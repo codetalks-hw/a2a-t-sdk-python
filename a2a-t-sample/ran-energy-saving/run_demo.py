@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Cross-platform, non-blocking launcher for the ran-energy-saving (Task-T) sample.
 
 The registry center and the A2A server each bind a port; started in the foreground they would
@@ -11,10 +11,11 @@ keep writing their logs to the run directory, and a follower thread echoes every
 the terminal as it happens, so the server prints when the server runs and the client prints when the
 client runs.
 
-The language defaults to English and is applied without touching the shared
-``a2a-t-sample/.env``: the launcher writes a temporary ``.env`` (a copy of the shared one with
-``A2AT_LANGUAGE`` overridden) into its own run directory and points the child processes at that
-working directory. Temporary files are removed on exit (see ``--keep-logs`` / ``--keep-alive``).
+The language and the sample scenario default to English / ``default`` and are applied without
+touching the shared ``a2a-t-sample/.env``: the launcher writes a temporary ``.env`` (a copy of
+the shared one with ``A2AT_LANGUAGE`` and ``A2AT_SAMPLE_SCENARIO`` overridden) into its own run
+directory and points the child processes at that working directory. Temporary files are removed
+on exit (see ``--keep-logs`` / ``--keep-alive``).
 
 Works on Windows, macOS and Linux. Run it with the same interpreter that has the sample
 dependencies installed (e.g. the repository ``.venv``).
@@ -22,6 +23,7 @@ dependencies installed (e.g. the repository ``.venv``).
 Usage:
     python run_demo.py                      # English, streams the energy-saving steps, then exits
     python run_demo.py --language zh-CN
+    python run_demo.py --scenario negotiation   # missing-region input; information negotiation
     python run_demo.py --keep-alive         # leave registry/server running; stop with --stop
     python run_demo.py --stop               # stop a previous --keep-alive run
 """
@@ -81,13 +83,14 @@ def _child_env() -> dict[str, str]:
     return env
 
 
-def _write_run_env(language: str) -> None:
-    """Write the per-run ``.env`` (shared .env copy with A2AT_LANGUAGE overridden)."""
+def _write_run_env(language: str, scenario: str) -> None:
+    """Write the per-run ``.env`` (shared .env copy with the run-specific keys overridden)."""
     text = ENV_FILE.read_text(encoding="utf-8")
-    if re.search(r"(?m)^A2AT_LANGUAGE=", text):
-        text = re.sub(r"(?m)^A2AT_LANGUAGE=.*$", f"A2AT_LANGUAGE={language}", text)
-    else:
-        text = text.rstrip("\n") + f"\nA2AT_LANGUAGE={language}\n"
+    for key, value in (("A2AT_LANGUAGE", language), ("A2AT_SAMPLE_SCENARIO", scenario)):
+        if re.search(rf"(?m)^{key}=", text):
+            text = re.sub(rf"(?m)^{key}=.*$", f"{key}={value}", text)
+        else:
+            text = text.rstrip("\n") + f"\n{key}={value}\n"
     env_path = RUN_DIR / ".env"
     env_path.write_text(text, encoding="utf-8", newline="\n")
     try:  # best effort: keep the copied config (may carry an API key) owner-only
@@ -235,6 +238,12 @@ def main() -> int:
         choices=["en-US", "zh-CN"],
         help="run language (default: en-US)",
     )
+    parser.add_argument(
+        "--scenario",
+        default="default",
+        choices=["default", "negotiation"],
+        help="sample scenario variant: default flow, or the missing-region information negotiation (default: default)",
+    )
     parser.add_argument("--keep-alive", action="store_true", help="leave registry/server running afterwards")
     parser.add_argument("--keep-logs", action="store_true", help="keep the temporary run directory (logs/.env)")
     parser.add_argument("--stop", action="store_true", help="stop a previous --keep-alive run and exit")
@@ -262,7 +271,7 @@ def main() -> int:
         PID_FILE.unlink(missing_ok=True)
         existing = []
 
-    _write_run_env(args.language)
+    _write_run_env(args.language, args.scenario)
     managed: list[int] = list(existing)
     started_pids: list[int] = []
     log_handles: list = []
@@ -346,7 +355,7 @@ def main() -> int:
         _save_pids(list(dict.fromkeys(managed)))
         persisted = True
 
-        print(f"[run_demo] running client (language = {args.language}) ...")
+        print(f"[run_demo] running client (language = {args.language}, scenario = {args.scenario}) ...")
         client_returncode = subprocess.run(
             [python, "-m", "client.client_main"],
             cwd=str(RUN_DIR),

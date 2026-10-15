@@ -10,8 +10,17 @@ sequence at zero, so a sequenced mock would serve the wrong response.
 =====================================  ==========================================
 schema signature                      served response
 =====================================  ==========================================
-``slots`` + ``slot_errors``           Task-T slot extraction
-``semantic_verdict`` property         content semantic validation
+``slots`` + ``slot_errors``           Task-T slot extraction — the ``slot_extraction``
+                                      complete variant, or the ``slot_extraction_missing``
+                                      variant when the first user message carries the
+                                      missing-region scenario input (told apart by the
+                                      scenario natural-language constants of
+                                      ``client.scenario_data``)
+``semantic_verdict`` property         content semantic validation — the
+                                      ``content_validation`` complete variant, or the
+                                      ``content_validation_missing`` variant when the region
+                                      display string is absent from the message head cut at
+                                      the template-content labels
 =====================================  ==========================================
 
 The response language is read from ``A2AT_LANGUAGE`` in the ``.env`` file (``zh-CN`` / ``en-US``);
@@ -28,18 +37,49 @@ from typing import Any
 
 from a2a_t.config.errors import ConfigFileNotFoundError
 from a2a_t.llm.models import LLMResponse
+from client.scenario_data import (
+    NATURAL_LANGUAGE_PROMPT_INPUT_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
+    NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
+    NEGOTIATION_REGION_STRINGS,
+)
 from dotenv import dotenv_values
 
 _RESOURCES_DIR = Path(__file__).resolve().parents[2] / "resources" / "mock_llm"
 
+#: Routed stage names (``llm_calls`` entries). The complete variants keep their historical names.
+STAGE_SLOT_EXTRACTION = "slot_extraction"
+STAGE_SLOT_EXTRACTION_MISSING = "slot_extraction_missing"
+STAGE_CONTENT_VALIDATION = "content_validation"
+STAGE_CONTENT_VALIDATION_MISSING = "content_validation_missing"
+
 #: Stage name -> response file name.
 _STAGE_FILES: dict[str, str] = {
-    "slot_extraction": "slot_extraction.json",
-    "content_validation": "content_validation.json",
+    STAGE_SLOT_EXTRACTION: "slot_extraction.json",
+    STAGE_SLOT_EXTRACTION_MISSING: "slot_extraction_missing.json",
+    STAGE_CONTENT_VALIDATION: "content_validation.json",
+    STAGE_CONTENT_VALIDATION_MISSING: "content_validation_missing.json",
 }
+
+#: Missing-region scenario inputs that flip the slot-extraction routing to the missing variant.
+_MISSING_SCENARIO_INPUTS = (
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
+)
+
+#: Complete scenario inputs; checked before the missing ones because the missing zh input is a
+#: substring of the complete zh input.
+_COMPLETE_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_EN, NATURAL_LANGUAGE_PROMPT_INPUT_ZH)
+
+#: Localized labels starting the template-content block of the content validation user prompt.
+_TEMPLATE_CONTENT_LABELS = ("Template Content:", "模板正文：")
 
 #: Placeholder API key injected while the mock is installed (no network access happens).
 _PLACEHOLDER_API_KEY = "mock-key-not-real"
+
+#: Language the canned script was loaded for (region-string routing reads it).
+_script_language = "zh-CN"
 
 #: Routed stage name of every served structured call (test seam).
 llm_calls: list[str] = []
@@ -89,18 +129,56 @@ def _load_script(language: str) -> dict[str, str]:
     return script
 
 
+def _head_before_markers(content: str, markers: tuple[str, ...]) -> str:
+    """Return the leading part of one message, cut at the earliest of the given markers.
+
+    The input block of every routed user message precedes the template content, so the head
+    carries the caller input alone — a region display string inside a template example can never
+    leak from the template content into the head.
+    """
+    cut = len(content)
+    for marker in markers:
+        index = content.find(marker)
+        if 0 <= index < cut:
+            cut = index
+    return content[:cut]
+
+
+def _first_user_content(messages: list[dict[str, str]]) -> str:
+    """Return the content of the first user message of one structured call."""
+    return next(message["content"] for message in messages if message.get("role") == "user")
+
+
 def route_structured_call(
     messages: list[dict[str, str]],
     json_schema: dict[str, Any] | None = None,
 ) -> str:
-    """Return the stage name one structured call is routed to, keyed on its output schema."""
+    """Return the stage name one structured call is routed to, keyed on its output schema.
+
+    The schema signature picks the stage family; the scenario variant is told apart from the
+    user message: slot extraction by the scenario natural-language input it carries, content
+    validation by the presence of the region display string in the message head (cut at the
+    template-content labels, so template examples never flip the variant).
+
+    Raises:
+        ValueError: when no signature matches the call (an unmapped SDK call).
+    """
+    user_content = _first_user_content(messages)
     properties = json_schema.get("properties") if isinstance(json_schema, dict) else None
     property_names = set(properties) if isinstance(properties, dict) else set()
 
     if "slots" in property_names and "slot_errors" in property_names:
-        return "slot_extraction"
+        if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION
+        if any(scenario_input in user_content for scenario_input in _MISSING_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION_MISSING
+        return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
-        return "content_validation"
+        region_string = NEGOTIATION_REGION_STRINGS.get(_script_language, "")
+        head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
+        if region_string and region_string not in head:
+            return STAGE_CONTENT_VALIDATION_MISSING
+        return STAGE_CONTENT_VALIDATION
     raise ValueError(f"The scripted mock LLM cannot route this structured call: {sorted(property_names)}")
 
 
@@ -146,9 +224,10 @@ def install_mock_llm(*, env_path: Path | None = None) -> None:
         ConfigFileNotFoundError: when the ``.env`` file does not exist.
         FileNotFoundError: when the response tree of the configured language does not exist.
     """
-    global _mock_enabled, _script
+    global _mock_enabled, _script, _script_language
     reset_call_log()
-    _script = _load_script(resolve_language(env_path=env_path))
+    _script_language = resolve_language(env_path=env_path)
+    _script = _load_script(_script_language)
     _mock_enabled = True
 
     from a2a_t.config.source import DotEnvConfigSource
