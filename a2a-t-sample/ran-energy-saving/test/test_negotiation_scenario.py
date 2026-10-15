@@ -110,8 +110,14 @@ def _slot_extraction_messages(user_input: str) -> list[dict[str, str]]:
     ]
 
 
-def _content_validation_messages(prompt_text: str, template_content: str) -> list[dict[str, str]]:
-    """User-message layout of a real content validation call (head + ``Template Content:`` tail)."""
+def _content_validation_messages(
+    prompt_text: str, template_content: str, *, template_content_label: str = "Template Content: "
+) -> list[dict[str, str]]:
+    """User-message layout of a real content validation call (head + template-content tail).
+
+    ``template_content_label`` is the localized label starting the template-content block; the
+    real zh-CN SDK template uses the full-width ``模板正文：`` with no trailing space.
+    """
     return [
         {"role": "system", "content": "content validation system prompt"},
         {
@@ -120,7 +126,7 @@ def _content_validation_messages(prompt_text: str, template_content: str) -> lis
                 "Extension Name: Task-T\n"
                 f"Input Content: {prompt_text}\n"
                 f"Template URI: {ENERGY_SAVING_TEMPLATE_URI}\n"
-                f"Template Content: {template_content}\n"
+                f"{template_content_label}{template_content}\n"
                 "Parameter Schema: {}"
             ),
         },
@@ -186,9 +192,14 @@ def test_content_validation_routing_selects_the_variant_by_the_region_string(tmp
     assert route_structured_call(missing, _content_validation_schema()) == mock_llm.STAGE_CONTENT_VALIDATION_MISSING
 
 
-def test_content_validation_routing_ignores_the_region_string_in_the_template_tail() -> None:
+@pytest.mark.parametrize("template_content_label", ["Template Content: ", "模板正文："], ids=["en-label", "zh-label"])
+def test_content_validation_routing_ignores_the_region_string_in_the_template_tail(
+    template_content_label: str,
+) -> None:
     """A region example inside the template content must not flip the missing-params variant."""
-    messages = _content_validation_messages(_MISSING_REGION_PROMPT, _REGION_TEMPLATE_TAIL)
+    messages = _content_validation_messages(
+        _MISSING_REGION_PROMPT, _REGION_TEMPLATE_TAIL, template_content_label=template_content_label
+    )
 
     assert route_structured_call(messages, _content_validation_schema()) == mock_llm.STAGE_CONTENT_VALIDATION_MISSING
 

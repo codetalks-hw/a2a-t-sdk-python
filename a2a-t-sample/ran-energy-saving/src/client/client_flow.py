@@ -45,7 +45,8 @@ def _parse_negotiation_context(metadata: dict[str, object]) -> NegotiationContex
     """Parse the negotiation session context carried in one status metadata map (demo parity).
 
     The context travels as the nested ``negotiationContext`` map (``id`` / ``round`` /
-    ``maxRounds`` / ``performative``); ``None`` when the metadata carries no parseable session.
+    ``maxRounds`` / ``performative``); ``None`` when the metadata carries no parseable session
+    (a context failing the ``NegotiationContext`` validation degrades like a missing one).
     """
     raw = metadata.get(NEGOTIATION_CONTEXT_METADATA_KEY)
     if not isinstance(raw, dict):
@@ -53,12 +54,15 @@ def _parse_negotiation_context(metadata: dict[str, object]) -> NegotiationContex
     performative = NegotiationPerformative.try_parse(str(raw.get("performative", "") or ""))
     if performative is None:
         return None
-    return NegotiationContext(
-        id=str(raw.get("id", "")),
-        round=int(raw.get("round", 1)),
-        max_rounds=int(raw.get("maxRounds", NegotiationContext.DEFAULT_MAX_ROUNDS)),
-        performative=performative,
-    )
+    try:
+        return NegotiationContext(
+            id=str(raw.get("id", "")),
+            round=int(raw.get("round", 1)),
+            max_rounds=int(raw.get("maxRounds", NegotiationContext.DEFAULT_MAX_ROUNDS)),
+            performative=performative,
+        )
+    except ValueError:
+        return None
 
 
 def _find_negotiation_input_required(events: list[dict[str, object]]) -> dict[str, object] | None:
@@ -255,8 +259,9 @@ async def run_client_flow(
                                                             -> ``[client] negotiation-accept`` /
                                                                ``[client] a2a-send-message`` (round=2)
 
-    Without the negotiation answers an INPUT_REQUIRED propose is logged as unhandled and the flow
-    ends after round 1; the default flow (no INPUT_REQUIRED) is unchanged.
+    Without the negotiation answers — or when the propose carries no parseable session context —
+    an INPUT_REQUIRED propose is logged as unhandled and the flow ends after round 1; the default
+    flow (no INPUT_REQUIRED) is unchanged.
 
     Message-body convention:
       * text part                 -> task name (request metadata)
@@ -358,6 +363,17 @@ async def run_client_flow(
                 artifact_count=artifact_count,
                 max_artifacts=max_artifacts,
                 log_sink=log_sink,
+            )
+        elif log_sink is not None:
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="negotiation-unhandled",
+                    detail=(
+                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                        "(malformed/missing session context), staying on round 1"
+                    ),
+                )
             )
 
     if log_sink is not None:

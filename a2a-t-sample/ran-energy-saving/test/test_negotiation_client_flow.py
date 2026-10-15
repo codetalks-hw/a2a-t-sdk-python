@@ -143,6 +143,14 @@ def _propose_metadata() -> dict[str, object]:
     return propose.build_metadata_content()
 
 
+def _malformed_propose_metadata() -> dict[str, object]:
+    """Round-1 metadata whose ``negotiationContext`` fails the NegotiationContext validation."""
+    return {
+        NEGOTIATION_T_EXTENSION_URI: "Please provide region: Coverage region of the energy-saving task.",
+        NEGOTIATION_CONTEXT_METADATA_KEY: {"id": "", "round": 1, "maxRounds": 5, "performative": "PROPOSE"},
+    }
+
+
 def _agent_message(*, text: str, metadata: dict[str, object] | None = None) -> Message:
     """Build one agent status message with a text part and an optional metadata map."""
     message = Message(context_id=_CONTEXT_ID, task_id=_TASK_ID, role=Role.ROLE_AGENT)
@@ -359,6 +367,31 @@ def test_input_required_without_answers_is_logged_unhandled_and_stays_on_round_1
     assert prompt_client.from_data_calls == []
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     assert any("negotiation-unhandled" in line for line in logs)
+
+
+def test_malformed_negotiation_context_is_logged_unhandled_and_stays_on_round_1() -> None:
+    """A propose whose context fails validation degrades to the unhandled log, never a crash."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=_malformed_propose_metadata())])
+
+    logs: list[str] = []
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1
+    assert prompt_client.accept_calls == []
+    assert prompt_client.from_data_calls == []
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
+    assert len(unhandled_logs) == 1
+    assert "malformed/missing session context" in unhandled_logs[0]
 
 
 def test_default_path_without_input_required_sends_exactly_once_and_keeps_the_stage_logs() -> None:
