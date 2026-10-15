@@ -71,6 +71,8 @@ python run_demo.py --language zh-CN   # 中文（默认是 en-US）
 | --- | --- |
 | `--language {en-US,zh-CN}` | 运行语言（默认 `en-US`） |
 | `--scenario {default,negotiation}` | 场景变体（默认 `default`；`negotiation` 运行缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
+| `--negotiation {information,target,feasibility}` | 协商类型，选择客户端场景输入（默认 `information` = 缺失 region；`target` = 100Mbps 速率超出小区能力；`feasibility` = 30% 节能目标与 50Mbps 速率目标冲突）。该参数只选择输入——服务端依据内容校验错误码数据驱动地分派，见[协商场景](#协商场景negotiation-t) |
+| `--channel {fromData,fromText}` | 协商 propose/accept 消息的生成通道（默认 `fromData`；`fromText` 每条生成的消息多一次抽取 LLM 调用，见[协商场景](#协商场景negotiation-t)） |
 | `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
 | `--keep-logs` | 保留临时运行目录（日志 / `.env`），位于 `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | 停止之前 `--keep-alive` 留下的后台进程并退出 |
@@ -126,6 +128,8 @@ uv run --no-sync python -m client.client_main
 | --- | --- |
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`；决定自然语言输入与 mock/模板语言树 |
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`；选择样例场景变体（`negotiation` = 缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
+| `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility`（默认 `information`）；选择协商场景输入，与 `--negotiation` 语义相同 |
+| `A2AT_SAMPLE_CHANNEL` | `data` / `text`（默认 `data`）；协商 propose/accept 消息的生成通道，与 `--channel` 语义相同 |
 | `A2AT_LLM_API_KEY` | 留空 ⇒ mock LLM；否则为 OpenAI 兼容的 key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM 端点配置 |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP 客户端超时（秒，默认 60） |
@@ -253,36 +257,64 @@ async def execute(self, context: RequestContext, event_queue: EventQueue) -> Non
 
 ## 协商场景（Negotiation-T）
 
-除上述默认流程外，本样例还提供 **`negotiation` 场景**，在同一条流式链路上演示 **Negotiation-T**
-信息协商：客户端输入缺少 `region` 参数，服务端识别出缺失槽位后用 Negotiation-T 信息 propose
-索要该参数，客户端再携带补全后的 Task-T prompt 与 Negotiation-T accept 应答，随后服务端完成
-任务。
+除上述默认流程外，本样例还提供多个协商场景，在同一条流式链路上演示 **Negotiation-T** 协商。支持三类
+协商类型，由服务端产生的内容校验错误码数据驱动地选择：
+
+| 内容校验错误码 | 协商类型 | 第 1 轮 propose → 第 2 轮 accept |
+| --- | --- | --- |
+| `content.param_missing` | 信息协商（information） | 服务端索要缺失参数（`region`）；客户端补全后应答 |
+| `content.value_not_allowed` | 目标协商（target） | 服务端提出澄清后的目标请求确认（确认请求轮）；客户端以确认后的意图应答 |
+| `content.semantic_conflict` | 可行性协商（feasibility） | 服务端请求对冲突内容做可行性评估（`action=REQUEST_FEASIBILITY_EVALUATION`，携带 `contents_to_evaluate`）；客户端以可行性摘要应答 |
+
+> 该映射是样例层的约定。报文是自描述的：每个 propose 携带各自的 `templateUri`
+> （`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`），客户端基于该 URI
+> 分派 accept。
 
 ```bash
 cd a2a-t-sample/ran-energy-saving
-python run_demo.py --scenario negotiation   # 缺失 region 的输入；信息协商
+python run_demo.py --scenario negotiation                         # 缺失 region 的输入；信息协商
+python run_demo.py --negotiation target                           # 100Mbps 速率超出小区能力；目标协商
+python run_demo.py --negotiation feasibility --channel fromText   # 30% 节能目标与 50Mbps 速率冲突；可行性协商
 ```
 
-该参数的默认值（`default`）保持上文流程不变；也可以通过 `.env` 中的 `A2AT_SAMPLE_SCENARIO`
-选择场景（见[配置](#配置)）。
+各参数的默认值（`default` 场景、`information` 类型、`fromData` 通道）保持上文流程不变；协商类型与
+通道也可以通过 `.env` 中的 `A2AT_SAMPLE_NEGOTIATION_KIND` / `A2AT_SAMPLE_CHANNEL` 选择
+（见[配置](#配置)）。
 
 **第一轮——服务端发起 propose。** 客户端用 `generate_task_prompt_from_text`
-（[`client_flow.py:286`](src/client/client_flow.py#L286)）从缺失 region 的输入生成 Task-T
-prompt。服务端用 `validate_task_prompt_and_data_filling` 校验后得到按槽位命名的拒绝
-（`region` 上的 `content.param_missing`）；由于错误携带槽位名，服务端将其视为缺失项，用
+（[`client_flow.py:448`](src/client/client_flow.py#L448)）从自然语言输入生成 Task-T prompt。服务端用
+`validate_task_prompt_and_data_filling`（[`server_flow.py:455`](src/server/server_flow.py#L455)）校验后
+得到按槽位命名的拒绝；错误码选择协商类型（见上表），服务端用
 `generate_negotiation_propose_prompt_from_data`
-（[`server_flow.py:127`](src/server/server_flow.py#L127)）从数据直接渲染 Negotiation-T 信息
-propose——渲染不涉及 LLM 调用——并发出 `TASK_STATE_INPUT_REQUIRED`，propose 放在该状态消息的
-metadata 中（`build_metadata_content()`）。
+（[`server_flow.py:285`](src/server/server_flow.py#L285)）从类型化内容（`a2a_t.negotiation.content.models`
+中的 `InformationProposeContent` / `TargetProposeContent` / `FeasibilityProposeContent`）渲染对应的
+Negotiation-T propose——fromData 通道下渲染不涉及 LLM 调用——并发出 `TASK_STATE_INPUT_REQUIRED`，
+propose 放在该状态消息的 metadata 中（`build_metadata_content()`）。
 
 **第二轮——客户端 accept。** 客户端从 INPUT_REQUIRED 的 metadata 中读取 propose 并解析
-`negotiationContext` 会话，用 `generate_task_prompt_from_data_with_schema`
-（[`client_flow.py:156`](src/client/client_flow.py#L156)）从补全后的参数重新生成 Task-T
-prompt，用 `generate_negotiation_accept_prompt_from_data`
-（[`client_flow.py:163`](src/client/client_flow.py#L163)）渲染 accept，然后把两个 prompt 一并放进
+`negotiationContext` 会话，然后基于 propose 的 `templateUri` 分派应答的 ending 内容——信息协商：
+`InformationEndingContent`（补全后的应答项）；目标协商：`TargetEndingContent`（`ACCEPT` +
+`confirmed_intent`）；可行性协商：`FeasibilityEndingContent`（`ACCEPT` + `feasibility_summary`）。
+客户端用 `generate_task_prompt_from_data_with_schema`
+（[`client_flow.py:302`](src/client/client_flow.py#L302)）从补全后的参数重新生成 Task-T prompt，用
+`generate_negotiation_accept_prompt_from_data`
+（[`client_flow.py:317`](src/client/client_flow.py#L317)）渲染 accept，然后把两个 prompt 一并放进
 消息 metadata 重新发送同一任务。服务端检测到 Negotiation-T URI 即视为协商续轮，校验补全后的
 prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPLETED` 结束任务——协商运行到此
 结束，而默认流程保持长连接运行。
+
+**fromText 通道。** 选择 `--channel fromText`（`A2AT_SAMPLE_CHANNEL=text`）时，每条协商消息先渲染为
+自然语言文本，再由 SDK 从文本中抽取结构化内容：服务端调用
+`generate_negotiation_propose_prompt_from_text`
+（[`server_flow.py:282`](src/server/server_flow.py#L282)），客户端调用
+`generate_negotiation_accept_prompt_from_text`
+（[`client_flow.py:311`](src/client/client_flow.py#L311)）——每条生成的协商消息多一次抽取 LLM 调用
+（使用内置 mock LLM 时表现为额外的 `llm-mock` 日志行）。报文格式与 `fromData` 完全一致。各类型的
+消息形态：目标协商的 propose 携带协商摘要与确认请求，accept 携带确认后的意图；可行性协商的 propose
+携带评估请求与 `contents_to_evaluate` 条目，accept 携带可行性摘要。
+
+> **语言行为：** 协商消息文本（propose 摘要、确认请求、可行性条目、accept 摘要）跟随运行语言
+> （`--language`）；UC1 进度与报告文案不随语言变化，保持内置英文。
 
 报文约定：
 

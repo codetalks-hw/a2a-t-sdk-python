@@ -13,5 +13,5 @@
 | 目录 | 说明 |
 | --- | --- |
 | [fault-management/](fault-management/) | 事件订阅样例——流式推送 Incident 通知 |
-| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——运行 RAN 节能任务，并包含 Negotiation-T 信息协商流程 |
+| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——运行 RAN 节能任务，并包含三类 Negotiation-T 协商（信息 / 目标 / 可行性），覆盖 fromData / fromText 两种生成通道 |
 | [negotiation/](negotiation/) | 协商闭环样例——离线 propose → accept 往返 |

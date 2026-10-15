@@ -75,6 +75,8 @@ stopped. Use an interpreter that has the sample dependencies (the repository `.v
 | --- | --- |
 | `--language {en-US,zh-CN}` | Run language (default `en-US`) |
 | `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
+| `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = 100Mbps throughput beyond cell capability; `feasibility` = 30% saving goal conflicting with a 50Mbps throughput target). The flag only selects the input — the server stays data-driven on the validation error code, see [Negotiation scenario](#negotiation-scenario-negotiation-t) |
+| `--channel {fromData,fromText}` | Generation channel of the negotiation propose/accept messages (default `fromData`; `fromText` adds one extraction LLM call per generated message, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |
 | `--keep-logs` | Keep the temp run directory (logs / `.env`) under `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | Stop a previous `--keep-alive` run and exit |
@@ -133,6 +135,8 @@ Configuration used by this sample (from `a2a-t-sample/.env`):
 | --- | --- |
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`; selects the natural-language input and the mock/template tree |
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`; selects the sample scenario variant (`negotiation` = the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
+| `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility` (default `information`); selects the negotiation scenario input, same semantics as `--negotiation` |
+| `A2AT_SAMPLE_CHANNEL` | `data` / `text` (default `data`); generation channel of the negotiation propose/accept messages, same semantics as `--channel` |
 | `A2AT_LLM_API_KEY` | Empty ⇒ mock LLM; otherwise an OpenAI-compatible key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM endpoint settings |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP client timeout in seconds (default 60) |
@@ -262,40 +266,68 @@ The `a2a-sdk` app assembly (routes, task store) is in
 
 ## Negotiation scenario (Negotiation-T)
 
-Besides the default flow above, the sample ships a **`negotiation` scenario** that demonstrates a
-**Negotiation-T** information negotiation over the same streaming path: the client input is missing
-the `region` parameter, the server detects the missing slot and asks for it with a Negotiation-T
-information propose, and the client answers with the filled Task-T prompt plus a Negotiation-T
-accept, after which the server completes the task.
+Besides the default flow above, the sample ships negotiation scenarios that demonstrate **Negotiation-T**
+negotiations over the same streaming path. Three negotiation kinds are supported, selected data-driven
+by the content-validation error code the server produces:
+
+| Validation error code | Negotiation kind | Round 1 propose → round 2 accept |
+| --- | --- | --- |
+| `content.param_missing` | information | the server asks for the missing parameter (`region`); the client answers with the filled value |
+| `content.value_not_allowed` | target | the server proposes the clarified target for confirmation (a confirm-request round); the client accepts with its confirmed intent |
+| `content.semantic_conflict` | feasibility | the server requests a feasibility evaluation (`action=REQUEST_FEASIBILITY_EVALUATION`) of the conflicting `contents_to_evaluate`; the client accepts with a feasibility summary |
+
+> This mapping is a demo-level convention. The wire self-describes: each propose carries its own
+> `templateUri` (`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`), and the
+> client dispatches its accept on that URI.
 
 ```bash
 cd a2a-t-sample/ran-energy-saving
-python run_demo.py --scenario negotiation   # missing-region input; information negotiation
+python run_demo.py --scenario negotiation                         # missing-region input; information negotiation
+python run_demo.py --negotiation target                           # 100Mbps throughput beyond cell capability; target negotiation
+python run_demo.py --negotiation feasibility --channel fromText   # 30% saving goal vs 50Mbps throughput; feasibility negotiation
 ```
 
-The flag's default (`default`) keeps the flow described above unchanged; the scenario can also be
-selected with `A2AT_SAMPLE_SCENARIO` in `.env` (see [Configuration](#configuration)).
+The flags' defaults (`default` scenario, `information` kind, `fromData` channel) keep the flow described
+above unchanged; the kind and the channel can also be selected with `A2AT_SAMPLE_NEGOTIATION_KIND` /
+`A2AT_SAMPLE_CHANNEL` in `.env` (see [Configuration](#configuration)).
 
-**Round 1 — the server proposes.** The client generates the Task-T prompt from the region-less
-input with `generate_task_prompt_from_text` ([`client_flow.py:286`](src/client/client_flow.py#L286)).
-The server validates it with `validate_task_prompt_and_data_filling` and gets a per-slot rejection
-(`content.param_missing` on `region`); because the errors name slots, the server treats them as
-missing items, renders the Negotiation-T information propose from the data with
-`generate_negotiation_propose_prompt_from_data`
-([`server_flow.py:127`](src/server/server_flow.py#L127)) — no LLM call is involved in rendering the
-propose — and emits `TASK_STATE_INPUT_REQUIRED` with the propose in the status message metadata
-(`build_metadata_content()`).
+**Round 1 — the server proposes.** The client generates the Task-T prompt from its natural-language
+input with `generate_task_prompt_from_text` ([`client_flow.py:448`](src/client/client_flow.py#L448)).
+The server validates it with `validate_task_prompt_and_data_filling`
+([`server_flow.py:455`](src/server/server_flow.py#L455)) and gets a per-slot rejection; the error code
+selects the negotiation kind (table above), and the server renders the matching Negotiation-T propose
+from typed content (`InformationProposeContent` / `TargetProposeContent` / `FeasibilityProposeContent`
+from `a2a_t.negotiation.content.models`) with `generate_negotiation_propose_prompt_from_data`
+([`server_flow.py:285`](src/server/server_flow.py#L285)) — on the fromData channel no LLM call is
+involved in rendering the propose — and emits `TASK_STATE_INPUT_REQUIRED` with the propose in the
+status message metadata (`build_metadata_content()`).
 
 **Round 2 — the client accepts.** The client reads the propose from the INPUT_REQUIRED metadata and
-parses the `negotiationContext` session, regenerates the Task-T prompt from the filled parameters
-with `generate_task_prompt_from_data_with_schema`
-([`client_flow.py:156`](src/client/client_flow.py#L156)), renders the accept with
-`generate_negotiation_accept_prompt_from_data`
-([`client_flow.py:163`](src/client/client_flow.py#L163)), and re-sends the same task with both
-prompts in the message metadata. The server detects the Negotiation-T URI as the continuation,
-validates the now-complete prompt, streams the UC1 progress steps and the report artifact, and
-closes the task with `TASK_STATE_COMPLETED` — the negotiation run ends here, whereas the default
-flow stays long-running.
+parses the `negotiationContext` session, then dispatches on the propose's `templateUri` and answers with
+the matching ending content — information: `InformationEndingContent` with the filled answers; target:
+`TargetEndingContent` (`ACCEPT` + `confirmed_intent`); feasibility: `FeasibilityEndingContent`
+(`ACCEPT` + `feasibility_summary`). It regenerates the Task-T prompt from the filled parameters with
+`generate_task_prompt_from_data_with_schema` ([`client_flow.py:302`](src/client/client_flow.py#L302)),
+renders the accept with `generate_negotiation_accept_prompt_from_data`
+([`client_flow.py:317`](src/client/client_flow.py#L317)), and re-sends the same task with both prompts
+in the message metadata. The server detects the Negotiation-T URI as the continuation, validates the
+now-complete prompt, streams the UC1 progress steps and the report artifact, and closes the task with
+`TASK_STATE_COMPLETED` — the negotiation run ends here, whereas the default flow stays long-running.
+
+**The fromText channel.** With `--channel fromText` (`A2AT_SAMPLE_CHANNEL=text`) each generated
+negotiation message is first rendered as a natural-language text, and the SDK extracts the structured
+content back from it: the server calls `generate_negotiation_propose_prompt_from_text`
+([`server_flow.py:282`](src/server/server_flow.py#L282)) and the client calls
+`generate_negotiation_accept_prompt_from_text` ([`client_flow.py:311`](src/client/client_flow.py#L311))
+— one extraction LLM call per generated message (visible as extra `llm-mock` lines with the bundled
+mock LLM). The wire format is identical to `fromData`. Per-type message shapes: the target propose
+carries the negotiation summary plus a confirm request, and the accept carries the confirmed intent;
+the feasibility propose carries the evaluation request with the `contents_to_evaluate` items, and the
+accept carries the feasibility summary.
+
+> **Language behavior:** the negotiation message texts (propose summaries, confirm requests,
+> feasibility contents, accept summaries) follow the run language (`--language`); the UC1 progress and
+> report text stays fixed English regardless of it.
 
 Wire conventions:
 
