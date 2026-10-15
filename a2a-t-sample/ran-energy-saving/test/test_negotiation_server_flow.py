@@ -55,6 +55,7 @@ from client.scenario_data import (
     build_prompt_input,
     negotiation_answers,
     negotiation_feasibility_contents,
+    negotiation_feasibility_description,
     negotiation_filled_params,
     negotiation_target_confirm_request,
     negotiation_target_description,
@@ -445,6 +446,11 @@ def test_round_1_feasibility_failure_from_text_channel_generates_via_extraction(
     assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
     propose_metadata = _message_metadata(events[-1])
     assert propose_metadata[TEMPLATE_URI_METADATA_KEY] == FEASIBILITY_NEGOTIATION_PROPOSE_URI
+    # The rendered text carries the description and the contents to evaluate of the scenario data.
+    propose_text = str(propose_metadata[NEGOTIATION_T_EXTENSION_URI])
+    assert negotiation_feasibility_description(env_path=_offline_env) in propose_text
+    for name, value in negotiation_feasibility_contents(env_path=_offline_env):
+        assert f"{name}: {value}" in propose_text
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
         mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
@@ -458,6 +464,32 @@ def test_target_propose_messages_are_equivalent_across_channels(_offline_env: Pa
     differs."""
     metadata = _kind_round1_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
+    )
+    server = A2ATServer(env_path=_offline_env)
+
+    mock_llm.reset_call_log()
+    data_events = asyncio.run(_run_flow(metadata=metadata, prompt_server=server, env_path=_offline_env))
+    mock_llm.reset_call_log()
+    text_events = asyncio.run(
+        _run_flow(metadata=metadata, prompt_server=server, channel=CHANNEL_TEXT, env_path=_offline_env)
+    )
+
+    data_metadata = _message_metadata(data_events[-1])
+    text_metadata = _message_metadata(text_events[-1])
+    assert data_metadata[NEGOTIATION_T_EXTENSION_URI] == text_metadata[NEGOTIATION_T_EXTENSION_URI]
+    assert data_metadata[TEMPLATE_URI_METADATA_KEY] == text_metadata[TEMPLATE_URI_METADATA_KEY]
+    data_context = dict(data_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
+    text_context = dict(text_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
+    assert data_context.pop("id") != text_context.pop("id")  # each channel opens its own session
+    assert data_context == text_context
+
+
+def test_feasibility_propose_messages_are_equivalent_across_channels(_offline_env: Path) -> None:
+    """The from-data and from-text feasibility proposes produce equivalent messages (the mock
+    extraction returns the canonical content the scenario accessors mirror); only the fresh
+    session id differs."""
+    metadata = _kind_round1_metadata(
+        A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
     )
     server = A2ATServer(env_path=_offline_env)
 
@@ -677,7 +709,7 @@ def test_propose_carries_the_relationship_only_for_multiple_items(_offline_env: 
 
 
 def test_resolve_negotiation_channel_defaults_and_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)  # no .env next to the cwd
+    monkeypatch.chdir(tmp_path)  # isolate the cwd; this test writes its own .env files below
 
     # No .env and no OS environment entry -> data.
     assert resolve_negotiation_channel() == CHANNEL_DATA

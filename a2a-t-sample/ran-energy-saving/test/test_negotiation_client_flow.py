@@ -3,7 +3,10 @@
 Drives ``run_client_flow`` against a scripted fake a2a client (real protobuf StreamResponse events)
 and a fake prompt client: round 1 sends the Task-T prompt and receives the Negotiation-T propose on
 INPUT_REQUIRED, round 2 re-sends the filled Task-T prompt together with the Negotiation-T accept and
-consumes the UC1 result; the default path stays single-round and its stage logs are pinned.
+consumes the UC1 result; the default path stays single-round and its stage logs are pinned. The
+accept generation covers all three negotiation types dispatched on the propose's ``templateUri``
+(the explicit kind flag wins when supplied) over both channels: from-data (typed content, zero LLM
+calls) and from-text (a natural-language rendering plus one extraction LLM call).
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
 from a2a.client.client import ClientCallContext
 from a2a.types import (
     Artifact,
@@ -37,11 +41,19 @@ from a2a_t.core.metadata import (
     NegotiationPerformative,
 )
 from a2a_t.core.standard_templates import (
+    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
     INFORMATION_NEGOTIATION_PROPOSE_URI,
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    TARGET_NEGOTIATION_PROPOSE_URI,
 )
 from a2a_t.negotiation.content.enums import NegotiationConclusion
-from a2a_t.negotiation.content.models import NegotiationEndingData
+from a2a_t.negotiation.content.models import (
+    FeasibilityEndingContent,
+    NegotiationEndingData,
+    TargetEndingContent,
+)
 from google.protobuf.json_format import MessageToDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -50,9 +62,28 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from client import scenario_data
 from client.client_flow import run_client_flow
-from client.scenario_data import ENERGY_SAVING_TEMPLATE_URI
+from client.scenario_data import (
+    CHANNEL_DATA,
+    CHANNEL_TEXT,
+    ENERGY_SAVING_TEMPLATE_URI,
+    negotiation_feasibility_summary,
+    negotiation_target_confirmation,
+)
 from common.sse_event_consumer import normalize_event
+
+#: An offline ``.env`` (language pinned) written per test; the scenario accessors read it.
+_OFFLINE_ENV_TEXT = "A2AT_LANGUAGE={language}\nA2AT_LLM_PROVIDER=openai\nA2AT_LLM_MODEL=mock-llm\nA2AT_LLM_API_KEY=\n"
+
+
+@pytest.fixture(autouse=True)
+def _offline_env(tmp_path: Path) -> Path:
+    """Write the offline ``.env`` (en-US) the accept builders' scenario accessors read."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(_OFFLINE_ENV_TEXT.format(language="en-US"), encoding="utf-8")
+    return env_path
+
 
 #: The round-1 task identity the scripted server stream answers with.
 _TASK_ID = "task-round-1"
@@ -90,6 +121,7 @@ class _ScriptedPromptClient:
         self.from_text_calls: list[tuple[str, str]] = []
         self.from_data_calls: list[tuple[dict[str, object], str]] = []
         self.accept_calls: list[NegotiationEndingData] = []
+        self.accept_from_text_calls: list[tuple[str, NegotiationContext, str]] = []
 
     def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent:
         self.from_text_calls.append((text, str(template_uri)))
@@ -109,24 +141,33 @@ class _ScriptedPromptClient:
             extension_uri=TASK_T_EXTENSION_URI,
         )
 
-    def generate_negotiation_accept_prompt_from_data(
-        self, data: NegotiationEndingData, template_uri: str
-    ) -> MetadataContent:
-        self.accept_calls.append(data)
+    def _accept_result(self, template_uri: str, context: NegotiationContext) -> MetadataContent:
         return MetadataContent(
             template_uri=str(template_uri),
             prompt_text="accept prompt",
             extension_uri=NEGOTIATION_T_EXTENSION_URI,
             negotiation_context=NegotiationContext(
-                id=data.context.id,
-                round=data.context.round,
-                max_rounds=data.context.max_rounds,
+                id=context.id,
+                round=context.round,
+                max_rounds=context.max_rounds,
                 performative=NegotiationPerformative.ACCEPT,
             ),
         )
 
+    def generate_negotiation_accept_prompt_from_data(
+        self, data: NegotiationEndingData, template_uri: str
+    ) -> MetadataContent:
+        self.accept_calls.append(data)
+        return self._accept_result(str(template_uri), data.context)
 
-def _propose_metadata() -> dict[str, object]:
+    def generate_negotiation_accept_prompt_from_text(
+        self, text: str, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent:
+        self.accept_from_text_calls.append((text, context, str(template_uri)))
+        return self._accept_result(str(template_uri), context)
+
+
+def _propose_metadata(*, template_uri: str = INFORMATION_NEGOTIATION_PROPOSE_URI) -> dict[str, object]:
     """Build the round-1 propose metadata the server emits (``build_metadata_content`` shape)."""
     context = NegotiationContext(
         id=str(uuid.uuid4()),
@@ -135,7 +176,7 @@ def _propose_metadata() -> dict[str, object]:
         performative=NegotiationPerformative.PROPOSE,
     )
     propose = MetadataContent(
-        template_uri=INFORMATION_NEGOTIATION_PROPOSE_URI,
+        template_uri=template_uri,
         prompt_text="Please provide region: Coverage region of the energy-saving task.",
         extension_uri=NEGOTIATION_T_EXTENSION_URI,
         negotiation_context=context,
@@ -225,6 +266,9 @@ async def _run_flow(
     *,
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
+    negotiation_kind: str | None = None,
+    channel: str = CHANNEL_DATA,
+    env_path: Path | None = None,
     log_sink: object | None = None,
 ) -> list[dict[str, object]]:
     """Run ``run_client_flow`` once against the scripted clients."""
@@ -235,6 +279,9 @@ async def _run_flow(
         input_text="Create a RAN energy saving task to maximize energy saving.",
         negotiation_params=negotiation_params,
         negotiation_answers=negotiation_answers,
+        negotiation_kind=negotiation_kind,
+        channel=channel,
+        env_path=env_path,
         log_sink=log_sink,
     )
 
@@ -443,6 +490,297 @@ def test_negotiation_round_trip_logs_the_accept_and_round2_send() -> None:
     round2_send_logs = [line for line in logs if line.startswith("[client] a2a-send-message: round=2")]
     assert len(round2_send_logs) == 1
     assert "header[A2A-Extensions]=" in round2_send_logs[0]
+
+
+# --- per-type accepts: target / feasibility over the from-data channel -----------------------
+
+
+def test_target_propose_answers_with_the_typed_target_accept(_offline_env: Path) -> None:
+    propose_metadata = _propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)
+    session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()])
+
+    logs: list[str] = []
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            negotiation_kind=scenario_data.NEGOTIATION_KIND_TARGET,
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    # The round-2 accept templateUri addresses the target accept-reject template.
+    round2_request, _round2_context = a2a_client.calls[1]
+    metadata = _request_metadata(round2_request)
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
+    context = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    assert context["id"] == session_id
+    assert context["round"] == 2
+    assert context["maxRounds"] == NegotiationContext.DEFAULT_MAX_ROUNDS
+    assert context["performative"] == "ACCEPT"
+
+    # The typed accept carries the confirmed intent of the scenario data (canned extraction text).
+    assert len(prompt_client.accept_calls) == 1
+    accept_data = prompt_client.accept_calls[0]
+    assert isinstance(accept_data.content, TargetEndingContent)
+    assert accept_data.content.conclusion == NegotiationConclusion.ACCEPT
+    assert accept_data.content.confirmed_intent == negotiation_target_confirmation(env_path=_offline_env)
+    assert accept_data.content.failure_reason is None
+    assert accept_data.context.id == session_id
+    assert accept_data.context.round == 2
+    assert accept_data.context.performative == NegotiationPerformative.ACCEPT
+    # The from-text accept API was not used on the data channel; the flow closes with COMPLETED.
+    assert prompt_client.accept_from_text_calls == []
+    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    accept_logs = [line for line in logs if line.startswith("[client] negotiation-accept:")]
+    assert len(accept_logs) == 1
+    assert "Negotiation-T/target-negotiation/accept-reject/v1" in accept_logs[0]
+    assert f"confirmed_intent={negotiation_target_confirmation(env_path=_offline_env)}" in accept_logs[0]
+
+
+def test_feasibility_propose_answers_with_the_typed_feasibility_accept(_offline_env: Path) -> None:
+    propose_metadata = _propose_metadata(template_uri=FEASIBILITY_NEGOTIATION_PROPOSE_URI)
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()])
+
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            negotiation_kind=scenario_data.NEGOTIATION_KIND_FEASIBILITY,
+            env_path=_offline_env,
+        )
+    )
+
+    round2_request, _round2_context = a2a_client.calls[1]
+    metadata = _request_metadata(round2_request)
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 2
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["performative"] == "ACCEPT"
+
+    # The typed accept carries the feasibility summary of the scenario data.
+    assert len(prompt_client.accept_calls) == 1
+    accept_data = prompt_client.accept_calls[0]
+    assert isinstance(accept_data.content, FeasibilityEndingContent)
+    assert accept_data.content.conclusion == NegotiationConclusion.ACCEPT
+    assert accept_data.content.feasibility_summary == negotiation_feasibility_summary(env_path=_offline_env)
+    assert prompt_client.accept_from_text_calls == []
+    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+
+
+@pytest.mark.parametrize(
+    ("propose_uri", "accept_uri"),
+    [
+        (INFORMATION_NEGOTIATION_PROPOSE_URI, INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI),
+        (TARGET_NEGOTIATION_PROPOSE_URI, TARGET_NEGOTIATION_ACCEPT_REJECT_URI),
+        (FEASIBILITY_NEGOTIATION_PROPOSE_URI, FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI),
+    ],
+)
+def test_propose_template_uri_dispatches_the_accept_kind_without_a_flag(
+    _offline_env: Path, propose_uri: str, accept_uri: str
+) -> None:
+    """With no kind flag the accept type dispatches on the propose's templateUri (the wire)."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient(
+        [_round1_events(metadata=_propose_metadata(template_uri=propose_uri)), _round2_events()]
+    )
+
+    asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            env_path=_offline_env,
+        )
+    )
+
+    # The client still builds the round-2 accept, addressed to the matching accept-reject template.
+    assert len(a2a_client.calls) == 2
+    metadata = _request_metadata(a2a_client.calls[1][0])
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == accept_uri
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 2
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["performative"] == "ACCEPT"
+    assert len(prompt_client.accept_calls) == 1
+    assert prompt_client.accept_from_text_calls == []
+
+
+# --- from-text channel: the accept goes through the extraction API ---------------------------
+
+
+def test_from_text_channel_generates_the_target_accept_via_extraction(_offline_env: Path) -> None:
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient(
+        [_round1_events(metadata=_propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)), _round2_events()]
+    )
+
+    asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            negotiation_kind=scenario_data.NEGOTIATION_KIND_TARGET,
+            channel=CHANNEL_TEXT,
+            env_path=_offline_env,
+        )
+    )
+
+    # The from-text accept API replaced the from-data call; the rendered text carries the content.
+    assert prompt_client.accept_calls == []
+    assert len(prompt_client.accept_from_text_calls) == 1
+    text, context, template_uri = prompt_client.accept_from_text_calls[0]
+    assert text == f"Accept. {negotiation_target_confirmation(env_path=_offline_env)}"
+    assert context.round == 2
+    assert context.performative == NegotiationPerformative.ACCEPT
+    assert template_uri == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
+    # The round-2 request shape is unchanged: same metadata keys, advanced ACCEPT session.
+    metadata = _request_metadata(a2a_client.calls[1][0])
+    assert set(metadata) == {
+        TASK_T_EXTENSION_URI,
+        NEGOTIATION_T_EXTENSION_URI,
+        TEMPLATE_URI_METADATA_KEY,
+        NEGOTIATION_CONTEXT_METADATA_KEY,
+    }
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 2
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["performative"] == "ACCEPT"
+
+
+def test_from_text_channel_renders_the_feasibility_summary_and_numbered_answers(_offline_env: Path) -> None:
+    feasibility_prompt_client = _ScriptedPromptClient()
+    feasibility_a2a_client = _ScriptedA2AClient(
+        [
+            _round1_events(metadata=_propose_metadata(template_uri=FEASIBILITY_NEGOTIATION_PROPOSE_URI)),
+            _round2_events(),
+        ]
+    )
+    asyncio.run(
+        _run_flow(
+            feasibility_a2a_client,
+            feasibility_prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            negotiation_kind=scenario_data.NEGOTIATION_KIND_FEASIBILITY,
+            channel=CHANNEL_TEXT,
+            env_path=_offline_env,
+        )
+    )
+    text, _context, template_uri = feasibility_prompt_client.accept_from_text_calls[0]
+    assert text == f"Accept. {negotiation_feasibility_summary(env_path=_offline_env)}"
+    assert template_uri == FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI
+
+    # The information accept keeps the numbered-items rendering of the answers.
+    information_prompt_client = _ScriptedPromptClient()
+    information_a2a_client = _ScriptedA2AClient([_round1_events(metadata=_propose_metadata()), _round2_events()])
+    asyncio.run(
+        _run_flow(
+            information_a2a_client,
+            information_prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            channel=CHANNEL_TEXT,
+            env_path=_offline_env,
+        )
+    )
+    text, _context, template_uri = information_prompt_client.accept_from_text_calls[0]
+    assert text == "Accept. 1. region：Songshanhu Administration Committee；"
+    assert template_uri == INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI
+
+
+def test_target_accept_round2_requests_are_equivalent_across_channels(_offline_env: Path) -> None:
+    """The from-data and from-text target accepts produce the same round-2 wire metadata."""
+    propose_metadata = _propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)
+    round2_metadata: list[dict[str, object]] = []
+    for channel in (CHANNEL_DATA, CHANNEL_TEXT):
+        prompt_client = _ScriptedPromptClient()
+        a2a_client = _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()])
+        asyncio.run(
+            _run_flow(
+                a2a_client,
+                prompt_client,
+                negotiation_params=dict(_NEGOTIATION_PARAMS),
+                negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+                negotiation_kind=scenario_data.NEGOTIATION_KIND_TARGET,
+                channel=channel,
+                env_path=_offline_env,
+            )
+        )
+        round2_metadata.append(_request_metadata(a2a_client.calls[1][0]))
+
+    data_metadata, text_metadata = round2_metadata
+    assert data_metadata[TEMPLATE_URI_METADATA_KEY] == text_metadata[TEMPLATE_URI_METADATA_KEY]
+    assert data_metadata[NEGOTIATION_CONTEXT_METADATA_KEY] == text_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+
+
+# --- unhandled degradations stay type-agnostic -----------------------------------------------
+
+
+def test_unknown_propose_template_uri_without_a_kind_flag_stays_unhandled(_offline_env: Path) -> None:
+    """A parseable session but an unrecognized propose templateUri keeps the single-round flow."""
+    metadata: dict[str, object] = {
+        NEGOTIATION_T_EXTENSION_URI: "propose text",
+        NEGOTIATION_CONTEXT_METADATA_KEY: {
+            "id": str(uuid.uuid4()),
+            "round": 1,
+            "maxRounds": NegotiationContext.DEFAULT_MAX_ROUNDS,
+            "performative": "PROPOSE",
+        },
+    }
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=metadata)])
+
+    logs: list[str] = []
+    asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1
+    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
+    unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
+    assert len(unhandled_logs) == 1
+    assert "unrecognized propose templateUri" in unhandled_logs[0]
+
+
+def test_malformed_context_degrades_to_unhandled_with_a_kind_flag_too(_offline_env: Path) -> None:
+    """The malformed-context degradation keeps working for every negotiation type."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=_malformed_propose_metadata())])
+
+    logs: list[str] = []
+    asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            negotiation_kind=scenario_data.NEGOTIATION_KIND_TARGET,
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1
+    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
+    unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
+    assert len(unhandled_logs) == 1
+    assert "malformed/missing session context" in unhandled_logs[0]
 
 
 # --- sse_event_consumer: metadata surfacing and context_id -----------------------------------

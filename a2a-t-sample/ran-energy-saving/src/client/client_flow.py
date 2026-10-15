@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from a2a.client.client import ClientCallContext
 from a2a.types import Role, SendMessageRequest, TaskState
@@ -13,19 +16,40 @@ from a2a_t.core.metadata import (
     NegotiationContext,
     NegotiationPerformative,
 )
-from a2a_t.core.standard_templates import INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI
+from a2a_t.core.standard_templates import (
+    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
 from a2a_t.negotiation.content.enums import NegotiationConclusion
 from a2a_t.negotiation.content.models import (
+    FeasibilityEndingContent,
     InformationEndingContent,
     NegotiationEndingData,
     NegotiationItem,
+    TargetEndingContent,
 )
 from common.logging_utils import format_payload_log, format_stage_log
 from common.sse_event_consumer import normalize_event
 from common.task_schema import TASK_PARAM_SCHEMA
 from google.protobuf.json_format import MessageToDict
 
-from client.scenario_data import ENERGY_SAVING_TEMPLATE_URI
+from client.scenario_data import (
+    CHANNEL_DATA,
+    CHANNEL_TEXT,
+    ENERGY_SAVING_TEMPLATE_URI,
+    NEGOTIATION_KIND_FEASIBILITY,
+    NEGOTIATION_KIND_INFORMATION,
+    NEGOTIATION_KIND_TARGET,
+    negotiation_feasibility_summary,
+    negotiation_target_confirmation,
+)
+
+if TYPE_CHECKING:
+    from a2a_t.client.a2at_client import A2ATClient
 
 
 def _require_prompt_text(prompt_content: object) -> tuple[str, str]:
@@ -65,11 +89,44 @@ def _parse_negotiation_context(metadata: dict[str, object]) -> NegotiationContex
         return None
 
 
+#: Negotiation kinds the client-side accept generation dispatches on. The kind resolves from the
+#: explicit flag when supplied, else from the propose's ``templateUri`` inside the INPUT_REQUIRED
+#: metadata (dispatch on the wire); each kind addresses its own accept-reject template.
+_NEGOTIATION_KIND_BY_PROPOSE_URI: dict[str, str] = {
+    INFORMATION_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_INFORMATION,
+    TARGET_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_TARGET,
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_FEASIBILITY,
+}
+
+_NEGOTIATION_ACCEPT_URI_BY_KIND: dict[str, str] = {
+    NEGOTIATION_KIND_INFORMATION: INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    NEGOTIATION_KIND_TARGET: TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    NEGOTIATION_KIND_FEASIBILITY: FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+}
+
+
+def _resolve_negotiation_kind(metadata: dict[str, object], negotiation_kind: str | None) -> str | None:
+    """Resolve the accept's negotiation kind: the explicit flag wins, else the propose's templateUri.
+
+    A ``None`` flag dispatches on the wire: the ``templateUri`` of the INPUT_REQUIRED metadata maps
+    to the negotiation kind, so the client accepts whatever type the server proposed. An unknown
+    flag, or a missing/unknown propose template URI when dispatching on the wire, returns ``None``
+    (the caller keeps the unhandled path).
+    """
+    if negotiation_kind is not None:
+        return negotiation_kind if negotiation_kind in _NEGOTIATION_ACCEPT_URI_BY_KIND else None
+    propose_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
+    if not isinstance(propose_uri, str):
+        return None
+    return _NEGOTIATION_KIND_BY_PROPOSE_URI.get(propose_uri)
+
+
 def _find_negotiation_input_required(events: list[dict[str, object]]) -> dict[str, object] | None:
-    """Find the INPUT_REQUIRED status event carrying the Negotiation-T information propose.
+    """Find the INPUT_REQUIRED status event carrying a Negotiation-T propose.
 
     The propose travels in the status message metadata under the Negotiation-T extension URI
-    together with the nested ``negotiationContext`` session map; ``None`` keeps the plain
+    together with the nested ``negotiationContext`` session map (any negotiation type; the
+    ``templateUri`` inside selects the client's accept type); ``None`` keeps the plain
     single-round flow.
     """
     for event in events:
@@ -133,16 +190,96 @@ async def _send_and_consume(
     return artifact_count
 
 
+def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
+    """Render items as one numbered list: ``N. name：value；`` per item (the negotiation demo rule).
+
+    The value is omitted when blank; the full-width separators keep the rendering identical to the
+    ``a2a-t-sample/negotiation`` demo's ``_numbered_items`` for both languages.
+    """
+    lines: list[str] = []
+    for index, (name, value) in enumerate(items, start=1):
+        line = f"{index}. {name}"
+        if value is not None and value.strip():
+            line += f"：{value}"
+        lines.append(f"{line}；")
+    return "".join(lines)
+
+
+def _negotiation_accept_content(
+    negotiation_kind: str,
+    *,
+    negotiation_answers: dict[str, str],
+    env_path: Path | None,
+) -> InformationEndingContent | TargetEndingContent | FeasibilityEndingContent:
+    """Build the typed accept content of one negotiation type (plan R3 scenario semantics).
+
+    Information keeps the v1 path: the accept items come from the supplied answers. Target accepts
+    the clarified target and feasibility confirms the feasibility evaluation, both with the
+    scenario-owned text of the resolved language (the canned accept-extraction content).
+    """
+    if negotiation_kind == NEGOTIATION_KIND_TARGET:
+        return TargetEndingContent(
+            conclusion=NegotiationConclusion.ACCEPT,
+            confirmed_intent=negotiation_target_confirmation(env_path=env_path),
+            failure_reason=None,
+        )
+    if negotiation_kind == NEGOTIATION_KIND_FEASIBILITY:
+        return FeasibilityEndingContent(
+            conclusion=NegotiationConclusion.ACCEPT,
+            feasibility_summary=negotiation_feasibility_summary(env_path=env_path),
+        )
+    return InformationEndingContent(
+        conclusion=NegotiationConclusion.ACCEPT,
+        items=[NegotiationItem(name=name, value=value) for name, value in negotiation_answers.items()],
+    )
+
+
+def _negotiation_accept_text(
+    negotiation_kind: str,
+    *,
+    negotiation_answers: dict[str, str],
+    env_path: Path | None,
+) -> str:
+    """Render the natural-language input of the from-text accept generation for one type.
+
+    The rendering carries the same content as the typed accept builders (the scenario accessors
+    mirror the canned extraction responses), so the extraction step of the from-text channel
+    returns the canonical content and both channels produce equivalent messages.
+    """
+    if negotiation_kind == NEGOTIATION_KIND_TARGET:
+        return f"Accept. {negotiation_target_confirmation(env_path=env_path)}"
+    if negotiation_kind == NEGOTIATION_KIND_FEASIBILITY:
+        return f"Accept. {negotiation_feasibility_summary(env_path=env_path)}"
+    return f"Accept. {_numbered_items(negotiation_answers.items())}"
+
+
+def _negotiation_accept_log_detail(
+    negotiation_kind: str,
+    *,
+    negotiation_answers: dict[str, str],
+    env_path: Path | None,
+) -> str:
+    """Summarize the accept content of one negotiation type for the ``negotiation-accept`` log."""
+    if negotiation_kind == NEGOTIATION_KIND_TARGET:
+        return f"confirmed_intent={negotiation_target_confirmation(env_path=env_path)}"
+    if negotiation_kind == NEGOTIATION_KIND_FEASIBILITY:
+        return f"feasibility_summary={negotiation_feasibility_summary(env_path=env_path)}"
+    return f"items={[(name, value) for name, value in negotiation_answers.items()]}"
+
+
 async def _run_negotiation_accept_round(
     *,
-    prompt_client: object,
+    prompt_client: A2ATClient,
     a2a_client: object,
     initial_input: dict[str, object],
     session: NegotiationContext,
     task_id: str,
     context_id: str,
+    negotiation_kind: str,
+    channel: str,
     negotiation_params: dict[str, object],
     negotiation_answers: dict[str, str],
+    env_path: Path | None,
     normalized_events: list[dict[str, object]],
     artifact_count: int,
     max_artifacts: int | None,
@@ -152,11 +289,16 @@ async def _run_negotiation_accept_round(
 
     Round 2 of the negotiation flow (demo ``run_four_message_flow`` message 3 over the real
     streaming path): the session context parsed from the propose metadata drives the accept
-    (round advanced by one, performative ACCEPT), the Task-T prompt is regenerated from the filled
-    parameters, and both travel in the round-2 message metadata under their extension URIs. Returns
+    (round advanced by one, performative ACCEPT) of the resolved negotiation type, the Task-T
+    prompt is regenerated from the filled parameters, and both travel in the round-2 message
+    metadata under their extension URIs. The channel switches only the accept generation call:
+    ``data`` builds the typed content and calls the deterministic from-data API (zero LLM calls),
+    ``text`` renders the same content as a natural-language message and calls the from-text API,
+    whose extraction step parses it back into the canonical typed content (one LLM call). Returns
     the updated artifact count after consuming the round-2 stream into ``normalized_events``.
     """
-    # Filled Task-T prompt: the parameters the propose asked for, regenerated from data.
+    # Filled Task-T prompt: the parameters the propose asked for, regenerated from data. All types
+    # complete the same four parameters, so one regeneration serves every negotiation kind.
     filled_prompt = prompt_client.generate_task_prompt_from_data_with_schema(
         dict(negotiation_params), TASK_PARAM_SCHEMA, ENERGY_SAVING_TEMPLATE_URI
     )
@@ -164,18 +306,25 @@ async def _run_negotiation_accept_round(
 
     # Negotiation-T accept continuing the server's session (round advanced, performative ACCEPT).
     accept_context = session.next_round().with_performative(NegotiationPerformative.ACCEPT)
-    accept = prompt_client.generate_negotiation_accept_prompt_from_data(
-        NegotiationEndingData(
-            context=accept_context,
-            content=InformationEndingContent(
-                conclusion=NegotiationConclusion.ACCEPT,
-                items=[NegotiationItem(name=name, value=value) for name, value in negotiation_answers.items()],
+    accept_template_uri = _NEGOTIATION_ACCEPT_URI_BY_KIND[negotiation_kind]
+    if channel == CHANNEL_TEXT:
+        accept = prompt_client.generate_negotiation_accept_prompt_from_text(
+            _negotiation_accept_text(negotiation_kind, negotiation_answers=negotiation_answers, env_path=env_path),
+            accept_context,
+            accept_template_uri,
+        )
+    else:
+        accept = prompt_client.generate_negotiation_accept_prompt_from_data(
+            NegotiationEndingData(
+                context=accept_context,
+                content=_negotiation_accept_content(
+                    negotiation_kind, negotiation_answers=negotiation_answers, env_path=env_path
+                ),
             ),
-        ),
-        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
-    )
+            accept_template_uri,
+        )
     accept_text, _ = _require_prompt_text(accept)
-    accept_template_uri = str(getattr(accept, "template_uri", None) or INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI)
+    accept_template_uri = str(getattr(accept, "template_uri", None) or accept_template_uri)
     accept_negotiation_context = getattr(accept, "negotiation_context", None)
 
     if log_sink is not None:
@@ -186,7 +335,9 @@ async def _run_negotiation_accept_round(
                 detail=(
                     f"generated (round={session.round + 1}) "
                     f"template_uri={accept_template_uri} "
-                    f"items={[(name, value) for name, value in negotiation_answers.items()]}"
+                    + _negotiation_accept_log_detail(
+                        negotiation_kind, negotiation_answers=negotiation_answers, env_path=env_path
+                    )
                 ),
             )
         )
@@ -235,7 +386,7 @@ async def _run_negotiation_accept_round(
 
 async def run_client_flow(
     *,
-    prompt_client: object,
+    prompt_client: A2ATClient,
     a2a_client: object,
     initial_input: dict[str, object],
     input_text: str,
@@ -243,6 +394,9 @@ async def run_client_flow(
     log_sink: object | None = None,
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
+    negotiation_kind: str | None = None,
+    channel: str = CHANNEL_DATA,
+    env_path: Path | None = None,
 ) -> list[dict[str, object]]:
     """Generate a Task-T prompt with the A2A-T client SDK, then stream the A2A server's artifacts.
 
@@ -253,15 +407,18 @@ async def run_client_flow(
       3. A2A SDK ``send_message`` (streaming) to the server    -> ``[client] a2a-send-message``
       4. each received A2A event, as raw JSON                 -> ``[client] a2a-event``
       5. Negotiation round trip: when the server answers INPUT_REQUIRED with a Negotiation-T
-         propose (status message metadata) and negotiation answers are supplied, regenerate the
-         Task-T prompt from the filled parameters, render the Negotiation-T accept for the parsed
-         session, and re-send over a second streaming request
+         propose (status message metadata) and negotiation answers are supplied, resolve the
+         negotiation kind (the explicit flag, else the propose's ``templateUri`` — dispatch on
+         the wire), regenerate the Task-T prompt from the filled parameters, render the
+         Negotiation-T accept of that type for the parsed session (from typed data, or from a
+         natural-language rendering plus one extraction LLM call per the configured channel),
+         and re-send over a second streaming request
                                                             -> ``[client] negotiation-accept`` /
                                                                ``[client] a2a-send-message`` (round=2)
 
-    Without the negotiation answers — or when the propose carries no parseable session context —
-    an INPUT_REQUIRED propose is logged as unhandled and the flow ends after round 1; the default
-    flow (no INPUT_REQUIRED) is unchanged.
+    Without the negotiation answers — or when the propose carries no parseable session context or
+    resolves to no negotiation kind — an INPUT_REQUIRED propose is logged as unhandled and the
+    flow ends after round 1; the default flow (no INPUT_REQUIRED) is unchanged.
 
     Message-body convention:
       * text part                 -> task name (request metadata)
@@ -349,21 +506,37 @@ async def run_client_flow(
     elif input_required_event is not None:
         metadata = input_required_event.get("metadata")
         session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
-        if session is not None:
-            artifact_count = await _run_negotiation_accept_round(
-                prompt_client=prompt_client,
-                a2a_client=a2a_client,
-                initial_input=initial_input,
-                session=session,
-                task_id=_first_task_id(normalized_events),
-                context_id=str(input_required_event.get("context_id", "")),
-                negotiation_params=negotiation_params,
-                negotiation_answers=negotiation_answers,
-                normalized_events=normalized_events,
-                artifact_count=artifact_count,
-                max_artifacts=max_artifacts,
-                log_sink=log_sink,
-            )
+        if session is not None and isinstance(metadata, dict):
+            negotiation_type = _resolve_negotiation_kind(metadata, negotiation_kind)
+            if negotiation_type is not None:
+                artifact_count = await _run_negotiation_accept_round(
+                    prompt_client=prompt_client,
+                    a2a_client=a2a_client,
+                    initial_input=initial_input,
+                    session=session,
+                    task_id=_first_task_id(normalized_events),
+                    context_id=str(input_required_event.get("context_id", "")),
+                    negotiation_kind=negotiation_type,
+                    channel=channel,
+                    negotiation_params=negotiation_params,
+                    negotiation_answers=negotiation_answers,
+                    env_path=env_path,
+                    normalized_events=normalized_events,
+                    artifact_count=artifact_count,
+                    max_artifacts=max_artifacts,
+                    log_sink=log_sink,
+                )
+            elif log_sink is not None:
+                log_sink(
+                    format_stage_log(
+                        role="client",
+                        stage="negotiation-unhandled",
+                        detail=(
+                            "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                            "(unrecognized propose templateUri), staying on round 1"
+                        ),
+                    )
+                )
         elif log_sink is not None:
             log_sink(
                 format_stage_log(
