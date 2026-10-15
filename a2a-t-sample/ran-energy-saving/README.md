@@ -75,7 +75,7 @@ stopped. Use an interpreter that has the sample dependencies (the repository `.v
 | --- | --- |
 | `--language {en-US,zh-CN}` | Run language (default `en-US`) |
 | `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
-| `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = 100Mbps throughput beyond cell capability; `feasibility` = 30% saving goal conflicting with a 50Mbps throughput target). The flag only selects the input — the server stays data-driven on the validation error code, see [Negotiation scenario](#negotiation-scenario-negotiation-t) |
+| `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = 100Mbps throughput beyond cell capability; `feasibility` = 30% saving goal conflicting with a 50Mbps throughput target). `information` keeps the `--scenario` switch (only `--scenario negotiation` runs the missing-region flow); `target`/`feasibility` engage without it. The flag only selects the input — the server stays data-driven on the validation error code, see [Negotiation scenario](#negotiation-scenario-negotiation-t) |
 | `--channel {fromData,fromText}` | Generation channel of the negotiation propose/accept messages (default `fromData`; `fromText` adds one extraction LLM call per generated message, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |
 | `--keep-logs` | Keep the temp run directory (logs / `.env`) under `<temp>/a2at-ran-energy-saving/` |
@@ -166,7 +166,7 @@ Notes:
 ### Client: generate and send a Task-T prompt
 
 Render a Task-T prompt from your natural-language input (A2A-T SDK) —
-[`client_flow.py:286`](src/client/client_flow.py#L286):
+[`client_flow.py:448`](src/client/client_flow.py#L448):
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -178,7 +178,7 @@ It returns `MetadataContent` (`prompt_text`, `extension_uri`, `template_uri`,
 `slot.not_provided`, `llm.not_configured`, `input.text_too_long`).
 
 Put the prompt in the message metadata and send it over `a2a-sdk` (streaming) —
-[`client_flow.py:300`](src/client/client_flow.py#L300):
+[`client_flow.py:462`](src/client/client_flow.py#L462):
 
 ```python
 request = SendMessageRequest()
@@ -204,7 +204,7 @@ The AgentCard discovery and `a2a-sdk` client construction that precede this are 
 ### Server: validate, extract, and stream
 
 Read the A2A-T payload from the message metadata the client sent —
-[`server_flow.py:52`](src/server/server_flow.py#L52):
+[`server_flow.py:75`](src/server/server_flow.py#L75):
 
 ```python
 def _extract_prompt_text(request_context: RequestContext) -> str:
@@ -216,7 +216,7 @@ def _extract_prompt_text(request_context: RequestContext) -> str:
 ```
 
 Validate the prompt and extract the parameters (A2A-T SDK) —
-[`server_flow.py:296`](src/server/server_flow.py#L296):
+[`server_flow.py:455`](src/server/server_flow.py#L455):
 
 ```python
 filled_params = prompt_server.validate_task_prompt_and_data_filling(
@@ -231,7 +231,7 @@ parameter map (or a list for array-shaped schemas). A rejected prompt raises `Co
 (codes such as `negotiation.semantic_rejected`, `llm.invocation_failed`, `template.not_found`)
 carrying `exc.errors` with per-slot `slot_name` / `code` / `message`; the sample maps that to
 `TASK_STATE_REJECTED` instead of crashing —
-[`server_flow.py:375`](src/server/server_flow.py#L375):
+[`server_flow.py:482`](src/server/server_flow.py#L482):
 
 ```python
 if validation_failure is not None:
@@ -248,7 +248,7 @@ if validation_failure is not None:
 ```
 
 The flow runs inside an `a2a-sdk` `AgentExecutor`, which delegates to `execute_server_flow` —
-[`server_main.py:55`](src/server/server_main.py#L55):
+[`server_main.py:59`](src/server/server_main.py#L59):
 
 ```python
 async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -320,7 +320,10 @@ content back from it: the server calls `generate_negotiation_propose_prompt_from
 ([`server_flow.py:282`](src/server/server_flow.py#L282)) and the client calls
 `generate_negotiation_accept_prompt_from_text` ([`client_flow.py:311`](src/client/client_flow.py#L311))
 — one extraction LLM call per generated message (visible as extra `llm-mock` lines with the bundled
-mock LLM). The wire format is identical to `fromData`. Per-type message shapes: the target propose
+mock LLM). The wire format is identical to `fromData`. Known mock artifact: on
+`--scenario negotiation --channel fromText` the information propose carries the canned 2-item
+extraction list where `fromData` carries the 1-item missing list; accept and wire conventions are
+equivalent. Per-type message shapes: the target propose
 carries the negotiation summary plus a confirm request, and the accept carries the confirmed intent;
 the feasibility propose carries the evaluation request with the `contents_to_evaluate` items, and the
 accept carries the feasibility summary.

@@ -71,7 +71,7 @@ python run_demo.py --language zh-CN   # 中文（默认是 en-US）
 | --- | --- |
 | `--language {en-US,zh-CN}` | 运行语言（默认 `en-US`） |
 | `--scenario {default,negotiation}` | 场景变体（默认 `default`；`negotiation` 运行缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
-| `--negotiation {information,target,feasibility}` | 协商类型，选择客户端场景输入（默认 `information` = 缺失 region；`target` = 100Mbps 速率超出小区能力；`feasibility` = 30% 节能目标与 50Mbps 速率目标冲突）。该参数只选择输入——服务端依据内容校验错误码数据驱动地分派，见[协商场景](#协商场景negotiation-t) |
+| `--negotiation {information,target,feasibility}` | 协商类型，选择客户端场景输入（默认 `information` = 缺失 region；`target` = 100Mbps 速率超出小区能力；`feasibility` = 30% 节能目标与 50Mbps 速率目标冲突）。`information` 仍受 `--scenario` 开关控制（只有 `--scenario negotiation` 运行缺失 region 流程）；`target`/`feasibility` 无需该开关即可触发。该参数只选择输入——服务端依据内容校验错误码数据驱动地分派，见[协商场景](#协商场景negotiation-t) |
 | `--channel {fromData,fromText}` | 协商 propose/accept 消息的生成通道（默认 `fromData`；`fromText` 每条生成的消息多一次抽取 LLM 调用，见[协商场景](#协商场景negotiation-t)） |
 | `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
 | `--keep-logs` | 保留临时运行目录（日志 / `.env`），位于 `<temp>/a2at-ran-energy-saving/` |
@@ -157,7 +157,7 @@ uv run --no-sync python -m client.client_main
 ### 客户端：生成并发送 Task-T prompt
 
 用 A2A-T SDK 把你的自然语言输入渲染成 Task-T prompt ——
-[`client_flow.py:286`](src/client/client_flow.py#L286)：
+[`client_flow.py:448`](src/client/client_flow.py#L448)：
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -169,7 +169,7 @@ prompt_text, extension_uri = _require_prompt_text(prompt_content)
 `llm.not_configured`、`input.text_too_long`）。
 
 把 prompt 放进消息 metadata，用 `a2a-sdk` 发送（流式）——
-[`client_flow.py:300`](src/client/client_flow.py#L300)：
+[`client_flow.py:462`](src/client/client_flow.py#L462)：
 
 ```python
 request = SendMessageRequest()
@@ -195,7 +195,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 ### 服务端：校验、抽取并流式推送
 
 从客户端发来的消息 metadata 中读取 A2A-T 报文 ——
-[`server_flow.py:52`](src/server/server_flow.py#L52)：
+[`server_flow.py:75`](src/server/server_flow.py#L75)：
 
 ```python
 def _extract_prompt_text(request_context: RequestContext) -> str:
@@ -207,7 +207,7 @@ def _extract_prompt_text(request_context: RequestContext) -> str:
 ```
 
 用 A2A-T SDK 校验 prompt 并抽取参数 ——
-[`server_flow.py:296`](src/server/server_flow.py#L296)：
+[`server_flow.py:455`](src/server/server_flow.py#L455)：
 
 ```python
 filled_params = prompt_server.validate_task_prompt_and_data_filling(
@@ -222,7 +222,7 @@ schema 则为 list）。prompt 被拒绝时会抛出 `ContentValidationError`（
 `negotiation.semantic_rejected`、`llm.invocation_failed`、`template.not_found`），并携带
 `exc.errors`，含每槽位的 `slot_name` / `code` / `message`；样例将其映射为 `TASK_STATE_REJECTED`
 而不是让服务崩溃 ——
-[`server_flow.py:375`](src/server/server_flow.py#L375)：
+[`server_flow.py:482`](src/server/server_flow.py#L482)：
 
 ```python
 if validation_failure is not None:
@@ -239,7 +239,7 @@ if validation_failure is not None:
 ```
 
 整条流程运行在 `a2a-sdk` 的 `AgentExecutor` 中，它把执行委托给 `execute_server_flow` ——
-[`server_main.py:55`](src/server/server_main.py#L55)：
+[`server_main.py:59`](src/server/server_main.py#L59)：
 
 ```python
 async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -309,7 +309,7 @@ prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPL
 （[`server_flow.py:282`](src/server/server_flow.py#L282)），客户端调用
 `generate_negotiation_accept_prompt_from_text`
 （[`client_flow.py:311`](src/client/client_flow.py#L311)）——每条生成的协商消息多一次抽取 LLM 调用
-（使用内置 mock LLM 时表现为额外的 `llm-mock` 日志行）。报文格式与 `fromData` 完全一致。各类型的
+（使用内置 mock LLM 时表现为额外的 `llm-mock` 日志行）。报文格式与 `fromData` 完全一致。已知的 mock 伪影：`--scenario negotiation --channel fromText` 时 information propose 携带预置的 2 条抽取项列表（`fromData` 携带 1 条缺失项列表）；accept 与报文约定保持等价。各类型的
 消息形态：目标协商的 propose 携带协商摘要与确认请求，accept 携带确认后的意图；可行性协商的 propose
 携带评估请求与 `contents_to_evaluate` 条目，accept 携带可行性摘要。
 

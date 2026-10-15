@@ -273,8 +273,10 @@ def main() -> int:
         help=(
             "negotiation kind selecting the client scenario input: information (missing region), "
             "target (100Mbps throughput beyond cell capability), feasibility (30-percent saving "
-            "goal conflicting with 50Mbps throughput). The KIND flag only selects the scenario "
-            "input — the server stays data-driven on the content-validation error code "
+            "goal conflicting with 50Mbps throughput). information engages only together with "
+            "--scenario negotiation; target/feasibility engage without it. The KIND flag only "
+            "selects the scenario input — the server stays data-driven on the content-validation "
+            "error code "
             "(default: information)"
         ),
     )
