@@ -48,6 +48,7 @@ from client.scenario_data import (
     build_prompt_input,
     negotiation_answers,
     negotiation_feasibility_contents,
+    negotiation_feasibility_description,
     negotiation_feasibility_summary,
     negotiation_filled_params,
     negotiation_target_confirm_request,
@@ -661,6 +662,10 @@ def test_negotiation_accessors_match_the_canned_extraction_responses(tmp_path: P
     assert target_propose["alignment_and_clarification"] is None
     assert target_propose["request_for_clarification"] is None
     assert feasibility_propose["action"] == "REQUEST_FEASIBILITY_EVALUATION"
+    assert (
+        negotiation_feasibility_description(env_path=env_path)
+        == feasibility_propose["feasibility_negotiation_description"]
+    )
     assert negotiation_feasibility_contents(env_path=env_path) == [
         (item["name"], item["value"])
         for item in feasibility_propose["contents_to_evaluate"]  # type: ignore[union-attr]

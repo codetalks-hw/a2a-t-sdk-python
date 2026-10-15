@@ -322,6 +322,11 @@ def negotiation_target_confirmation(*, env_path: Path | None = None) -> str:
     return _localized_text(_NEGOTIATION_TARGET_CONFIRMATIONS, env_path=env_path)
 
 
+def negotiation_feasibility_description(*, env_path: Path | None = None) -> str:
+    """Return the feasibility negotiation propose description (mirrors the canned propose extraction)."""
+    return _localized_text(_NEGOTIATION_FEASIBILITY_DESCRIPTIONS, env_path=env_path)
+
+
 def negotiation_feasibility_contents(*, env_path: Path | None = None) -> list[tuple[str, str]]:
     """Return the contents to evaluate of the feasibility propose (canned propose extraction)."""
     language = resolve_language(env_path=env_path)

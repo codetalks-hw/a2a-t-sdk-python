@@ -22,7 +22,7 @@ from common.registry_client import register_agentcard
 from dotenv import dotenv_values
 from starlette.applications import Starlette
 
-from server.constants_data import get_public_agent_card
+from server.constants_data import CHANNEL_DATA, get_public_agent_card, resolve_negotiation_channel
 from server.server_flow import execute_server_flow
 
 install_mock_llm_if_needed()
@@ -47,10 +47,14 @@ class SampleAgentExecutor(AgentExecutor):
         prompt_server: object,
         log_sink: object | None = None,
         execute_flow: object,
+        channel: str = CHANNEL_DATA,
+        env_path: Path | None = None,
     ) -> None:
         self._prompt_server = prompt_server
         self._log_sink = log_sink
         self._execute_flow = execute_flow
+        self._channel = channel
+        self._env_path = env_path
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         kwargs = {
@@ -58,6 +62,8 @@ class SampleAgentExecutor(AgentExecutor):
             "event_queue": event_queue,
             "prompt_server": self._prompt_server,
             "log_sink": self._log_sink,
+            "channel": self._channel,
+            "env_path": self._env_path,
         }
         await self._execute_flow(**kwargs)
 
@@ -100,6 +106,7 @@ def build_registration_payload(*, host: str, port: int) -> dict[str, Any]:
 def build_agent_card(*, host: str, port: int) -> object:
     from a2a.types import AgentCard
     from google.protobuf.json_format import ParseDict
+
     return ParseDict(build_agent_card_payload(host=host, port=port), AgentCard())
 
 
@@ -111,7 +118,12 @@ def build_server_runtime(
     log_sink: object | None = None,
     debug_enabled: bool = False,
 ) -> dict[str, object]:
-    """Build the server runtime: an A2ATServer prompt server and a SampleAgentExecutor."""
+    """Build the server runtime: an A2ATServer prompt server and a SampleAgentExecutor.
+
+    The negotiation generation channel is resolved here from the run's ``.env``
+    (``A2AT_SAMPLE_CHANNEL``, default ``data``) and, with the ``env_path`` itself, threaded into
+    the executor so the propose builders read the same scenario configuration.
+    """
     resolved_logger = logger
     if resolved_logger is None and log_sink is not None and debug_enabled:
         resolved_logger = build_sample_logger(sink=log_sink, debug_enabled=True)
@@ -120,6 +132,8 @@ def build_server_runtime(
         prompt_server=prompt_server,
         log_sink=log_sink,
         execute_flow=execute_server_flow,
+        channel=resolve_negotiation_channel(env_path=env_path),
+        env_path=env_path,
     )
     return {
         "prompt_server": prompt_server,
@@ -163,8 +177,7 @@ async def register_agent_card_if_possible(
             log_sink("[server] agent-card registration: success")
         else:
             log_sink(
-                "[server] agent-card registration failed, continuing startup: "
-                f"{result.get('message', 'unknown error')}"
+                f"[server] agent-card registration failed, continuing startup: {result.get('message', 'unknown error')}"
             )
     return result
 
