@@ -10,6 +10,7 @@
 - [Using the A2A-T SDK](#using-the-a2a-t-sdk)
   - [Client: generate and send a Task-T prompt](#client-generate-and-send-a-task-t-prompt)
   - [Server: validate, extract, and stream](#server-validate-extract-and-stream)
+- [Negotiation scenario (Negotiation-T)](#negotiation-scenario-negotiation-t)
 
 ## Overview
 
@@ -73,6 +74,7 @@ stopped. Use an interpreter that has the sample dependencies (the repository `.v
 | Flag | Effect |
 | --- | --- |
 | `--language {en-US,zh-CN}` | Run language (default `en-US`) |
+| `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |
 | `--keep-logs` | Keep the temp run directory (logs / `.env`) under `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | Stop a previous `--keep-alive` run and exit |
@@ -130,6 +132,7 @@ Configuration used by this sample (from `a2a-t-sample/.env`):
 | Key | Meaning |
 | --- | --- |
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`; selects the natural-language input and the mock/template tree |
+| `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`; selects the sample scenario variant (`negotiation` = the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `A2AT_LLM_API_KEY` | Empty ⇒ mock LLM; otherwise an OpenAI-compatible key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM endpoint settings |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP client timeout in seconds (default 60) |
@@ -159,7 +162,7 @@ Notes:
 ### Client: generate and send a Task-T prompt
 
 Render a Task-T prompt from your natural-language input (A2A-T SDK) —
-[`client_flow.py:70`](src/client/client_flow.py#L70):
+[`client_flow.py:286`](src/client/client_flow.py#L286):
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -171,7 +174,7 @@ It returns `MetadataContent` (`prompt_text`, `extension_uri`, `template_uri`,
 `slot.not_provided`, `llm.not_configured`, `input.text_too_long`).
 
 Put the prompt in the message metadata and send it over `a2a-sdk` (streaming) —
-[`client_flow.py:84`](src/client/client_flow.py#L84):
+[`client_flow.py:300`](src/client/client_flow.py#L300):
 
 ```python
 request = SendMessageRequest()
@@ -197,7 +200,7 @@ The AgentCard discovery and `a2a-sdk` client construction that precede this are 
 ### Server: validate, extract, and stream
 
 Read the A2A-T payload from the message metadata the client sent —
-[`server_flow.py:39`](src/server/server_flow.py#L39):
+[`server_flow.py:52`](src/server/server_flow.py#L52):
 
 ```python
 def _extract_prompt_text(request_context: RequestContext) -> str:
@@ -209,7 +212,7 @@ def _extract_prompt_text(request_context: RequestContext) -> str:
 ```
 
 Validate the prompt and extract the parameters (A2A-T SDK) —
-[`server_flow.py:101`](src/server/server_flow.py#L101):
+[`server_flow.py:296`](src/server/server_flow.py#L296):
 
 ```python
 filled_params = prompt_server.validate_task_prompt_and_data_filling(
@@ -224,7 +227,7 @@ parameter map (or a list for array-shaped schemas). A rejected prompt raises `Co
 (codes such as `negotiation.semantic_rejected`, `llm.invocation_failed`, `template.not_found`)
 carrying `exc.errors` with per-slot `slot_name` / `code` / `message`; the sample maps that to
 `TASK_STATE_REJECTED` instead of crashing —
-[`server_flow.py:145`](src/server/server_flow.py#L145):
+[`server_flow.py:375`](src/server/server_flow.py#L375):
 
 ```python
 if validation_failure is not None:
@@ -256,3 +259,61 @@ async def execute(self, context: RequestContext, event_queue: EventQueue) -> Non
 
 The `a2a-sdk` app assembly (routes, task store) is in
 [`src/server/server_main.py`](src/server/server_main.py).
+
+## Negotiation scenario (Negotiation-T)
+
+Besides the default flow above, the sample ships a **`negotiation` scenario** that demonstrates a
+**Negotiation-T** information negotiation over the same streaming path: the client input is missing
+the `region` parameter, the server detects the missing slot and asks for it with a Negotiation-T
+information propose, and the client answers with the filled Task-T prompt plus a Negotiation-T
+accept, after which the server completes the task.
+
+```bash
+cd a2a-t-sample/ran-energy-saving
+python run_demo.py --scenario negotiation   # missing-region input; information negotiation
+```
+
+The flag's default (`default`) keeps the flow described above unchanged; the scenario can also be
+selected with `A2AT_SAMPLE_SCENARIO` in `.env` (see [Configuration](#configuration)).
+
+**Round 1 — the server proposes.** The client generates the Task-T prompt from the region-less
+input with `generate_task_prompt_from_text` ([`client_flow.py:286`](src/client/client_flow.py#L286)).
+The server validates it with `validate_task_prompt_and_data_filling` and gets a per-slot rejection
+(`content.param_missing` on `region`); because the errors name slots, the server treats them as
+missing items, renders the Negotiation-T information propose from the data with
+`generate_negotiation_propose_prompt_from_data`
+([`server_flow.py:127`](src/server/server_flow.py#L127)) — no LLM call is involved in rendering the
+propose — and emits `TASK_STATE_INPUT_REQUIRED` with the propose in the status message metadata
+(`build_metadata_content()`).
+
+**Round 2 — the client accepts.** The client reads the propose from the INPUT_REQUIRED metadata and
+parses the `negotiationContext` session, regenerates the Task-T prompt from the filled parameters
+with `generate_task_prompt_from_data_with_schema`
+([`client_flow.py:156`](src/client/client_flow.py#L156)), renders the accept with
+`generate_negotiation_accept_prompt_from_data`
+([`client_flow.py:163`](src/client/client_flow.py#L163)), and re-sends the same task with both
+prompts in the message metadata. The server detects the Negotiation-T URI as the continuation,
+validates the now-complete prompt, streams the UC1 progress steps and the report artifact, and
+closes the task with `TASK_STATE_COMPLETED` — the negotiation run ends here, whereas the default
+flow stays long-running.
+
+Wire conventions:
+
+| What | Where |
+| --- | --- |
+| Propose (round 1) / accept (round 2) text | message `metadata` under the Negotiation-T extension URI (`https://projects.tmforum.org/a2aproject/telecommunication/extensions/Negotiation-T/v1`) |
+| Negotiation session | nested `negotiationContext` metadata map (`id` / `round` / `maxRounds` / `performative`) |
+| Round-2 continuation signal | Negotiation-T URI in the round-2 message `metadata`; `task_id` / `context_id` repeat round 1 |
+| Round-2 `A2A-Extensions` header | both extension URIs (Task-T **and** Negotiation-T), comma-joined |
+
+**Expected output** (trimmed):
+
+```text
+[client] a2a-event: {"task": {"id": "...", "status": {"state": "TASK_STATE_SUBMITTED", ...}}}
+[client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_INPUT_REQUIRED", "message": {"metadata": {"negotiationContext": {"round": 1.0, ..., "performative": "PROPOSE"}, ".../extensions/Negotiation-T/v1": "## Information Negotiation ...", "templateUri": "Negotiation-T/information-negotiation/propose/v1"}}}}}
+[client] negotiation-accept: generated (round=2) template_uri=Negotiation-T/information-negotiation/accept-reject/v1 items=[('region', 'Songshanhu Administration Committee')]
+[client] a2a-send-message: round=2 streaming text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1>
+[client] a2a-event: {"artifactUpdate": {"artifact": {"name": "energy saving intent report", ...}}}
+[client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED", ...}}}
+[client] stream-completed: events=14 artifacts=1
+```

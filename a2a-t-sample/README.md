@@ -13,5 +13,5 @@ See the repository root [`README.md`](../README.md) for setup and how to run.
 | Directory | Description |
 | --- | --- |
 | [fault-management/](fault-management/) | Event subscription sample — stream Incident notifications |
-| [ran-energy-saving/](ran-energy-saving/) | RAN energy saving sample — run a RAN energy-saving task |
+| [ran-energy-saving/](ran-energy-saving/) | RAN energy saving sample — run a RAN energy-saving task, including a Negotiation-T information negotiation flow |
 | [negotiation/](negotiation/) | Negotiation closed-loop sample — offline propose → accept round trips |

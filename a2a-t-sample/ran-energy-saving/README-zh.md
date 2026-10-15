@@ -10,6 +10,7 @@
 - [如何使用 A2A-T SDK](#如何使用-a2a-t-sdk)
   - [客户端：生成并发送 Task-T prompt](#客户端生成并发送-task-t-prompt)
   - [服务端：校验、抽取并流式推送](#服务端校验抽取并流式推送)
+- [协商场景（Negotiation-T）](#协商场景negotiation-t)
 
 ## 概览
 
@@ -69,6 +70,7 @@ python run_demo.py --language zh-CN   # 中文（默认是 en-US）
 | 参数 | 作用 |
 | --- | --- |
 | `--language {en-US,zh-CN}` | 运行语言（默认 `en-US`） |
+| `--scenario {default,negotiation}` | 场景变体（默认 `default`；`negotiation` 运行缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
 | `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
 | `--keep-logs` | 保留临时运行目录（日志 / `.env`），位于 `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | 停止之前 `--keep-alive` 留下的后台进程并退出 |
@@ -123,6 +125,7 @@ uv run --no-sync python -m client.client_main
 | 键 | 含义 |
 | --- | --- |
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`；决定自然语言输入与 mock/模板语言树 |
+| `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`；选择样例场景变体（`negotiation` = 缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
 | `A2AT_LLM_API_KEY` | 留空 ⇒ mock LLM；否则为 OpenAI 兼容的 key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM 端点配置 |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP 客户端超时（秒，默认 60） |
@@ -150,7 +153,7 @@ uv run --no-sync python -m client.client_main
 ### 客户端：生成并发送 Task-T prompt
 
 用 A2A-T SDK 把你的自然语言输入渲染成 Task-T prompt ——
-[`client_flow.py:70`](src/client/client_flow.py#L70)：
+[`client_flow.py:286`](src/client/client_flow.py#L286)：
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -162,7 +165,7 @@ prompt_text, extension_uri = _require_prompt_text(prompt_content)
 `llm.not_configured`、`input.text_too_long`）。
 
 把 prompt 放进消息 metadata，用 `a2a-sdk` 发送（流式）——
-[`client_flow.py:84`](src/client/client_flow.py#L84)：
+[`client_flow.py:300`](src/client/client_flow.py#L300)：
 
 ```python
 request = SendMessageRequest()
@@ -188,7 +191,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 ### 服务端：校验、抽取并流式推送
 
 从客户端发来的消息 metadata 中读取 A2A-T 报文 ——
-[`server_flow.py:39`](src/server/server_flow.py#L39)：
+[`server_flow.py:52`](src/server/server_flow.py#L52)：
 
 ```python
 def _extract_prompt_text(request_context: RequestContext) -> str:
@@ -200,7 +203,7 @@ def _extract_prompt_text(request_context: RequestContext) -> str:
 ```
 
 用 A2A-T SDK 校验 prompt 并抽取参数 ——
-[`server_flow.py:101`](src/server/server_flow.py#L101)：
+[`server_flow.py:296`](src/server/server_flow.py#L296)：
 
 ```python
 filled_params = prompt_server.validate_task_prompt_and_data_filling(
@@ -215,7 +218,7 @@ schema 则为 list）。prompt 被拒绝时会抛出 `ContentValidationError`（
 `negotiation.semantic_rejected`、`llm.invocation_failed`、`template.not_found`），并携带
 `exc.errors`，含每槽位的 `slot_name` / `code` / `message`；样例将其映射为 `TASK_STATE_REJECTED`
 而不是让服务崩溃 ——
-[`server_flow.py:145`](src/server/server_flow.py#L145)：
+[`server_flow.py:375`](src/server/server_flow.py#L375)：
 
 ```python
 if validation_failure is not None:
@@ -247,3 +250,57 @@ async def execute(self, context: RequestContext, event_queue: EventQueue) -> Non
 
 `a2a-sdk` 应用装配（routes、task store）见
 [`src/server/server_main.py`](src/server/server_main.py)。
+
+## 协商场景（Negotiation-T）
+
+除上述默认流程外，本样例还提供 **`negotiation` 场景**，在同一条流式链路上演示 **Negotiation-T**
+信息协商：客户端输入缺少 `region` 参数，服务端识别出缺失槽位后用 Negotiation-T 信息 propose
+索要该参数，客户端再携带补全后的 Task-T prompt 与 Negotiation-T accept 应答，随后服务端完成
+任务。
+
+```bash
+cd a2a-t-sample/ran-energy-saving
+python run_demo.py --scenario negotiation   # 缺失 region 的输入；信息协商
+```
+
+该参数的默认值（`default`）保持上文流程不变；也可以通过 `.env` 中的 `A2AT_SAMPLE_SCENARIO`
+选择场景（见[配置](#配置)）。
+
+**第一轮——服务端发起 propose。** 客户端用 `generate_task_prompt_from_text`
+（[`client_flow.py:286`](src/client/client_flow.py#L286)）从缺失 region 的输入生成 Task-T
+prompt。服务端用 `validate_task_prompt_and_data_filling` 校验后得到按槽位命名的拒绝
+（`region` 上的 `content.param_missing`）；由于错误携带槽位名，服务端将其视为缺失项，用
+`generate_negotiation_propose_prompt_from_data`
+（[`server_flow.py:127`](src/server/server_flow.py#L127)）从数据直接渲染 Negotiation-T 信息
+propose——渲染不涉及 LLM 调用——并发出 `TASK_STATE_INPUT_REQUIRED`，propose 放在该状态消息的
+metadata 中（`build_metadata_content()`）。
+
+**第二轮——客户端 accept。** 客户端从 INPUT_REQUIRED 的 metadata 中读取 propose 并解析
+`negotiationContext` 会话，用 `generate_task_prompt_from_data_with_schema`
+（[`client_flow.py:156`](src/client/client_flow.py#L156)）从补全后的参数重新生成 Task-T
+prompt，用 `generate_negotiation_accept_prompt_from_data`
+（[`client_flow.py:163`](src/client/client_flow.py#L163)）渲染 accept，然后把两个 prompt 一并放进
+消息 metadata 重新发送同一任务。服务端检测到 Negotiation-T URI 即视为协商续轮，校验补全后的
+prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPLETED` 结束任务——协商运行到此
+结束，而默认流程保持长连接运行。
+
+报文约定：
+
+| 内容 | 位置 |
+| --- | --- |
+| propose（第 1 轮）/ accept（第 2 轮）文本 | 消息 `metadata` 中 Negotiation-T 扩展 URI 之下（`https://projects.tmforum.org/a2aproject/telecommunication/extensions/Negotiation-T/v1`） |
+| 协商会话 | 嵌套的 `negotiationContext` metadata map（`id` / `round` / `maxRounds` / `performative`） |
+| 第 2 轮续轮信号 | 第 2 轮消息 `metadata` 中出现 Negotiation-T URI；`task_id` / `context_id` 沿用第 1 轮 |
+| 第 2 轮 `A2A-Extensions` 头 | 同时携带两个扩展 URI（Task-T **与** Negotiation-T），逗号拼接 |
+
+**预期输出**（已裁剪）：
+
+```text
+[client] a2a-event: {"task": {"id": "...", "status": {"state": "TASK_STATE_SUBMITTED", ...}}}
+[client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_INPUT_REQUIRED", "message": {"metadata": {"negotiationContext": {"round": 1.0, ..., "performative": "PROPOSE"}, ".../extensions/Negotiation-T/v1": "## Information Negotiation ...", "templateUri": "Negotiation-T/information-negotiation/propose/v1"}}}}}
+[client] negotiation-accept: generated (round=2) template_uri=Negotiation-T/information-negotiation/accept-reject/v1 items=[('region', 'Songshanhu Administration Committee')]
+[client] a2a-send-message: round=2 streaming text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1>
+[client] a2a-event: {"artifactUpdate": {"artifact": {"name": "energy saving intent report", ...}}}
+[client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED", ...}}}
+[client] stream-completed: events=14 artifacts=1
+```
