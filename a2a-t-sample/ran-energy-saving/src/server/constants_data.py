@@ -1,12 +1,29 @@
-﻿"""Static data for the ran-energy-saving server: agent card, UC1 progress steps, intent report."""
+"""Static data for the ran-energy-saving server: agent card, UC1 progress steps, intent report."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
 
+from a2a_t.core.standard_templates import INFORMATION_NEGOTIATION_PROPOSE_URI
+
 SUBMITTED_MESSAGE = "Energy saving task accepted, starting RAN energy saving task"
 ARTIFACT_SEND_INTERVAL_SECONDS = 1.0
+
+#: Text part of the INPUT_REQUIRED status message carrying the Negotiation-T propose metadata.
+INPUT_REQUIRED_MESSAGE = "Additional information is required to start the energy saving task"
+
+#: Text part of the COMPLETED status message closing the negotiation continuation flow.
+COMPLETED_MESSAGE = "Energy saving task completed"
+
+#: Hint rendered into each missing-item entry of a Negotiation-T information propose; the
+#: ``{slot}`` / ``{description}`` placeholders are filled from the validation error's slot name
+#: and the caller schema's property description.
+NEGOTIATION_MISSING_ITEM_HINT = "Please provide {slot}: {description}."
+
+#: Relationship note carried by a Negotiation-T information propose when more than one item is
+#: missing (omitted for a single item).
+NEGOTIATION_RELATIONSHIP = "Multiple items must be provided together."
 
 #: Task-T extension URI (Java ``ExtensionUriConstants``).
 TASK_T_EXTENSION_URI = "https://projects.tmforum.org/a2aproject/telecommunication/extensions/Task-T/v1"
@@ -16,6 +33,11 @@ NEGOTIATION_T_EXTENSION_URI = "https://projects.tmforum.org/a2aproject/telecommu
 
 #: Template addressed by this case.
 ENERGY_SAVING_TEMPLATE_URI = "Task-T/network-layer/ran-energy-saving/v1"
+
+#: Negotiation-T information-propose template addressed by the server's round-1 propose
+#: (re-exported from ``a2a_t.core.standard_templates``; the URIs used by this sample are
+#: centralized here).
+NEGOTIATION_PROPOSE_TEMPLATE_URI = INFORMATION_NEGOTIATION_PROPOSE_URI
 
 #: Area the sample energy-saving intent is scoped to (from the RAN energy-saving interface spec).
 ENERGY_SAVING_REGION = "Songshanhu Administration Committee"
@@ -49,7 +71,7 @@ PUBLIC_AGENT_CARD: dict[str, Any] = {
                 "time-segment-based guaranteed throughput target is {00:00~06:00,2Mbps}, "
                 "{06:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,10Mbps}.",
                 "Modify the RAN energy-saving task for XX Region to maximize energy savings. The "
-                "site list is [\"Site1\", \"Site2\"]. The time-segment-based guaranteed throughput "
+                'site list is ["Site1", "Site2"]. The time-segment-based guaranteed throughput '
                 "target is {03:00-05:00, 2Mbps}. The background event is a power outage from 03:00 "
                 "to 05:00.",
             ],
