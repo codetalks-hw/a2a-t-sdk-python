@@ -22,7 +22,14 @@ from dotenv import dotenv_values
 from google.protobuf.json_format import ParseDict
 
 from client.client_flow import run_client_flow
-from client.scenario_data import build_prompt_input, build_task_request
+from client.scenario_data import (
+    SCENARIO_NEGOTIATION,
+    build_prompt_input,
+    build_task_request,
+    negotiation_answers,
+    negotiation_filled_params,
+    resolve_scenario,
+)
 
 install_mock_llm_if_needed()
 install_llm_logger(role="client")
@@ -140,8 +147,15 @@ async def run_main(
     debug_enabled: bool = False,
     max_artifacts: int | None = None,
     registry_query_fn: object = query_by_name_org,
+    negotiation_params: dict[str, object] | None = None,
+    negotiation_answers: dict[str, str] | None = None,
 ) -> object:
-    """Run the full client flow: bootstrap runtime, discover agent, generate prompt, consume stream."""
+    """Run the full client flow: bootstrap runtime, discover agent, generate prompt, consume stream.
+
+    The negotiation arguments are supplied by the caller for the ``negotiation`` scenario: when the
+    server answers the round-1 prompt with an INPUT_REQUIRED propose, the flow answers it with the
+    filled Task-T prompt and the Negotiation-T accept (round 2).
+    """
     resolved_logger = logger
     if resolved_logger is None and log_sink is not None and debug_enabled:
         resolved_logger = build_sample_logger(sink=log_sink, debug_enabled=True)
@@ -185,6 +199,8 @@ async def run_main(
         input_text=input_text,
         max_artifacts=max_artifacts,
         log_sink=log_sink,
+        negotiation_params=negotiation_params,
+        negotiation_answers=negotiation_answers,
     )
 
 
@@ -202,18 +218,27 @@ def main(
         debug_enabled = resolve_sample_debug(env_path=resolved_env_path)
         raw_max_artifacts = int(os.environ.get("A2AT_SAMPLE_MAX_ARTIFACTS", "0") or "0")
         max_artifacts = raw_max_artifacts if raw_max_artifacts > 0 else None
+        scenario = resolve_scenario(env_path=resolved_env_path)
         print(
             f"[client] startup: server_url={resolve_server_url(env_path=resolved_env_path)} "
-            f"debug={'true' if debug_enabled else 'false'}"
+            f"debug={'true' if debug_enabled else 'false'} scenario={scenario}"
+        )
+        negotiation_params = (
+            negotiation_filled_params(env_path=sample_env_path) if scenario == SCENARIO_NEGOTIATION else None
+        )
+        negotiation_answers_map = (
+            negotiation_answers(env_path=sample_env_path) if scenario == SCENARIO_NEGOTIATION else None
         )
         return async_runner(
             run_async(
                 env_path=sample_env_path,
                 initial_input=build_task_request(),
-                input_text=build_prompt_input(env_path=sample_env_path),
+                input_text=build_prompt_input(env_path=sample_env_path, scenario=scenario),
                 log_sink=print,
                 debug_enabled=debug_enabled,
                 max_artifacts=max_artifacts,
+                negotiation_params=negotiation_params,
+                negotiation_answers=negotiation_answers_map,
             )
         )
 
