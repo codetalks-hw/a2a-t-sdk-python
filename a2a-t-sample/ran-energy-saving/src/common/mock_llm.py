@@ -11,19 +11,24 @@ sequence at zero, so a sequenced mock would serve the wrong response.
 schema signature                      served response
 =====================================  ==========================================
 ``slots`` + ``slot_errors``           Task-T slot extraction — the ``slot_extraction``
-                                      complete variant (also for the target/feasibility
-                                      negotiation inputs, which are complete inputs), or the
-                                      ``slot_extraction_missing`` variant when the first user
-                                      message carries the missing-region scenario input (told
+                                      complete variant (default scenario input or from-data
+                                      regeneration), the ``slot_extraction_missing`` variant for
+                                      the missing-region scenario input, and the
+                                      ``slot_extraction_target`` / ``slot_extraction_feasibility``
+                                      variants for the target/feasibility negotiation inputs
+                                      (complete slot sets that preserve the distinguishing
+                                      100Mbps / 30%+50Mbps values in the rendered prompt), told
                                       apart by the scenario natural-language constants of
-                                      ``client.scenario_data``)
+                                      ``client.scenario_data``
 ``semantic_verdict`` property         content semantic validation — 4-way by the scenario
-                                      natural-language input carried in the message head cut at
-                                      the template-content labels (``content_validation_target``
-                                      / ``content_validation_feasibility`` /
+                                      natural-language input, or the distinguishing
+                                      target/feasibility values of the rendered prompt, carried
+                                      in the message head cut at the template-content labels
+                                      (``content_validation_target`` /
+                                      ``content_validation_feasibility`` /
                                       ``content_validation`` / ``content_validation_missing``),
                                       falling back to the v1 region display-string heuristic for
-                                      heads without a scenario input (rendered prompts)
+                                      heads without either
 negotiation extraction signatures     Negotiation-T extraction (most-specific property set
                                       first, per ``build_extraction_schema``):
                                       ``{conclusion, feasibility_summary}`` ->
@@ -72,6 +77,8 @@ _RESOURCES_DIR = Path(__file__).resolve().parents[2] / "resources" / "mock_llm"
 #: Routed stage names (``llm_calls`` entries). The complete variants keep their historical names.
 STAGE_SLOT_EXTRACTION = "slot_extraction"
 STAGE_SLOT_EXTRACTION_MISSING = "slot_extraction_missing"
+STAGE_SLOT_EXTRACTION_TARGET = "slot_extraction_target"
+STAGE_SLOT_EXTRACTION_FEASIBILITY = "slot_extraction_feasibility"
 STAGE_CONTENT_VALIDATION = "content_validation"
 STAGE_CONTENT_VALIDATION_MISSING = "content_validation_missing"
 STAGE_CONTENT_VALIDATION_TARGET = "content_validation_target"
@@ -87,6 +94,8 @@ STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION = "negotiation_feasibility_accep
 _STAGE_FILES: dict[str, str] = {
     STAGE_SLOT_EXTRACTION: "slot_extraction.json",
     STAGE_SLOT_EXTRACTION_MISSING: "slot_extraction_missing.json",
+    STAGE_SLOT_EXTRACTION_TARGET: "slot_extraction_target.json",
+    STAGE_SLOT_EXTRACTION_FEASIBILITY: "slot_extraction_feasibility.json",
     STAGE_CONTENT_VALIDATION: "content_validation.json",
     STAGE_CONTENT_VALIDATION_MISSING: "content_validation_missing.json",
     STAGE_CONTENT_VALIDATION_TARGET: "content_validation_target.json",
@@ -109,17 +118,19 @@ _MISSING_SCENARIO_INPUTS = (
 #: missing zh input is a substring of the complete zh input.
 _COMPLETE_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_EN, NATURAL_LANGUAGE_PROMPT_INPUT_ZH)
 
-#: Target / feasibility negotiation inputs: complete inputs (all slots provided), so slot
-#: extraction serves the complete variant, while content validation serves their own variants.
+#: Target / feasibility negotiation inputs: complete inputs served by their own slot-extraction
+#: variants, whose canned slots preserve the distinguishing values the rendered prompt needs.
 _TARGET_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH)
 _FEASIBILITY_SCENARIO_INPUTS = (
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
 )
 
-#: Every complete-input scenario (slot-extraction complete variant): the default complete input
-#: plus the target/feasibility negotiation inputs.
-_COMPLETE_SLOT_INPUTS = _COMPLETE_SCENARIO_INPUTS + _TARGET_SCENARIO_INPUTS + _FEASIBILITY_SCENARIO_INPUTS
+#: Distinguishing values the target/feasibility rendered prompts carry (the dedicated
+#: slot-extraction variants preserve them), so the content-validation routing also fires on real
+#: rendered-prompt heads and not only on the scenario natural-language inputs.
+_TARGET_VALIDATION_MARKER = "100Mbps"
+_FEASIBILITY_VALIDATION_MARKERS = ("30%", "50Mbps")
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
 #: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
@@ -224,10 +235,10 @@ def route_structured_call(
     stages by the most-specific matching signature of
     ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``. The scenario
     variant is told apart from the user message: slot extraction by the scenario natural-language
-    input it carries, content validation by the scenario input in the message head (cut at the
-    template-content labels, so template examples never flip the variant) with the v1 region
-    display-string heuristic as the fallback for heads without a scenario input (rendered
-    prompts).
+    input it carries, content validation by the scenario input — or the distinguishing
+    target/feasibility values of a rendered prompt — in the message head (cut at the
+    template-content labels, so template examples never flip the variant), with the v1 region
+    display-string heuristic as the fallback for heads without either.
 
     Raises:
         ValueError: when no signature matches the call (an unmapped SDK call, including the
@@ -238,16 +249,20 @@ def route_structured_call(
     property_names = set(properties) if isinstance(properties, dict) else set()
 
     if "slots" in property_names and "slot_errors" in property_names:
-        if any(scenario_input in user_content for scenario_input in _COMPLETE_SLOT_INPUTS):
+        if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION
         if any(scenario_input in user_content for scenario_input in _MISSING_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION_MISSING
+        if any(scenario_input in user_content for scenario_input in _TARGET_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION_TARGET
+        if any(scenario_input in user_content for scenario_input in _FEASIBILITY_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION_FEASIBILITY
         return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
         head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
-        if any(scenario_input in head for scenario_input in _TARGET_SCENARIO_INPUTS):
+        if _is_target_validation_head(head):
             return STAGE_CONTENT_VALIDATION_TARGET
-        if any(scenario_input in head for scenario_input in _FEASIBILITY_SCENARIO_INPUTS):
+        if _is_feasibility_validation_head(head):
             return STAGE_CONTENT_VALIDATION_FEASIBILITY
         if any(scenario_input in head for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_CONTENT_VALIDATION
@@ -261,6 +276,20 @@ def route_structured_call(
         if signature <= property_names:
             return stage
     raise ValueError(f"The scripted mock LLM cannot route this structured call: {sorted(property_names)}")
+
+
+def _is_target_validation_head(head: str) -> bool:
+    """Report whether one content-validation head carries the target negotiation input."""
+    return _TARGET_VALIDATION_MARKER in head or any(
+        scenario_input in head for scenario_input in _TARGET_SCENARIO_INPUTS
+    )
+
+
+def _is_feasibility_validation_head(head: str) -> bool:
+    """Report whether one content-validation head carries the feasibility negotiation input."""
+    return all(marker in head for marker in _FEASIBILITY_VALIDATION_MARKERS) or any(
+        scenario_input in head for scenario_input in _FEASIBILITY_SCENARIO_INPUTS
+    )
 
 
 def get_routed_response(

@@ -1,11 +1,13 @@
 """Offline tests of the negotiation scenario plumbing of the ran-energy-saving demo.
 
-Covers the scripted mock LLM's variant routing (slot extraction by the scenario input, content
-validation 4-way by the scenario input with the region display-string fallback, Negotiation-T
-extraction by the SDK schema signature), the scenario data of the ``negotiation`` variant
-(missing-region inputs, filled params, accept answers) and of the target/feasibility negotiation
-kinds (complete inputs, per-type accessors), and the client-side feasibility of generating the
-missing-region task prompt with the A2A-T SDK.
+Covers the scripted mock LLM's variant routing (slot extraction by the scenario input with
+dedicated target/feasibility variants preserving the distinguishing values, content validation
+4-way by the scenario input or the rendered distinguishing values with the region display-string
+fallback, Negotiation-T extraction by the SDK schema signature), the scenario data of the
+``negotiation`` variant (missing-region inputs, filled params, accept answers) and of the
+target/feasibility negotiation kinds (complete inputs, per-type accessors), the pinned per-type
+call sequences, and the client-side feasibility of generating the missing-region and
+negotiation-kind task prompts with the A2A-T SDK.
 """
 
 from __future__ import annotations
@@ -184,10 +186,10 @@ _FILLED_REGION_PROMPT = (
         (NATURAL_LANGUAGE_PROMPT_INPUT_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
         (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN, mock_llm.STAGE_SLOT_EXTRACTION_MISSING),
         (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH, mock_llm.STAGE_SLOT_EXTRACTION_MISSING),
-        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, mock_llm.STAGE_SLOT_EXTRACTION),
-        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
-        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN, mock_llm.STAGE_SLOT_EXTRACTION),
-        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, mock_llm.STAGE_SLOT_EXTRACTION_TARGET),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH, mock_llm.STAGE_SLOT_EXTRACTION_TARGET),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN, mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH, mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY),
     ],
     ids=[
         "complete-en",
@@ -270,6 +272,45 @@ def test_content_validation_routing_selects_the_variant_by_the_negotiation_input
     assert route_structured_call(messages, _content_validation_schema()) == expected_stage
 
 
+#: Slot name of the throughput-context and goal sections per language (the slots whose values
+#: distinguish the target/feasibility rendered prompts).
+_SLOT_SECTION_NAMES = {
+    "en-US": {"context": "task_context", "target": "task_target"},
+    "zh-CN": {"context": "任务上下文", "target": "任务目标"},
+}
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_content_validation_routing_matches_the_rendered_distinguishing_values(language: str) -> None:
+    """A rendered target/feasibility prompt head routes to its variant without the NL input.
+
+    The dedicated slot-extraction variants keep the distinguishing values, so the server's
+    content validation of the real rendered prompt (never carrying the scenario NL input)
+    still reaches the target/feasibility variant.
+    """
+    context_slot = _SLOT_SECTION_NAMES[language]["context"]
+    target_slot = _SLOT_SECTION_NAMES[language]["target"]
+    target_slots = _resource(language, "slot_extraction_target.json")["slots"]
+    feasibility_slots = _resource(language, "slot_extraction_feasibility.json")["slots"]
+    target_prompt = f"## Task Context\n\n{target_slots[context_slot]}"
+    feasibility_prompt = (
+        f"## Task Target\n\n{feasibility_slots[target_slot]}\n\n## Task Context\n\n{feasibility_slots[context_slot]}"
+    )
+
+    assert (
+        route_structured_call(
+            _content_validation_messages(str(target_prompt), _REGION_TEMPLATE_TAIL), _content_validation_schema()
+        )
+        == mock_llm.STAGE_CONTENT_VALIDATION_TARGET
+    )
+    assert (
+        route_structured_call(
+            _content_validation_messages(str(feasibility_prompt), _REGION_TEMPLATE_TAIL), _content_validation_schema()
+        )
+        == mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY
+    )
+
+
 @pytest.mark.parametrize(
     ("negotiation_type", "performative", "expected_stage"),
     [
@@ -342,25 +383,33 @@ def test_negotiation_variant_call_sequence_is_pinned() -> None:
     ]
 
 
+def _run_mock_sequence(steps: list[tuple[list[dict[str, str]], dict[str, object]]]) -> None:
+    """Serve one scripted call sequence through the mock (test seam for the call-sequence pins)."""
+    for messages, schema in steps:
+        mock_llm.get_routed_response(messages, schema)
+
+
 def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() -> None:
     """fromData target run; fromText adds the server propose and the client accept extractions."""
     target_input = scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN
+    from_data_slot_messages = _slot_extraction_messages('{"operationType": "create"}')
+    filled_validation_messages = _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL)
     propose_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.PROPOSE)
     accept_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.ACCEPT)
 
     # fromData: client slot extraction (target input) -> server target validation -> the client's
     # from-data prompt regeneration slot call -> the server's filled-prompt validation.
     mock_llm.reset_call_log()
-    mock_llm.get_routed_response(_slot_extraction_messages(target_input), _slot_extraction_schema())
-    mock_llm.get_routed_response(
-        _content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
-    )
-    mock_llm.get_routed_response(_slot_extraction_messages('{"operationType": "create"}'), _slot_extraction_schema())
-    mock_llm.get_routed_response(
-        _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    _run_mock_sequence(
+        [
+            (_slot_extraction_messages(target_input), _slot_extraction_schema()),
+            (_content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
+            (from_data_slot_messages, _slot_extraction_schema()),
+            (filled_validation_messages, _content_validation_schema()),
+        ]
     )
     assert llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
         mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
         mock_llm.STAGE_SLOT_EXTRACTION,
         mock_llm.STAGE_CONTENT_VALIDATION,
@@ -369,22 +418,71 @@ def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() 
     # fromText: the server propose extraction joins between the target validation and the round-2
     # slot call, and the client accept extraction joins before the final validation.
     mock_llm.reset_call_log()
-    mock_llm.get_routed_response(_slot_extraction_messages(target_input), _slot_extraction_schema())
-    mock_llm.get_routed_response(
-        _content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
-    )
-    mock_llm.get_routed_response([{"role": "user", "content": "server propose rendering"}], propose_schema)
-    mock_llm.get_routed_response(_slot_extraction_messages('{"operationType": "create"}'), _slot_extraction_schema())
-    mock_llm.get_routed_response([{"role": "user", "content": "client accept rendering"}], accept_schema)
-    mock_llm.get_routed_response(
-        _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    _run_mock_sequence(
+        [
+            (_slot_extraction_messages(target_input), _slot_extraction_schema()),
+            (_content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
+            ([{"role": "user", "content": "server propose rendering"}], propose_schema),
+            (from_data_slot_messages, _slot_extraction_schema()),
+            ([{"role": "user", "content": "client accept rendering"}], accept_schema),
+            (filled_validation_messages, _content_validation_schema()),
+        ]
     )
     assert llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
         mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
         mock_llm.STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
         mock_llm.STAGE_SLOT_EXTRACTION,
         mock_llm.STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION,
+        mock_llm.STAGE_CONTENT_VALIDATION,
+    ]
+
+
+def test_feasibility_negotiation_call_sequences_are_pinned_from_data_and_from_text() -> None:
+    """fromData feasibility run; fromText adds the server propose and the client accept extractions."""
+    feasibility_input = scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN
+    from_data_slot_messages = _slot_extraction_messages('{"operationType": "create"}')
+    filled_validation_messages = _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL)
+    propose_schema = build_extraction_schema(NegotiationType.FEASIBILITY, NegotiationPerformative.PROPOSE)
+    accept_schema = build_extraction_schema(NegotiationType.FEASIBILITY, NegotiationPerformative.ACCEPT)
+
+    # fromData: client slot extraction (feasibility input) -> server feasibility validation ->
+    # the client's from-data prompt regeneration slot call -> the server's filled-prompt validation.
+    mock_llm.reset_call_log()
+    _run_mock_sequence(
+        [
+            (_slot_extraction_messages(feasibility_input), _slot_extraction_schema()),
+            (_content_validation_messages(feasibility_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
+            (from_data_slot_messages, _slot_extraction_schema()),
+            (filled_validation_messages, _content_validation_schema()),
+        ]
+    )
+    assert llm_calls == [
+        mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
+        mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_CONTENT_VALIDATION,
+    ]
+
+    # fromText: the server propose extraction joins between the feasibility validation and the
+    # round-2 slot call, and the client accept extraction joins before the final validation.
+    mock_llm.reset_call_log()
+    _run_mock_sequence(
+        [
+            (_slot_extraction_messages(feasibility_input), _slot_extraction_schema()),
+            (_content_validation_messages(feasibility_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
+            ([{"role": "user", "content": "server propose rendering"}], propose_schema),
+            (from_data_slot_messages, _slot_extraction_schema()),
+            ([{"role": "user", "content": "client accept rendering"}], accept_schema),
+            (filled_validation_messages, _content_validation_schema()),
+        ]
+    )
+    assert llm_calls == [
+        mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
+        mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
+        mock_llm.STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION,
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION,
         mock_llm.STAGE_CONTENT_VALIDATION,
     ]
 
@@ -419,6 +517,36 @@ def test_missing_mock_resources_mirror_the_complete_variants(language: str) -> N
         {"slot_name": "region", "code": "content.param_missing", "facts": {"section_label": region_slot}}
     ]
     assert missing_validation["params"] == {**complete_validation["params"], "region": None}
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_negotiation_slot_resources_preserve_the_distinguishing_values(language: str) -> None:
+    region_slot = _REGION_SLOT_NAMES[language]
+    context_slot = _SLOT_SECTION_NAMES[language]["context"]
+    target_slot = _SLOT_SECTION_NAMES[language]["target"]
+    complete = _resource(language, "slot_extraction.json")
+    target = _resource(language, "slot_extraction_target.json")
+    feasibility = _resource(language, "slot_extraction_feasibility.json")
+
+    # The negotiation slot variants keep the complete slot set with no slot errors and the
+    # region slot filled (complete inputs).
+    assert target["slot_errors"] == []
+    assert feasibility["slot_errors"] == []
+    assert set(target["slots"]) == set(complete["slots"])  # type: ignore[arg-type]
+    assert set(feasibility["slots"]) == set(complete["slots"])  # type: ignore[arg-type]
+    assert target["slots"][region_slot] == complete["slots"][region_slot]
+    assert feasibility["slots"][region_slot] == complete["slots"][region_slot]
+    # Every slot equals the complete variant except the distinguishing ones: the target variant
+    # keeps the 100Mbps throughput, the feasibility variant the 30% goal and the 50Mbps throughput.
+    for variant, distinguishing in (
+        (target, {context_slot: "100Mbps"}),
+        (feasibility, {context_slot: "50Mbps", target_slot: "30%"}),
+    ):
+        for name, value in complete["slots"].items():  # type: ignore[union-attr]
+            if name in distinguishing:
+                assert distinguishing[name] in str(variant["slots"][name])
+            else:
+                assert variant["slots"][name] == value
 
 
 #: Localized section label per language of the sections the new content-validation variants
@@ -762,3 +890,41 @@ def test_negotiation_client_generation_renders_the_missing_region_prompt(tmp_pat
     # string, so the server-side content validation routes to the missing variant.
     assert NEGOTIATION_REGION_STRINGS[language] not in prompt.prompt_text
     assert _REGION_PLACEHOLDERS[language] in prompt.prompt_text
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_slot_stage", "expected_validation_stage"),
+    [
+        ("target", mock_llm.STAGE_SLOT_EXTRACTION_TARGET, mock_llm.STAGE_CONTENT_VALIDATION_TARGET),
+        ("feasibility", mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY, mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY),
+    ],
+    ids=["target", "feasibility"],
+)
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_negotiation_kind_client_generation_routes_to_its_content_validation_variant(
+    tmp_path: Path, language: str, kind: str, expected_slot_stage: str, expected_validation_stage: str
+) -> None:
+    """The real client path renders the distinguishing values, so the round-1 trigger works.
+
+    ``generate_task_prompt_from_text`` serves the kind's slot-extraction variant whose rendered
+    prompt carries the distinguishing values, so the server-side content validation of that
+    rendered prompt routes to the kind's variant — the data-driven negotiation trigger.
+    """
+    from a2a_t.client.a2at_client import A2ATClient
+
+    env_path = _write_offline_env(tmp_path, language)
+    mock_llm.install_mock_llm(env_path=env_path)
+    mock_llm.reset_call_log()
+
+    client = A2ATClient(env_path=env_path)
+    prompt = client.generate_task_prompt_from_text(_kind_input(kind, language), ENERGY_SAVING_TEMPLATE_URI)
+
+    # The kind's NL input routes its slot-extraction call to the dedicated variant...
+    assert llm_calls == [expected_slot_stage]
+    # ...whose distinguishing values in the rendered prompt drive the server-side routing.
+    assert (
+        route_structured_call(
+            _content_validation_messages(prompt.prompt_text, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+        )
+        == expected_validation_stage
+    )
