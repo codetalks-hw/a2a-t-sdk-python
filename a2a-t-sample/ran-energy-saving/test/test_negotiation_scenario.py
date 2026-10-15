@@ -1,9 +1,11 @@
 """Offline tests of the negotiation scenario plumbing of the ran-energy-saving demo.
 
 Covers the scripted mock LLM's variant routing (slot extraction by the scenario input, content
-validation by the region display string in the message head), the scenario data of the
-``negotiation`` variant (missing-region inputs, filled params, accept answers), and the
-client-side feasibility of generating the missing-region task prompt with the A2A-T SDK.
+validation 4-way by the scenario input with the region display-string fallback, Negotiation-T
+extraction by the SDK schema signature), the scenario data of the ``negotiation`` variant
+(missing-region inputs, filled params, accept answers) and of the target/feasibility negotiation
+kinds (complete inputs, per-type accessors), and the client-side feasibility of generating the
+missing-region task prompt with the A2A-T SDK.
 """
 
 from __future__ import annotations
@@ -13,6 +15,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from a2a_t.core.metadata import NegotiationPerformative
+from a2a_t.negotiation.content.enums import NegotiationType
+from a2a_t.negotiation.generation.json_schema_builder import build_extraction_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -23,17 +28,31 @@ if str(SRC_ROOT) not in sys.path:
 
 from client import scenario_data
 from client.scenario_data import (
+    CHANNEL_DATA,
+    CHANNEL_ENV_KEY,
+    CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
     NATURAL_LANGUAGE_PROMPT_INPUT_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
+    NEGOTIATION_INPUT_KEYS,
+    NEGOTIATION_KIND_ENV_KEY,
     NEGOTIATION_REGION_STRINGS,
     SCENARIO_DEFAULT,
     SCENARIO_ENV_KEY,
     SCENARIO_NEGOTIATION,
+    SUPPORTED_CHANNELS,
+    SUPPORTED_NEGOTIATION_KINDS,
     SUPPORTED_SCENARIOS,
     build_prompt_input,
     negotiation_answers,
+    negotiation_feasibility_contents,
+    negotiation_feasibility_summary,
     negotiation_filled_params,
+    negotiation_target_confirm_request,
+    negotiation_target_confirmation,
+    negotiation_target_description,
+    resolve_channel,
+    resolve_negotiation_kind,
     resolve_scenario,
 )
 from common import mock_llm
@@ -65,6 +84,8 @@ def _offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Force-install the scripted mock LLM (en-US) for every test, regardless of any real ``.env``."""
     monkeypatch.chdir(PROJECT_ROOT)
     monkeypatch.delenv(SCENARIO_ENV_KEY, raising=False)
+    monkeypatch.delenv(CHANNEL_ENV_KEY, raising=False)
+    monkeypatch.delenv(NEGOTIATION_KIND_ENV_KEY, raising=False)
     env_path = _write_offline_env(tmp_path, "en-US")
     mock_llm.install_mock_llm(env_path=env_path)
     install_llm_logger(role="test", verbose=False)
@@ -163,8 +184,21 @@ _FILLED_REGION_PROMPT = (
         (NATURAL_LANGUAGE_PROMPT_INPUT_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
         (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN, mock_llm.STAGE_SLOT_EXTRACTION_MISSING),
         (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH, mock_llm.STAGE_SLOT_EXTRACTION_MISSING),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, mock_llm.STAGE_SLOT_EXTRACTION),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN, mock_llm.STAGE_SLOT_EXTRACTION),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH, mock_llm.STAGE_SLOT_EXTRACTION),
     ],
-    ids=["complete-en", "complete-zh", "missing-en", "missing-zh"],
+    ids=[
+        "complete-en",
+        "complete-zh",
+        "missing-en",
+        "missing-zh",
+        "target-en",
+        "target-zh",
+        "feasibility-en",
+        "feasibility-zh",
+    ],
 )
 def test_slot_extraction_routing_selects_the_variant_by_the_scenario_input(
     user_input: str, expected_stage: str
@@ -204,9 +238,84 @@ def test_content_validation_routing_ignores_the_region_string_in_the_template_ta
     assert route_structured_call(messages, _content_validation_schema()) == mock_llm.STAGE_CONTENT_VALIDATION_MISSING
 
 
+@pytest.mark.parametrize(
+    ("user_input", "expected_stage"),
+    [
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, mock_llm.STAGE_CONTENT_VALIDATION_TARGET),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH, mock_llm.STAGE_CONTENT_VALIDATION_TARGET),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN, mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH, mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY),
+        (NATURAL_LANGUAGE_PROMPT_INPUT_EN, mock_llm.STAGE_CONTENT_VALIDATION),
+        (NATURAL_LANGUAGE_PROMPT_INPUT_ZH, mock_llm.STAGE_CONTENT_VALIDATION),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN, mock_llm.STAGE_CONTENT_VALIDATION_MISSING),
+        (scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH, mock_llm.STAGE_CONTENT_VALIDATION_MISSING),
+    ],
+    ids=[
+        "target-en",
+        "target-zh",
+        "feasibility-en",
+        "feasibility-zh",
+        "complete-en",
+        "complete-zh",
+        "missing-en",
+        "missing-zh",
+    ],
+)
+def test_content_validation_routing_selects_the_variant_by_the_negotiation_input(
+    user_input: str, expected_stage: str
+) -> None:
+    """The 4-way variant routing matches the known scenario NL input in the message head."""
+    messages = _content_validation_messages(user_input, _REGION_TEMPLATE_TAIL)
+
+    assert route_structured_call(messages, _content_validation_schema()) == expected_stage
+
+
+@pytest.mark.parametrize(
+    ("negotiation_type", "performative", "expected_stage"),
+    [
+        (NegotiationType.INFORMATION, NegotiationPerformative.PROPOSE, mock_llm.STAGE_NEGOTIATION_PROPOSE_EXTRACTION),
+        (NegotiationType.INFORMATION, NegotiationPerformative.ACCEPT, mock_llm.STAGE_NEGOTIATION_ACCEPT_EXTRACTION),
+        (
+            NegotiationType.TARGET,
+            NegotiationPerformative.PROPOSE,
+            mock_llm.STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
+        ),
+        (NegotiationType.TARGET, NegotiationPerformative.ACCEPT, mock_llm.STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION),
+        (
+            NegotiationType.FEASIBILITY,
+            NegotiationPerformative.PROPOSE,
+            mock_llm.STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION,
+        ),
+        (
+            NegotiationType.FEASIBILITY,
+            NegotiationPerformative.ACCEPT,
+            mock_llm.STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION,
+        ),
+    ],
+    ids=["info-propose", "info-accept", "target-propose", "target-accept", "feasibility-propose", "feasibility-accept"],
+)
+def test_negotiation_extraction_routing_follows_the_sdk_schema_signature(
+    negotiation_type: NegotiationType, performative: NegotiationPerformative, expected_stage: str
+) -> None:
+    """Every Negotiation-T extraction routes by its distinct ``build_extraction_schema`` signature."""
+    messages = [{"role": "user", "content": "negotiation extraction call"}]
+    json_schema = build_extraction_schema(negotiation_type, performative)
+
+    assert route_structured_call(messages, json_schema) == expected_stage
+
+
 def test_route_structured_call_rejects_unmapped_calls() -> None:
     messages = [{"role": "user", "content": "unrelated"}]
     json_schema = {"type": "object", "properties": {"unexpected": {"type": "string"}}}
+
+    with pytest.raises(ValueError, match="cannot route"):
+        route_structured_call(messages, json_schema)
+
+
+def test_route_structured_call_rejects_the_bare_conclusion_signature() -> None:
+    """A bare ``{conclusion}`` negotiation signature is impossible and never routed (plan R5)."""
+    messages = [{"role": "user", "content": "unrelated"}]
+    json_schema = {"type": "object", "properties": {"conclusion": {"type": "string"}}}
 
     with pytest.raises(ValueError, match="cannot route"):
         route_structured_call(messages, json_schema)
@@ -229,6 +338,53 @@ def test_negotiation_variant_call_sequence_is_pinned() -> None:
     assert llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_MISSING,
         mock_llm.STAGE_CONTENT_VALIDATION_MISSING,
+        mock_llm.STAGE_CONTENT_VALIDATION,
+    ]
+
+
+def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() -> None:
+    """fromData target run; fromText adds the server propose and the client accept extractions."""
+    target_input = scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN
+    propose_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.PROPOSE)
+    accept_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.ACCEPT)
+
+    # fromData: client slot extraction (target input) -> server target validation -> the client's
+    # from-data prompt regeneration slot call -> the server's filled-prompt validation.
+    mock_llm.reset_call_log()
+    mock_llm.get_routed_response(_slot_extraction_messages(target_input), _slot_extraction_schema())
+    mock_llm.get_routed_response(
+        _content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    )
+    mock_llm.get_routed_response(_slot_extraction_messages('{"operationType": "create"}'), _slot_extraction_schema())
+    mock_llm.get_routed_response(
+        _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    )
+    assert llm_calls == [
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_CONTENT_VALIDATION,
+    ]
+
+    # fromText: the server propose extraction joins between the target validation and the round-2
+    # slot call, and the client accept extraction joins before the final validation.
+    mock_llm.reset_call_log()
+    mock_llm.get_routed_response(_slot_extraction_messages(target_input), _slot_extraction_schema())
+    mock_llm.get_routed_response(
+        _content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    )
+    mock_llm.get_routed_response([{"role": "user", "content": "server propose rendering"}], propose_schema)
+    mock_llm.get_routed_response(_slot_extraction_messages('{"operationType": "create"}'), _slot_extraction_schema())
+    mock_llm.get_routed_response([{"role": "user", "content": "client accept rendering"}], accept_schema)
+    mock_llm.get_routed_response(
+        _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+    )
+    assert llm_calls == [
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
+        mock_llm.STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
+        mock_llm.STAGE_SLOT_EXTRACTION,
+        mock_llm.STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION,
         mock_llm.STAGE_CONTENT_VALIDATION,
     ]
 
@@ -263,6 +419,126 @@ def test_missing_mock_resources_mirror_the_complete_variants(language: str) -> N
         {"slot_name": "region", "code": "content.param_missing", "facts": {"section_label": region_slot}}
     ]
     assert missing_validation["params"] == {**complete_validation["params"], "region": None}
+
+
+#: Localized section label per language of the sections the new content-validation variants
+#: report (the zh labels follow the v1 ``任务对象`` section-label convention).
+_VARIANT_SECTION_LABELS = {
+    "en-US": {"task_context": "task_context", "task_target": "task_target"},
+    "zh-CN": {"task_context": "任务上下文", "task_target": "任务目标"},
+}
+
+
+def _extraction_resource_schemas() -> dict[str, dict[str, object]]:
+    """Canned Negotiation-T extraction file name -> the SDK schema whose properties it must carry."""
+    return {
+        "negotiation_propose_extraction.json": build_extraction_schema(
+            NegotiationType.INFORMATION, NegotiationPerformative.PROPOSE
+        ),
+        "negotiation_accept_extraction.json": build_extraction_schema(
+            NegotiationType.INFORMATION, NegotiationPerformative.ACCEPT
+        ),
+        "negotiation_target_propose_extraction.json": build_extraction_schema(
+            NegotiationType.TARGET, NegotiationPerformative.PROPOSE
+        ),
+        "negotiation_target_accept_extraction.json": build_extraction_schema(
+            NegotiationType.TARGET, NegotiationPerformative.ACCEPT
+        ),
+        "negotiation_feasibility_propose_extraction.json": build_extraction_schema(
+            NegotiationType.FEASIBILITY, NegotiationPerformative.PROPOSE
+        ),
+        "negotiation_feasibility_accept_extraction.json": build_extraction_schema(
+            NegotiationType.FEASIBILITY, NegotiationPerformative.ACCEPT
+        ),
+    }
+
+
+def _resource(language: str, file_name: str) -> dict[str, object]:
+    """Load one canned mock resource of one language."""
+    resource: dict[str, object] = json.loads((RESOURCES_DIR / language / file_name).read_text(encoding="utf-8"))
+    return resource
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_negotiation_extraction_resources_match_the_sdk_schema_properties(language: str) -> None:
+    """Every canned extraction response carries exactly the properties of its SDK schema."""
+    for file_name, schema in _extraction_resource_schemas().items():
+        resource = _resource(language, file_name)
+        assert set(resource) == set(schema["properties"]), file_name
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_information_extraction_resources_mirror_the_scenario_answers(language: str) -> None:
+    propose = _resource(language, "negotiation_propose_extraction.json")
+    accept = _resource(language, "negotiation_accept_extraction.json")
+
+    # The propose asks for the region (plus one more item) with no relationship note.
+    assert len(propose["items"]) == 2  # type: ignore[arg-type]
+    assert propose["relationship"] is None
+    # The accept confirms the region exactly as the scenario answers carry it.
+    assert accept == {
+        "conclusion": "Accept",
+        "items": [{"name": "region", "value": NEGOTIATION_REGION_STRINGS[language]}],
+    }
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_content_validation_variant_resources_carry_the_trigger_codes(language: str) -> None:
+    complete = _resource(language, "content_validation.json")
+    target = _resource(language, "content_validation_target.json")
+    feasibility = _resource(language, "content_validation_feasibility.json")
+
+    # The target variant reports the value-not-allowed error on the throughput param; the
+    # feasibility variant reports the semantic-conflict error on the energy goal param.
+    assert target["semantic_verdict"] is False
+    assert target["errors"] == [
+        {
+            "slot_name": "guaranteedThroughputTarget",
+            "code": "content.value_not_allowed",
+            "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_context"]},
+        }
+    ]
+    assert target["params"] == {**complete["params"], "guaranteedThroughputTarget": None}
+    assert feasibility["semantic_verdict"] is False
+    assert feasibility["errors"] == [
+        {
+            "slot_name": "energySavingGoal",
+            "code": "content.semantic_conflict",
+            "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_target"]},
+        }
+    ]
+    assert feasibility["params"] == {**complete["params"], "energySavingGoal": None}
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_negotiation_accessors_match_the_canned_extraction_responses(tmp_path: Path, language: str) -> None:
+    env_path = _write_offline_env(tmp_path, language)
+    target_propose = _resource(language, "negotiation_target_propose_extraction.json")
+    target_accept = _resource(language, "negotiation_target_accept_extraction.json")
+    feasibility_propose = _resource(language, "negotiation_feasibility_propose_extraction.json")
+    feasibility_accept = _resource(language, "negotiation_feasibility_accept_extraction.json")
+
+    # The client-generated accept texts equal the canned accept-extraction content, so the
+    # from-data and from-text channels produce equivalent messages.
+    assert target_accept["conclusion"] == "Accept"
+    assert target_accept["failure_reason"] is None
+    assert negotiation_target_confirmation(env_path=env_path) == target_accept["confirmed_intent"]
+    assert feasibility_accept["conclusion"] == "Accept"
+    assert negotiation_feasibility_summary(env_path=env_path) == feasibility_accept["feasibility_summary"]
+    # The server-side propose texts mirror the canned propose extraction (confirm-request round:
+    # all three conditional lists stay null; evaluation request: details/request stay null).
+    assert negotiation_target_description(env_path=env_path) == target_propose["target_negotiation_description"]
+    assert negotiation_target_confirm_request(env_path=env_path) == target_propose["target_confirm_request"]
+    assert target_propose["intent_understanding"] is None
+    assert target_propose["alignment_and_clarification"] is None
+    assert target_propose["request_for_clarification"] is None
+    assert feasibility_propose["action"] == "REQUEST_FEASIBILITY_EVALUATION"
+    assert negotiation_feasibility_contents(env_path=env_path) == [
+        (item["name"], item["value"])
+        for item in feasibility_propose["contents_to_evaluate"]  # type: ignore[union-attr]
+    ]
+    assert feasibility_propose["infeasibility_details_and_proposal"] is None
+    assert feasibility_propose["feasibility_confirm_request"] is None
 
 
 # --- scenario data -------------------------------------------------------------------------
@@ -332,6 +608,136 @@ def test_negotiation_filled_params_and_answers_are_region_filled(tmp_path: Path,
         "params"
     ]
     assert params == resource_params
+
+
+def test_negotiation_kinds_and_channels_constants() -> None:
+    assert SUPPORTED_NEGOTIATION_KINDS == ("information", "target", "feasibility")
+    assert SUPPORTED_CHANNELS == ("data", "text")
+    assert set(NEGOTIATION_INPUT_KEYS) == set(SUPPORTED_NEGOTIATION_KINDS)
+
+
+def _kind_input(kind: str, language: str) -> str:
+    """Return the negotiation-kind NL input of one language via the exported mapping."""
+    en_input, zh_input = NEGOTIATION_INPUT_KEYS[kind]
+    return en_input if language == "en-US" else zh_input
+
+
+def test_resolve_channel_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)  # no .env next to the cwd
+
+    # No .env and no OS environment entry -> data.
+    assert resolve_channel() == CHANNEL_DATA
+
+    # Unknown value -> data.
+    env_path = tmp_path / ".env"
+    env_path.write_text("A2AT_SAMPLE_CHANNEL=bogus\n", encoding="utf-8")
+    assert resolve_channel(env_path=env_path) == CHANNEL_DATA
+
+    # Known value -> itself.
+    env_path.write_text("A2AT_SAMPLE_CHANNEL=text\n", encoding="utf-8")
+    assert resolve_channel(env_path=env_path) == CHANNEL_TEXT
+
+    # OS environment fallback when the .env does not carry the key.
+    env_path.write_text("A2AT_LANGUAGE=en-US\n", encoding="utf-8")
+    monkeypatch.setenv(CHANNEL_ENV_KEY, CHANNEL_TEXT)
+    assert resolve_channel(env_path=env_path) == CHANNEL_TEXT
+
+    # The .env value wins over the OS environment.
+    env_path.write_text("A2AT_SAMPLE_CHANNEL=data\n", encoding="utf-8")
+    assert resolve_channel(env_path=env_path) == CHANNEL_DATA
+
+
+def test_resolve_negotiation_kind_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)  # no .env next to the cwd
+
+    # No .env and no OS environment entry -> information.
+    assert resolve_negotiation_kind() == "information"
+
+    # Unknown value -> information.
+    env_path = tmp_path / ".env"
+    env_path.write_text("A2AT_SAMPLE_NEGOTIATION_KIND=bogus\n", encoding="utf-8")
+    assert resolve_negotiation_kind(env_path=env_path) == "information"
+
+    # Known value -> itself.
+    env_path.write_text("A2AT_SAMPLE_NEGOTIATION_KIND=target\n", encoding="utf-8")
+    assert resolve_negotiation_kind(env_path=env_path) == "target"
+
+    # OS environment fallback when the .env does not carry the key.
+    env_path.write_text("A2AT_LANGUAGE=en-US\n", encoding="utf-8")
+    monkeypatch.setenv(NEGOTIATION_KIND_ENV_KEY, "feasibility")
+    assert resolve_negotiation_kind(env_path=env_path) == "feasibility"
+
+    # The .env value wins over the OS environment.
+    env_path.write_text("A2AT_SAMPLE_NEGOTIATION_KIND=information\n", encoding="utf-8")
+    assert resolve_negotiation_kind(env_path=env_path) == "information"
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_build_prompt_input_selects_the_input_by_the_negotiation_kind(tmp_path: Path, language: str) -> None:
+    env_path = _write_offline_env(tmp_path, language)
+    complete = NATURAL_LANGUAGE_PROMPT_INPUT_EN if language == "en-US" else NATURAL_LANGUAGE_PROMPT_INPUT_ZH
+
+    # The target/feasibility kinds select their own input regardless of the scenario.
+    assert build_prompt_input(env_path=env_path, negotiation_kind="target") == _kind_input("target", language)
+    assert build_prompt_input(env_path=env_path, negotiation_kind="feasibility") == _kind_input("feasibility", language)
+    assert build_prompt_input(
+        env_path=env_path, scenario=SCENARIO_NEGOTIATION, negotiation_kind="target"
+    ) == _kind_input("target", language)
+    # The information kind keeps the v1 scenario behavior (complete input on the default scenario,
+    # missing-region input on the negotiation scenario).
+    assert build_prompt_input(env_path=env_path, negotiation_kind="information") == complete
+    assert build_prompt_input(
+        env_path=env_path, scenario=SCENARIO_NEGOTIATION, negotiation_kind="information"
+    ) == _kind_input("information", language)
+
+    # The .env-resolved kind selects the input the same way an explicit override does.
+    kind_env_path = tmp_path / "kind.env"
+    kind_env_path.write_text(
+        _OFFLINE_ENV_TEXT.format(language=language) + "A2AT_SAMPLE_NEGOTIATION_KIND=feasibility\n", encoding="utf-8"
+    )
+    assert build_prompt_input(env_path=kind_env_path) == _kind_input("feasibility", language)
+
+    # An unknown kind falls back to the information behavior like resolve_negotiation_kind does.
+    bogus_env_path = tmp_path / "bogus.env"
+    bogus_env_path.write_text(
+        _OFFLINE_ENV_TEXT.format(language=language) + "A2AT_SAMPLE_NEGOTIATION_KIND=bogus\n", encoding="utf-8"
+    )
+    assert build_prompt_input(env_path=bogus_env_path) == complete
+
+
+@pytest.mark.parametrize("language", ["en-US", "zh-CN"])
+def test_negotiation_kind_inputs_and_accessors_are_complete(tmp_path: Path, language: str) -> None:
+    env_path = _write_offline_env(tmp_path, language)
+    target_input = _kind_input("target", language)
+    feasibility_input = _kind_input("feasibility", language)
+
+    # Both kind inputs are complete inputs: they carry the region display string.
+    assert NEGOTIATION_REGION_STRINGS[language] in target_input
+    assert NEGOTIATION_REGION_STRINGS[language] in feasibility_input
+    # The target input carries the 100Mbps target; the feasibility input carries both the 30%
+    # goal and the 50Mbps throughput.
+    assert "100Mbps" in target_input
+    assert "30%" in feasibility_input
+    assert "50Mbps" in feasibility_input
+    # Each kind input maps to its own content-validation stage via the router.
+    assert (
+        route_structured_call(
+            _content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+        )
+        == mock_llm.STAGE_CONTENT_VALIDATION_TARGET
+    )
+    assert (
+        route_structured_call(
+            _content_validation_messages(feasibility_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()
+        )
+        == mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY
+    )
+    # All per-type accessors return non-empty values for both languages.
+    assert negotiation_target_description(env_path=env_path)
+    assert negotiation_target_confirm_request(env_path=env_path)
+    assert negotiation_target_confirmation(env_path=env_path)
+    assert len(negotiation_feasibility_contents(env_path=env_path)) == 2
+    assert negotiation_feasibility_summary(env_path=env_path)
 
 
 # --- client-side feasibility ---------------------------------------------------------------

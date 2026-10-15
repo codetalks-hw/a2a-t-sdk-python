@@ -11,16 +11,33 @@ sequence at zero, so a sequenced mock would serve the wrong response.
 schema signature                      served response
 =====================================  ==========================================
 ``slots`` + ``slot_errors``           Task-T slot extraction — the ``slot_extraction``
-                                      complete variant, or the ``slot_extraction_missing``
-                                      variant when the first user message carries the
-                                      missing-region scenario input (told apart by the
-                                      scenario natural-language constants of
+                                      complete variant (also for the target/feasibility
+                                      negotiation inputs, which are complete inputs), or the
+                                      ``slot_extraction_missing`` variant when the first user
+                                      message carries the missing-region scenario input (told
+                                      apart by the scenario natural-language constants of
                                       ``client.scenario_data``)
-``semantic_verdict`` property         content semantic validation — the
-                                      ``content_validation`` complete variant, or the
-                                      ``content_validation_missing`` variant when the region
-                                      display string is absent from the message head cut at
-                                      the template-content labels
+``semantic_verdict`` property         content semantic validation — 4-way by the scenario
+                                      natural-language input carried in the message head cut at
+                                      the template-content labels (``content_validation_target``
+                                      / ``content_validation_feasibility`` /
+                                      ``content_validation`` / ``content_validation_missing``),
+                                      falling back to the v1 region display-string heuristic for
+                                      heads without a scenario input (rendered prompts)
+negotiation extraction signatures     Negotiation-T extraction (most-specific property set
+                                      first, per ``build_extraction_schema``):
+                                      ``{conclusion, feasibility_summary}`` ->
+                                      ``negotiation_feasibility_accept_extraction``,
+                                      ``{conclusion, confirmed_intent, failure_reason}`` ->
+                                      ``negotiation_target_accept_extraction``,
+                                      ``{conclusion, items}`` ->
+                                      ``negotiation_accept_extraction``,
+                                      ``{feasibility_negotiation_description, action}`` ->
+                                      ``negotiation_feasibility_propose_extraction``,
+                                      ``{target_negotiation_description}`` ->
+                                      ``negotiation_target_propose_extraction``,
+                                      ``{items, relationship}`` ->
+                                      ``negotiation_propose_extraction``
 =====================================  ==========================================
 
 The response language is read from ``A2AT_LANGUAGE`` in the ``.env`` file (``zh-CN`` / ``en-US``);
@@ -39,8 +56,12 @@ from a2a_t.config.errors import ConfigFileNotFoundError
 from a2a_t.llm.models import LLMResponse
 from client.scenario_data import (
     NATURAL_LANGUAGE_PROMPT_INPUT_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
+    NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH,
     NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
     NEGOTIATION_REGION_STRINGS,
 )
@@ -53,6 +74,14 @@ STAGE_SLOT_EXTRACTION = "slot_extraction"
 STAGE_SLOT_EXTRACTION_MISSING = "slot_extraction_missing"
 STAGE_CONTENT_VALIDATION = "content_validation"
 STAGE_CONTENT_VALIDATION_MISSING = "content_validation_missing"
+STAGE_CONTENT_VALIDATION_TARGET = "content_validation_target"
+STAGE_CONTENT_VALIDATION_FEASIBILITY = "content_validation_feasibility"
+STAGE_NEGOTIATION_PROPOSE_EXTRACTION = "negotiation_propose_extraction"
+STAGE_NEGOTIATION_ACCEPT_EXTRACTION = "negotiation_accept_extraction"
+STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION = "negotiation_target_propose_extraction"
+STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION = "negotiation_target_accept_extraction"
+STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION = "negotiation_feasibility_propose_extraction"
+STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION = "negotiation_feasibility_accept_extraction"
 
 #: Stage name -> response file name.
 _STAGE_FILES: dict[str, str] = {
@@ -60,6 +89,14 @@ _STAGE_FILES: dict[str, str] = {
     STAGE_SLOT_EXTRACTION_MISSING: "slot_extraction_missing.json",
     STAGE_CONTENT_VALIDATION: "content_validation.json",
     STAGE_CONTENT_VALIDATION_MISSING: "content_validation_missing.json",
+    STAGE_CONTENT_VALIDATION_TARGET: "content_validation_target.json",
+    STAGE_CONTENT_VALIDATION_FEASIBILITY: "content_validation_feasibility.json",
+    STAGE_NEGOTIATION_PROPOSE_EXTRACTION: "negotiation_propose_extraction.json",
+    STAGE_NEGOTIATION_ACCEPT_EXTRACTION: "negotiation_accept_extraction.json",
+    STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION: "negotiation_target_propose_extraction.json",
+    STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION: "negotiation_target_accept_extraction.json",
+    STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION: "negotiation_feasibility_propose_extraction.json",
+    STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION: "negotiation_feasibility_accept_extraction.json",
 }
 
 #: Missing-region scenario inputs that flip the slot-extraction routing to the missing variant.
@@ -68,9 +105,36 @@ _MISSING_SCENARIO_INPUTS = (
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
 )
 
-#: Complete scenario inputs; checked before the missing ones because the missing zh input is a
-#: substring of the complete zh input.
+#: Complete scenario inputs of the default scenario; checked before the missing ones because the
+#: missing zh input is a substring of the complete zh input.
 _COMPLETE_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_EN, NATURAL_LANGUAGE_PROMPT_INPUT_ZH)
+
+#: Target / feasibility negotiation inputs: complete inputs (all slots provided), so slot
+#: extraction serves the complete variant, while content validation serves their own variants.
+_TARGET_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH)
+_FEASIBILITY_SCENARIO_INPUTS = (
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
+)
+
+#: Every complete-input scenario (slot-extraction complete variant): the default complete input
+#: plus the target/feasibility negotiation inputs.
+_COMPLETE_SLOT_INPUTS = _COMPLETE_SCENARIO_INPUTS + _TARGET_SCENARIO_INPUTS + _FEASIBILITY_SCENARIO_INPUTS
+
+#: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
+#: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
+#: A bare ``{conclusion}`` signature is impossible and never routed.
+_NEGOTIATION_EXTRACTION_SIGNATURES: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"conclusion", "feasibility_summary"}), STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION),
+    (frozenset({"conclusion", "confirmed_intent", "failure_reason"}), STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION),
+    (frozenset({"conclusion", "items"}), STAGE_NEGOTIATION_ACCEPT_EXTRACTION),
+    (
+        frozenset({"feasibility_negotiation_description", "action"}),
+        STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION,
+    ),
+    (frozenset({"target_negotiation_description"}), STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION),
+    (frozenset({"items", "relationship"}), STAGE_NEGOTIATION_PROPOSE_EXTRACTION),
+)
 
 #: Localized labels starting the template-content block of the content validation user prompt.
 _TEMPLATE_CONTENT_LABELS = ("Template Content:", "模板正文：")
@@ -155,30 +219,47 @@ def route_structured_call(
 ) -> str:
     """Return the stage name one structured call is routed to, keyed on its output schema.
 
-    The schema signature picks the stage family; the scenario variant is told apart from the
-    user message: slot extraction by the scenario natural-language input it carries, content
-    validation by the presence of the region display string in the message head (cut at the
-    template-content labels, so template examples never flip the variant).
+    The schema signature picks the stage family: slot extraction by the ``slots``/``slot_errors``
+    properties, content validation by ``semantic_verdict``, and the Negotiation-T extraction
+    stages by the most-specific matching signature of
+    ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``. The scenario
+    variant is told apart from the user message: slot extraction by the scenario natural-language
+    input it carries, content validation by the scenario input in the message head (cut at the
+    template-content labels, so template examples never flip the variant) with the v1 region
+    display-string heuristic as the fallback for heads without a scenario input (rendered
+    prompts).
 
     Raises:
-        ValueError: when no signature matches the call (an unmapped SDK call).
+        ValueError: when no signature matches the call (an unmapped SDK call, including the
+            impossible bare-``conclusion`` negotiation signature).
     """
     user_content = _first_user_content(messages)
     properties = json_schema.get("properties") if isinstance(json_schema, dict) else None
     property_names = set(properties) if isinstance(properties, dict) else set()
 
     if "slots" in property_names and "slot_errors" in property_names:
-        if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
+        if any(scenario_input in user_content for scenario_input in _COMPLETE_SLOT_INPUTS):
             return STAGE_SLOT_EXTRACTION
         if any(scenario_input in user_content for scenario_input in _MISSING_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION_MISSING
         return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
-        region_string = NEGOTIATION_REGION_STRINGS.get(_script_language, "")
         head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
+        if any(scenario_input in head for scenario_input in _TARGET_SCENARIO_INPUTS):
+            return STAGE_CONTENT_VALIDATION_TARGET
+        if any(scenario_input in head for scenario_input in _FEASIBILITY_SCENARIO_INPUTS):
+            return STAGE_CONTENT_VALIDATION_FEASIBILITY
+        if any(scenario_input in head for scenario_input in _COMPLETE_SCENARIO_INPUTS):
+            return STAGE_CONTENT_VALIDATION
+        if any(scenario_input in head for scenario_input in _MISSING_SCENARIO_INPUTS):
+            return STAGE_CONTENT_VALIDATION_MISSING
+        region_string = NEGOTIATION_REGION_STRINGS.get(_script_language, "")
         if region_string and region_string not in head:
             return STAGE_CONTENT_VALIDATION_MISSING
         return STAGE_CONTENT_VALIDATION
+    for signature, stage in _NEGOTIATION_EXTRACTION_SIGNATURES:
+        if signature <= property_names:
+            return stage
     raise ValueError(f"The scripted mock LLM cannot route this structured call: {sorted(property_names)}")
 
 
