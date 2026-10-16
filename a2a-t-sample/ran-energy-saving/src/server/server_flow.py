@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,12 +45,9 @@ from server.constants_data import (
     SUBMITTED_MESSAGE,
     TARGET_NEGOTIATION_PROPOSE_TEMPLATE_URI,
     TASK_T_EXTENSION_URI,
-    get_energy_saving_intent_report,
-    get_energy_saving_progress_steps,
 )
+from server.task_execution import SleepFn, TaskExecutionService, Uc1DemoExecutionService
 from server.task_schema import TASK_PARAM_SCHEMA
-
-SleepFn = Callable[[float], Awaitable[None]]
 
 #: Negotiation types the server-side propose generation dispatches on. The first content-validation
 #: error's code selects the type (plan R1); the type picks the propose template URI, the typed
@@ -59,6 +55,17 @@ SleepFn = Callable[[float], Awaitable[None]]
 NEGOTIATION_TYPE_INFORMATION = "information"
 NEGOTIATION_TYPE_TARGET = "target"
 NEGOTIATION_TYPE_FEASIBILITY = "feasibility"
+
+#: Sample-level convention mapping the first content-validation error's code to the Negotiation-T
+#: type it proposes (plan R6): ``content.param_missing`` -> information, ``content.value_not_allowed``
+#: -> target, ``content.semantic_conflict`` -> feasibility. This is a sample convention, not an SDK
+#: rule — customers edit their copy of this table to their own error codes (see the integration
+#: guide); codes absent from the table keep the plain rejection.
+_NEGOTIATION_TYPE_BY_ERROR_CODE: dict[str, str] = {
+    CONTENT_ERROR_CODE_INFORMATION: NEGOTIATION_TYPE_INFORMATION,
+    CONTENT_ERROR_CODE_TARGET: NEGOTIATION_TYPE_TARGET,
+    CONTENT_ERROR_CODE_FEASIBILITY: NEGOTIATION_TYPE_FEASIBILITY,
+}
 
 
 def _require_task_extension(request_context: RequestContext) -> None:
@@ -130,8 +137,9 @@ def _resolve_negotiation_type(
 ) -> str | None:
     """Return the negotiation type the failed Task-T validation proposes, ``None`` to reject.
 
-    The FIRST error entry's code selects the type (plan R1): ``content.param_missing`` keeps the
-    v1 information path (which still proposes only when the errors name slots),
+    The FIRST error entry's code selects the type through the sample-level
+    ``_NEGOTIATION_TYPE_BY_ERROR_CODE`` table (plan R6): ``content.param_missing`` keeps the v1
+    information path (which still proposes only when the errors name slots),
     ``content.value_not_allowed`` selects the target propose and ``content.semantic_conflict`` the
     feasibility propose. Any other code — or a codeless error — selects no negotiation type, so the
     caller rejects the task exactly as v1 did (including the slotless case).
@@ -139,13 +147,10 @@ def _resolve_negotiation_type(
     if not errors:
         return None
     code = str(getattr(errors[0], "code", "") or "")
-    if code == CONTENT_ERROR_CODE_TARGET:
-        return NEGOTIATION_TYPE_TARGET
-    if code == CONTENT_ERROR_CODE_FEASIBILITY:
-        return NEGOTIATION_TYPE_FEASIBILITY
-    if code == CONTENT_ERROR_CODE_INFORMATION and missing_items:
-        return NEGOTIATION_TYPE_INFORMATION
-    return None
+    negotiation_type = _NEGOTIATION_TYPE_BY_ERROR_CODE.get(code)
+    if negotiation_type == NEGOTIATION_TYPE_INFORMATION and not missing_items:
+        return None
+    return negotiation_type
 
 
 def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
@@ -308,48 +313,47 @@ async def _emit_negotiation_propose(
         log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_INPUT_REQUIRED"))
 
 
-async def _stream_uc1_result(
+async def _execute_and_emit_result(
     *,
     request_context: RequestContext,
     event_queue: EventQueue,
-    progress_steps: list[str],
-    report: dict[str, str],
+    execution_service: TaskExecutionService,
+    params: dict[str, object],
     task_id: str,
     context_id: str,
-    sleep_fn: SleepFn,
-    artifact_send_interval_seconds: float,
     log_sink: object | None,
 ) -> None:
-    """Stream the UC1 progress steps, then the energy-saving intent report artifact.
+    """Execute the negotiated task through the ``TaskExecutionService`` seam and push its artifact.
 
-    Shared by the default success path (the task then stays long-running — no terminal state is
-    emitted here) and the negotiation continuation path (which emits COMPLETED afterwards).
+    INTEGRATION POINT (server): the flow owns the A2A emission — each ``emit_progress`` call is a
+    ``TASK_STATE_WORKING`` status update, the returned ``TaskExecutionResult`` becomes the report
+    artifact, and an exception of the service is caught here, emitted as ``TASK_STATE_FAILED`` with
+    a generic text and re-raised. The service only produces the progress texts and the result.
     """
-    try:
-        for step_text in progress_steps:
-            await emit_status_update(
-                request_context=request_context,
-                event_queue=event_queue,
-                context_id=context_id,
-                task_id=task_id,
-                state=TaskState.TASK_STATE_WORKING,
-                text=step_text,
-            )
-            if log_sink is not None:
-                log_sink(format_stage_log(role="server", stage="task-progress", detail=step_text))
-            # Pace the stream so the client observes the task progressing step by step.
-            await sleep_fn(artifact_send_interval_seconds)
 
-        report_name = str(report.get("name", "energy saving intent report"))
+    async def emit_progress(text: str) -> None:
+        await emit_status_update(
+            request_context=request_context,
+            event_queue=event_queue,
+            context_id=context_id,
+            task_id=task_id,
+            state=TaskState.TASK_STATE_WORKING,
+            text=text,
+        )
+        if log_sink is not None:
+            log_sink(format_stage_log(role="server", stage="task-progress", detail=text))
+
+    try:
+        result = await execution_service.execute(params, emit_progress=emit_progress)
         await event_queue.enqueue_event(
             TaskArtifactUpdateEvent(
                 task_id=task_id,
                 context_id=context_id,
                 artifact=build_metadata_artifact(
-                    name=report_name,
-                    text=str(report.get("text", report_name)),
+                    name=result.report_name,
+                    text=result.report_text,
                     extension_uri=TASK_T_EXTENSION_URI,
-                    metadata_text=str(report.get("metadata", "")),
+                    metadata_text=result.report_metadata,
                 ),
                 last_chunk=True,
             )
@@ -359,10 +363,20 @@ async def _stream_uc1_result(
                 format_stage_log(
                     role="server",
                     stage="artifact-pushed",
-                    detail=f"name={report_name} metadata[{TASK_T_EXTENSION_URI}]",
+                    detail=f"name={result.report_name} metadata[{TASK_T_EXTENSION_URI}]",
                 )
             )
-            log_sink(json.dumps(dict(report), ensure_ascii=False))
+            # Same report shape the flow used to log from the demo's report dict.
+            log_sink(
+                json.dumps(
+                    {
+                        "name": result.report_name,
+                        "text": result.report_text,
+                        "metadata": result.report_metadata,
+                    },
+                    ensure_ascii=False,
+                )
+            )
     except Exception as exc:
         if log_sink is not None:
             log_sink(format_stage_log(role="server", stage="task-status", detail=f"TASK_STATE_FAILED: {exc}"))
@@ -372,7 +386,7 @@ async def _stream_uc1_result(
             context_id=context_id,
             task_id=task_id,
             state=TaskState.TASK_STATE_FAILED,
-            text=f"Mock energy saving stream failed: {exc}",
+            text=f"Task execution failed: {exc}",
         )
         raise
 
@@ -389,30 +403,43 @@ async def execute_server_flow(
     log_sink: object | None = None,
     channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
+    execution_service: TaskExecutionService | None = None,
 ) -> None:
     """Validate the incoming Task-T prompt with A2A-T SDK, then stream the UC1 energy-saving flow.
+
+    ``execution_service`` is the server-side INTEGRATION POINT
+    (:class:`server.task_execution.TaskExecutionService`): the negotiated task itself is executed
+    through it and the flow only emits the A2A events. ``None`` (the default) keeps the demo
+    behavior — an internal :class:`Uc1DemoExecutionService` is constructed from the legacy
+    ``progress_steps`` / ``intent_report`` / ``sleep_fn`` / ``artifact_send_interval_seconds``
+    parameters, whose defaults preserve the pre-seam behavior for existing call sites and tests.
 
     Flow (RAN energy-saving interface spec, UC1):
       1. Validate the A2A-Extensions header (Task-T) and extract the prompt text
       2. ``A2ATServer.validate_task_prompt_and_data_filling`` (A2A-T server SDK) validates the
          prompt and extracts the filled parameters
       3. Negotiation continuation (Negotiation-T URI in the message metadata): no SUBMITTED —
-         validate, stream the UC1 progress messages and report artifact, then COMPLETED
+         validate, execute the task through the seam (progress messages and report artifact),
+         then COMPLETED
       4. Default flow: emit SUBMITTED, then on failure REJECTED — or, when the first validation
          error's code selects a negotiation type (plan R1: ``content.param_missing`` information
          with slot-named errors, ``content.value_not_allowed`` target, ``content.semantic_conflict``
          feasibility), a Negotiation-T propose of that type on an INPUT_REQUIRED status update,
          generated from typed data or from a natural-language rendering per the configured channel
          (data-driven trigger, the server reads no scenario flag)
-      5. Default success: stream the UC1 progress messages as ``TASK_STATE_WORKING`` status
-         updates, then the energy-saving intent report as one ``TaskArtifactUpdateEvent`` (the
-         report body travels in ``artifact.metadata[Task-T/v1]``); the task then stays
-         long-running — no terminal state is emitted
-      6. Exception during pushing -> emit FAILED
+      5. Default success: execute the negotiated task through the seam — each progress line
+         becomes a ``TASK_STATE_WORKING`` status update and the ``TaskExecutionResult`` becomes
+         the report artifact as one ``TaskArtifactUpdateEvent`` (the report body travels in
+         ``artifact.metadata[Task-T/v1]``); the task then stays long-running — no terminal state
+         is emitted
+      6. Exception during execution or artifact pushing -> emit FAILED (generic text) and re-raise
     """
-    resolved_sleep = sleep_fn or asyncio.sleep
-    resolved_progress_steps = get_energy_saving_progress_steps() if progress_steps is None else progress_steps
-    resolved_report = get_energy_saving_intent_report() if intent_report is None else intent_report
+    resolved_execution_service = execution_service or Uc1DemoExecutionService(
+        progress_steps=progress_steps,
+        intent_report=intent_report,
+        sleep_fn=sleep_fn,
+        artifact_send_interval_seconds=artifact_send_interval_seconds,
+    )
     resolved_task_id = request_context.task_id or ""
     resolved_context_id = request_context.context_id or ""
 
@@ -451,12 +478,18 @@ async def execute_server_flow(
     validation_failure: str | None = None
     content_errors: Sequence[SlotValidationError] | None = None
     missing_items: list[NegotiationItem] = []
+    # The object parameter mapping the execution seam consumes; set on validation success. The
+    # sample schema is object-shaped, so the filled data is always a mapping — the empty mapping
+    # only keeps the (unused by this sample) array-shaped corner type-safe.
+    filled_params_data: dict[str, object] = {}
     try:
         filled_params = prompt_server.validate_task_prompt_and_data_filling(
             prompt=prompt_text,
             schema=TASK_PARAM_SCHEMA,
             template_uri=ENERGY_SAVING_TEMPLATE_URI,
         )
+        filled_data = filled_params.data
+        filled_params_data = filled_data if isinstance(filled_data, dict) else {}
         if log_sink is not None:
             log_sink(
                 format_stage_log(
@@ -477,7 +510,7 @@ async def execute_server_flow(
             log_sink(format_stage_log(role="server", stage="sdk-result", detail=f"invalid input {validation_failure}"))
 
     # Negotiation continuation (round 2): no SUBMITTED — the completed Task-T prompt is validated,
-    # the UC1 result is streamed, and the task closes with COMPLETED.
+    # the task executes through the seam, and the task closes with COMPLETED.
     if negotiation_continuation:
         if validation_failure is not None:
             await emit_status_update(
@@ -491,15 +524,13 @@ async def execute_server_flow(
             if log_sink is not None:
                 log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_REJECTED"))
             return
-        await _stream_uc1_result(
+        await _execute_and_emit_result(
             request_context=request_context,
             event_queue=event_queue,
-            progress_steps=resolved_progress_steps,
-            report=resolved_report,
+            execution_service=resolved_execution_service,
+            params=filled_params_data,
             task_id=resolved_task_id,
             context_id=resolved_context_id,
-            sleep_fn=resolved_sleep,
-            artifact_send_interval_seconds=artifact_send_interval_seconds,
             log_sink=log_sink,
         )
         await emit_status_update(
@@ -561,15 +592,13 @@ async def execute_server_flow(
             log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_REJECTED"))
         return
 
-    # 3. On success → stream the UC1 progress messages (default flow stays long-running)
-    await _stream_uc1_result(
+    # 3. On success → execute the negotiated task through the seam (default flow stays long-running)
+    await _execute_and_emit_result(
         request_context=request_context,
         event_queue=event_queue,
-        progress_steps=resolved_progress_steps,
-        report=resolved_report,
+        execution_service=resolved_execution_service,
+        params=filled_params_data,
         task_id=resolved_task_id,
         context_id=resolved_context_id,
-        sleep_fn=resolved_sleep,
-        artifact_send_interval_seconds=artifact_send_interval_seconds,
         log_sink=log_sink,
     )

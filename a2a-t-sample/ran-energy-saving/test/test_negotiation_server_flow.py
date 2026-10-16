@@ -6,13 +6,18 @@ Negotiation-T information propose metadata, round 2 (continuation) streams the U
 closes with COMPLETED, a failure without slot-named errors keeps the plain REJECTED branch, and
 the target/feasibility content-validation failures propose their per-type Negotiation-T content
 over both generation channels (from-data without and from-text with one extraction LLM call).
+The task-execution seam is covered too: the demo service satisfies the ``TaskExecutionService``
+Protocol, an injected fake replaces the demo behavior end-to-end, and an execution failure emits
+FAILED with the generic text.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
@@ -34,6 +39,7 @@ from a2a_t.core.standard_templates import (
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
+from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.negotiation.content.enums import NegotiationConclusion
 from a2a_t.negotiation.content.models import (
     InformationEndingContent,
@@ -67,14 +73,17 @@ from server.constants_data import (
     CHANNEL_ENV_KEY,
     CHANNEL_TEXT,
     COMPLETED_MESSAGE,
+    ENERGY_SAVING_REGION,
     INPUT_REQUIRED_MESSAGE,
     NEGOTIATION_RELATIONSHIP,
     NEGOTIATION_T_EXTENSION_URI,
     TASK_T_EXTENSION_URI,
+    get_energy_saving_intent_report,
     get_energy_saving_progress_steps,
     resolve_negotiation_channel,
 )
 from server.server_flow import (
+    _NEGOTIATION_TYPE_BY_ERROR_CODE,
     NEGOTIATION_TYPE_FEASIBILITY,
     NEGOTIATION_TYPE_INFORMATION,
     NEGOTIATION_TYPE_TARGET,
@@ -85,6 +94,7 @@ from server.server_flow import (
     _numbered_items,
     execute_server_flow,
 )
+from server.task_execution import TaskExecutionResult, TaskExecutionService, Uc1DemoExecutionService
 from server.task_schema import TASK_PARAM_SCHEMA
 
 #: An offline ``.env`` (no API key) written per test; the mock force-installs against it.
@@ -145,6 +155,7 @@ async def _run_flow(
     requested_extensions: set[str] | None = None,
     channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
+    execution_service: TaskExecutionService | None = None,
 ) -> list[object]:
     """Run one ``execute_server_flow`` round on a real EventQueue and return the drained events."""
     queue = EventQueueLegacy()
@@ -159,6 +170,7 @@ async def _run_flow(
         sleep_fn=_no_sleep,
         channel=channel,
         env_path=env_path,
+        execution_service=execution_service,
     )
     return await _drain_events(queue)
 
@@ -648,6 +660,186 @@ def test_default_failure_with_an_unrecognized_error_code_answers_rejected(_offli
 
     assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_REJECTED]
     assert NEGOTIATION_T_EXTENSION_URI not in _message_metadata(events[-1])
+
+
+# --- task-execution seam: Protocol contract, demo service, injected fake, failure text --------
+
+
+def test_uc1_demo_execution_service_satisfies_the_task_execution_protocol() -> None:
+    """Contract test: the demo implementation structurally satisfies the server seam Protocol.
+
+    ``TaskExecutionService`` is ``@runtime_checkable``, so the idiomatic conformance check is an
+    ``isinstance`` probe (it verifies the member set at runtime; signatures stay the static
+    checks' concern). The ``TaskExecutionResult`` shape the flow maps onto the report artifact is
+    pinned here too.
+    """
+    assert isinstance(Uc1DemoExecutionService(), TaskExecutionService)
+    assert [field.name for field in dataclasses.fields(TaskExecutionResult)] == [
+        "report_name",
+        "report_text",
+        "report_metadata",
+    ]
+    result = TaskExecutionResult(report_name="n", report_text="t", report_metadata="m")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.report_name = "other"
+
+
+def test_uc1_demo_execution_service_delegates_to_constants_data() -> None:
+    """The demo service delegates to the ``constants_data`` accessors — the data stays there (plan R2)."""
+    emitted: list[str] = []
+
+    async def _emit(text: str) -> None:
+        emitted.append(text)
+
+    service = Uc1DemoExecutionService(sleep_fn=_no_sleep)
+    result = asyncio.run(service.execute({}, _emit))
+
+    assert emitted == get_energy_saving_progress_steps()
+    report = get_energy_saving_intent_report()
+    assert result.report_name == report["name"]
+    assert result.report_text == report["text"]
+    assert result.report_metadata == report["metadata"]
+
+
+def test_uc1_demo_execution_service_streams_steps_with_pacing_and_maps_the_report() -> None:
+    """The scripted demo emits each step with one pacing sleep after it, then maps the report."""
+    sleeps: list[float] = []
+    emitted: list[str] = []
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async def _emit(text: str) -> None:
+        emitted.append(text)
+
+    service = Uc1DemoExecutionService(
+        progress_steps=["step one", "step two"],
+        intent_report={"name": "fake report", "metadata": "fake metadata"},
+        sleep_fn=_sleep,
+        artifact_send_interval_seconds=0.5,
+    )
+    result = asyncio.run(service.execute({"region": "R"}, _emit))
+
+    assert emitted == ["step one", "step two"]
+    assert sleeps == [0.5, 0.5]
+    # The report dict maps onto the result fields; the text falls back to the name when absent.
+    assert (result.report_name, result.report_text, result.report_metadata) == (
+        "fake report",
+        "fake report",
+        "fake metadata",
+    )
+
+
+class _RecordingExecutionService:
+    """Injected fake ``TaskExecutionService`` proving the seam replaces the demo behavior."""
+
+    def __init__(self) -> None:
+        self.seen_params: dict[str, object] | None = None
+
+    async def execute(
+        self, params: dict[str, object], emit_progress: Callable[[str], Awaitable[None]]
+    ) -> TaskExecutionResult:
+        self.seen_params = params
+        for line in ("fake progress one", "fake progress two"):
+            await emit_progress(line)
+        return TaskExecutionResult(
+            report_name="fake report",
+            report_text="fake report body",
+            report_metadata="fake report metadata",
+        )
+
+
+def test_injected_execution_service_replaces_the_demo_behavior_end_to_end(_offline_env: Path) -> None:
+    """An injected execution service drives the flow: its lines become the WORKING updates and its
+    result the report artifact — the demo UC1 stream is fully replaced (the seam works)."""
+    mock_llm.reset_call_log()
+    client = A2ATClient(env_path=_offline_env)
+    prompt = client.generate_task_prompt_from_text(
+        build_prompt_input(env_path=_offline_env, scenario=scenario_data.SCENARIO_DEFAULT),
+        ENERGY_SAVING_TEMPLATE_URI,
+    )
+    fake = _RecordingExecutionService()
+
+    events = asyncio.run(
+        _run_flow(
+            metadata={
+                prompt.extension_uri: prompt.prompt_text,
+                TEMPLATE_URI_METADATA_KEY: ENERGY_SAVING_TEMPLATE_URI,
+            },
+            prompt_server=A2ATServer(env_path=_offline_env),
+            execution_service=fake,
+        )
+    )
+
+    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED] + [TaskState.TASK_STATE_WORKING] * 2
+    working = [
+        event
+        for event in events
+        if isinstance(event, TaskStatusUpdateEvent) and event.status.state == TaskState.TASK_STATE_WORKING
+    ]
+    assert [event.status.message.parts[0].text for event in working] == ["fake progress one", "fake progress two"]
+    artifacts = [event for event in events if isinstance(event, TaskArtifactUpdateEvent)]
+    assert len(artifacts) == 1
+    assert artifacts[0].artifact.name == "fake report"
+    assert artifacts[0].artifact.parts[0].text == "fake report body"
+    assert artifacts[0].artifact.metadata[TASK_T_EXTENSION_URI] == "fake report metadata"
+    # The seam receives the filled Task-T parameters extracted by the content validation.
+    assert isinstance(fake.seen_params, dict)
+    assert fake.seen_params.get("region") == ENERGY_SAVING_REGION
+
+
+class _ValidatingPromptServer:
+    """Prompt-server stub whose content validation succeeds with fixed filled parameters."""
+
+    def validate_task_prompt_and_data_filling(self, *, prompt: str, schema: object, template_uri: object) -> object:
+        return FilledParamData(data={"operationType": "create", "region": ENERGY_SAVING_REGION})
+
+
+class _FailingExecutionService:
+    """Injected execution service whose execution always fails."""
+
+    async def execute(
+        self, params: dict[str, object], emit_progress: Callable[[str], Awaitable[None]]
+    ) -> TaskExecutionResult:
+        raise RuntimeError("validation is fine, execution is not")
+
+
+def test_execution_failure_emits_failed_with_the_generic_text() -> None:
+    """The flow owns the exception -> FAILED emission; the text is generic (no 'Mock' wording, plan R2).
+
+    The flow re-raises after the FAILED emission, so the events are drained after the raised run.
+    """
+    queue = EventQueueLegacy()
+    request_context = _build_request_context(
+        metadata={TASK_T_EXTENSION_URI: "any prompt text"},
+        requested_extensions={TASK_T_EXTENSION_URI},
+    )
+    with pytest.raises(RuntimeError, match="validation is fine, execution is not"):
+        asyncio.run(
+            execute_server_flow(
+                request_context=request_context,
+                event_queue=queue,
+                prompt_server=_ValidatingPromptServer(),
+                execution_service=_FailingExecutionService(),
+            )
+        )
+
+    events = asyncio.run(_drain_events(queue))
+    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_FAILED]
+    failed = events[-1]
+    assert isinstance(failed, TaskStatusUpdateEvent)
+    assert failed.status.message.parts[0].text == "Task execution failed: validation is fine, execution is not"
+
+
+def test_negotiation_type_by_error_code_pins_the_sample_mapping() -> None:
+    """The error-code -> negotiation-type table is the sample-level customization point (plan R6)."""
+    assert _NEGOTIATION_TYPE_BY_ERROR_CODE == {
+        "content.param_missing": "information",
+        "content.value_not_allowed": "target",
+        "content.semantic_conflict": "feasibility",
+    }
+    # Unrecognized codes stay out of the table (their tasks keep the plain rejection).
+    assert "content.format_error" not in _NEGOTIATION_TYPE_BY_ERROR_CODE
 
 
 # --- missing-item building and the relationship rule ----------------------------------------
