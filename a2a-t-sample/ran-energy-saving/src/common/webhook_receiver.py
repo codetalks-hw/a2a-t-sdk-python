@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import Callable
 
 import uvicorn
@@ -46,6 +47,11 @@ _TOKEN_HEADER = "X-A2A-Notification-Token"
 #: Top-level keys of a StreamResponse JSON body (``MessageToDict`` camelCase field names); a body
 #: carrying none of them is not a task event.
 _STREAM_RESPONSE_KEYS = ("task", "statusUpdate", "artifactUpdate", "message")
+
+#: Budgets of the embedded receiver: the poll deadline for the uvicorn bind, and the graceful
+#: drain budget of ``stop()``.
+_STARTUP_TIMEOUT_SECONDS = 10.0
+_STOP_TIMEOUT_SECONDS = 5.0
 
 
 def _recognized_stream_key(payload: object) -> str | None:
@@ -101,25 +107,48 @@ class WebhookReceiver:
         """Serve the webhook route as an asyncio task on the running event loop.
 
         Waits for the uvicorn server to bind before returning (with ``port=0`` the OS-assigned
-        port is read back from the server); a bind failure (e.g. the port is already taken)
-        raises ``RuntimeError``.
+        port is read back from the server); a bind failure (e.g. the port is already taken), or a
+        startup that does not complete within ``_STARTUP_TIMEOUT_SECONDS``, raises ``RuntimeError``.
         """
         if self._serve_task is not None:
             return
         config = uvicorn.Config(self._app, host=self._host, port=self._port, log_level="warning", access_log=False)
         server = uvicorn.Server(config)
-        serve_task = asyncio.create_task(server.serve(), name="webhook-receiver")
+        serve_task = asyncio.create_task(self._serve(server), name="webhook-receiver")
+        deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
         while not server.started:
             if serve_task.done():
                 failure = serve_task.exception()
-                detail = f"{type(failure).__name__}: {failure}" if failure is not None else "exited before listening"
-                raise RuntimeError(f"webhook receiver failed to start on {self._host}:{self._port} ({detail})")
+                if failure is not None:
+                    raise failure  # the bind-failure conversion (or an unexpected serve error)
+                raise RuntimeError(f"webhook receiver on {self._host}:{self._port} exited before listening")
+            if time.monotonic() >= deadline:
+                serve_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await serve_task
+                raise RuntimeError(
+                    f"webhook receiver startup did not complete within {_STARTUP_TIMEOUT_SECONDS:.0f}s "
+                    f"on {self._host}:{self._port}"
+                )
             await asyncio.sleep(0.01)
         self._server = server
         self._serve_task = serve_task
         if self._port == 0:
             self._resolved_port = int(server.servers[0].sockets[0].getsockname()[1])
         self._log("listening", f"url={self.url}")
+
+    async def _serve(self, server: uvicorn.Server) -> None:
+        """Run ``server.serve()``, converting uvicorn's bind-failure ``SystemExit`` to ``RuntimeError``.
+
+        uvicorn's ``startup()`` answers a bind failure (e.g. the port is already taken) with
+        ``sys.exit``; a task-raised ``SystemExit`` is re-raised through the event loop (tearing it
+        down) instead of being observable on the serve task, so it must be converted inside the
+        coroutine for the ``start()`` contract to hold.
+        """
+        try:
+            await server.serve()
+        except SystemExit as exc:
+            raise RuntimeError(f"webhook receiver failed to start on {self._host}:{self._port}") from exc
 
     async def stop(self) -> None:
         """Shut the receiver down gracefully and release the port (idempotent)."""
@@ -131,13 +160,11 @@ class WebhookReceiver:
             return
         server.should_exit = True  # graceful: uvicorn stops accepting and drains
         try:
-            await asyncio.wait_for(serve_task, timeout=5.0)
+            await asyncio.wait_for(serve_task, timeout=_STOP_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            # wait_for already cancelled the serve task; reap it and force uvicorn's exit flag.
-            server.force_exit = True
-            serve_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await serve_task
+            # wait_for (3.12+) already cancelled and reaped the serve task on timeout; the drain
+            # simply exceeded the budget, so record it instead of forcing anything.
+            self._log("stop-timeout", f"url={self.url} graceful stop exceeded {_STOP_TIMEOUT_SECONDS:.0f}s")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

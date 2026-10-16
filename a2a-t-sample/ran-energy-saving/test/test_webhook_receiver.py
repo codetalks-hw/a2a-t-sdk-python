@@ -5,9 +5,11 @@ port (in-process HTTP only, per the sample's no-cross-process-HTTP rule): the re
 answers 200 and delivers the parsed StreamResponse-shaped dict to the injected callback, a wrong
 or missing ``X-A2A-Notification-Token`` header answers 401 without delivery, and a malformed or
 unrecognized JSON body answers 400 without delivery. The start/stop lifecycle is pinned (graceful
-stop releases the port; stop is idempotent), and the transport resolvers (``A2AT_SAMPLE_TRANSPORT``
-/ ``A2AT_SAMPLE_WEBHOOK_PORT`` / ``A2AT_SAMPLE_WEBHOOK_TOKEN`` / ``A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT``)
-follow the scenario/channel resolver tests: defaults, overrides, and invalid-value fallbacks.
+stop releases the port; stop is idempotent), a taken port surfaces as the documented ``RuntimeError``
+(uvicorn's bind-failure ``SystemExit`` converted), and the transport resolvers
+(``A2AT_SAMPLE_TRANSPORT`` / ``A2AT_SAMPLE_WEBHOOK_PORT`` / ``A2AT_SAMPLE_WEBHOOK_TOKEN``
+/ ``A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT``) follow the scenario/channel resolver tests: defaults,
+overrides, and invalid-value fallbacks.
 """
 
 from __future__ import annotations
@@ -185,6 +187,29 @@ def test_webhook_receiver_defaults_pin_host_port_and_url() -> None:
     receiver = WebhookReceiver(token=_DEMO_TOKEN, on_event=lambda event: None)
     assert receiver.port == 9000  # the configured port until started with 0
     assert receiver.url == "http://127.0.0.1:9000/webhook"
+
+
+def test_webhook_receiver_start_raises_runtime_error_when_the_port_is_taken() -> None:
+    # uvicorn answers a bind failure (port already taken) with sys.exit inside its startup; a
+    # task-raised SystemExit would tear down the whole event loop instead of being observable,
+    # so start() must convert it to the documented RuntimeError (and leave the holder serving).
+    async def scenario() -> None:
+        holder = WebhookReceiver(token=_DEMO_TOKEN, on_event=lambda event: None, port=0)
+        await holder.start()
+        try:
+            with pytest.raises(RuntimeError, match="failed to start"):
+                blocked = WebhookReceiver(token=_DEMO_TOKEN, on_event=lambda event: None, port=holder.port)
+                await blocked.start()
+            async with httpx.AsyncClient(trust_env=False) as client:
+                response = await client.post(
+                    holder.url, json=_STATUS_UPDATE_BODY, headers={"X-A2A-Notification-Token": _DEMO_TOKEN}
+                )
+            assert response.status_code == 200  # the holder survived the failed startup attempt
+        finally:
+            await holder.stop()
+        assert not _port_open(holder.port)
+
+    asyncio.run(scenario())
 
 
 # --- transport/webhook resolvers ---------------------------------------------------------------
