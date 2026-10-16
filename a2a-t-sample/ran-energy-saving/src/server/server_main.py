@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import os
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_rest_routes
+from a2a.server.tasks import BasePushNotificationSender, InMemoryPushNotificationConfigStore
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from a2a.utils.constants import TransportProtocol
 from a2a_t.server.a2at_server import A2ATServer
@@ -146,18 +149,45 @@ def build_rest_app(
     agent_card: object,
     executor: object,
 ) -> object:
-    """Build the Starlette REST app with agent card routes and A2A task/message routes."""
+    """Build the Starlette REST app with agent card routes and A2A task/message routes.
+
+    Push-notification machinery (plan R1) is assembled **unconditionally**: the in-memory config
+    store and the BasePushNotificationSender (with its own httpx client) go into the
+    DefaultRequestHandler whether or not any client registers a push config — in SSE transport
+    mode nothing registers and the machinery simply idles; in webhook mode the client registers
+    its callback (round 1 inline config / round 2 REST endpoint re-registration) and every task
+    event is POSTed to it. There is deliberately no server-side transport switch.
+
+    Lifecycle: the sender's httpx client is closed by the app's lifespan (uvicorn runs it on
+    shutdown). The built request handler is exposed as ``app.state.request_handler`` for tests.
+    """
     task_store = InMemoryTaskStore()
+    push_config_store = InMemoryPushNotificationConfigStore()
+    push_httpx_client = httpx.AsyncClient(trust_env=False)
+    push_sender = BasePushNotificationSender(push_httpx_client, push_config_store)
+
+    @asynccontextmanager
+    async def _lifespan(app: Starlette) -> AsyncGenerator[None, None]:
+        # The sender's httpx client closes on app shutdown (uvicorn runs the lifespan when the
+        # server stops); the asynccontextmanager return annotation must be `AsyncGenerator`
+        # (the `AsyncIterator` spelling is the deprecated overload).
+        yield
+        await push_httpx_client.aclose()
+
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=task_store,
         agent_card=agent_card,
+        push_config_store=push_config_store,
+        push_sender=push_sender,
     )
     routes = [
         *create_agent_card_routes(agent_card),
         *create_rest_routes(request_handler),
     ]
-    return Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=_lifespan)
+    app.state.request_handler = request_handler
+    return app
 
 
 async def register_agent_card_if_possible(

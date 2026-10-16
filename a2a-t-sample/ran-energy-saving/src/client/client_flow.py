@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from a2a.client.client import ClientCallContext
-from a2a.types import Role, SendMessageRequest, TaskState
+from a2a.types import Role, SendMessageRequest, StreamResponse, TaskPushNotificationConfig, TaskState
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
@@ -44,6 +45,8 @@ from client.scenario_data import (
     NEGOTIATION_KIND_FEASIBILITY,
     NEGOTIATION_KIND_INFORMATION,
     NEGOTIATION_KIND_TARGET,
+    TRANSPORT_SSE,
+    TRANSPORT_WEBHOOK,
     negotiation_feasibility_summary,
     negotiation_target_confirmation,
 )
@@ -190,6 +193,369 @@ async def _send_and_consume(
     return artifact_count
 
 
+# --- webhook transport (v3)：事件管线复用 ------------------------------------------------------
+
+#: Webhook 事件循环的结束信号（plan R5/D7）：round 1 以 artifact（默认场景结束信号）或
+#: INPUT_REQUIRED（协商场景的应答点）结束；round 2（协商 accept 之后）以 COMPLETED 结束；
+#: 空闲超时（idle timeout）是所有场景的兜底结束信号。
+_WEBHOOK_SIGNAL_ARTIFACT = "artifact"
+_WEBHOOK_SIGNAL_INPUT_REQUIRED = "input-required"
+_WEBHOOK_SIGNAL_COMPLETED = "completed"
+_WEBHOOK_SIGNAL_TIMEOUT = "timeout"
+_ROUND1_END_SIGNALS = frozenset({_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED})
+_ROUND2_END_SIGNALS = frozenset({_WEBHOOK_SIGNAL_COMPLETED})
+
+
+def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Convert one webhook push body into the same normalized shape ``normalize_event`` produces.
+
+    The receiver hands over the raw parsed JSON dict — the ``MessageToDict`` of a ``StreamResponse``
+    (camelCase: ``task`` / ``statusUpdate`` / ``artifactUpdate`` / ``message`` top-level key) — and
+    this adapts it to the flat event dict (``kind`` / ``task_id`` / ``state`` / ...) that the
+    negotiation detection (INPUT_REQUIRED + Negotiation-T URI + negotiationContext), the
+    templateUri→kind dispatch and the summary counting already consume, so the SSE and webhook
+    drivers share the whole event pipeline unchanged.
+
+    Metadata maps pass through verbatim; the nested ``negotiationContext``'s ``round`` arrives as
+    the JSON ``1.0`` float after the Struct round-trip — the session parser's ``int()`` coercion
+    (v2) absorbs it, exactly as on the SSE path.
+    """
+    status_update = payload.get("statusUpdate")
+    if isinstance(status_update, dict):
+        status = status_update.get("status")
+        status_dict: dict[str, object] = status if isinstance(status, dict) else {}
+        text = ""
+        metadata: dict[str, object] | None = None
+        message = status_dict.get("message")
+        if isinstance(message, dict):
+            parts = message.get("parts")
+            if isinstance(parts, list) and parts and isinstance(parts[0], dict):
+                text = str(parts[0].get("text", ""))
+            raw_metadata = message.get("metadata")
+            if isinstance(raw_metadata, dict) and raw_metadata:
+                metadata = raw_metadata
+        event: dict[str, object] = {
+            "kind": "status",
+            "task_id": str(status_update.get("taskId", "")),
+            "context_id": str(status_update.get("contextId", "")),
+            "state": str(status_dict.get("state", "")),
+            "text": text,
+        }
+        if metadata is not None:
+            event["metadata"] = metadata
+        return event
+
+    message = payload.get("message")
+    if isinstance(message, dict):
+        text = ""
+        parts = message.get("parts")
+        if isinstance(parts, list) and parts and isinstance(parts[0], dict):
+            text = str(parts[0].get("text", ""))
+        return {"kind": "message", "text": text}
+
+    artifact_update = payload.get("artifactUpdate")
+    if isinstance(artifact_update, dict):
+        artifact = artifact_update.get("artifact")
+        artifact_dict: dict[str, object] = artifact if isinstance(artifact, dict) else {}
+        event = {
+            "kind": "artifact",
+            "task_id": str(artifact_update.get("taskId", "")),
+            "artifact_id": str(artifact_dict.get("artifactId", "")),
+            "name": str(artifact_dict.get("name", "")),
+        }
+        parts = artifact_dict.get("parts")
+        if isinstance(parts, list) and parts and isinstance(parts[0], dict):
+            part = parts[0]
+            if "data" in part:
+                event["data"] = part["data"]
+            elif "text" in part:
+                event["text"] = part["text"]
+        raw_artifact_metadata = artifact_dict.get("metadata")
+        if isinstance(raw_artifact_metadata, dict) and raw_artifact_metadata:
+            event["metadata"] = raw_artifact_metadata
+        return event
+
+    task = payload.get("task")
+    if isinstance(task, dict):
+        task_status = task.get("status")
+        task_status_dict: dict[str, object] = task_status if isinstance(task_status, dict) else {}
+        return {
+            "kind": "status",
+            "task_id": str(task.get("id", "")),
+            "context_id": str(task.get("contextId", "")),
+            "state": str(task_status_dict.get("state", "")),
+        }
+
+    raise ValueError("Unsupported webhook payload: no recognized StreamResponse field set")
+
+
+def _webhook_end_signal(event: dict[str, object], end_signals: frozenset[str]) -> str | None:
+    """Return the webhook end signal this event matches, ``None`` to keep consuming (plan R5/D7)."""
+    if event.get("kind") == "artifact":
+        return _WEBHOOK_SIGNAL_ARTIFACT if _WEBHOOK_SIGNAL_ARTIFACT in end_signals else None
+    if event.get("kind") != "status":
+        return None
+    state = event.get("state")
+    if state == TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED):
+        return _WEBHOOK_SIGNAL_INPUT_REQUIRED if _WEBHOOK_SIGNAL_INPUT_REQUIRED in end_signals else None
+    if state == TaskState.Name(TaskState.TASK_STATE_COMPLETED):
+        return _WEBHOOK_SIGNAL_COMPLETED if _WEBHOOK_SIGNAL_COMPLETED in end_signals else None
+    return None
+
+
+async def _consume_webhook_events(
+    *,
+    webhook_queue: asyncio.Queue[dict[str, object]],
+    webhook_idle_timeout: float,
+    normalized_events: list[dict[str, object]],
+    artifact_count: int,
+    log_sink: Callable[[str], None] | None,
+    end_signals: frozenset[str],
+) -> tuple[str, int]:
+    """Consume webhook events until an end signal or the idle backstop (plan R5/R6).
+
+    Each payload is normalized into the shared event shape (so the negotiation detection and
+    artifact counting work unchanged), logged as ``[client] webhook-event`` mirroring the
+    ``a2a-event`` style, and appended to ``normalized_events``. The idle timeout resets per
+    received event; on timeout the ``webhook-idle-timeout`` diagnostic is logged and the flow
+    ends normally with what has been collected. Returns the end reason (the matched signal, or
+    ``timeout``) and the updated artifact count.
+    """
+    while True:
+        try:
+            payload = await asyncio.wait_for(webhook_queue.get(), timeout=webhook_idle_timeout)
+        except asyncio.TimeoutError:
+            if log_sink is not None:
+                log_sink(
+                    format_stage_log(
+                        role="client",
+                        stage="webhook-idle-timeout",
+                        detail=f"no event for {webhook_idle_timeout}s",
+                    )
+                )
+            return _WEBHOOK_SIGNAL_TIMEOUT, artifact_count
+        if log_sink is not None:
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="webhook-event",
+                    detail=json.dumps(payload, ensure_ascii=False),
+                )
+            )
+        event = normalize_webhook_payload(payload)
+        normalized_events.append(event)
+        if event["kind"] == "artifact":
+            artifact_count += 1
+        signal = _webhook_end_signal(event, end_signals)
+        if signal is not None:
+            return signal, artifact_count
+
+
+async def _send_webhook_round(
+    *,
+    # Any (not object): the fake-friendly client of the SSE helpers is `object`, but the SSE path
+    # tolerates the resulting baseline diagnostics while this new code must add none (plan: ty
+    # total stays at the 52 baseline) — Any keeps attribute access on the a2a client clean.
+    a2a_client: Any,
+    request: SendMessageRequest,
+    call_context: ClientCallContext,
+    log_sink: Callable[[str], None] | None,
+) -> None:
+    """Send one non-blocking ``message:send`` and log the single RPC reply (plan R6).
+
+    With ``return_immediately=True`` the RPC returns after the first event; the server's
+    background consumer keeps pushing every event to the webhook. The reply overlaps with the
+    webhook pushes (the SUBMITTED Task arrives both ways), so it is logged ONCE here as
+    ``webhook-rpc-reply`` and deliberately NOT appended to ``normalized_events`` — the events
+    summary counts WEBHOOK-received events only (SSE parity).
+    """
+    rpc_reply: StreamResponse | None = None
+    async for stream_response in a2a_client.send_message(request, context=call_context):
+        rpc_reply = stream_response
+    if log_sink is not None and rpc_reply is not None:
+        log_sink(
+            format_stage_log(
+                role="client",
+                stage="webhook-rpc-reply",
+                detail=json.dumps(MessageToDict(rpc_reply), ensure_ascii=False),
+            )
+        )
+
+
+async def _run_webhook_flow(
+    *,
+    prompt_client: A2ATClient,
+    a2a_client: Any,
+    initial_input: dict[str, object],
+    request: SendMessageRequest,
+    call_context: ClientCallContext,
+    webhook_queue: asyncio.Queue[dict[str, object]],
+    push_url: str,
+    push_token: str,
+    webhook_idle_timeout: float,
+    negotiation_params: dict[str, object] | None,
+    negotiation_answers: dict[str, str] | None,
+    negotiation_kind: str | None,
+    channel: str,
+    env_path: Path | None,
+    normalized_events: list[dict[str, object]],
+    artifact_count: int,
+    log_sink: Callable[[str], None] | None,
+) -> tuple[int, bool]:
+    """Drive the whole task over the webhook transport (v3, plan R2/R4/R5/R6).
+
+    Round 1: register the push config INLINE on the request (the task id is unknown before the
+    send — the only registration path available here), send ``message:send`` with
+    ``return_immediately=True`` through the ``streaming=False`` client, then consume webhook
+    events. An INPUT_REQUIRED propose is answered in-round: re-register the SAME url/token via
+    ``create_task_push_notification_config`` (the REST endpoint — the second registration path),
+    send the accept (non-blocking, NO inline config — already registered), and keep consuming
+    until COMPLETED. The default scenario ends on the report artifact. The idle timeout is the
+    backstop that ends any phase with a diagnostic line and a normal exit. Returns the artifact
+    count and whether a timeout ended the flow.
+    """
+    # Round-1 request additions (R2/R4): non-blocking + inline push registration.
+    request.configuration.return_immediately = True
+    request.configuration.task_push_notification_config.CopyFrom(
+        TaskPushNotificationConfig(url=push_url, token=push_token)
+    )
+    if log_sink is not None:
+        log_sink(
+            format_stage_log(
+                role="client",
+                stage="a2a-send-message",
+                detail=(
+                    f"round=1 webhook text_part={_build_request_metadata(initial_input)} "
+                    f"metadata_keys=[{TASK_T_EXTENSION_URI}, templateUri] "
+                    f"return_immediately=true push_registration=inline"
+                ),
+            )
+        )
+    await _send_webhook_round(a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink)
+
+    # Phase 1 consume: default scenario ends on the artifact; a negotiation propose pauses on
+    # INPUT_REQUIRED; the idle timeout backstops both (R5).
+    end_signal, artifact_count = await _consume_webhook_events(
+        webhook_queue=webhook_queue,
+        webhook_idle_timeout=webhook_idle_timeout,
+        normalized_events=normalized_events,
+        artifact_count=artifact_count,
+        log_sink=log_sink,
+        end_signals=_ROUND1_END_SIGNALS,
+    )
+    if end_signal != _WEBHOOK_SIGNAL_INPUT_REQUIRED:
+        return artifact_count, end_signal == _WEBHOOK_SIGNAL_TIMEOUT
+
+    # Negotiation round 2 (reuses the SSE-path detection/builders verbatim; same unhandled logs).
+    input_required_event = _find_negotiation_input_required(normalized_events)
+    if input_required_event is None:
+        # Plain INPUT_REQUIRED without a Negotiation-T propose: SSE parity — the flow just ends.
+        return artifact_count, False
+    if negotiation_params is None or negotiation_answers is None:
+        if log_sink is not None:
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="negotiation-unhandled",
+                    detail=(
+                        "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, staying on round 1"
+                    ),
+                )
+            )
+        return artifact_count, False
+    metadata = input_required_event.get("metadata")
+    session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
+    if session is None or not isinstance(metadata, dict):
+        if log_sink is not None:
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="negotiation-unhandled",
+                    detail=(
+                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                        "(malformed/missing session context), staying on round 1"
+                    ),
+                )
+            )
+        return artifact_count, False
+    negotiation_type = _resolve_negotiation_kind(metadata, negotiation_kind)
+    if negotiation_type is None:
+        if log_sink is not None:
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="negotiation-unhandled",
+                    detail=(
+                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                        "(unrecognized propose templateUri), staying on round 1"
+                    ),
+                )
+            )
+        return artifact_count, False
+
+    task_id = _first_task_id(normalized_events)
+    context_id = str(input_required_event.get("context_id", ""))
+    round2_request, round2_call_context = _build_negotiation_accept_request(
+        prompt_client=prompt_client,
+        initial_input=initial_input,
+        session=session,
+        negotiation_kind=negotiation_type,
+        channel=channel,
+        negotiation_params=negotiation_params,
+        negotiation_answers=negotiation_answers,
+        env_path=env_path,
+        log_sink=log_sink,
+    )
+    round2_request.message.task_id = task_id
+    round2_request.message.context_id = context_id
+
+    # R4: re-register the SAME url/token via the REST endpoint before re-sending (the task now
+    # exists, so the endpoint path is available; round 1 could only register inline).
+    registration = TaskPushNotificationConfig(task_id=task_id, url=push_url, token=push_token)
+    if log_sink is not None:
+        log_sink(
+            format_stage_log(
+                role="client",
+                stage="webhook-push-reregister",
+                detail=(
+                    f"task_id={task_id} url={push_url} method=create_task_push_notification_config "
+                    f"token={'***' if push_token else ''}"
+                ),
+            )
+        )
+    await a2a_client.create_task_push_notification_config(registration)
+
+    round2_request.configuration.return_immediately = True  # NO inline config — registered above
+    if log_sink is not None:
+        log_sink(
+            format_stage_log(
+                role="client",
+                stage="a2a-send-message",
+                detail=(
+                    f"round=2 webhook text_part={_build_request_metadata(initial_input)} "
+                    f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
+                    f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
+                    f"header[A2A-Extensions]={','.join(sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI}))} "
+                    f"return_immediately=true push_registration=endpoint"
+                ),
+            )
+        )
+    await _send_webhook_round(
+        a2a_client=a2a_client, request=round2_request, call_context=round2_call_context, log_sink=log_sink
+    )
+
+    # Phase 2 consume: the negotiation closes on COMPLETED (R5); idle timeout backstops.
+    end_signal, artifact_count = await _consume_webhook_events(
+        webhook_queue=webhook_queue,
+        webhook_idle_timeout=webhook_idle_timeout,
+        normalized_events=normalized_events,
+        artifact_count=artifact_count,
+        log_sink=log_sink,
+        end_signals=_ROUND2_END_SIGNALS,
+    )
+    return artifact_count, end_signal == _WEBHOOK_SIGNAL_TIMEOUT
+
+
 def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
     """Render items as one numbered list: ``N. name：value；`` per item (the negotiation demo rule).
 
@@ -267,35 +633,29 @@ def _negotiation_accept_log_detail(
     return f"items={[(name, value) for name, value in negotiation_answers.items()]}"
 
 
-async def _run_negotiation_accept_round(
+def _build_negotiation_accept_request(
     *,
     prompt_client: A2ATClient,
-    a2a_client: object,
     initial_input: dict[str, object],
     session: NegotiationContext,
-    task_id: str,
-    context_id: str,
     negotiation_kind: str,
     channel: str,
     negotiation_params: dict[str, object],
     negotiation_answers: dict[str, str],
     env_path: Path | None,
-    normalized_events: list[dict[str, object]],
-    artifact_count: int,
-    max_artifacts: int | None,
     log_sink: object | None,
-) -> int:
-    """Answer the server's INPUT_REQUIRED propose with the filled Task-T prompt and the accept.
+) -> tuple[SendMessageRequest, ClientCallContext]:
+    """Build the negotiation round-2 accept request (shared by the SSE and webhook drivers).
 
-    Round 2 of the negotiation flow (demo ``run_four_message_flow`` message 3 over the real
-    streaming path): the session context parsed from the propose metadata drives the accept
-    (round advanced by one, performative ACCEPT) of the resolved negotiation type, the Task-T
-    prompt is regenerated from the filled parameters, and both travel in the round-2 message
-    metadata under their extension URIs. The channel switches only the accept generation call:
-    ``data`` builds the typed content and calls the deterministic from-data API (zero LLM calls),
-    ``text`` renders the same content as a natural-language message and calls the from-text API,
-    whose extraction step parses it back into the canonical typed content (one LLM call). Returns
-    the updated artifact count after consuming the round-2 stream into ``normalized_events``.
+    Round 2 of the negotiation flow (demo ``run_four_message_flow`` message 3): the session context
+    parsed from the propose metadata drives the accept (round advanced by one, performative ACCEPT)
+    of the resolved negotiation type, the Task-T prompt is regenerated from the filled parameters,
+    and both travel in the round-2 message metadata under their extension URIs. The channel
+    switches only the accept generation call: ``data`` builds the typed content and calls the
+    deterministic from-data API (zero LLM calls), ``text`` renders the same content as a
+    natural-language message and calls the from-text API, whose extraction step parses it back
+    into the canonical typed content (one LLM call). Returns the request and its call context;
+    the caller decides HOW to send it (SSE streaming / webhook non-blocking).
     """
     # Filled Task-T prompt: the parameters the propose asked for, regenerated from data. All types
     # complete the same four parameters, so one regeneration serves every negotiation kind.
@@ -345,8 +705,8 @@ async def _run_negotiation_accept_round(
     round2_request = SendMessageRequest()
     round2_request.message.message_id = str(uuid.uuid4())
     round2_request.message.role = Role.ROLE_USER
-    round2_request.message.task_id = task_id
-    round2_request.message.context_id = context_id
+    # task_id / context_id are filled by the caller from the round-1 events (the builder sees no
+    # events); the wire shape is identical for both drivers once set.
     round2_request.message.parts.add().text = _build_request_metadata(initial_input)
     round2_request.message.metadata[TASK_T_EXTENSION_URI] = filled_text
     round2_request.message.metadata[NEGOTIATION_T_EXTENSION_URI] = accept_text
@@ -366,6 +726,49 @@ async def _run_negotiation_accept_round(
     # a2a-sdk service-parameter helper emits (see with_a2a_extensions).
     extension_uris = sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI})
     round2_call_context = ClientCallContext(service_parameters={"A2A-Extensions": ",".join(extension_uris)})
+    return round2_request, round2_call_context
+
+
+async def _run_negotiation_accept_round(
+    *,
+    prompt_client: A2ATClient,
+    a2a_client: object,
+    initial_input: dict[str, object],
+    session: NegotiationContext,
+    task_id: str,
+    context_id: str,
+    negotiation_kind: str,
+    channel: str,
+    negotiation_params: dict[str, object],
+    negotiation_answers: dict[str, str],
+    env_path: Path | None,
+    normalized_events: list[dict[str, object]],
+    artifact_count: int,
+    max_artifacts: int | None,
+    log_sink: object | None,
+) -> int:
+    """Answer the server's INPUT_REQUIRED propose with the filled Task-T prompt and the accept.
+
+    SSE-path round 2: builds the accept request (shared builder) and consumes the round-2 stream
+    into ``normalized_events`` (stream cut once ``max_artifacts`` is reached).
+    """
+    round2_request, round2_call_context = _build_negotiation_accept_request(
+        prompt_client=prompt_client,
+        initial_input=initial_input,
+        session=session,
+        negotiation_kind=negotiation_kind,
+        channel=channel,
+        negotiation_params=negotiation_params,
+        negotiation_answers=negotiation_answers,
+        env_path=env_path,
+        log_sink=log_sink,
+    )
+    round2_request.message.task_id = task_id
+    round2_request.message.context_id = context_id
+
+    # The A2A-Extensions header carries both extension URIs as the comma-joined string the
+    # a2a-sdk service-parameter helper emits (see with_a2a_extensions).
+    extension_uris = sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI})
 
     return await _send_and_consume(
         a2a_client=a2a_client,
@@ -391,28 +794,41 @@ async def run_client_flow(
     initial_input: dict[str, object],
     input_text: str,
     max_artifacts: int | None = None,
-    log_sink: object | None = None,
+    log_sink: Callable[[str], None] | None = None,
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
+    transport: str = TRANSPORT_SSE,
+    webhook_queue: asyncio.Queue[dict[str, object]] | None = None,
+    push_url: str | None = None,
+    push_token: str | None = None,
+    webhook_idle_timeout: float = 30.0,
 ) -> list[dict[str, object]]:
-    """Generate a Task-T prompt with the A2A-T client SDK, then stream the A2A server's artifacts.
+    """Generate a Task-T prompt with the A2A-T client SDK, then receive the A2A server's artifacts.
+
+    Two event transports (plan v3): ``sse`` (default) consumes the streaming response exactly as
+    before; ``webhook`` embeds no SSE at all — the request goes out as non-blocking
+    ``message:send`` with ``return_immediately=True`` and an inline push-notification config, and
+    every task event arrives as a webhook POST on the embedded receiver's ``webhook_queue``
+    (``_run_webhook_flow`` drives rounds/end-signals there; the events summary counts
+    WEBHOOK-received events and adds ``transport=webhook``).
 
     Pipeline and its logged boundaries:
       1. raw natural-language input                            -> ``[client] input-raw``
       2. ``A2ATClient.generate_task_prompt_from_text``         -> ``[client] sdk-call`` /
                                                                    ``[client] sdk-output-prompt``
-      3. A2A SDK ``send_message`` (streaming) to the server    -> ``[client] a2a-send-message``
-      4. each received A2A event, as raw JSON                 -> ``[client] a2a-event``
+      3. A2A SDK ``send_message`` to the server                -> ``[client] a2a-send-message``
+      4. each received A2A event, as raw JSON                 -> ``[client] a2a-event`` (SSE) /
+                                                                   ``[client] webhook-event`` (webhook)
       5. Negotiation round trip: when the server answers INPUT_REQUIRED with a Negotiation-T
          propose (status message metadata) and negotiation answers are supplied, resolve the
          negotiation kind (the explicit flag, else the propose's ``templateUri`` — dispatch on
          the wire), regenerate the Task-T prompt from the filled parameters, render the
          Negotiation-T accept of that type for the parsed session (from typed data, or from a
          natural-language rendering plus one extraction LLM call per the configured channel),
-         and re-send over a second streaming request
+         and re-send over a second request
                                                             -> ``[client] negotiation-accept`` /
                                                                ``[client] a2a-send-message`` (round=2)
 
@@ -472,60 +888,101 @@ async def run_client_flow(
         service_parameters={"A2A-Extensions": extension_uri},
     )
 
-    # (4) consume the streamed status/artifact events
+    # (4) consume the task events: SSE stream (unchanged), or webhook pushes via the embedded
+    # receiver's queue (v3) — the negotiation detection and counting below work on both shapes.
     normalized_events: list[dict[str, object]] = []
     artifact_count = 0
-    artifact_count = await _send_and_consume(
-        a2a_client=a2a_client,
-        request=request,
-        call_context=call_context,
-        send_log_detail=(
-            f"streaming text_part={_build_request_metadata(initial_input)} "
-            f"metadata_keys=[{extension_uri}, templateUri] "
-            f"header[A2A-Extensions]={extension_uri}"
-        ),
-        normalized_events=normalized_events,
-        artifact_count=artifact_count,
-        max_artifacts=max_artifacts,
-        log_sink=log_sink,
-    )
+    webhook_timed_out = False
+    if transport == TRANSPORT_WEBHOOK:
+        if webhook_queue is None:
+            raise ValueError("webhook transport requires webhook_queue (the embedded receiver's event queue)")
+        if push_url is None:
+            raise ValueError("webhook transport requires push_url (the receiver's callback URL)")
+        artifact_count, webhook_timed_out = await _run_webhook_flow(
+            prompt_client=prompt_client,
+            a2a_client=a2a_client,
+            initial_input=initial_input,
+            request=request,
+            call_context=call_context,
+            webhook_queue=webhook_queue,
+            push_url=push_url,
+            push_token=push_token or "",
+            webhook_idle_timeout=webhook_idle_timeout,
+            negotiation_params=negotiation_params,
+            negotiation_answers=negotiation_answers,
+            negotiation_kind=negotiation_kind,
+            channel=channel,
+            env_path=env_path,
+            normalized_events=normalized_events,
+            artifact_count=artifact_count,
+            log_sink=log_sink,
+        )
+    else:
+        artifact_count = await _send_and_consume(
+            a2a_client=a2a_client,
+            request=request,
+            call_context=call_context,
+            send_log_detail=(
+                f"streaming text_part={_build_request_metadata(initial_input)} "
+                f"metadata_keys=[{extension_uri}, templateUri] "
+                f"header[A2A-Extensions]={extension_uri}"
+            ),
+            normalized_events=normalized_events,
+            artifact_count=artifact_count,
+            max_artifacts=max_artifacts,
+            log_sink=log_sink,
+        )
 
-    # (5) negotiation round trip: answer the server's INPUT_REQUIRED propose with the accept
-    input_required_event = _find_negotiation_input_required(normalized_events)
-    if input_required_event is not None and (negotiation_params is None or negotiation_answers is None):
-        if log_sink is not None:
-            log_sink(
-                format_stage_log(
-                    role="client",
-                    stage="negotiation-unhandled",
-                    detail=(
-                        "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, staying on round 1"
-                    ),
+    # (5) negotiation round trip: answer the server's INPUT_REQUIRED propose with the accept.
+    # SSE-only: the webhook driver answers the propose inline inside its event loop (round 2 with
+    # the endpoint re-registration happens there).
+    if transport != TRANSPORT_WEBHOOK:
+        input_required_event = _find_negotiation_input_required(normalized_events)
+        if input_required_event is not None and (negotiation_params is None or negotiation_answers is None):
+            if log_sink is not None:
+                log_sink(
+                    format_stage_log(
+                        role="client",
+                        stage="negotiation-unhandled",
+                        detail=(
+                            "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, staying on round 1"
+                        ),
+                    )
                 )
-            )
-    elif input_required_event is not None:
-        metadata = input_required_event.get("metadata")
-        session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
-        if session is not None and isinstance(metadata, dict):
-            negotiation_type = _resolve_negotiation_kind(metadata, negotiation_kind)
-            if negotiation_type is not None:
-                artifact_count = await _run_negotiation_accept_round(
-                    prompt_client=prompt_client,
-                    a2a_client=a2a_client,
-                    initial_input=initial_input,
-                    session=session,
-                    task_id=_first_task_id(normalized_events),
-                    context_id=str(input_required_event.get("context_id", "")),
-                    negotiation_kind=negotiation_type,
-                    channel=channel,
-                    negotiation_params=negotiation_params,
-                    negotiation_answers=negotiation_answers,
-                    env_path=env_path,
-                    normalized_events=normalized_events,
-                    artifact_count=artifact_count,
-                    max_artifacts=max_artifacts,
-                    log_sink=log_sink,
-                )
+        elif input_required_event is not None:
+            metadata = input_required_event.get("metadata")
+            session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
+            if session is not None and isinstance(metadata, dict):
+                negotiation_type = _resolve_negotiation_kind(metadata, negotiation_kind)
+                if negotiation_type is not None:
+                    artifact_count = await _run_negotiation_accept_round(
+                        prompt_client=prompt_client,
+                        a2a_client=a2a_client,
+                        initial_input=initial_input,
+                        session=session,
+                        task_id=_first_task_id(normalized_events),
+                        context_id=str(input_required_event.get("context_id", "")),
+                        negotiation_kind=negotiation_type,
+                        channel=channel,
+                        negotiation_params=negotiation_params,
+                        negotiation_answers=negotiation_answers,
+                        env_path=env_path,
+                        normalized_events=normalized_events,
+                        artifact_count=artifact_count,
+                        max_artifacts=max_artifacts,
+                        log_sink=log_sink,
+                    )
+                elif log_sink is not None:
+                    log_sink(
+                        format_stage_log(
+                            role="client",
+                            stage="negotiation-unhandled",
+                            detail=(
+                                "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                                "(unrecognized propose templateUri), staying on round 1"
+                            ),
+                        )
+                    )
             elif log_sink is not None:
                 log_sink(
                     format_stage_log(
@@ -533,28 +990,25 @@ async def run_client_flow(
                         stage="negotiation-unhandled",
                         detail=(
                             "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
-                            "(unrecognized propose templateUri), staying on round 1"
+                            "(malformed/missing session context), staying on round 1"
                         ),
                     )
                 )
-        elif log_sink is not None:
-            log_sink(
-                format_stage_log(
-                    role="client",
-                    stage="negotiation-unhandled",
-                    detail=(
-                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
-                        "(malformed/missing session context), staying on round 1"
-                    ),
-                )
-            )
 
     if log_sink is not None:
+        if transport == TRANSPORT_WEBHOOK:
+            # R6: the summary counts WEBHOOK-received events (+ artifacts); the RPC replies are
+            # logged separately and never counted. A timeout end is noted on the line (R5).
+            detail = f"events={len(normalized_events)} artifacts={artifact_count} transport=webhook"
+            if webhook_timed_out:
+                detail += f" idle-timeout={webhook_idle_timeout}s"
+        else:
+            detail = f"events={len(normalized_events)} artifacts={artifact_count}"
         log_sink(
             format_stage_log(
                 role="client",
                 stage="stream-completed",
-                detail=f"events={len(normalized_events)} artifacts={artifact_count}",
+                detail=detail,
             )
         )
     return normalized_events

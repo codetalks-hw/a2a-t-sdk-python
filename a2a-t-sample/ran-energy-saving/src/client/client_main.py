@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from common.llm_logger import install_llm_logger, set_llm_log_sink
 from common.logging_utils import build_sample_logger, resolve_sample_debug
 from common.mock_llm import install_mock_llm_if_needed
 from common.registry_client import query_by_name_org
+from common.webhook_receiver import WebhookReceiver
 from dotenv import dotenv_values
 from google.protobuf.json_format import ParseDict
 
@@ -27,6 +29,8 @@ from client.scenario_data import (
     NEGOTIATION_KIND_FEASIBILITY,
     NEGOTIATION_KIND_TARGET,
     SCENARIO_NEGOTIATION,
+    TRANSPORT_SSE,
+    TRANSPORT_WEBHOOK,
     build_prompt_input,
     build_task_request,
     negotiation_answers,
@@ -34,6 +38,10 @@ from client.scenario_data import (
     resolve_channel,
     resolve_negotiation_kind,
     resolve_scenario,
+    resolve_transport,
+    resolve_webhook_idle_timeout,
+    resolve_webhook_port,
+    resolve_webhook_token,
 )
 
 install_mock_llm_if_needed()
@@ -148,7 +156,7 @@ async def run_main(
     bootstrap: object = build_client_runtime,
     flow: object = run_client_flow,
     logger: Any | None = None,
-    log_sink: object | None = None,
+    log_sink: Callable[[str], None] | None = None,
     debug_enabled: bool = False,
     max_artifacts: int | None = None,
     registry_query_fn: object = query_by_name_org,
@@ -156,63 +164,124 @@ async def run_main(
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     channel: str = CHANNEL_DATA,
+    transport: str = TRANSPORT_SSE,
+    webhook_port: int | None = None,
+    webhook_token: str | None = None,
+    webhook_idle_timeout: float | None = None,
 ) -> object:
-    """Run the full client flow: bootstrap runtime, discover agent, generate prompt, consume stream.
+    """Run the full client flow: bootstrap runtime, discover agent, generate prompt, consume events.
 
     The negotiation arguments are supplied by the caller for the negotiation kinds: when the server
     answers the round-1 prompt with an INPUT_REQUIRED propose, the flow answers it with the filled
     Task-T prompt and the Negotiation-T accept of the resolved type (round 2). The ``negotiation_kind``
     flag selects the accept type directly; ``None`` dispatches on the propose's ``templateUri``.
+
+    Transport (plan v3): ``sse`` (default) consumes the streaming response unchanged; ``webhook``
+    starts the embedded ``WebhookReceiver`` on THIS asyncio loop before the flow runs (lifecycle:
+    stopped in the ``finally`` after the flow ends or Ctrl+C unwinds), feeds its events through an
+    ``asyncio.Queue`` into the flow, and builds the a2a client with ``ClientConfig(streaming=False)``
+    (R2 — required to select non-blocking ``message:send``). The receiver's port/token/idle-timeout
+    resolve from the run ``.env`` unless explicitly supplied.
     """
     resolved_logger = logger
     if resolved_logger is None and log_sink is not None and debug_enabled:
         resolved_logger = build_sample_logger(sink=log_sink, debug_enabled=True)
     runtime = await bootstrap(env_path=env_path, logger=resolved_logger)
 
-    agent_card_query = initial_input.get("agent_card_query")
-    query_name = str(agent_card_query.get("name", "")) if isinstance(agent_card_query, dict) else ""
-    query_org = str(agent_card_query.get("organization", "")) if isinstance(agent_card_query, dict) else ""
-    agent_card_response = await registry_query_fn(
-        organization=query_org,
-        name=query_name,
-        env_path=env_path,
-        log_sink=log_sink,
-    )
-    agent_cards = agent_card_response.get("agentCards") or []
-    if not agent_cards:
-        raise ValueError(
-            f"agent discovery failed: no AgentCard found for name='{query_name}' organization='{query_org}'"
+    # Webhook-mode runtime (v3): receiver on this loop + event queue + registered push params.
+    webhook_queue: asyncio.Queue[dict[str, object]] | None = None
+    receiver: WebhookReceiver | None = None
+    push_url: str | None = None
+    push_token: str | None = None
+    resolved_idle_timeout: float = 30.0
+    if transport == TRANSPORT_WEBHOOK:
+        resolved_token = webhook_token if webhook_token is not None else resolve_webhook_token(env_path=env_path)
+        resolved_port = webhook_port if webhook_port is not None else resolve_webhook_port(env_path=env_path)
+        resolved_idle_timeout = (
+            webhook_idle_timeout
+            if webhook_idle_timeout is not None
+            else resolve_webhook_idle_timeout(env_path=env_path)
         )
-    agent_card_dict = agent_cards[0]
-    endpoint = resolve_preferred_interface(agent_card_dict)
-    if log_sink is not None:
-        log_sink(f"[client] agent-discovered: url={endpoint.url} binding={endpoint.protocol_binding}")
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        receiver = WebhookReceiver(
+            token=resolved_token,
+            on_event=queue.put_nowait,
+            port=resolved_port,
+            log_sink=log_sink,
+        )
+        await receiver.start()
+        webhook_queue = queue
+        push_url = receiver.url
+        push_token = resolved_token
+        if log_sink is not None:
+            log_sink(
+                f"[client] webhook-mode: push_url={push_url} idle_timeout={resolved_idle_timeout}s "
+                "(client streaming=false, events via push notifications)"
+            )
 
-    client_factory = ClientFactory(
-        ClientConfig(
+    try:
+        agent_card_query = initial_input.get("agent_card_query")
+        query_name = str(agent_card_query.get("name", "")) if isinstance(agent_card_query, dict) else ""
+        query_org = str(agent_card_query.get("organization", "")) if isinstance(agent_card_query, dict) else ""
+        agent_card_response = await registry_query_fn(
+            organization=query_org,
+            name=query_name,
+            env_path=env_path,
+            log_sink=log_sink,
+        )
+        agent_cards = agent_card_response.get("agentCards") or []
+        if not agent_cards:
+            raise ValueError(
+                f"agent discovery failed: no AgentCard found for name='{query_name}' organization='{query_org}'"
+            )
+        agent_card_dict = agent_cards[0]
+        endpoint = resolve_preferred_interface(agent_card_dict)
+        if log_sink is not None:
+            log_sink(f"[client] agent-discovered: url={endpoint.url} binding={endpoint.protocol_binding}")
+
+        client_config = ClientConfig(
             httpx_client=runtime["httpx_client"],
             supported_protocol_bindings=[TransportProtocol.HTTP_JSON],
             use_client_preference=True,
         )
-    )
-    agent_card = ParseDict(agent_card_dict, AgentCard())
-    a2a_client = client_factory.create(agent_card)
+        if transport == TRANSPORT_WEBHOOK:
+            # R2 (builder-check V2): the high-level client selects non-blocking message:send ONLY
+            # when the config carries streaming=False — return_immediately on the request alone
+            # does not switch the path.
+            client_config.streaming = False
+        client_factory = ClientFactory(client_config)
+        agent_card = ParseDict(agent_card_dict, AgentCard())
+        a2a_client = client_factory.create(agent_card)
 
-    if log_sink is not None:
-        log_sink(f"[client] bootstrap-ready: server_url={endpoint.url}")
-    return await flow(
-        prompt_client=runtime["prompt_client"],
-        a2a_client=a2a_client,
-        initial_input=initial_input,
-        input_text=input_text,
-        max_artifacts=max_artifacts,
-        log_sink=log_sink,
-        negotiation_params=negotiation_params,
-        negotiation_answers=negotiation_answers,
-        negotiation_kind=negotiation_kind,
-        channel=channel,
-        env_path=env_path,
-    )
+        if log_sink is not None:
+            log_sink(f"[client] bootstrap-ready: server_url={endpoint.url}")
+        flow_kwargs: dict[str, object] = {
+            "prompt_client": runtime["prompt_client"],
+            "a2a_client": a2a_client,
+            "initial_input": initial_input,
+            "input_text": input_text,
+            "max_artifacts": max_artifacts,
+            "log_sink": log_sink,
+            "negotiation_params": negotiation_params,
+            "negotiation_answers": negotiation_answers,
+            "negotiation_kind": negotiation_kind,
+            "channel": channel,
+            "env_path": env_path,
+        }
+        if transport == TRANSPORT_WEBHOOK:
+            flow_kwargs.update(
+                transport=transport,
+                webhook_queue=webhook_queue,
+                push_url=push_url,
+                push_token=push_token,
+                webhook_idle_timeout=resolved_idle_timeout,
+            )
+        return await flow(**flow_kwargs)
+    finally:
+        # Receiver lifecycle follows the flow (and Ctrl+C: the KeyboardInterrupt unwinds through
+        # here exactly as in SSE mode — the receiver installs no signal handlers of its own).
+        if receiver is not None:
+            await receiver.stop()
 
 
 def main(
@@ -232,6 +301,7 @@ def main(
         scenario = resolve_scenario(env_path=resolved_env_path)
         channel = resolve_channel(env_path=sample_env_path)
         negotiation_kind = resolve_negotiation_kind(env_path=sample_env_path)
+        transport = resolve_transport(env_path=sample_env_path)
         print(
             f"[client] startup: server_url={resolve_server_url(env_path=resolved_env_path)} "
             f"debug={'true' if debug_enabled else 'false'} scenario={scenario} channel={channel}"
@@ -256,6 +326,7 @@ def main(
                 negotiation_answers=negotiation_answers_map,
                 negotiation_kind=negotiation_kind,
                 channel=channel,
+                transport=transport,
             )
         )
 

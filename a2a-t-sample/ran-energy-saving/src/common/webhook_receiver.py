@@ -14,7 +14,11 @@ the dict-to-event adaptation lives with the caller, not here.
 Hosting follows the client's lifecycle: ``start()`` runs ``uvicorn.Server.serve()`` as an asyncio
 task on the running event loop and resolves the bound port before returning (an OS-assigned
 ephemeral port when constructed with ``port=0``); ``stop()`` shuts the server down gracefully and
-is idempotent.
+is idempotent. Uvicorn's own signal handling is disabled (the pre-uvicorn-0.52
+``install_signal_handlers=False`` semantics, which that version removed — reimplemented by
+``_HostSignalServer``) so Ctrl+C in the host client process raises ``KeyboardInterrupt`` exactly
+as it does in SSE mode — the client's ``run_main`` ``finally`` then calls ``stop()`` (same
+semantics as the SSE path).
 """
 
 from __future__ import annotations
@@ -52,6 +56,21 @@ _STREAM_RESPONSE_KEYS = ("task", "statusUpdate", "artifactUpdate", "message")
 #: drain budget of ``stop()``.
 _STARTUP_TIMEOUT_SECONDS = 10.0
 _STOP_TIMEOUT_SECONDS = 5.0
+
+
+class _HostSignalServer(uvicorn.Server):
+    """不接管进程信号的 uvicorn Server（旧版 ``Config.install_signal_handlers=False`` 的等价物）。
+
+    本机 uvicorn 0.52 已移除 ``install_signal_handlers`` 配置项，``Server.serve()`` 在主线程
+    无条件 ``capture_signals()``——不处理的话，第一次 Ctrl+C 会被 uvicorn 换成"优雅关闭接收器"
+    （流程继续跑），与 SSE 模式的 KeyboardInterrupt 语义不一致。重写为空操作后，Ctrl+C 照常
+    在宿主 client_main 里抛 KeyboardInterrupt，由 ``run_main`` 的 ``finally`` 调 ``stop()`` 收尾
+    接收器（webhook 模式与 SSE 模式的 Ctrl+C 行为完全一致）。
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self):  # type: ignore[override]
+        yield
 
 
 def _recognized_stream_key(payload: object) -> str | None:
@@ -113,7 +132,7 @@ class WebhookReceiver:
         if self._serve_task is not None:
             return
         config = uvicorn.Config(self._app, host=self._host, port=self._port, log_level="warning", access_log=False)
-        server = uvicorn.Server(config)
+        server: uvicorn.Server = _HostSignalServer(config)
         serve_task = asyncio.create_task(self._serve(server), name="webhook-receiver")
         deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
         while not server.started:
