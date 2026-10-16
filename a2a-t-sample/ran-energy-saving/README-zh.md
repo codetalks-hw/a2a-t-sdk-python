@@ -267,6 +267,9 @@ async def execute(self, context: RequestContext, event_queue: EventQueue) -> Non
 除上述默认流程外，本样例还提供多个协商场景，在同一条流式链路上演示 **Negotiation-T** 协商。支持三类
 协商类型，由服务端产生的内容校验错误码数据驱动地选择：
 
+> 要把协商集成到您自己的系统？参见 [A2A-T 协商集成指南](../../docs/zh/协商集成指南.md)，了解
+> SDK/客户职责分界、七步集成路径与 demo 到生产的替换清单。
+
 | 内容校验错误码 | 协商类型 | 第 1 轮 propose → 第 2 轮 accept |
 | --- | --- | --- |
 | `content.param_missing` | 信息协商（information） | 服务端索要缺失参数（`region`）；客户端补全后应答 |

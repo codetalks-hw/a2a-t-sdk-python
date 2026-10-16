@@ -277,6 +277,11 @@ Besides the default flow above, the sample ships negotiation scenarios that demo
 negotiations over the same streaming path. Three negotiation kinds are supported, selected data-driven
 by the content-validation error code the server produces:
 
+> Integrating negotiation into your own system? See the
+> [A2A-T Negotiation Integration Guide](../../docs/en/negotiation_integration_guide.md) for the
+> SDK/customer responsibility split, the seven-step integration path, and the demo-to-production
+> replacement checklist.
+
 | Validation error code | Negotiation kind | Round 1 propose → round 2 accept |
 | --- | --- | --- |
 | `content.param_missing` | information | the server asks for the missing parameter (`region`); the client answers with the filled value |
