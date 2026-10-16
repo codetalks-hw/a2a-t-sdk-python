@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
 
@@ -55,10 +55,12 @@ class NegotiationDecision:
       through the existing accept builders, so the wire behavior is the demo's accept.
     * ``"reject"`` / ``"abort"`` — not wired in this demo: the flow logs the decision and ends the
       round without sending anything (see the integration guide for the SDK reject/abort APIs a
-      customer wires to actually emit them).
+      customer wires to actually emit them). ``reason`` is accepted for reject/abort but unused by
+      the demo flow — it becomes the ending content's ``failure_reason`` once you wire the
+      reject/abort send yourself (see the integration guide).
     """
 
-    conclusion: str
+    conclusion: Literal["accept", "reject", "abort"]
     filled_params: dict[str, object] | None = None
     confirmed_intent: str | None = None
     feasibility_summary: str | None = None

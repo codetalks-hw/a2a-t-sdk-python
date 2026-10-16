@@ -189,7 +189,7 @@ class NegotiationProposeView:
 
 @dataclass(frozen=True, slots=True)
 class NegotiationDecision:
-    conclusion: str                                  # "accept" / "reject" / "abort"
+    conclusion: Literal["accept", "reject", "abort"] # accept / reject / abort
     filled_params: dict[str, object] | None = None   # information accept: the name->value items
     confirmed_intent: str | None = None              # target accept
     feasibility_summary: str | None = None           # feasibility accept
@@ -206,9 +206,15 @@ builds the view from the wire metadata, calls `respond`, and acts on the decisio
   session, and sends round 2 over the configured transport.
 - `reject` / `abort` → **not wired in this demo**: the flow logs
   `negotiation-decision: {conclusion} (not wired in this demo; see the integration guide)` and ends
-  the flow without sending anything. To actually emit them, wire the SDK's
-  `generate_negotiation_reject_prompt_from_data` / `generate_negotiation_abort_prompt_from_data`
-  (or their `_from_text` variants) at your decision point — see §5.2.
+  the flow without sending anything. The real extension point is the reject/abort branch of
+  `_plan_negotiation_accept` in
+  [client_flow.py](../../a2a-t-sample/ran-energy-saving/src/client/client_flow.py) — the decision
+  point (`respond`) only returns a `NegotiationDecision` and cannot send wire messages. To emit
+  them, extend that branch to mirror `_run_negotiation_accept_round`: advance the session with
+  `session.next_round().with_performative(NegotiationPerformative.REJECT)`, build the proposed
+  type's ending content with conclusion `Reject` (the decision's `reason` becomes the ending
+  content's `failure_reason`), and generate the round-2 reject with the SDK's
+  `generate_negotiation_reject_prompt_from_data` / `..._from_text` (per channel) — see §5.2.
 - `respond` is synchronous — the flow blocks at the decision point. A customer implementation that
   needs asynchrony (a human confirmation UI, an upstream system call) owns that internally.
 
@@ -385,7 +391,7 @@ template; abort uses the common `Negotiation-T/common/abort/v1` template with
 | --- | --- | --- |
 | mock LLM — [resources/mock_llm/](../../a2a-t-sample/ran-energy-saving/resources/mock_llm) + the schema-routed mock in `src/common/` | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI/offline runs; **REMOVE** from production deployments and configure a real OpenAI-compatible endpoint (step 2) |
 | scripted execution data — [src/server/constants_data.py](../../a2a-t-sample/ran-energy-saving/src/server/constants_data.py) | the UC1 progress steps and intent report the demo execution service streams | **REPLACE** via the `TaskExecutionService` seam (step 3); once your service is assembled, `Uc1DemoExecutionService` and the demo data can be deleted |
-| scripted answers — [src/client/scenario_data.py](../../a2a-t-sample/ran-energy-saving/src/client/scenario_data.py) | the client's filled parameters, confirmed intent, and feasibility summary | **REPLACE** via the `NegotiationResponseProvider` seam (step 4); `ScriptedNegotiationResponseProvider` then has no assembly site |
+| scripted answers — [src/client/scenario_data.py](../../a2a-t-sample/ran-energy-saving/src/client/scenario_data.py) | feeds BOTH sides: the client answers (filled parameters, confirmed intent, feasibility summary) via the provider seam, and the server's propose content — `server_flow._negotiation_propose_data` builds the target/feasibility propose texts from its accessors | **REPLACE** on both sides: the client answers via the `NegotiationResponseProvider` seam (step 4), and the accessor-backed propose texts in your copy of `server_flow._negotiation_propose_data` with your business phrasing — replacing only provider and execution service still leaves the server proposing the demo's canned texts, so the module is not removable |
 | mock registry — [src/registry/](../../a2a-t-sample/ran-energy-saving/src/registry) (port 5001) | AgentCard register/query mock for discovery | **REPLACE** with your registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
 | static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | shared static token carried in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-pair secrets, rotation, TLS) — see §5.3 |
 
@@ -416,11 +422,18 @@ template; abort uses the common `Negotiation-T/common/abort/v1` template with
 - **Reject/abort in the demo:** a `reject`/`abort` decision from the provider is *not* wired to the
   wire — the flow logs
   `negotiation-decision: {conclusion} (not wired in this demo; see the integration guide)` and ends
-  the flow without sending (same end-of-flow semantics as an unhandled propose). To actually emit
-  them, call the SDK's `generate_negotiation_reject_prompt_from_data` (the reject shares the type's
+  the flow without sending (same end-of-flow semantics as an unhandled propose). There is no other
+  seam: the decision point (`respond`) only returns a `NegotiationDecision` and cannot send wire
+  messages. To actually emit them, extend the reject/abort branch of `_plan_negotiation_accept` in
+  client_flow.py to mirror `_run_negotiation_accept_round`: advance the session with
+  `session.next_round().with_performative(NegotiationPerformative.REJECT)`, build the proposed
+  type's ending content with conclusion `Reject` (`TargetEndingContent.failure_reason` carries the
+  decision's `reason`; abort uses `NegotiationAbortContent(termination_reason)` instead), and call
+  the SDK's `generate_negotiation_reject_prompt_from_data` (the reject shares the type's
   `accept-reject` template, e.g. `Negotiation-T/feasibility-negotiation/accept-reject/v1`) or
-  `generate_negotiation_abort_prompt_from_data` at your decision point; both exist on
-  `A2ATClient` and `A2ATServer`, with `_from_text` variants that add one extraction LLM call.
+  `generate_negotiation_abort_prompt_from_data` (the common `Negotiation-T/common/abort/v1`
+  template); both exist on `A2ATClient` and `A2ATServer`, with `_from_text` variants that add one
+  extraction LLM call.
 - **Diagnosing your own provider:** two further `negotiation-decision` problem logs tell you when
   the flow could not use a decision —
   `unsupported conclusion {c!r}; staying on round 1` for an unknown conclusion, and
