@@ -304,7 +304,8 @@ def main(
         transport = resolve_transport(env_path=sample_env_path)
         print(
             f"[client] startup: server_url={resolve_server_url(env_path=resolved_env_path)} "
-            f"debug={'true' if debug_enabled else 'false'} scenario={scenario} channel={channel}"
+            f"debug={'true' if debug_enabled else 'false'} scenario={scenario} channel={channel} "
+            f"transport={transport}"
         )
         # The target/feasibility kinds select their own (complete) scenario input regardless of the
         # scenario switch, so they engage the negotiation round trip like the negotiation scenario.

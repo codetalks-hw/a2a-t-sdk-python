@@ -182,8 +182,10 @@ class WebhookReceiver:
             await asyncio.wait_for(serve_task, timeout=_STOP_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             # wait_for (3.12+) already cancelled and reaped the serve task on timeout; the drain
-            # simply exceeded the budget, so record it instead of forcing anything.
+            # simply exceeded the budget, so record it instead of forcing anything — and return
+            # WITHOUT the ``stopped`` line: the graceful stop did not complete.
             self._log("stop-timeout", f"url={self.url} graceful stop exceeded {_STOP_TIMEOUT_SECONDS:.0f}s")
+            return
         except asyncio.CancelledError:
             raise
         except Exception as exc:

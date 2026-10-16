@@ -195,15 +195,26 @@ async def _send_and_consume(
 
 # --- webhook transport (v3)：事件管线复用 ------------------------------------------------------
 
-#: Webhook 事件循环的结束信号（plan R5/D7）：round 1 以 artifact（默认场景结束信号）或
-#: INPUT_REQUIRED（协商场景的应答点）结束；round 2（协商 accept 之后）以 COMPLETED 结束；
-#: 空闲超时（idle timeout）是所有场景的兜底结束信号。
+#: Webhook 事件循环的结束信号（plan R5/D7 + final fix）：round 1 以 artifact（默认场景结束信号）、
+#: INPUT_REQUIRED（协商场景的应答点——中断信号，非终态）或任一 SDK 终态结束；round 2（协商 accept
+#: 之后）以任一 SDK 终态结束。终态集 COMPLETED / CANCELED / FAILED / REJECTED 对齐 a2a-sdk
+#: ``DefaultRequestHandler.TERMINAL_TASK_STATES``：服务端在协商拒绝（round-2 校验失败、round-1 未映射
+#: 错误码）时推送 REJECTED、流异常时推送 FAILED——webhook 客户端必须立即结束流程（summary 记
+#: ``end=<state>``），而不是等空闲超时兜底。空闲超时（idle timeout）是所有场景的兜底结束信号。
 _WEBHOOK_SIGNAL_ARTIFACT = "artifact"
 _WEBHOOK_SIGNAL_INPUT_REQUIRED = "input-required"
-_WEBHOOK_SIGNAL_COMPLETED = "completed"
 _WEBHOOK_SIGNAL_TIMEOUT = "timeout"
-_ROUND1_END_SIGNALS = frozenset({_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED})
-_ROUND2_END_SIGNALS = frozenset({_WEBHOOK_SIGNAL_COMPLETED})
+_TERMINAL_STATE_SIGNALS: frozenset[str] = frozenset(
+    TaskState.Name(state)
+    for state in (
+        TaskState.TASK_STATE_COMPLETED,
+        TaskState.TASK_STATE_CANCELED,
+        TaskState.TASK_STATE_FAILED,
+        TaskState.TASK_STATE_REJECTED,
+    )
+)
+_ROUND1_END_SIGNALS = _TERMINAL_STATE_SIGNALS | {_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED}
+_ROUND2_END_SIGNALS = _TERMINAL_STATE_SIGNALS  # 终态即 round-2 的全部结束信号
 
 
 def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -290,7 +301,14 @@ def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _webhook_end_signal(event: dict[str, object], end_signals: frozenset[str]) -> str | None:
-    """Return the webhook end signal this event matches, ``None`` to keep consuming (plan R5/D7)."""
+    """Return the webhook end signal this event matches, ``None`` to keep consuming (plan R5/D7).
+
+    Terminal task states (the SDK's COMPLETED / CANCELED / FAILED / REJECTED set) end BOTH phases
+    and are reported under their TaskState name (the summary notes ``end=<state>``) — a REJECTED
+    validation failure or a FAILED stream must end the flow instead of hanging to the idle
+    backstop. INPUT_REQUIRED stays the phase-1-only interrupt (not a terminal state); the artifact
+    signal stays phase-1-only (the default scenario's end).
+    """
     if event.get("kind") == "artifact":
         return _WEBHOOK_SIGNAL_ARTIFACT if _WEBHOOK_SIGNAL_ARTIFACT in end_signals else None
     if event.get("kind") != "status":
@@ -298,8 +316,8 @@ def _webhook_end_signal(event: dict[str, object], end_signals: frozenset[str]) -
     state = event.get("state")
     if state == TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED):
         return _WEBHOOK_SIGNAL_INPUT_REQUIRED if _WEBHOOK_SIGNAL_INPUT_REQUIRED in end_signals else None
-    if state == TaskState.Name(TaskState.TASK_STATE_COMPLETED):
-        return _WEBHOOK_SIGNAL_COMPLETED if _WEBHOOK_SIGNAL_COMPLETED in end_signals else None
+    if isinstance(state, str) and state in end_signals:
+        return state
     return None
 
 
@@ -401,7 +419,7 @@ async def _run_webhook_flow(
     normalized_events: list[dict[str, object]],
     artifact_count: int,
     log_sink: Callable[[str], None] | None,
-) -> tuple[int, bool]:
+) -> tuple[int, str]:
     """Drive the whole task over the webhook transport (v3, plan R2/R4/R5/R6).
 
     Round 1: register the push config INLINE on the request (the task id is unknown before the
@@ -409,10 +427,13 @@ async def _run_webhook_flow(
     ``return_immediately=True`` through the ``streaming=False`` client, then consume webhook
     events. An INPUT_REQUIRED propose is answered in-round: re-register the SAME url/token via
     ``create_task_push_notification_config`` (the REST endpoint — the second registration path),
-    send the accept (non-blocking, NO inline config — already registered), and keep consuming
-    until COMPLETED. The default scenario ends on the report artifact. The idle timeout is the
-    backstop that ends any phase with a diagnostic line and a normal exit. Returns the artifact
-    count and whether a timeout ended the flow.
+    send the accept (non-blocking, NO inline config — already registered), and keep consuming. The
+    default scenario ends on the report artifact; any terminal state (COMPLETED / FAILED /
+    CANCELED / REJECTED) ends whichever phase is consuming right there — a REJECTED/FAILED push
+    must not hang until the idle backstop. The idle timeout is the backstop that ends any phase
+    with a diagnostic line and a normal exit. Returns the artifact count and the end signal of the
+    last consumed phase (``artifact`` / ``input-required`` / a ``TASK_STATE_*`` terminal state /
+    ``timeout``) — the caller derives the timeout flag and the ``end=`` summary note from it.
     """
     # Round-1 request additions (R2/R4): non-blocking + inline push registration.
     request.configuration.return_immediately = True
@@ -434,7 +455,8 @@ async def _run_webhook_flow(
     await _send_webhook_round(a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink)
 
     # Phase 1 consume: default scenario ends on the artifact; a negotiation propose pauses on
-    # INPUT_REQUIRED; the idle timeout backstops both (R5).
+    # INPUT_REQUIRED; a terminal state (e.g. a round-1 REJECTED validation failure) ends the whole
+    # flow right here — no round 2; the idle timeout backstops all of them (R5 + final fix).
     end_signal, artifact_count = await _consume_webhook_events(
         webhook_queue=webhook_queue,
         webhook_idle_timeout=webhook_idle_timeout,
@@ -444,13 +466,13 @@ async def _run_webhook_flow(
         end_signals=_ROUND1_END_SIGNALS,
     )
     if end_signal != _WEBHOOK_SIGNAL_INPUT_REQUIRED:
-        return artifact_count, end_signal == _WEBHOOK_SIGNAL_TIMEOUT
+        return artifact_count, end_signal
 
     # Negotiation round 2 (reuses the SSE-path detection/builders verbatim; same unhandled logs).
     input_required_event = _find_negotiation_input_required(normalized_events)
     if input_required_event is None:
         # Plain INPUT_REQUIRED without a Negotiation-T propose: SSE parity — the flow just ends.
-        return artifact_count, False
+        return artifact_count, end_signal
     if negotiation_params is None or negotiation_answers is None:
         if log_sink is not None:
             log_sink(
@@ -462,7 +484,7 @@ async def _run_webhook_flow(
                     ),
                 )
             )
-        return artifact_count, False
+        return artifact_count, end_signal
     metadata = input_required_event.get("metadata")
     session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
     if session is None or not isinstance(metadata, dict):
@@ -477,7 +499,7 @@ async def _run_webhook_flow(
                     ),
                 )
             )
-        return artifact_count, False
+        return artifact_count, end_signal
     negotiation_type = _resolve_negotiation_kind(metadata, negotiation_kind)
     if negotiation_type is None:
         if log_sink is not None:
@@ -491,7 +513,7 @@ async def _run_webhook_flow(
                     ),
                 )
             )
-        return artifact_count, False
+        return artifact_count, end_signal
 
     task_id = _first_task_id(normalized_events)
     context_id = str(input_required_event.get("context_id", ""))
@@ -544,7 +566,9 @@ async def _run_webhook_flow(
         a2a_client=a2a_client, request=round2_request, call_context=round2_call_context, log_sink=log_sink
     )
 
-    # Phase 2 consume: the negotiation closes on COMPLETED (R5); idle timeout backstops.
+    # Phase 2 consume: the negotiation closes on a terminal state — COMPLETED normally, REJECTED
+    # (round-2 validation failure) / FAILED (stream exception) instead of hanging (final fix);
+    # the idle timeout backstops (R5).
     end_signal, artifact_count = await _consume_webhook_events(
         webhook_queue=webhook_queue,
         webhook_idle_timeout=webhook_idle_timeout,
@@ -553,7 +577,7 @@ async def _run_webhook_flow(
         log_sink=log_sink,
         end_signals=_ROUND2_END_SIGNALS,
     )
-    return artifact_count, end_signal == _WEBHOOK_SIGNAL_TIMEOUT
+    return artifact_count, end_signal
 
 
 def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
@@ -812,8 +836,11 @@ async def run_client_flow(
     before; ``webhook`` embeds no SSE at all — the request goes out as non-blocking
     ``message:send`` with ``return_immediately=True`` and an inline push-notification config, and
     every task event arrives as a webhook POST on the embedded receiver's ``webhook_queue``
-    (``_run_webhook_flow`` drives rounds/end-signals there; the events summary counts
-    WEBHOOK-received events and adds ``transport=webhook``).
+    (``_run_webhook_flow`` drives rounds/end-signals there — any SDK terminal state ends both
+    phases and the summary notes ``end=<state>``; the events summary counts WEBHOOK-received
+    events and adds ``transport=webhook``). ``max_artifacts`` is inert under webhook — the
+    artifact end signal itself closes the default flow there, so the stream-cut cap does not
+    apply.
 
     Pipeline and its logged boundaries:
       1. raw natural-language input                            -> ``[client] input-raw``
@@ -892,13 +919,13 @@ async def run_client_flow(
     # receiver's queue (v3) — the negotiation detection and counting below work on both shapes.
     normalized_events: list[dict[str, object]] = []
     artifact_count = 0
-    webhook_timed_out = False
+    webhook_end_signal: str | None = None
     if transport == TRANSPORT_WEBHOOK:
         if webhook_queue is None:
             raise ValueError("webhook transport requires webhook_queue (the embedded receiver's event queue)")
         if push_url is None:
             raise ValueError("webhook transport requires push_url (the receiver's callback URL)")
-        artifact_count, webhook_timed_out = await _run_webhook_flow(
+        artifact_count, webhook_end_signal = await _run_webhook_flow(
             prompt_client=prompt_client,
             a2a_client=a2a_client,
             initial_input=initial_input,
@@ -998,9 +1025,13 @@ async def run_client_flow(
     if log_sink is not None:
         if transport == TRANSPORT_WEBHOOK:
             # R6: the summary counts WEBHOOK-received events (+ artifacts); the RPC replies are
-            # logged separately and never counted. A timeout end is noted on the line (R5).
+            # logged separately and never counted. A terminal end is noted as end=<state> (final
+            # fix: a REJECTED/FAILED flow must be visible without reading every event line); a
+            # timeout end keeps the idle-timeout note (R5).
             detail = f"events={len(normalized_events)} artifacts={artifact_count} transport=webhook"
-            if webhook_timed_out:
+            if webhook_end_signal is not None and webhook_end_signal in _TERMINAL_STATE_SIGNALS:
+                detail += f" end={webhook_end_signal}"
+            elif webhook_end_signal == _WEBHOOK_SIGNAL_TIMEOUT:
                 detail += f" idle-timeout={webhook_idle_timeout}s"
         else:
             detail = f"events={len(normalized_events)} artifacts={artifact_count}"

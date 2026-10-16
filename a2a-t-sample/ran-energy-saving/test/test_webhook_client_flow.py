@@ -12,8 +12,10 @@ registered token header — simulating the server's push sender, so the ENTIRE w
 Covered: the default scenario (artifact end, no round 2, summary counts WEBHOOK-received events
 only — the RPC reply is logged separately per R6), the 3-type negotiation matrix over the fromData
 channel (per-type accept content + re-registration + COMPLETED end), the target fromText spot
-check, the unhandled/malformed INPUT_REQUIRED degradations (identical to SSE), the idle-timeout
-backstop (R5), the ``normalize_webhook_payload``/``normalize_event`` parity, and the server
+check, the unhandled/malformed INPUT_REQUIRED degradations (identical to SSE), the terminal-state
+end signals (round-1/round-2 REJECTED end promptly with ``end=<state>`` on the summary — no idle
+hang, final fix), the idle-timeout backstop (R5), the
+``normalize_webhook_payload``/``normalize_event`` parity, and the server
 assembly (push store/sender wired unconditionally into ``build_rest_app``).
 """
 
@@ -514,9 +516,11 @@ def test_negotiation_webhook_round_trip_re_registers_and_completes(
     assert prompt_client.accept_calls[0].content.conclusion == NegotiationConclusion.ACCEPT
     assert prompt_client.accept_calls[0].context.round == 2
 
-    # Summary: 2 webhook events (round 1) + 4 (round 2), 1 artifact, ends without timeout.
+    # Summary: 2 webhook events (round 1) + 4 (round 2), 1 artifact, terminal COMPLETED end.
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
-    assert summary_lines == ["[client] stream-completed: events=6 artifacts=1 transport=webhook"]
+    assert summary_lines == [
+        "[client] stream-completed: events=6 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED"
+    ]
 
 
 def test_information_webhook_accept_carries_the_answer_items(_offline_env: Path) -> None:
@@ -659,6 +663,65 @@ def test_idle_timeout_ends_the_flow_gracefully_when_no_push_arrives(_offline_env
     assert timeout_logs == ["[client] webhook-idle-timeout: no event for 0.2s"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == ["[client] stream-completed: events=0 artifacts=0 transport=webhook idle-timeout=0.2s"]
+
+
+# --- terminal-state end signals: REJECTED ends the flow, not the idle backstop (final fix) -------
+
+
+def test_round1_rejected_ends_the_flow_promptly_with_no_round2_send(_offline_env: Path) -> None:
+    """Round-1 REJECTED (unmapped-code validation failure) is a terminal end — no idle hang, no round 2."""
+    events, a2a_client, prompt_client, logs, _receiver = asyncio.run(
+        _run_webhook_scenario(
+            rounds=[
+                [
+                    _task_event(TaskState.TASK_STATE_SUBMITTED),
+                    _status_update(state=TaskState.TASK_STATE_REJECTED, text="Prompt validation failed: unknown code"),
+                ]
+            ],
+            env_path=_offline_env,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+        )
+    )
+
+    # No idle-timeout diagnostic: the terminal state ended the flow instead of the backstop.
+    timeout_logs = [line for line in logs if line.startswith("[client] webhook-idle-timeout:")]
+    assert timeout_logs == []
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_REJECTED"]
+    # The answers were supplied, but a terminal REJECTED preempts the negotiation round trip.
+    assert len(a2a_client.send_calls) == 1
+    assert a2a_client.register_calls == []
+    assert prompt_client.accept_calls == []
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == [
+        "[client] stream-completed: events=2 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"
+    ]
+
+
+def test_round2_rejected_after_accept_ends_the_flow_with_the_state_noted(_offline_env: Path) -> None:
+    """Round-2 REJECTED (accept validation failure) ends the flow right away — the state is noted."""
+    events, a2a_client, _prompt_client, logs, _receiver = asyncio.run(
+        _run_webhook_scenario(
+            rounds=[
+                _negotiation_round1_script(_propose_metadata()),
+                # The server pushes REJECTED instead of the normal progress/artifact/COMPLETED.
+                [_status_update(state=TaskState.TASK_STATE_REJECTED, text="Prompt validation failed: region")],
+            ],
+            env_path=_offline_env,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+        )
+    )
+
+    # The accept WAS sent (a genuine round-2 failure), then REJECTED ended the flow — no hang.
+    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
+    timeout_logs = [line for line in logs if line.startswith("[client] webhook-idle-timeout:")]
+    assert timeout_logs == []
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_REJECTED"]
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == [
+        "[client] stream-completed: events=3 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"
+    ]
 
 
 # --- normalize_webhook_payload: parity with normalize_event ---------------------------------------

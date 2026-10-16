@@ -164,7 +164,7 @@ uv run --no-sync python -m client.client_main
 ### 客户端：生成并发送 Task-T prompt
 
 用 A2A-T SDK 把你的自然语言输入渲染成 Task-T prompt ——
-[`client_flow.py:448`](src/client/client_flow.py#L448)：
+[`client_flow.py:891`](src/client/client_flow.py#L891)：
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -176,7 +176,7 @@ prompt_text, extension_uri = _require_prompt_text(prompt_content)
 `llm.not_configured`、`input.text_too_long`）。
 
 把 prompt 放进消息 metadata，用 `a2a-sdk` 发送（流式）——
-[`client_flow.py:462`](src/client/client_flow.py#L462)：
+[`client_flow.py:905`](src/client/client_flow.py#L905)：
 
 ```python
 request = SendMessageRequest()
@@ -289,7 +289,7 @@ python run_demo.py --negotiation feasibility --channel fromText   # 30% 节能�
 （见[配置](#配置)）。
 
 **第一轮——服务端发起 propose。** 客户端用 `generate_task_prompt_from_text`
-（[`client_flow.py:448`](src/client/client_flow.py#L448)）从自然语言输入生成 Task-T prompt。服务端用
+（[`client_flow.py:891`](src/client/client_flow.py#L891)）从自然语言输入生成 Task-T prompt。服务端用
 `validate_task_prompt_and_data_filling`（[`server_flow.py:455`](src/server/server_flow.py#L455)）校验后
 得到按槽位命名的拒绝；错误码选择协商类型（见上表），服务端用
 `generate_negotiation_propose_prompt_from_data`
@@ -303,9 +303,9 @@ propose 放在该状态消息的 metadata 中（`build_metadata_content()`）。
 `InformationEndingContent`（补全后的应答项）；目标协商：`TargetEndingContent`（`ACCEPT` +
 `confirmed_intent`）；可行性协商：`FeasibilityEndingContent`（`ACCEPT` + `feasibility_summary`）。
 客户端用 `generate_task_prompt_from_data_with_schema`
-（[`client_flow.py:302`](src/client/client_flow.py#L302)）从补全后的参数重新生成 Task-T prompt，用
+（[`client_flow.py:686`](src/client/client_flow.py#L686)）从补全后的参数重新生成 Task-T prompt，用
 `generate_negotiation_accept_prompt_from_data`
-（[`client_flow.py:317`](src/client/client_flow.py#L317)）渲染 accept，然后把两个 prompt 一并放进
+（[`client_flow.py:701`](src/client/client_flow.py#L701)）渲染 accept，然后把两个 prompt 一并放进
 消息 metadata 重新发送同一任务。服务端检测到 Negotiation-T URI 即视为协商续轮，校验补全后的
 prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPLETED` 结束任务——协商运行到此
 结束，而默认流程保持长连接运行。
@@ -315,7 +315,7 @@ prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPL
 `generate_negotiation_propose_prompt_from_text`
 （[`server_flow.py:282`](src/server/server_flow.py#L282)），客户端调用
 `generate_negotiation_accept_prompt_from_text`
-（[`client_flow.py:311`](src/client/client_flow.py#L311)）——每条生成的协商消息多一次抽取 LLM 调用
+（[`client_flow.py:695`](src/client/client_flow.py#L695)）——每条生成的协商消息多一次抽取 LLM 调用
 （使用内置 mock LLM 时表现为额外的 `llm-mock` 日志行）。报文格式与 `fromData` 完全一致。已知的 mock 伪影：`--scenario negotiation --channel fromText` 时 information propose 携带预置的 2 条抽取项列表（`fromData` 携带 1 条缺失项列表）；accept 与报文约定保持等价。各类型的
 消息形态：目标协商的 propose 携带协商摘要与确认请求，accept 携带确认后的意图；可行性协商的 propose
 携带评估请求与 `contents_to_evaluate` 条目，accept 携带可行性摘要。
@@ -361,17 +361,22 @@ prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPL
   `InMemoryPushNotificationConfigStore` + `BasePushNotificationSender`
   （[`server_main.py`](src/server/server_main.py)）——SSE 模式下它只是闲置，不存在服务端模式开关。
 - **Token 鉴权。** 服务端推送发送方在每个 POST 的 `X-A2A-Notification-Token` 头中携带
-  `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`）；接收器校验该头，不匹配回 `401`（事件被丢弃）。
-- **结束信号。** 协商场景以 webhook 收到 `TASK_STATE_COMPLETED` 结束；默认场景以收到报告 artifact 结束。
-  空闲超时（`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）是兜底：打印
-  `webhook-idle-timeout` 诊断行后，带着已收集的事件正常结束流程。
+  `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`）；接收器校验该头，不匹配回 `401`（事件被丢弃）；
+  格式错误或无法识别的报文回 `400`（两条拒绝路径都属于接收器契约）。
+- **结束信号。** 任一 SDK 终态（`TASK_STATE_COMPLETED` / `FAILED` / `CANCELED` / `REJECTED`）都会在两个阶段
+  立即结束流程——协商场景正常以 `COMPLETED` 结束，校验失败或流异常则以 `REJECTED` / `FAILED` 直接结束，
+  而不是一直挂到空闲兜底——summary 行以 `end=<state>` 记录终态结束。默认场景仍以报告 artifact 结束；
+  `INPUT_REQUIRED`（协商 propose）只是第 1 轮的中断点，不是流程结束。空闲超时
+  （`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）是兜底：打印
+  `webhook-idle-timeout` 诊断行后，带着已收集的事件正常结束流程。`A2AT_SAMPLE_MAX_ARTIFACTS` 在 webhook
+  模式下不生效——artifact 结束信号本身就关闭默认流程（没有流截断上限）。
 
 webhook 模式下客户端内嵌接收器，因此除注册中心/服务端端口外**多绑定一个监听端口**——
 `A2AT_SAMPLE_WEBHOOK_PORT`（默认 9000；`--webhook-port N`，`0` = 操作系统分配临时端口）。a2a 客户端以
 `ClientConfig(streaming=False)` 构建——这是选择非阻塞 `message:send` 路径的必要条件（仅设置
 `return_immediately` 不会切换路径）。语言行为沿用上文协商章节的说明。每一轮的唯一 RPC 应答（首个 Task）以
 `webhook-rpc-reply` 记录一次、不重复计数：`stream-completed` 汇总统计经 webhook 收到的事件（与 SSE 口径
-一致），并追加 `transport=webhook`（若由超时结束则再追加 `idle-timeout=<N>s`）。
+一致），并追加 `transport=webhook`（终态结束再追加 `end=<state>`，空闲兜底结束则追加 `idle-timeout=<N>s`）。
 
 ```bash
 cd a2a-t-sample/ran-energy-saving
@@ -391,6 +396,6 @@ python run_demo.py --transport webhook --negotiation target     # webhook 上的
 [client] webhook-push-reregister: task_id=... url=http://127.0.0.1:9000/webhook method=create_task_push_notification_config token=***
 [client] a2a-send-message: round=2 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1> return_immediately=true push_registration=endpoint
 [client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_COMPLETED", ...}}}
-[client] stream-completed: events=14 artifacts=1 transport=webhook
+[client] stream-completed: events=14 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED
 [webhook-receiver] stopped: url=http://127.0.0.1:9000/webhook
 ```

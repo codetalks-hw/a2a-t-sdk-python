@@ -173,7 +173,7 @@ Notes:
 ### Client: generate and send a Task-T prompt
 
 Render a Task-T prompt from your natural-language input (A2A-T SDK) —
-[`client_flow.py:448`](src/client/client_flow.py#L448):
+[`client_flow.py:891`](src/client/client_flow.py#L891):
 
 ```python
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
@@ -185,7 +185,7 @@ It returns `MetadataContent` (`prompt_text`, `extension_uri`, `template_uri`,
 `slot.not_provided`, `llm.not_configured`, `input.text_too_long`).
 
 Put the prompt in the message metadata and send it over `a2a-sdk` (streaming) —
-[`client_flow.py:462`](src/client/client_flow.py#L462):
+[`client_flow.py:905`](src/client/client_flow.py#L905):
 
 ```python
 request = SendMessageRequest()
@@ -299,7 +299,7 @@ above unchanged; the kind and the channel can also be selected with `A2AT_SAMPLE
 `A2AT_SAMPLE_CHANNEL` in `.env` (see [Configuration](#configuration)).
 
 **Round 1 — the server proposes.** The client generates the Task-T prompt from its natural-language
-input with `generate_task_prompt_from_text` ([`client_flow.py:448`](src/client/client_flow.py#L448)).
+input with `generate_task_prompt_from_text` ([`client_flow.py:891`](src/client/client_flow.py#L891)).
 The server validates it with `validate_task_prompt_and_data_filling`
 ([`server_flow.py:455`](src/server/server_flow.py#L455)) and gets a per-slot rejection; the error code
 selects the negotiation kind (table above), and the server renders the matching Negotiation-T propose
@@ -314,9 +314,9 @@ parses the `negotiationContext` session, then dispatches on the propose's `templ
 the matching ending content — information: `InformationEndingContent` with the filled answers; target:
 `TargetEndingContent` (`ACCEPT` + `confirmed_intent`); feasibility: `FeasibilityEndingContent`
 (`ACCEPT` + `feasibility_summary`). It regenerates the Task-T prompt from the filled parameters with
-`generate_task_prompt_from_data_with_schema` ([`client_flow.py:302`](src/client/client_flow.py#L302)),
+`generate_task_prompt_from_data_with_schema` ([`client_flow.py:686`](src/client/client_flow.py#L686)),
 renders the accept with `generate_negotiation_accept_prompt_from_data`
-([`client_flow.py:317`](src/client/client_flow.py#L317)), and re-sends the same task with both prompts
+([`client_flow.py:701`](src/client/client_flow.py#L701)), and re-sends the same task with both prompts
 in the message metadata. The server detects the Negotiation-T URI as the continuation, validates the
 now-complete prompt, streams the UC1 progress steps and the report artifact, and closes the task with
 `TASK_STATE_COMPLETED` — the negotiation run ends here, whereas the default flow stays long-running.
@@ -325,7 +325,7 @@ now-complete prompt, streams the UC1 progress steps and the report artifact, and
 negotiation message is first rendered as a natural-language text, and the SDK extracts the structured
 content back from it: the server calls `generate_negotiation_propose_prompt_from_text`
 ([`server_flow.py:282`](src/server/server_flow.py#L282)) and the client calls
-`generate_negotiation_accept_prompt_from_text` ([`client_flow.py:311`](src/client/client_flow.py#L311))
+`generate_negotiation_accept_prompt_from_text` ([`client_flow.py:695`](src/client/client_flow.py#L695))
 — one extraction LLM call per generated message (visible as extra `llm-mock` lines with the bundled
 mock LLM). The wire format is identical to `fromData`. Known mock artifact: on
 `--scenario negotiation --channel fromText` the information propose carries the canned 2-item
@@ -385,11 +385,17 @@ streaming connection open:
   mode switch exists.
 - **Token auth.** The server's push sender carries `A2AT_SAMPLE_WEBHOOK_TOKEN` (default
   `demo-webhook-token`) in the `X-A2A-Notification-Token` header on every POST; the receiver validates
-  it and answers `401` on a mismatch (the event is dropped).
-- **End signals.** The negotiation scenarios end when the webhook delivers `TASK_STATE_COMPLETED`; the
-  default scenario ends on the report artifact. An idle timeout (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`,
-  default 30 s, reset per received event) is the backstop: it logs a `webhook-idle-timeout` diagnostic
-  line and ends the flow normally with what was collected.
+  it and answers `401` on a mismatch (the event is dropped); a malformed or unrecognized body answers
+  `400` (both rejection paths are part of the receiver contract).
+- **End signals.** Any SDK terminal state (`TASK_STATE_COMPLETED` / `FAILED` / `CANCELED` /
+  `REJECTED`) ends the flow in both phases — the negotiation scenarios normally end on `COMPLETED`,
+  while a failed validation or stream error ends it on `REJECTED` / `FAILED` right away instead of
+  hanging to the idle backstop — and the summary line notes a terminal end as `end=<state>`. The
+  default scenario still ends on the report artifact; `INPUT_REQUIRED` (a negotiation propose) is a
+  phase-1 interrupt, not a flow end. An idle timeout (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`, default
+  30 s, reset per received event) is the backstop: it logs a `webhook-idle-timeout` diagnostic line
+  and ends the flow normally with what was collected. `A2AT_SAMPLE_MAX_ARTIFACTS` does not apply in
+  webhook mode — the artifact end signal itself closes the default flow (no stream-cut cap).
 
 The client embeds the receiver, so webhook mode binds **one extra listening port** —
 `A2AT_SAMPLE_WEBHOOK_PORT` (default 9000; `--webhook-port N`, `0` = OS-assigned ephemeral port) —
@@ -398,7 +404,8 @@ is required to select the non-blocking `message:send` path (the `return_immediat
 not switch the path). Language behavior is inherited from the negotiation section above. Each round's
 single RPC reply (the first Task) is logged once as `webhook-rpc-reply` and is not counted again: the
 `stream-completed` summary counts the events received over the webhook (SSE parity) and appends
-`transport=webhook` (plus `idle-timeout=<N>s` when a timeout ended the flow).
+`transport=webhook` (plus `end=<state>` when a terminal state ended the flow, or `idle-timeout=<N>s`
+when the idle backstop did).
 
 ```bash
 cd a2a-t-sample/ran-energy-saving
@@ -418,6 +425,6 @@ python run_demo.py --transport webhook --negotiation target     # target negotia
 [client] webhook-push-reregister: task_id=... url=http://127.0.0.1:9000/webhook method=create_task_push_notification_config token=***
 [client] a2a-send-message: round=2 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1> return_immediately=true push_registration=endpoint
 [client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_COMPLETED", ...}}}
-[client] stream-completed: events=14 artifacts=1 transport=webhook
+[client] stream-completed: events=14 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED
 [webhook-receiver] stopped: url=http://127.0.0.1:9000/webhook
 ```
