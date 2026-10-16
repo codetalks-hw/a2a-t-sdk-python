@@ -14,7 +14,9 @@ negotiation, the client answers with ``negotiation_answers``), and by the negoti
 inputs whose Task-T validation fails with the value-not-allowed / semantic-conflict content
 error that triggers the target / feasibility negotiation (the server stays data-driven on the
 error code). The generation channel (``A2AT_SAMPLE_CHANNEL``) switches the negotiation
-propose/accept generation between typed data and natural-language text.
+propose/accept generation between typed data and natural-language text. The transport
+(``A2AT_SAMPLE_TRANSPORT``) switches how the client receives the task events: the default SSE
+stream or the embedded webhook receiver (``common.webhook_receiver``).
 """
 
 from __future__ import annotations
@@ -44,6 +46,24 @@ SUPPORTED_CHANNELS = (CHANNEL_DATA, CHANNEL_TEXT)
 
 #: ``.env`` key selecting the generation channel.
 CHANNEL_ENV_KEY = "A2AT_SAMPLE_CHANNEL"
+
+#: Event transport variants selected by ``A2AT_SAMPLE_TRANSPORT``: ``sse`` consumes the streamed
+#: response as before, ``webhook`` embeds the client-side receiver
+#: (``common.webhook_receiver.WebhookReceiver``) and receives the task events as push-notification
+#: callbacks (non-blocking ``message:send``).
+TRANSPORT_SSE = "sse"
+TRANSPORT_WEBHOOK = "webhook"
+SUPPORTED_TRANSPORTS = (TRANSPORT_SSE, TRANSPORT_WEBHOOK)
+
+#: ``.env`` key selecting the event transport.
+TRANSPORT_ENV_KEY = "A2AT_SAMPLE_TRANSPORT"
+
+#: ``.env`` keys of the webhook transport: the receiver bind port (``0`` = OS-assigned ephemeral
+#: port), the push token checked against the ``X-A2A-Notification-Token`` header, and the idle
+#: backstop timeout (seconds) that ends the default scenario when no push arrives.
+WEBHOOK_PORT_ENV_KEY = "A2AT_SAMPLE_WEBHOOK_PORT"
+WEBHOOK_TOKEN_ENV_KEY = "A2AT_SAMPLE_WEBHOOK_TOKEN"
+WEBHOOK_IDLE_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT"
 
 #: Negotiation kinds selecting the client scenario input; the server stays data-driven on the
 #: content-validation error code (``content.param_missing`` -> information,
@@ -267,6 +287,68 @@ def resolve_negotiation_kind(*, env_path: Path | None = None) -> str:
         str(values.get(NEGOTIATION_KIND_ENV_KEY, "")).strip() or os.environ.get(NEGOTIATION_KIND_ENV_KEY, "").strip()
     )
     return raw_value if raw_value in SUPPORTED_NEGOTIATION_KINDS else NEGOTIATION_KIND_INFORMATION
+
+
+def resolve_transport(*, env_path: Path | None = None) -> str:
+    """Resolve the configured ``A2AT_SAMPLE_TRANSPORT`` (defaults to ``sse``).
+
+    The transport switches how the client receives the task events: ``sse`` consumes the streamed
+    response, ``webhook`` embeds the ``common.webhook_receiver.WebhookReceiver`` and receives the
+    events as push-notification callbacks (non-blocking ``message:send``). An unset or unknown
+    value resolves to ``sse``.
+    """
+    resolved = env_path or Path.cwd() / ".env"
+    values = dotenv_values(resolved) if resolved.exists() else {}
+    raw_value = str(values.get(TRANSPORT_ENV_KEY, "")).strip() or os.environ.get(TRANSPORT_ENV_KEY, "").strip()
+    return raw_value if raw_value in SUPPORTED_TRANSPORTS else TRANSPORT_SSE
+
+
+def resolve_webhook_port(*, env_path: Path | None = None) -> int:
+    """Resolve the configured ``A2AT_SAMPLE_WEBHOOK_PORT`` (defaults to ``9000``).
+
+    The port binds the embedded webhook receiver; ``0`` selects an OS-assigned ephemeral port.
+    An unset, blank, non-integer or out-of-range value resolves to the ``9000`` default.
+    """
+    resolved = env_path or Path.cwd() / ".env"
+    values = dotenv_values(resolved) if resolved.exists() else {}
+    raw_value = str(values.get(WEBHOOK_PORT_ENV_KEY, "")).strip() or os.environ.get(WEBHOOK_PORT_ENV_KEY, "").strip()
+    try:
+        port = int(raw_value)
+    except ValueError:
+        return 9000
+    return port if 0 <= port <= 65535 else 9000
+
+
+def resolve_webhook_token(*, env_path: Path | None = None) -> str:
+    """Resolve the configured ``A2AT_SAMPLE_WEBHOOK_TOKEN`` (defaults to ``demo-webhook-token``).
+
+    The token is the expected value of the ``X-A2A-Notification-Token`` header the server's push
+    sender carries on every webhook POST; the receiver answers 401 on a mismatch.
+    """
+    resolved = env_path or Path.cwd() / ".env"
+    values = dotenv_values(resolved) if resolved.exists() else {}
+    raw_value = str(values.get(WEBHOOK_TOKEN_ENV_KEY, "")).strip() or os.environ.get(WEBHOOK_TOKEN_ENV_KEY, "").strip()
+    return raw_value or "demo-webhook-token"
+
+
+def resolve_webhook_idle_timeout(*, env_path: Path | None = None) -> float:
+    """Resolve the configured ``A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`` (defaults to ``30.0``).
+
+    The timeout is the webhook-mode backstop that ends the default scenario when no push arrives
+    (reset per received event). An unset, blank, non-numeric or non-positive value resolves to
+    the ``30.0`` default.
+    """
+    resolved = env_path or Path.cwd() / ".env"
+    values = dotenv_values(resolved) if resolved.exists() else {}
+    raw_value = (
+        str(values.get(WEBHOOK_IDLE_TIMEOUT_ENV_KEY, "")).strip()
+        or os.environ.get(WEBHOOK_IDLE_TIMEOUT_ENV_KEY, "").strip()
+    )
+    try:
+        timeout = float(raw_value)
+    except ValueError:
+        return 30.0
+    return timeout if timeout > 0 else 30.0
 
 
 def build_prompt_input(
