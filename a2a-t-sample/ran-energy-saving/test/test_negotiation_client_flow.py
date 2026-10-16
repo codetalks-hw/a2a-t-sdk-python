@@ -12,6 +12,7 @@ calls) and from-text (a natural-language rendering plus one extraction LLM call)
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import sys
 import uuid
 from collections.abc import AsyncIterator
@@ -64,6 +65,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from client import scenario_data
 from client.client_flow import run_client_flow
+from client.negotiation_response import (
+    NegotiationDecision,
+    NegotiationProposeView,
+    NegotiationResponseProvider,
+    ScriptedNegotiationResponseProvider,
+)
 from client.scenario_data import (
     CHANNEL_DATA,
     CHANNEL_TEXT,
@@ -267,6 +274,7 @@ async def _run_flow(
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
+    negotiation_response_provider: NegotiationResponseProvider | None = None,
     channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     log_sink: object | None = None,
@@ -280,6 +288,7 @@ async def _run_flow(
         negotiation_params=negotiation_params,
         negotiation_answers=negotiation_answers,
         negotiation_kind=negotiation_kind,
+        negotiation_response_provider=negotiation_response_provider,
         channel=channel,
         env_path=env_path,
         log_sink=log_sink,
@@ -821,3 +830,276 @@ def test_task_event_gains_the_context_id() -> None:
         "context_id": _CONTEXT_ID,
         "state": "TASK_STATE_SUBMITTED",
     }
+
+
+# --- negotiation response seam: Protocol contract, shim equivalence, injected providers --------
+
+
+def test_scripted_provider_satisfies_the_negotiation_response_protocol(_offline_env: Path) -> None:
+    """Contract test: the demo provider structurally satisfies the client seam Protocol.
+
+    ``NegotiationResponseProvider`` is ``@runtime_checkable``, so the idiomatic conformance check is
+    an ``isinstance`` probe (it verifies the member set at runtime; signatures stay the static
+    checks' concern). The seam's data shapes are pinned here too.
+    """
+    provider = ScriptedNegotiationResponseProvider(
+        negotiation_params=dict(_NEGOTIATION_PARAMS),
+        negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+        negotiation_kind=None,
+        env_path=_offline_env,
+    )
+    assert isinstance(provider, NegotiationResponseProvider)
+    assert [field.name for field in dataclasses.fields(NegotiationProposeView)] == [
+        "kind",
+        "template_uri",
+        "prompt_text",
+    ]
+    assert [field.name for field in dataclasses.fields(NegotiationDecision)] == [
+        "conclusion",
+        "filled_params",
+        "confirmed_intent",
+        "feasibility_summary",
+        "reason",
+    ]
+    decision = NegotiationDecision(conclusion="accept")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        decision.conclusion = "reject"
+
+
+def test_scripted_provider_mirrors_the_legacy_selection(_offline_env: Path) -> None:
+    """The demo provider's decisions mirror the scripted selection for every kind (plan R3)."""
+    provider = ScriptedNegotiationResponseProvider(
+        negotiation_params=dict(_NEGOTIATION_PARAMS),
+        negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+        negotiation_kind=None,
+        env_path=_offline_env,
+    )
+    session = NegotiationContext(id="s", round=1, max_rounds=5, performative=NegotiationPerformative.PROPOSE)
+
+    information = provider.respond(
+        NegotiationProposeView(
+            kind=scenario_data.NEGOTIATION_KIND_INFORMATION,
+            template_uri=INFORMATION_NEGOTIATION_PROPOSE_URI,
+            prompt_text="propose text",
+        ),
+        session,
+    )
+    assert information == NegotiationDecision(conclusion="accept", filled_params=dict(_NEGOTIATION_ANSWERS))
+    target = provider.respond(
+        NegotiationProposeView(
+            kind=scenario_data.NEGOTIATION_KIND_TARGET,
+            template_uri=TARGET_NEGOTIATION_PROPOSE_URI,
+            prompt_text="propose text",
+        ),
+        session,
+    )
+    assert target == NegotiationDecision(
+        conclusion="accept", confirmed_intent=negotiation_target_confirmation(env_path=_offline_env)
+    )
+    feasibility = provider.respond(
+        NegotiationProposeView(
+            kind=scenario_data.NEGOTIATION_KIND_FEASIBILITY,
+            template_uri=FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+            prompt_text="propose text",
+        ),
+        session,
+    )
+    assert feasibility == NegotiationDecision(
+        conclusion="accept", feasibility_summary=negotiation_feasibility_summary(env_path=_offline_env)
+    )
+
+
+def test_explicit_scripted_provider_matches_the_legacy_shim_outputs(_offline_env: Path) -> None:
+    """provider=None + legacy params (the internal shim) and provider=Scripted(...) are equivalent.
+
+    The shim run passes the legacy arguments; the seam run supplies the same scripted provider
+    explicitly and NO ``negotiation_answers`` — the accept content comes from the provider's
+    decision, and both runs produce identical round-2 requests, accept content and stage logs.
+    """
+    propose_metadata = _propose_metadata()
+    legacy_prompt_client = _ScriptedPromptClient()
+    legacy_logs: list[str] = []
+    legacy_events = asyncio.run(
+        _run_flow(
+            _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()]),
+            legacy_prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+            env_path=_offline_env,
+            log_sink=legacy_logs.append,
+        )
+    )
+    scripted_provider = ScriptedNegotiationResponseProvider(
+        negotiation_params=dict(_NEGOTIATION_PARAMS),
+        negotiation_answers=dict(_NEGOTIATION_ANSWERS),
+        negotiation_kind=None,
+        env_path=_offline_env,
+    )
+    seam_prompt_client = _ScriptedPromptClient()
+    seam_logs: list[str] = []
+    seam_events = asyncio.run(
+        _run_flow(
+            _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()]),
+            seam_prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_response_provider=scripted_provider,
+            env_path=_offline_env,
+            log_sink=seam_logs.append,
+        )
+    )
+
+    assert _event_states(seam_events) == _event_states(legacy_events)
+    assert _stage_names(seam_logs) == _stage_names(legacy_logs)
+    # The accept content is identical (items from the legacy answers == the provider's decision).
+    assert len(legacy_prompt_client.accept_calls) == len(seam_prompt_client.accept_calls) == 1
+    legacy_accept = legacy_prompt_client.accept_calls[0]
+    seam_accept = seam_prompt_client.accept_calls[0]
+    assert seam_accept.context.id == legacy_accept.context.id
+    assert seam_accept.context.round == legacy_accept.context.round == 2
+    assert seam_accept.context.performative == NegotiationPerformative.ACCEPT
+    assert (
+        [(item.name, item.value) for item in seam_accept.content.items]
+        == [(item.name, item.value) for item in legacy_accept.content.items]
+        == list(_NEGOTIATION_ANSWERS.items())
+    )
+
+
+class _RecordingResponseProvider:
+    """Injected fake ``NegotiationResponseProvider`` proving the seam replaces the scripted behavior."""
+
+    def __init__(self, decision: NegotiationDecision) -> None:
+        self._decision = decision
+        self.views: list[NegotiationProposeView] = []
+        self.sessions: list[NegotiationContext] = []
+
+    def respond(self, propose: NegotiationProposeView, session: NegotiationContext) -> NegotiationDecision:
+        self.views.append(propose)
+        self.sessions.append(session)
+        return self._decision
+
+
+def test_injected_provider_replaces_the_scripted_accept_end_to_end(_offline_env: Path) -> None:
+    """A custom accept decision drives the round-2 accept: its filled_params become the items."""
+    propose_metadata = _propose_metadata()
+    session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=propose_metadata), _round2_events()])
+    provider = _RecordingResponseProvider(
+        NegotiationDecision(conclusion="accept", filled_params={"region": "Custom filled region"})
+    )
+
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),  # Task-T refill; NO scripted answers
+            negotiation_response_provider=provider,
+            env_path=_offline_env,
+        )
+    )
+
+    # The provider saw the propose view verbatim: resolved kind, templateUri, rendered text, session.
+    assert len(provider.views) == 1
+    view = provider.views[0]
+    assert (view.kind, view.template_uri, view.prompt_text) == (
+        scenario_data.NEGOTIATION_KIND_INFORMATION,
+        INFORMATION_NEGOTIATION_PROPOSE_URI,
+        "Please provide region: Coverage region of the energy-saving task.",
+    )
+    assert provider.sessions[0].id == session_id
+    assert provider.sessions[0].performative == NegotiationPerformative.PROPOSE
+
+    # The accept was built from the decision (the seam replaced the scripted answer content).
+    assert len(a2a_client.calls) == 2
+    assert len(prompt_client.accept_calls) == 1
+    accept_data = prompt_client.accept_calls[0]
+    assert [(item.name, item.value) for item in accept_data.content.items] == [("region", "Custom filled region")]
+    # The Task-T prompt refill remains the flow's wire mechanic fed by the caller.
+    assert prompt_client.from_data_calls == [(_NEGOTIATION_PARAMS, ENERGY_SAVING_TEMPLATE_URI)]
+    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+
+
+def test_reject_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_env: Path) -> None:
+    """A reject decision logs the dedicated line and ends the flow like unhandled (plan R5)."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=_propose_metadata())])
+    provider = _RecordingResponseProvider(NegotiationDecision(conclusion="reject", reason="not now"))
+
+    logs: list[str] = []
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_response_provider=provider,
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1  # no round-2 send
+    assert prompt_client.accept_calls == []
+    assert prompt_client.from_data_calls == []
+    decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
+    assert decision_logs == [
+        "[client] negotiation-decision: reject (not wired in this demo; see the integration guide)"
+    ]
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]
+
+
+def test_abort_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_env: Path) -> None:
+    """An abort decision behaves like reject: dedicated log, no round-2 send (plan R5)."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient([_round1_events(metadata=_propose_metadata())])
+    provider = _RecordingResponseProvider(NegotiationDecision(conclusion="abort", reason="budget spent"))
+
+    logs: list[str] = []
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_response_provider=provider,
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1
+    assert prompt_client.accept_calls == []
+    decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
+    assert decision_logs == ["[client] negotiation-decision: abort (not wired in this demo; see the integration guide)"]
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]
+
+
+def test_target_accept_missing_confirmed_intent_is_logged_and_stays_unhandled(_offline_env: Path) -> None:
+    """An accept whose per-conclusion field is missing logs the problem and ends as unhandled."""
+    prompt_client = _ScriptedPromptClient()
+    a2a_client = _ScriptedA2AClient(
+        [_round1_events(metadata=_propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI))]
+    )
+    provider = _RecordingResponseProvider(NegotiationDecision(conclusion="accept"))
+
+    logs: list[str] = []
+    events = asyncio.run(
+        _run_flow(
+            a2a_client,
+            prompt_client,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_response_provider=provider,
+            env_path=_offline_env,
+            log_sink=logs.append,
+        )
+    )
+
+    assert len(a2a_client.calls) == 1
+    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
+    decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
+    assert len(decision_logs) == 1
+    assert "missing confirmed_intent" in decision_logs[0]
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]

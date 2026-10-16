@@ -24,6 +24,7 @@ from dotenv import dotenv_values
 from google.protobuf.json_format import ParseDict
 
 from client.client_flow import run_client_flow
+from client.negotiation_response import NegotiationResponseProvider, ScriptedNegotiationResponseProvider
 from client.scenario_data import (
     CHANNEL_DATA,
     NEGOTIATION_KIND_FEASIBILITY,
@@ -163,6 +164,7 @@ async def run_main(
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
+    negotiation_response_provider: NegotiationResponseProvider | None = None,
     channel: str = CHANNEL_DATA,
     transport: str = TRANSPORT_SSE,
     webhook_port: int | None = None,
@@ -175,6 +177,9 @@ async def run_main(
     answers the round-1 prompt with an INPUT_REQUIRED propose, the flow answers it with the filled
     Task-T prompt and the Negotiation-T accept of the resolved type (round 2). The ``negotiation_kind``
     flag selects the accept type directly; ``None`` dispatches on the propose's ``templateUri``.
+    ``negotiation_response_provider`` is the client-side INTEGRATION POINT: when supplied, the flow
+    derives the answer from it and the scripted answers are bypassed (``main`` assembles the demo
+    ``ScriptedNegotiationResponseProvider``).
 
     Transport (plan v3): ``sse`` (default) consumes the streaming response unchanged; ``webhook``
     starts the embedded ``WebhookReceiver`` on THIS asyncio loop before the flow runs (lifecycle:
@@ -265,6 +270,7 @@ async def run_main(
             "negotiation_params": negotiation_params,
             "negotiation_answers": negotiation_answers,
             "negotiation_kind": negotiation_kind,
+            "negotiation_response_provider": negotiation_response_provider,
             "channel": channel,
             "env_path": env_path,
         }
@@ -315,6 +321,18 @@ def main(
         )
         negotiation_params = negotiation_filled_params(env_path=sample_env_path) if negotiation_engaged else None
         negotiation_answers_map = negotiation_answers(env_path=sample_env_path) if negotiation_engaged else None
+        # INTEGRATION POINT: replace ScriptedNegotiationResponseProvider with your negotiation
+        # response provider (human confirmation, policy engine, upstream system...)
+        negotiation_response_provider = (
+            ScriptedNegotiationResponseProvider(
+                negotiation_params=negotiation_params,
+                negotiation_answers=negotiation_answers_map,
+                negotiation_kind=negotiation_kind,
+                env_path=sample_env_path,
+            )
+            if negotiation_engaged
+            else None
+        )
         return async_runner(
             run_async(
                 env_path=sample_env_path,
@@ -326,6 +344,7 @@ def main(
                 negotiation_params=negotiation_params,
                 negotiation_answers=negotiation_answers_map,
                 negotiation_kind=negotiation_kind,
+                negotiation_response_provider=negotiation_response_provider,
                 channel=channel,
                 transport=transport,
             )

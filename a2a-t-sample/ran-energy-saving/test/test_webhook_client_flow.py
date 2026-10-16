@@ -77,10 +77,16 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from client.client_flow import _parse_negotiation_context, normalize_webhook_payload, run_client_flow
+from client.negotiation_response import (
+    NegotiationDecision,
+    NegotiationProposeView,
+    NegotiationResponseProvider,
+)
 from client.scenario_data import (
     CHANNEL_DATA,
     CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
+    NEGOTIATION_KIND_TARGET,
     negotiation_feasibility_summary,
     negotiation_target_confirmation,
 )
@@ -332,6 +338,7 @@ async def _run_webhook_scenario(
     negotiation_params: dict[str, object] | None = None,
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
+    negotiation_response_provider: NegotiationResponseProvider | None = None,
     channel: str = CHANNEL_DATA,
     idle_timeout: float = 2.0,
     token: str = _DEMO_TOKEN,
@@ -358,6 +365,7 @@ async def _run_webhook_scenario(
             negotiation_params=negotiation_params,
             negotiation_answers=negotiation_answers,
             negotiation_kind=negotiation_kind,
+            negotiation_response_provider=negotiation_response_provider,
             channel=channel,
             env_path=env_path,
             transport="webhook",
@@ -645,6 +653,89 @@ def test_malformed_context_is_unhandled_and_ends_after_round1_webhook(_offline_e
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "malformed/missing session context" in unhandled_logs[0]
+
+
+# --- negotiation response seam: injected provider over webhook (plan R3/R4/R5) -------------------
+
+
+class _RecordingResponseProvider:
+    """Injected fake ``NegotiationResponseProvider`` proving the seam replaces the scripted behavior."""
+
+    def __init__(self, decision: NegotiationDecision) -> None:
+        self._decision = decision
+        self.views: list[NegotiationProposeView] = []
+        self.sessions: list[NegotiationContext] = []
+
+    def respond(self, propose: NegotiationProposeView, session: NegotiationContext) -> NegotiationDecision:
+        self.views.append(propose)
+        self.sessions.append(session)
+        return self._decision
+
+
+def test_injected_provider_webhook_replaces_the_scripted_accept_end_to_end(_offline_env: Path) -> None:
+    """A custom accept decision drives the webhook round-2 accept: re-register, send, COMPLETED."""
+    propose_metadata = _propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)
+    session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
+    provider = _RecordingResponseProvider(
+        NegotiationDecision(conclusion="accept", confirmed_intent="Custom confirmed target")
+    )
+
+    events, a2a_client, prompt_client, logs, _receiver = asyncio.run(
+        _run_webhook_scenario(
+            rounds=[_negotiation_round1_script(propose_metadata), _negotiation_round2_script()],
+            env_path=_offline_env,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),  # Task-T refill; NO scripted answers
+            negotiation_response_provider=provider,
+        )
+    )
+
+    # The provider saw the propose view verbatim (kind dispatched on the propose's templateUri).
+    assert len(provider.views) == 1
+    view = provider.views[0]
+    assert (view.kind, view.template_uri, view.prompt_text) == (
+        NEGOTIATION_KIND_TARGET,
+        TARGET_NEGOTIATION_PROPOSE_URI,
+        "Please provide region: Coverage region of the energy-saving task.",
+    )
+    assert provider.sessions[0].id == session_id
+
+    # Order evidence: round-1 send -> endpoint re-registration -> round-2 send.
+    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
+    # The typed accept carries the decision's confirmed intent (not the scenario text).
+    assert len(prompt_client.accept_calls) == 1
+    accept_data = prompt_client.accept_calls[0]
+    assert isinstance(accept_data.content, TargetEndingContent)
+    assert accept_data.content.confirmed_intent == "Custom confirmed target"
+    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == [
+        "[client] stream-completed: events=6 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED"
+    ]
+
+
+def test_reject_decision_webhook_logs_and_ends_after_round1(_offline_env: Path) -> None:
+    """A reject decision over webhook: dedicated log, no re-registration, no round-2 send (R5)."""
+    provider = _RecordingResponseProvider(NegotiationDecision(conclusion="reject", reason="policy"))
+
+    events, a2a_client, prompt_client, logs, _receiver = asyncio.run(
+        _run_webhook_scenario(
+            rounds=[_negotiation_round1_script(_propose_metadata())],
+            env_path=_offline_env,
+            negotiation_params=dict(_NEGOTIATION_PARAMS),
+            negotiation_response_provider=provider,
+        )
+    )
+
+    assert a2a_client.call_log == ["send:1"]
+    assert a2a_client.register_calls == []
+    assert prompt_client.accept_calls == []
+    decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
+    assert decision_logs == [
+        "[client] negotiation-decision: reject (not wired in this demo; see the integration guide)"
+    ]
+    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
+    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0 transport=webhook"]
 
 
 # --- idle timeout backstop (R5) -------------------------------------------------------------------
