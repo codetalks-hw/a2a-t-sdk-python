@@ -11,6 +11,7 @@
   - [Client: generate and send a Task-T prompt](#client-generate-and-send-a-task-t-prompt)
   - [Server: validate, extract, and stream](#server-validate-extract-and-stream)
 - [Negotiation scenario (Negotiation-T)](#negotiation-scenario-negotiation-t)
+- [Webhook transport (A2A push notifications)](#webhook-transport-a2a-push-notifications)
 
 ## Overview
 
@@ -77,6 +78,8 @@ stopped. Use an interpreter that has the sample dependencies (the repository `.v
 | `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = 100Mbps throughput beyond cell capability; `feasibility` = 30% saving goal conflicting with a 50Mbps throughput target). `information` keeps the `--scenario` switch (only `--scenario negotiation` runs the missing-region flow); `target`/`feasibility` engage without it. The flag only selects the input — the server stays data-driven on the validation error code, see [Negotiation scenario](#negotiation-scenario-negotiation-t) |
 | `--channel {fromData,fromText}` | Generation channel of the negotiation propose/accept messages (default `fromData`; `fromText` adds one extraction LLM call per generated message, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
+| `--transport {sse,webhook}` | Event transport of the client (default `sse`): `sse` consumes the streamed response; `webhook` embeds a client-side push receiver and receives every task event as a webhook POST, see [Webhook transport](#webhook-transport-a2a-push-notifications) |
+| `--webhook-port N` | Bind port of the embedded webhook receiver used with `--transport webhook` (default 9000; `0` selects an OS-assigned ephemeral port), see [Webhook transport](#webhook-transport-a2a-push-notifications) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |
 | `--keep-logs` | Keep the temp run directory (logs / `.env`) under `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | Stop a previous `--keep-alive` run and exit |
@@ -137,6 +140,10 @@ Configuration used by this sample (from `a2a-t-sample/.env`):
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`; selects the sample scenario variant (`negotiation` = the missing-region information negotiation, see [Negotiation scenario](#negotiation-scenario-negotiation-t)) |
 | `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility` (default `information`); selects the negotiation scenario input, same semantics as `--negotiation` |
 | `A2AT_SAMPLE_CHANNEL` | `data` / `text` (default `data`); generation channel of the negotiation propose/accept messages, same semantics as `--channel` |
+| `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook` (default `sse`); event transport of the client, same semantics as `--transport` |
+| `A2AT_SAMPLE_WEBHOOK_PORT` | Bind port of the embedded webhook receiver (default `9000`; `0` = OS-assigned ephemeral port), used when `A2AT_SAMPLE_TRANSPORT=webhook` |
+| `A2AT_SAMPLE_WEBHOOK_TOKEN` | Push token the server must carry in the `X-A2A-Notification-Token` header (default `demo-webhook-token`); a mismatch answers `401` |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | Idle backstop in seconds that ends the webhook flow when no push arrives (default `30`) |
 | `A2AT_LLM_API_KEY` | Empty ⇒ mock LLM; otherwise an OpenAI-compatible key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM endpoint settings |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP client timeout in seconds (default 60) |
@@ -351,4 +358,66 @@ Wire conventions:
 [client] a2a-event: {"artifactUpdate": {"artifact": {"name": "energy saving intent report", ...}}}
 [client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED", ...}}}
 [client] stream-completed: events=14 artifacts=1
+```
+
+## Webhook transport (A2A push notifications)
+
+Besides the SSE streaming above, the sample supports the **webhook transport** (`--transport webhook`,
+`A2AT_SAMPLE_TRANSPORT=webhook`) — the A2A **push notification** mode for clients that do not hold a
+streaming connection open:
+
+- **Pure callback mode.** The client does not consume SSE. It sends a non-blocking `message:send`
+  (`return_immediately=True`) and receives **all** task events as webhook POSTs on a receiver embedded
+  in the client process: `client_main` starts the Starlette/uvicorn
+  [`WebhookReceiver`](src/common/webhook_receiver.py) on the client's asyncio loop before the flow runs
+  and stops it when the flow ends ([`client_main.py`](src/client/client_main.py)). Push bodies are
+  StreamResponse-shaped JSON — the same shape as the SSE events (a2a-sdk posts
+  `to_stream_response(event)`) — so the negotiation detection, artifact counting, and presentation are
+  shared with the SSE path.
+- **Two registration paths.** Round 1 registers the push config inline on the request
+  (`SendMessageConfiguration.task_push_notification_config`, a flat
+  `TaskPushNotificationConfig(url, token)` — the task id is still unknown at this point); round 2
+  re-registers the same URL/token through the `POST /tasks/{id}/pushNotificationConfigs` REST endpoint
+  (a2a-sdk `BaseClient.create_task_push_notification_config`) before the negotiation accept is sent.
+  The server assembles the push machinery **unconditionally** — a2a-sdk `DefaultRequestHandler` with
+  `InMemoryPushNotificationConfigStore` + `BasePushNotificationSender`
+  ([`server_main.py`](src/server/server_main.py)) — so in SSE mode it simply idles; no server-side
+  mode switch exists.
+- **Token auth.** The server's push sender carries `A2AT_SAMPLE_WEBHOOK_TOKEN` (default
+  `demo-webhook-token`) in the `X-A2A-Notification-Token` header on every POST; the receiver validates
+  it and answers `401` on a mismatch (the event is dropped).
+- **End signals.** The negotiation scenarios end when the webhook delivers `TASK_STATE_COMPLETED`; the
+  default scenario ends on the report artifact. An idle timeout (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`,
+  default 30 s, reset per received event) is the backstop: it logs a `webhook-idle-timeout` diagnostic
+  line and ends the flow normally with what was collected.
+
+The client embeds the receiver, so webhook mode binds **one extra listening port** —
+`A2AT_SAMPLE_WEBHOOK_PORT` (default 9000; `--webhook-port N`, `0` = OS-assigned ephemeral port) —
+besides the registry/server ports. The a2a client is built with `ClientConfig(streaming=False)`, which
+is required to select the non-blocking `message:send` path (the `return_immediately` flag alone does
+not switch the path). Language behavior is inherited from the negotiation section above. Each round's
+single RPC reply (the first Task) is logged once as `webhook-rpc-reply` and is not counted again: the
+`stream-completed` summary counts the events received over the webhook (SSE parity) and appends
+`transport=webhook` (plus `idle-timeout=<N>s` when a timeout ended the flow).
+
+```bash
+cd a2a-t-sample/ran-energy-saving
+python run_demo.py --transport webhook                          # default scenario; ends on the report artifact
+python run_demo.py --transport webhook --scenario negotiation   # information negotiation; ends on COMPLETED
+python run_demo.py --transport webhook --negotiation target     # target negotiation over webhook
+```
+
+**Expected output** (trimmed):
+
+```text
+[webhook-receiver] listening: url=http://127.0.0.1:9000/webhook
+[client] webhook-mode: push_url=http://127.0.0.1:9000/webhook idle_timeout=30.0s (client streaming=false, events via push notifications)
+[client] a2a-send-message: round=1 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, templateUri] return_immediately=true push_registration=inline
+[client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_INPUT_REQUIRED", "message": {"metadata": {"negotiationContext": {"round": 1.0, ..., "performative": "PROPOSE"}, ".../extensions/Negotiation-T/v1": "## Information Negotiation ...", "templateUri": "Negotiation-T/information-negotiation/propose/v1"}}}}}
+[client] negotiation-accept: generated (round=2) template_uri=Negotiation-T/information-negotiation/accept-reject/v1 items=[('region', 'Songshanhu Administration Committee')]
+[client] webhook-push-reregister: task_id=... url=http://127.0.0.1:9000/webhook method=create_task_push_notification_config token=***
+[client] a2a-send-message: round=2 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1> return_immediately=true push_registration=endpoint
+[client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_COMPLETED", ...}}}
+[client] stream-completed: events=14 artifacts=1 transport=webhook
+[webhook-receiver] stopped: url=http://127.0.0.1:9000/webhook
 ```

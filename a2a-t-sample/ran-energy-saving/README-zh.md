@@ -11,6 +11,7 @@
   - [客户端：生成并发送 Task-T prompt](#客户端生成并发送-task-t-prompt)
   - [服务端：校验、抽取并流式推送](#服务端校验抽取并流式推送)
 - [协商场景（Negotiation-T）](#协商场景negotiation-t)
+- [Webhook 传输（A2A 推送通知）](#webhook-传输a2a-推送通知)
 
 ## 概览
 
@@ -73,6 +74,8 @@ python run_demo.py --language zh-CN   # 中文（默认是 en-US）
 | `--scenario {default,negotiation}` | 场景变体（默认 `default`；`negotiation` 运行缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
 | `--negotiation {information,target,feasibility}` | 协商类型，选择客户端场景输入（默认 `information` = 缺失 region；`target` = 100Mbps 速率超出小区能力；`feasibility` = 30% 节能目标与 50Mbps 速率目标冲突）。`information` 仍受 `--scenario` 开关控制（只有 `--scenario negotiation` 运行缺失 region 流程）；`target`/`feasibility` 无需该开关即可触发。该参数只选择输入——服务端依据内容校验错误码数据驱动地分派，见[协商场景](#协商场景negotiation-t) |
 | `--channel {fromData,fromText}` | 协商 propose/accept 消息的生成通道（默认 `fromData`；`fromText` 每条生成的消息多一次抽取 LLM 调用，见[协商场景](#协商场景negotiation-t)） |
+| `--transport {sse,webhook}` | 客户端的事件传输方式（默认 `sse`）：`sse` 消费流式响应；`webhook` 在客户端内嵌推送接收器，以 webhook POST 接收全部任务事件，见[Webhook 传输](#webhook-传输a2a-推送通知) |
+| `--webhook-port N` | `--transport webhook` 时内嵌 webhook 接收器的绑定端口（默认 9000；`0` 表示由操作系统分配临时端口），见[Webhook 传输](#webhook-传输a2a-推送通知) |
 | `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
 | `--keep-logs` | 保留临时运行目录（日志 / `.env`），位于 `<temp>/a2at-ran-energy-saving/` |
 | `--stop` | 停止之前 `--keep-alive` 留下的后台进程并退出 |
@@ -130,6 +133,10 @@ uv run --no-sync python -m client.client_main
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`；选择样例场景变体（`negotiation` = 缺失 region 的信息协商，见[协商场景](#协商场景negotiation-t)） |
 | `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility`（默认 `information`）；选择协商场景输入，与 `--negotiation` 语义相同 |
 | `A2AT_SAMPLE_CHANNEL` | `data` / `text`（默认 `data`）；协商 propose/accept 消息的生成通道，与 `--channel` 语义相同 |
+| `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook`（默认 `sse`）；客户端的事件传输方式，与 `--transport` 语义相同 |
+| `A2AT_SAMPLE_WEBHOOK_PORT` | 内嵌 webhook 接收器的绑定端口（默认 `9000`；`0` = 操作系统分配临时端口），`A2AT_SAMPLE_TRANSPORT=webhook` 时使用 |
+| `A2AT_SAMPLE_WEBHOOK_TOKEN` | 服务端在 `X-A2A-Notification-Token` 头中必须携带的推送 token（默认 `demo-webhook-token`）；不匹配回 `401` |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 空闲兜底超时（秒）：webhook 流程超过该时长未收到推送即结束（默认 `30`） |
 | `A2AT_LLM_API_KEY` | 留空 ⇒ mock LLM；否则为 OpenAI 兼容的 key |
 | `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM 端点配置 |
 | `A2AT_LLM_TIMEOUT_SECONDS` | HTTP 客户端超时（秒，默认 60） |
@@ -335,4 +342,55 @@ prompt，流式推送 UC1 进度与报告 artifact，最后以 `TASK_STATE_COMPL
 [client] a2a-event: {"artifactUpdate": {"artifact": {"name": "energy saving intent report", ...}}}
 [client] a2a-event: {"statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED", ...}}}
 [client] stream-completed: events=14 artifacts=1
+```
+
+## Webhook 传输（A2A 推送通知）
+
+除上述 SSE 流式消费外，样例还支持 **webhook 传输**（`--transport webhook`、`A2AT_SAMPLE_TRANSPORT=webhook`）——
+即 A2A **推送通知（Push Notification）**模式，面向不保持流式长连接的客户端：
+
+- **纯回调模式。** 客户端不消费 SSE：发送非阻塞 `message:send`（`return_immediately=True`），**全部**任务事件以
+  webhook POST 的形式送达客户端进程内嵌的接收器：`client_main` 在流程开始前于客户端自己的 asyncio loop 上启动
+  Starlette/uvicorn [`WebhookReceiver`](src/common/webhook_receiver.py)，流程结束后停止
+  （[`client_main.py`](src/client/client_main.py)）。推送报文是与 SSE 事件同构的 StreamResponse JSON（a2a-sdk
+  发送 `to_stream_response(event)`），因此协商检测、artifact 计数与展示逻辑与 SSE 路径完全共享。
+- **两条注册路径。** 第 1 轮在请求内联注册 push 配置（`SendMessageConfiguration.task_push_notification_config`，
+  即扁平的 `TaskPushNotificationConfig(url, token)`——此时 task id 尚未知）；第 2 轮在发送协商 accept 前，经
+  `POST /tasks/{id}/pushNotificationConfigs` REST 端点（a2a-sdk `BaseClient.create_task_push_notification_config`）
+  重注册同一 URL/token。服务端**无条件**装配推送机制——a2a-sdk `DefaultRequestHandler` 携带
+  `InMemoryPushNotificationConfigStore` + `BasePushNotificationSender`
+  （[`server_main.py`](src/server/server_main.py)）——SSE 模式下它只是闲置，不存在服务端模式开关。
+- **Token 鉴权。** 服务端推送发送方在每个 POST 的 `X-A2A-Notification-Token` 头中携带
+  `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`）；接收器校验该头，不匹配回 `401`（事件被丢弃）。
+- **结束信号。** 协商场景以 webhook 收到 `TASK_STATE_COMPLETED` 结束；默认场景以收到报告 artifact 结束。
+  空闲超时（`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）是兜底：打印
+  `webhook-idle-timeout` 诊断行后，带着已收集的事件正常结束流程。
+
+webhook 模式下客户端内嵌接收器，因此除注册中心/服务端端口外**多绑定一个监听端口**——
+`A2AT_SAMPLE_WEBHOOK_PORT`（默认 9000；`--webhook-port N`，`0` = 操作系统分配临时端口）。a2a 客户端以
+`ClientConfig(streaming=False)` 构建——这是选择非阻塞 `message:send` 路径的必要条件（仅设置
+`return_immediately` 不会切换路径）。语言行为沿用上文协商章节的说明。每一轮的唯一 RPC 应答（首个 Task）以
+`webhook-rpc-reply` 记录一次、不重复计数：`stream-completed` 汇总统计经 webhook 收到的事件（与 SSE 口径
+一致），并追加 `transport=webhook`（若由超时结束则再追加 `idle-timeout=<N>s`）。
+
+```bash
+cd a2a-t-sample/ran-energy-saving
+python run_demo.py --transport webhook                          # 默认场景；以报告 artifact 结束
+python run_demo.py --transport webhook --scenario negotiation   # 信息协商；以 COMPLETED 结束
+python run_demo.py --transport webhook --negotiation target     # webhook 上的目标协商
+```
+
+**预期输出**（已裁剪）：
+
+```text
+[webhook-receiver] listening: url=http://127.0.0.1:9000/webhook
+[client] webhook-mode: push_url=http://127.0.0.1:9000/webhook idle_timeout=30.0s (client streaming=false, events via push notifications)
+[client] a2a-send-message: round=1 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, templateUri] return_immediately=true push_registration=inline
+[client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_INPUT_REQUIRED", "message": {"metadata": {"negotiationContext": {"round": 1.0, ..., "performative": "PROPOSE"}, ".../extensions/Negotiation-T/v1": "## Information Negotiation ...", "templateUri": "Negotiation-T/information-negotiation/propose/v1"}}}}}
+[client] negotiation-accept: generated (round=2) template_uri=Negotiation-T/information-negotiation/accept-reject/v1 items=[('region', 'Songshanhu Administration Committee')]
+[client] webhook-push-reregister: task_id=... url=http://127.0.0.1:9000/webhook method=create_task_push_notification_config token=***
+[client] a2a-send-message: round=2 webhook text_part=create ran energy saving task metadata_keys=[<Task-T/v1>, <Negotiation-T/v1>, templateUri, negotiationContext] header[A2A-Extensions]=<Negotiation-T/v1>,<Task-T/v1> return_immediately=true push_registration=endpoint
+[client] webhook-event: {"statusUpdate": {..., "status": {"state": "TASK_STATE_COMPLETED", ...}}}
+[client] stream-completed: events=14 artifacts=1 transport=webhook
+[webhook-receiver] stopped: url=http://127.0.0.1:9000/webhook
 ```
