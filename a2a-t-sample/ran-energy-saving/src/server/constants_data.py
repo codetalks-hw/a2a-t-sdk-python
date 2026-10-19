@@ -56,10 +56,10 @@ FEASIBILITY_NEGOTIATION_PROPOSE_TEMPLATE_URI = FEASIBILITY_NEGOTIATION_PROPOSE_U
 #: Task-T content-validation error codes that select the negotiation type (demo convention, plan
 #: R1): the first structured error of a failed Task-T content validation carries the code —
 #: ``content.param_missing`` proposes information (v1), ``content.value_not_allowed`` target and
-#: ``content.semantic_conflict`` feasibility.
+#: ``content.rule_violation`` feasibility.
 CONTENT_ERROR_CODE_INFORMATION = "content.param_missing"
 CONTENT_ERROR_CODE_TARGET = "content.value_not_allowed"
-CONTENT_ERROR_CODE_FEASIBILITY = "content.semantic_conflict"
+CONTENT_ERROR_CODE_FEASIBILITY = "content.rule_violation"
 
 #: Generation channel variants selected by ``A2AT_SAMPLE_CHANNEL``: ``data`` generates the
 #: negotiation propose from typed content (no extraction LLM call), ``text`` from a natural-language

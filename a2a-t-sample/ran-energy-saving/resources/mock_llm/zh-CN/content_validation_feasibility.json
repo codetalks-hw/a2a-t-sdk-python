@@ -3,7 +3,7 @@
   "errors": [
     {
       "slot_name": "guaranteedThroughputTarget",
-      "code": "content.semantic_conflict",
+      "code": "content.rule_violation",
       "facts": {
         "section_label": "任务上下文"
       }

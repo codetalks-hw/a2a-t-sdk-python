@@ -839,7 +839,7 @@ def test_negotiation_type_by_error_code_pins_the_sample_mapping() -> None:
     assert _NEGOTIATION_TYPE_BY_ERROR_CODE == {
         "content.param_missing": "information",
         "content.value_not_allowed": "target",
-        "content.semantic_conflict": "feasibility",
+        "content.rule_violation": "feasibility",
     }
     # Unrecognized codes stay out of the table (their tasks keep the plain rejection).
     assert "content.format_error" not in _NEGOTIATION_TYPE_BY_ERROR_CODE

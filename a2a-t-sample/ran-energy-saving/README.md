@@ -131,7 +131,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 ### 3.3 Server side
 
 `_extract_prompt_text` reads the metadata and `validate_task_prompt_and_data_filling` validates and
-extracts ([`server_flow.py:82`](src/server/server_flow.py#L82), [`server_flow.py:486`](src/server/server_flow.py#L486)).
+extracts ([`server_flow.py:82`](src/server/server_flow.py#L82), [`server_flow.py:495`](src/server/server_flow.py#L495)).
 A rejected prompt is mapped to `TASK_STATE_REJECTED` instead of crashing the server; the validated
 parameters go into the execution integration point.
 
@@ -256,9 +256,33 @@ that code is the sample's wiring, not part of the protocol.
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
-| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, InformationProposeContent(items, relationship)), INFORMATION_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, InformationEndingContent(ACCEPT, items)), INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607), [`client_flow.py:659`](src/client/client_flow.py#L659) |
-| Answer source | `NegotiationDecision(conclusion="accept", filled_params={...})` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| Server propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
+| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# server: render the propose from typed content
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        InformationProposeContent(items=missing_items, relationship=None),
+    ),
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+)
+
+# client: decide, then render the accept from that decision
+decision = provider.respond(propose_view, session)   # filled_params = the values to deliver
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        InformationEndingContent(
+            conclusion=ACCEPT,
+            items=[NegotiationItem(name=n, value=v) for n, v in decision.filled_params.items()],
+        ),
+    ),
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 The propose's `items` are the missing parameters; the accept's `items` are the filled values.
 
@@ -288,9 +312,34 @@ ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
-| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, TargetProposeContent(description, intent_understanding=[...], request_for_clarification=[...])), TARGET_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, TargetEndingContent(ACCEPT, confirmed_intent, failure_reason=None)), TARGET_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
-| Answer source | `NegotiationDecision(conclusion="accept", confirmed_intent="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| Server propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
+| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# server: restate the intent and ask for the time adjustment
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        TargetProposeContent(
+            target_negotiation_description=description,
+            intent_understanding=intent_items,
+            request_for_clarification=clarification_items,
+        ),
+    ),
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
+
+# client: decide, then confirm the corrected target
+decision = provider.respond(propose_view, session)   # confirmed_intent = the corrected target
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        TargetEndingContent(conclusion=ACCEPT, confirmed_intent=decision.confirmed_intent),
+    ),
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 The demo proposes the *clarification* form: the server restates the intent it understood
 (`intent_understanding`) and asks for the time adjustment (`request_for_clarification`). The accept
@@ -304,23 +353,44 @@ the demo reads it from `scenario_data`; a real client gets it from whoever resol
 The clarification wording of the propose belongs to the server agent (`_negotiation_propose_data`'s
 target branch).
 
-> `TargetProposeContent` also supports the confirm-request form (`target_confirm_request`, with the
-> three conditional lists empty — the mutual-exclusion rule the SDK enforces) and
-> `alignment_and_clarification` for later rounds. The demo uses the first-round clarification form.
-
 ### 4.6 Feasibility negotiation
 
 **① When the server opens it.** The request may be impossible under current conditions: the
 guaranteed rate cannot sustain the declared outage duration for the listed stations. The demo's
-trigger is a `content.semantic_conflict` validation error.
+trigger is a `content.rule_violation` validation error.
 
 **② What the reference code does.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
-| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, FeasibilityProposeContent(description, action=PROPOSE_ALTERNATIVE_ON_FAILURE, infeasibility_details_and_proposal=[...])), FEASIBILITY_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, FeasibilityEndingContent(ACCEPT, feasibility_summary)), FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
-| Answer source | `NegotiationDecision(conclusion="accept", feasibility_summary="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| Server propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
+| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# server: report the assessment as infeasible and attach the alternative proposal
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        FeasibilityProposeContent(
+            feasibility_negotiation_description=description,
+            action=PROPOSE_ALTERNATIVE_ON_FAILURE,
+            infeasibility_details_and_proposal=infeasibility_items,
+        ),
+    ),
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+)
+
+# client: decide, then answer with the agreed adjustment
+decision = provider.respond(propose_view, session)   # feasibility_summary = the answer
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        FeasibilityEndingContent(conclusion=ACCEPT, feasibility_summary=decision.feasibility_summary),
+    ),
+    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 The demo reports the completed assessment as infeasible and attaches an alternative proposal
 (`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with `infeasibility_details_and_proposal`); the accept
@@ -333,10 +403,6 @@ handling, transport.
 from the client's own planning, simulation or power-capacity system. The assessment itself — the
 infeasibility conclusion and the proposal — is the server agent's, built in
 `_negotiation_propose_data`'s feasibility branch.
-
-> `FeasibilityProposeContent` also supports `REQUEST_FEASIBILITY_EVALUATION` (asking the client to
-> evaluate `contents_to_evaluate`) and the `feasibility_confirm_request` form. The demo uses the
-> infeasibility-and-proposal form.
 
 ### 4.7 Reject and abort — the extension point
 
@@ -378,7 +444,7 @@ the server rows show what the counterpart replaces when the server is a real sys
 > **`scenario_data` feeds BOTH sides** — the client's scripted answers (filled parameters,
 > confirmed intent, feasibility summary) go through the provider integration point, and the server's propose
 > content is built from the same module: `_negotiation_propose_data`
-> ([`server_flow.py:207`](src/server/server_flow.py#L207)) fills the target/feasibility propose
+> ([`server_flow.py:208`](src/server/server_flow.py#L208)) fills the target/feasibility propose
 > texts from its accessors. Replacing only the provider and the execution service still leaves
 > the server proposing the demo's canned texts — the module is not removable.
 

@@ -126,7 +126,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 ### 3.3 服务端侧
 
 `_extract_prompt_text` 从 metadata 读取提示词，`validate_task_prompt_and_data_filling` 校验并抽取
-([`server_flow.py:82`](src/server/server_flow.py#L82)、[`server_flow.py:486`](src/server/server_flow.py#L486))。
+([`server_flow.py:82`](src/server/server_flow.py#L82)、[`server_flow.py:495`](src/server/server_flow.py#L495))。
 被拒绝的提示词映射为 `TASK_STATE_REJECTED`，而不是让服务崩溃；校验通过的参数进入执行接入点。
 
 ### 3.4 client 侧要替换什么
@@ -228,9 +228,33 @@ flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, InformationProposeContent(items, relationship)), INFORMATION_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, InformationEndingContent(ACCEPT, items)), INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607)、[`client_flow.py:659`](src/client/client_flow.py#L659) |
-| 应答来源 | `NegotiationDecision(conclusion="accept", filled_params={...})` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| 服务端 propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# 服务端：用类型化内容渲染 propose
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        InformationProposeContent(items=missing_items, relationship=None),
+    ),
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+)
+
+# 客户端：先决策，再根据决策渲染 accept
+decision = provider.respond(propose_view, session)   # filled_params = 要补的取值
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        InformationEndingContent(
+            conclusion=ACCEPT,
+            items=[NegotiationItem(name=n, value=v) for n, v in decision.filled_params.items()],
+        ),
+    ),
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 propose 的 `items` 是缺失的参数；accept 的 `items` 是补全后的取值。
 
@@ -257,9 +281,34 @@ class MyProvider:
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, TargetProposeContent(description, intent_understanding=[...], request_for_clarification=[...])), TARGET_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, TargetEndingContent(ACCEPT, confirmed_intent, failure_reason=None)), TARGET_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
-| 应答来源 | `NegotiationDecision(conclusion="accept", confirmed_intent="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| 服务端 propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# 服务端：复述意图并请求调整时间
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        TargetProposeContent(
+            target_negotiation_description=description,
+            intent_understanding=intent_items,
+            request_for_clarification=clarification_items,
+        ),
+    ),
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
+
+# 客户端：先决策，再确认修正后的目标
+decision = provider.respond(propose_view, session)   # confirmed_intent = 修正后的目标
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        TargetEndingContent(conclusion=ACCEPT, confirmed_intent=decision.confirmed_intent),
+    ),
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 样例用的是**澄清**形态：服务端复述它理解的意图（`intent_understanding`），并请求调整时间
 （`request_for_clarification`）。accept 把修正后的目标放进 `confirmed_intent`。
@@ -270,21 +319,43 @@ class MyProvider:
 读取；真实 client 的值来自把歧义解决掉的那一方。propose 中澄清请求的措辞属于 server agent
 （`_negotiation_propose_data` 的 target 分支）。
 
-> `TargetProposeContent` 还支持确认请求形态（`target_confirm_request` 非空，三个条件列表为空 ——
-> SDK 强制的互斥规则），以及后续轮的 `alignment_and_clarification`。样例用的是首轮澄清形态。
-
 ### 4.6 可行性协商（feasibility）
 
 **① 服务端何时开启。** 请求在当前条件下可能做不到：保障速率无法支撑所声明站点的停电时长。样例的
-触发条件是 `content.semantic_conflict` 校验错误。
+触发条件是 `content.rule_violation` 校验错误。
 
 **② 参考代码做了什么。**
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, FeasibilityProposeContent(description, action=PROPOSE_ALTERNATIVE_ON_FAILURE, infeasibility_details_and_proposal=[...])), FEASIBILITY_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, FeasibilityEndingContent(ACCEPT, feasibility_summary)), FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
-| 应答来源 | `NegotiationDecision(conclusion="accept", feasibility_summary="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
+| 服务端 propose | `generate_negotiation_propose_prompt_from_data` | [`server_flow.py:208`](src/server/server_flow.py#L208) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+
+```python
+# 服务端：上报不可行结论并附替代提案
+propose = server.generate_negotiation_propose_prompt_from_data(
+    NegotiationProposeData(
+        context,
+        FeasibilityProposeContent(
+            feasibility_negotiation_description=description,
+            action=PROPOSE_ALTERNATIVE_ON_FAILURE,
+            infeasibility_details_and_proposal=infeasibility_items,
+        ),
+    ),
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+)
+
+# 客户端：先决策，再应答同意的调整
+decision = provider.respond(propose_view, session)   # feasibility_summary = 应答内容
+accept = client.generate_negotiation_accept_prompt_from_data(
+    NegotiationEndingData(
+        context,
+        FeasibilityEndingContent(conclusion=ACCEPT, feasibility_summary=decision.feasibility_summary),
+    ),
+    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+)
+```
 
 样例把已完成的评估结论作为不可行上报，并附上替代提案
 （`action=PROPOSE_ALTERNATIVE_ON_FAILURE` 加 `infeasibility_details_and_proposal`）；accept 说明
@@ -295,9 +366,6 @@ class MyProvider:
 **④ client 侧必须自己实现的部分。** 应答：`feasibility_summary` 必须来自 client 自己的规划、
 仿真或备电容量系统。评估本身 —— 不可行的结论和提案 —— 属于 server agent，在
 `_negotiation_propose_data` 的 feasibility 分支构建。
-
-> `FeasibilityProposeContent` 还支持 `REQUEST_FEASIBILITY_EVALUATION`（请对方评估
-> `contents_to_evaluate`）与 `feasibility_confirm_request` 形态。样例用的是「不可行 + 提案」形态。
 
 ### 4.7 reject 与 abort —— 扩展点
 
@@ -334,7 +402,7 @@ SDK 的 `generate_negotiation_reject_prompt_from_data` / `..._from_text` 生成�
 
 > **`scenario_data` 同时喂两侧** —— 客户端的脚本化应答（补全参数、确认意图、可行性摘要）经
 > provider 接入点使用；服务端的 propose 内容也由同一模块构建：`_negotiation_propose_data`
-> ([`server_flow.py:207`](src/server/server_flow.py#L207)) 用其访问器填充 target/feasibility 的
+> ([`server_flow.py:208`](src/server/server_flow.py#L208)) 用其访问器填充 target/feasibility 的
 > propose 文案。只替换 provider 与执行服务，服务端仍会用 demo 的预制文案发起 propose ——
 > 该模块不可删除。
 

@@ -58,7 +58,7 @@ NEGOTIATION_TYPE_FEASIBILITY = "feasibility"
 
 #: Sample-level convention mapping the first content-validation error's code to the Negotiation-T
 #: type it proposes (plan R6): ``content.param_missing`` -> information, ``content.value_not_allowed``
-#: -> target, ``content.semantic_conflict`` -> feasibility. This is a sample convention, not an SDK
+#: -> target, ``content.rule_violation`` -> feasibility. This is a sample convention, not an SDK
 #: rule — customers edit their copy of this table to their own error codes (see the sample README,
 #: Negotiation-T chapter); codes absent from the table keep the plain rejection.
 _NEGOTIATION_TYPE_BY_ERROR_CODE: dict[str, str] = {
@@ -140,7 +140,7 @@ def _resolve_negotiation_type(
     The FIRST error entry's code selects the type through the sample-level
     ``_NEGOTIATION_TYPE_BY_ERROR_CODE`` table (plan R6): ``content.param_missing`` keeps the v1
     information path (which still proposes only when the errors name slots),
-    ``content.value_not_allowed`` selects the target propose and ``content.semantic_conflict`` the
+    ``content.value_not_allowed`` selects the target propose and ``content.rule_violation`` the
     feasibility propose. Any other code — or a codeless error — selects no negotiation type, so the
     caller rejects the task exactly as v1 did (including the slotless case).
     """
@@ -432,7 +432,7 @@ async def execute_server_flow(
          then COMPLETED
       4. Default flow: emit SUBMITTED, then on failure REJECTED — or, when the first validation
          error's code selects a negotiation type (plan R1: ``content.param_missing`` information
-         with slot-named errors, ``content.value_not_allowed`` target, ``content.semantic_conflict``
+         with slot-named errors, ``content.value_not_allowed`` target, ``content.rule_violation``
          feasibility), a Negotiation-T propose of that type on an INPUT_REQUIRED status update,
          generated from typed data or from a natural-language rendering per the configured channel
          (data-driven trigger, the server reads no scenario flag)

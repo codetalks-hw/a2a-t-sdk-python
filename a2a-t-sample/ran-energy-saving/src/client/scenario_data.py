@@ -67,7 +67,7 @@ WEBHOOK_IDLE_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT"
 
 #: Negotiation kinds selecting the client scenario input; the server stays data-driven on the
 #: content-validation error code (``content.param_missing`` -> information,
-#: ``content.value_not_allowed`` -> target, ``content.semantic_conflict`` -> feasibility).
+#: ``content.value_not_allowed`` -> target, ``content.rule_violation`` -> feasibility).
 NEGOTIATION_KIND_INFORMATION = "information"
 NEGOTIATION_KIND_TARGET = "target"
 NEGOTIATION_KIND_FEASIBILITY = "feasibility"

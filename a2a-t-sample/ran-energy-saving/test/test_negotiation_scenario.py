@@ -633,7 +633,7 @@ def test_content_validation_variant_resources_carry_the_trigger_codes(language: 
     assert feasibility["errors"] == [
         {
             "slot_name": "guaranteedThroughputTarget",
-            "code": "content.semantic_conflict",
+            "code": "content.rule_violation",
             "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_context"]},
         }
     ]
