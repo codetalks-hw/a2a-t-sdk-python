@@ -145,8 +145,8 @@ SDK contract** — edit your copy freely (remap codes, add your own, or drop the
 from your own business rules; an unmapped failure is simply rejected).
 
 The wire does not depend on that table: every propose self-describes through its own `templateUri`
-(`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`), so the client dispatches
-the accept on the URI it received, not on any error code.
+(`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`), so the client picks its
+answer — accept, reject or abort — from the URI it received, not from any error code.
 
 ### 4.2 Shared mechanics
 
