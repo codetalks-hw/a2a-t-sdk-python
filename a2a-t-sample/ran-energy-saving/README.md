@@ -147,10 +147,12 @@ sample-specific, so a client implementation brings its own
 
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
 
-The boundary in one sentence: the SDK handles the protocol details — rendering, validation, the
-negotiation session map, the transport mechanics. The two agents own the business, each on its own side: the
-server agent decides when a request cannot be carried out as-is and a conversation would settle it;
-the client agent decides how to answer the propose.
+The boundary in one sentence: the SDKs handle the protocol details — the **A2A-T SDK** generates and
+validates the negotiation messages (rendering, the negotiation session map), and the **A2A SDK**
+carries them (the transport). The A2A-T SDK has no transport layer of its own, so a deployment always
+pairs the two. The two agents own the business, each on its own side: the server agent decides when
+a request cannot be carried out as-is and a conversation would settle it; the client agent decides
+how to answer the propose.
 
 ### 4.1 When a negotiation happens
 
@@ -178,7 +180,7 @@ client accepts the adjusted target.
 ### 4.2 How the demo decides which one applies
 
 Which situation applies — and whether to negotiate at all — is **the server agent's business
-decision; the SDK has no opinion** — and the client only reacts to the propose it receives. In this
+decision; the SDKs have no opinion** — and the client only reacts to the propose it receives. In this
 demo it is data-driven: the first content-validation error's code selects the kind, via the
 `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
 ([`server_flow.py:55`](src/server/server_flow.py#L55)). That table is a **sample convention, not an
@@ -221,7 +223,7 @@ server side.
 4. server → client: the result — progress, then the report.
 
 The session (`id` / `round` / `maxRounds` / performative) travels with every negotiation message in
-the `negotiationContext` metadata map, so the SDK itself stays stateless.
+the `negotiationContext` metadata map, so the A2A-T SDK itself stays stateless.
 
 **Where the client's decision plugs in.** When message 2 arrives, the client flow builds a lightweight
 `NegotiationProposeView` (kind, `templateUri`, rendered text) and calls the provider
@@ -395,12 +397,12 @@ message. The SDK provides the matching generation methods
 
 ### 4.8 Generating messages from structured data or from natural language
 
-The **propose** is always written as a business message: the server composes the text, and the SDK
+The **propose** is always written as a business message: the server composes the text, and the A2A-T SDK
 extracts the structured content and renders the template (one extraction call).
 
 The **accept** can be generated either way, selected by `--channel`:
 
-- **from structured data (default)** — the client builds the typed content in code; the SDK renders
+- **from structured data (default)** — the client builds the typed content in code; the A2A-T SDK renders
   the template directly, with no model call.
 - **from natural language** (`--channel fromText`) — the client writes the accept as plain text; the
   SDK asks the model to extract the structured content first, then renders the template.

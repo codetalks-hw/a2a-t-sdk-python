@@ -139,8 +139,10 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
-一句话分界：SDK 拥有报文 —— 渲染、校验、协商会话映射、传输机制。业务由两端各自负责：server
-agent 决定请求何时无法按原样执行、值得先谈一谈；client agent 决定如何应答收到的 propose。
+一句话分界：报文由两个 SDK 共同承担 —— **A2A-T SDK** 负责生成与校验协商消息（渲染、协商会话
+映射），**A2A SDK** 负责把它们传输出去。A2A-T SDK 本身不含传输层，所以部署时总是两者配合使用。
+业务由两端各自负责：server agent 决定请求何时无法按原样执行、值得先谈一谈；client agent 决定如何
+应答收到的 propose。
 
 ### 4.1 什么时候会发生协商
 
@@ -161,7 +163,7 @@ agent 决定请求何时无法按原样执行、值得先谈一谈；client agen
 
 ### 4.2 样例如何判断属于哪一种
 
-判断属于哪种情况、以及到底要不要协商，是**server agent 的业务决策，SDK 不持立场** —— client
+判断属于哪种情况、以及到底要不要协商，是**server agent 的业务决策，两个 SDK 都不持立场** —— client
 只对收到的 propose 作出反应。本样例是数据驱动的：首个内容校验错误的错误码通过
 `_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
 （[`server_flow.py:55`](src/server/server_flow.py#L55)）选出类型。这张表是**样例约定，不是 SDK
@@ -197,7 +199,7 @@ abort。角色只决定谁发 propose；报文形态、会话处理与传输完�
 4. 服务端 → 客户端：结果 —— 先进度，后报告。
 
 会话（`id` / `round` / `maxRounds` / performative）随每条协商消息放在 `negotiationContext` metadata
-中，因此 SDK 本身无状态。
+中，因此 A2A-T SDK 本身无状态。
 
 **client 侧要接的地方。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
 `templateUri`、渲染文本）并调用（[`negotiation_response.py`](src/client/negotiation_response.py)）：
@@ -352,18 +354,18 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 ### 4.7 reject 与 abort
 
 客户端也可以用 `reject` 或 `abort` 回应 propose，而不只是 `accept`。本样例只实现了 accept 路径：
-reject/abort 决策只会打日志并结束流程，不发送报文。需要发送时，SDK 提供对应的生成方法
+reject/abort 决策只会打日志并结束流程，不发送报文。需要发送时，A2A-T SDK 提供对应的生成方法
 （`generate_negotiation_reject_prompt_from_data` / `..._from_text`，以及
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`）。
 
 ### 4.8 从结构化数据生成，还是从自然语言生成
 
-**propose 固定按业务报文生成**：服务端写好文本，SDK 抽取成结构化内容后渲染模板（一次抽取调用）。
+**propose 固定按业务报文生成**：服务端写好文本，A2A-T SDK 抽取成结构化内容后渲染模板（一次抽取调用）。
 
 **accept** 两种方式都支持，由 `--channel` 选择：
 
-- **从结构化数据生成（默认）**：client 在代码里构造类型化内容，SDK 直接渲染模板，不调用模型。
-- **从自然语言生成**（`--channel fromText`）：client 把 accept 写成一段自然语言，SDK 先让模型抽取成
+- **从结构化数据生成（默认）**：client 在代码里构造类型化内容，A2A-T SDK 直接渲染模板，不调用模型。
+- **从自然语言生成**（`--channel fromText`）：client 把 accept 写成一段自然语言，A2A-T SDK 先让模型抽取成
   结构化内容，再渲染模板。
 
 ## 5. 替换清单（demo 到生产）
