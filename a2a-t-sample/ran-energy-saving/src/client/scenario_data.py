@@ -11,10 +11,9 @@ complete input, while the ``negotiation`` scenario uses the missing-region input
 information-negotiation variant (the client input omits the region, the server opens the
 negotiation, the client answers with ``negotiation_answers``), and by the negotiation kind
 (``A2AT_SAMPLE_NEGOTIATION_KIND``): ``target`` / ``feasibility`` select their own complete
-inputs whose Task-T validation fails with the value-not-allowed / semantic-conflict content
-error that triggers the target / feasibility negotiation (the server stays data-driven on the
-error code). The generation channel (``A2AT_SAMPLE_CHANNEL``) switches the negotiation
-propose/accept generation between typed data and natural-language text. The transport
+inputs whose Task-T validation fails with the value-not-allowed / rule-violation content error
+that triggers the target / feasibility negotiation (the server stays data-driven on the error
+code). The transport
 (``A2AT_SAMPLE_TRANSPORT``) switches how the client receives the task events: the default SSE
 stream or the embedded webhook receiver (``common.webhook_receiver``).
 """
@@ -36,16 +35,6 @@ SUPPORTED_SCENARIOS = (SCENARIO_DEFAULT, SCENARIO_NEGOTIATION)
 
 #: ``.env`` key selecting the sample scenario variant.
 SCENARIO_ENV_KEY = "A2AT_SAMPLE_SCENARIO"
-
-#: Generation channel variants selected by ``A2AT_SAMPLE_CHANNEL``: ``data`` generates the
-#: negotiation propose/accept from typed content (no extraction LLM call), ``text`` from a
-#: natural-language rendering plus one extraction LLM call.
-CHANNEL_DATA = "data"
-CHANNEL_TEXT = "text"
-SUPPORTED_CHANNELS = (CHANNEL_DATA, CHANNEL_TEXT)
-
-#: ``.env`` key selecting the generation channel.
-CHANNEL_ENV_KEY = "A2AT_SAMPLE_CHANNEL"
 
 #: Event transport variants selected by ``A2AT_SAMPLE_TRANSPORT``: ``sse`` consumes the streamed
 #: response as before, ``webhook`` embeds the client-side receiver
@@ -125,7 +114,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN = (
 
 #: Chinese natural-language task request of the feasibility negotiation: two stations must keep
 #: a guaranteed rate through an 18-hour power outage, so the Task-T validation reports the
-#: semantic-conflict content error that triggers the feasibility negotiation (spec case 3: the
+#: rule-violation content error that triggers the feasibility negotiation (spec case 3: the
 #: guaranteed rate cannot sustain the outage duration).
 NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH = (
     "在松山湖管委会创建无线网络节能任务：站点列表1为[站点名称1, 站点名称2]；"
@@ -323,17 +312,6 @@ def resolve_scenario(*, env_path: Path | None = None) -> str:
     raw_value = str(values.get(SCENARIO_ENV_KEY, "")).strip() or os.environ.get(SCENARIO_ENV_KEY, "").strip()
     return raw_value if raw_value in SUPPORTED_SCENARIOS else SCENARIO_DEFAULT
 
-
-def resolve_channel(*, env_path: Path | None = None) -> str:
-    """Resolve the configured ``A2AT_SAMPLE_CHANNEL`` (defaults to ``data``).
-
-    The channel switches only the negotiation propose/accept generation (typed data vs an
-    NL rendering plus one extraction LLM call); an unset or unknown value resolves to ``data``.
-    """
-    resolved = env_path or Path.cwd() / ".env"
-    values = dotenv_values(resolved) if resolved.exists() else {}
-    raw_value = str(values.get(CHANNEL_ENV_KEY, "")).strip() or os.environ.get(CHANNEL_ENV_KEY, "").strip()
-    return raw_value if raw_value in SUPPORTED_CHANNELS else CHANNEL_DATA
 
 
 def resolve_negotiation_kind(*, env_path: Path | None = None) -> str:

@@ -10,9 +10,9 @@ registered token header — simulating the server's push sender, so the ENTIRE w
 (R4) with the same url/token, and the call order send→register→send is pinned.
 
 Covered: the default scenario (artifact end, no accept sent, summary counts WEBHOOK-received events
-only — the RPC reply is logged separately per R6), the 3-type negotiation matrix over the fromData
-channel (per-type accept content + re-registration + COMPLETED end), the target fromText spot
-check, the unhandled/malformed INPUT_REQUIRED degradations (identical to SSE), the terminal-state
+only — the RPC reply is logged separately per R6), the 3-type negotiation matrix (per-type accept
+content + re-registration + COMPLETED end), the target accept spot check, the unhandled/malformed
+INPUT_REQUIRED degradations (identical to SSE), the terminal-state
 end signals (a REJECTED in either phase ends promptly with ``end=<state>`` on the summary — no idle
 hang, final fix), the idle-timeout backstop (R5), the
 ``normalize_webhook_payload``/``normalize_event`` parity, and the server
@@ -61,13 +61,6 @@ from a2a_t.core.standard_templates import (
     TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from a2a_t.negotiation.content.enums import NegotiationConclusion
-from a2a_t.negotiation.content.models import (
-    FeasibilityEndingContent,
-    InformationEndingContent,
-    NegotiationEndingData,
-    TargetEndingContent,
-)
 from google.protobuf.json_format import MessageToDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -83,8 +76,6 @@ from client.negotiation_response import (
     NegotiationResponseProvider,
 )
 from client.scenario_data import (
-    CHANNEL_DATA,
-    CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
     NEGOTIATION_KIND_TARGET,
     negotiation_feasibility_summary,
@@ -128,7 +119,6 @@ class _ScriptedPromptClient:
     def __init__(self) -> None:
         self.from_text_calls: list[tuple[str, str]] = []
         self.from_data_calls: list[tuple[dict[str, object], str]] = []
-        self.accept_calls: list[NegotiationEndingData] = []
         self.accept_from_text_calls: list[tuple[str, NegotiationContext, str]] = []
 
     def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent:
@@ -162,11 +152,6 @@ class _ScriptedPromptClient:
             ),
         )
 
-    def generate_negotiation_accept_prompt_from_data(
-        self, data: NegotiationEndingData, template_uri: str
-    ) -> MetadataContent:
-        self.accept_calls.append(data)
-        return self._accept_result(str(template_uri), data.context)
 
     def generate_negotiation_accept_prompt_from_text(
         self, text: str, context: NegotiationContext, template_uri: str
@@ -339,7 +324,6 @@ async def _run_webhook_scenario(
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     negotiation_response_provider: NegotiationResponseProvider | None = None,
-    channel: str = CHANNEL_DATA,
     idle_timeout: float = 2.0,
     token: str = _DEMO_TOKEN,
 ) -> tuple[list[dict[str, object]], _WebhookFakeA2AClient, _ScriptedPromptClient, list[str], WebhookReceiver]:
@@ -366,7 +350,6 @@ async def _run_webhook_scenario(
             negotiation_answers=negotiation_answers,
             negotiation_kind=negotiation_kind,
             negotiation_response_provider=negotiation_response_provider,
-            channel=channel,
             env_path=env_path,
             transport="webhook",
             webhook_queue=queue,
@@ -412,7 +395,7 @@ def test_default_scenario_webhook_ends_on_artifact_and_counts_webhook_events(_of
     assert len(events) == 3  # SUBMITTED + WORKING + artifact, all WEBHOOK-received
     assert len(a2a_client.send_calls) == 1  # no accept sent
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
 
     # Initial request carries return_immediately + the inline push config (R2/R4).
     request, context = a2a_client.send_calls[0]
@@ -447,7 +430,7 @@ def test_default_scenario_webhook_ends_on_artifact_and_counts_webhook_events(_of
     ]
 
 
-# --- negotiation matrix: 3 types x webhook (fromData) ------------------------------------------
+# --- negotiation matrix: 3 types x webhook -----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -517,12 +500,10 @@ def test_negotiation_webhook_round_trip_re_registers_and_completes(
     reregister_logs = [line for line in logs if line.startswith("[client] webhook-push-reregister:")]
     assert len(reregister_logs) == 1
 
-    # The accept was generated from typed data (fromData channel) for the proposed type.
+    # The accept goes through the extraction API for the proposed type.
     assert prompt_client.from_data_calls == [(_NEGOTIATION_PARAMS, ENERGY_SAVING_TEMPLATE_URI)]
-    assert len(prompt_client.accept_calls) == 1
-    assert prompt_client.accept_from_text_calls == []
-    assert prompt_client.accept_calls[0].content.conclusion == NegotiationConclusion.ACCEPT
-    assert prompt_client.accept_calls[0].context.round == 1
+    assert len(prompt_client.accept_from_text_calls) == 1
+    assert prompt_client.accept_from_text_calls[0][1].round == 1
 
     # Summary: 2 webhook events (initial) + 4 (continuation), 1 artifact, terminal COMPLETED end.
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
@@ -541,9 +522,8 @@ def test_information_webhook_accept_carries_the_answer_items(_offline_env: Path)
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, InformationEndingContent)
-    assert [(item.name, item.value) for item in accept_data.content.items] == list(_NEGOTIATION_ANSWERS.items())
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == "Accept. 1. region：Songshanhu Administration Committee；"
 
 
 def test_target_webhook_accept_carries_the_confirmed_intent(_offline_env: Path) -> None:
@@ -558,9 +538,8 @@ def test_target_webhook_accept_carries_the_confirmed_intent(_offline_env: Path) 
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, TargetEndingContent)
-    assert accept_data.content.confirmed_intent == negotiation_target_confirmation(env_path=_offline_env)
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == f"Accept. {negotiation_target_confirmation(env_path=_offline_env)}"
     accept_logs = [line for line in logs if line.startswith("[client] negotiation-accept:")]
     assert "Negotiation-T/target-negotiation/accept-reject/v1" in accept_logs[0]
 
@@ -577,16 +556,15 @@ def test_feasibility_webhook_accept_carries_the_feasibility_summary(_offline_env
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, FeasibilityEndingContent)
-    assert accept_data.content.feasibility_summary == negotiation_feasibility_summary(env_path=_offline_env)
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == f"Accept. {negotiation_feasibility_summary(env_path=_offline_env)}"
 
 
-# --- target fromText x webhook spot check (D8) ---------------------------------------------------
+# --- target accept x webhook spot check ----------------------------------------------------------
 
 
-def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None:
-    """fromText accept generation works under webhook: rendered text -> extraction API call."""
+def test_target_accept_webhook_spot_check(_offline_env: Path) -> None:
+    """The accept generation works under webhook: rendered text -> extraction API call."""
     _, a2a_client, prompt_client, _logs, _receiver = asyncio.run(
         _run_webhook_scenario(
             rounds=[
@@ -597,11 +575,9 @@ def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None
             negotiation_params=dict(_NEGOTIATION_PARAMS),
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
             negotiation_kind="target",
-            channel=CHANNEL_TEXT,
         )
     )
 
-    assert prompt_client.accept_calls == []
     assert len(prompt_client.accept_from_text_calls) == 1
     text, context, template_uri = prompt_client.accept_from_text_calls[0]
     assert text == f"Accept. {negotiation_target_confirmation(env_path=_offline_env)}"
@@ -609,7 +585,7 @@ def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None
     assert context.performative == NegotiationPerformative.ACCEPT
     assert template_uri == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
 
-    # Round-2 message shape unchanged across channels: send -> register -> send, COMPLETED end.
+    # Round-2 message shape: send -> register -> send, COMPLETED end.
     assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
     accept_request = a2a_client.send_calls[1][0]
     metadata = _request_metadata(accept_request)
@@ -630,7 +606,7 @@ def test_input_required_without_answers_is_unhandled_and_ends_after_the_initial_
 
     assert len(a2a_client.send_calls) == 1
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "no negotiation answers supplied" in unhandled_logs[0]
@@ -649,7 +625,7 @@ def test_malformed_context_is_unhandled_and_ends_after_the_initial_phase_webhook
     )
 
     assert len(a2a_client.send_calls) == 1
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "malformed/missing session context" in unhandled_logs[0]
@@ -701,11 +677,9 @@ def test_injected_provider_webhook_replaces_the_scripted_accept_end_to_end(_offl
 
     # Order evidence: initial send -> endpoint re-registration -> accept send.
     assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
-    # The typed accept carries the decision's confirmed intent (not the scenario text).
-    assert len(prompt_client.accept_calls) == 1
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, TargetEndingContent)
-    assert accept_data.content.confirmed_intent == "Custom confirmed target"
+    # The accept text carries the decision's confirmed intent (not the scenario text).
+    assert len(prompt_client.accept_from_text_calls) == 1
+    assert prompt_client.accept_from_text_calls[0][0] == "Accept. Custom confirmed target"
     assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
@@ -728,7 +702,7 @@ def test_reject_decision_webhook_logs_and_ends_after_the_initial_phase(_offline_
 
     assert a2a_client.call_log == ["send:1"]
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
         "[client] negotiation-decision: reject (not implemented in this demo; see the sample README)"
@@ -782,7 +756,7 @@ def test_initial_phase_rejected_ends_the_flow_promptly_with_no_accept_sent(_offl
     # The answers were supplied, but a terminal REJECTED preempts the negotiation round trip.
     assert len(a2a_client.send_calls) == 1
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
         "[client] stream-completed: events=2 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"

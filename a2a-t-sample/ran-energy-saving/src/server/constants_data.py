@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from a2a_t.core.standard_templates import (
@@ -12,7 +10,6 @@ from a2a_t.core.standard_templates import (
     INFORMATION_NEGOTIATION_PROPOSE_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from dotenv import dotenv_values
 
 SUBMITTED_MESSAGE = "Energy saving task accepted, starting RAN energy saving task"
 ARTIFACT_SEND_INTERVAL_SECONDS = 1.0
@@ -60,17 +57,6 @@ FEASIBILITY_NEGOTIATION_PROPOSE_TEMPLATE_URI = FEASIBILITY_NEGOTIATION_PROPOSE_U
 CONTENT_ERROR_CODE_INFORMATION = "content.param_missing"
 CONTENT_ERROR_CODE_TARGET = "content.value_not_allowed"
 CONTENT_ERROR_CODE_FEASIBILITY = "content.rule_violation"
-
-#: Generation channel variants selected by ``A2AT_SAMPLE_CHANNEL``: ``data`` generates the
-#: negotiation propose from typed content (no extraction LLM call), ``text`` from a natural-language
-#: rendering plus one extraction LLM call. Server-side mirror of the ``client.scenario_data``
-#: resolver — the server imports no client resolver (only its scenario accessors).
-CHANNEL_DATA = "data"
-CHANNEL_TEXT = "text"
-SUPPORTED_CHANNELS = (CHANNEL_DATA, CHANNEL_TEXT)
-
-#: ``.env`` key selecting the generation channel.
-CHANNEL_ENV_KEY = "A2AT_SAMPLE_CHANNEL"
 
 #: Area the sample energy-saving intent is scoped to (from the RAN energy-saving interface spec).
 ENERGY_SAVING_REGION = "Songshanhu Administration Committee"
@@ -198,15 +184,3 @@ def get_energy_saving_intent_report() -> dict[str, str]:
     return report
 
 
-def resolve_negotiation_channel(*, env_path: Path | None = None) -> str:
-    """Resolve the configured ``A2AT_SAMPLE_CHANNEL`` (defaults to ``data``).
-
-    The channel switches only the negotiation propose generation (typed data vs a natural-language
-    rendering plus one extraction LLM call); an unset or unknown value resolves to ``data``. The
-    ``.env`` value wins over the OS environment (the sample resolver convention, mirroring the
-    client-side ``client.scenario_data.resolve_channel`` without importing it).
-    """
-    resolved = env_path or Path.cwd() / ".env"
-    values = dotenv_values(resolved) if resolved.exists() else {}
-    raw_value = str(values.get(CHANNEL_ENV_KEY, "")).strip() or os.environ.get(CHANNEL_ENV_KEY, "").strip()
-    return raw_value if raw_value in SUPPORTED_CHANNELS else CHANNEL_DATA

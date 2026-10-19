@@ -30,9 +30,6 @@ if str(SRC_ROOT) not in sys.path:
 
 from client import scenario_data
 from client.scenario_data import (
-    CHANNEL_DATA,
-    CHANNEL_ENV_KEY,
-    CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
     NATURAL_LANGUAGE_PROMPT_INPUT_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
@@ -42,7 +39,6 @@ from client.scenario_data import (
     SCENARIO_DEFAULT,
     SCENARIO_ENV_KEY,
     SCENARIO_NEGOTIATION,
-    SUPPORTED_CHANNELS,
     SUPPORTED_NEGOTIATION_KINDS,
     SUPPORTED_SCENARIOS,
     build_prompt_input,
@@ -55,7 +51,6 @@ from client.scenario_data import (
     negotiation_target_confirmation,
     negotiation_target_description,
     negotiation_target_intent_understanding,
-    resolve_channel,
     resolve_negotiation_kind,
     resolve_scenario,
 )
@@ -88,7 +83,6 @@ def _offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Force-install the scripted mock LLM (en-US) for every test, regardless of any real ``.env``."""
     monkeypatch.chdir(PROJECT_ROOT)
     monkeypatch.delenv(SCENARIO_ENV_KEY, raising=False)
-    monkeypatch.delenv(CHANNEL_ENV_KEY, raising=False)
     monkeypatch.delenv(NEGOTIATION_KIND_ENV_KEY, raising=False)
     env_path = _write_offline_env(tmp_path, "en-US")
     mock_llm.install_mock_llm(env_path=env_path)
@@ -391,34 +385,17 @@ def _run_mock_sequence(steps: list[tuple[list[dict[str, str]], dict[str, object]
         mock_llm.get_routed_response(messages, schema)
 
 
-def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() -> None:
-    """fromData target run; fromText adds the server propose and the client accept extractions."""
+def test_target_negotiation_call_sequence_is_pinned() -> None:
+    """The run adds one propose extraction and one accept extraction to the Task-T calls."""
     target_input = scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN
     from_data_slot_messages = _slot_extraction_messages('{"operationType": "create"}')
     filled_validation_messages = _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL)
     propose_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.PROPOSE)
     accept_schema = build_extraction_schema(NegotiationType.TARGET, NegotiationPerformative.ACCEPT)
 
-    # fromData: client slot extraction (target input) -> server target validation -> the client's
-    # from-data prompt regeneration slot call -> the server's filled-prompt validation.
-    mock_llm.reset_call_log()
-    _run_mock_sequence(
-        [
-            (_slot_extraction_messages(target_input), _slot_extraction_schema()),
-            (_content_validation_messages(target_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
-            (from_data_slot_messages, _slot_extraction_schema()),
-            (filled_validation_messages, _content_validation_schema()),
-        ]
-    )
-    assert llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
-        mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
-        mock_llm.STAGE_SLOT_EXTRACTION,
-        mock_llm.STAGE_CONTENT_VALIDATION,
-    ]
-
-    # fromText: the server propose extraction joins between the target validation and the accept
-    # slot call, and the client accept extraction joins before the final validation.
+    # client slot extraction (target input) -> server target validation -> the server propose
+    # extraction -> the client's prompt-regeneration slot call -> the client accept extraction ->
+    # the server's filled-prompt validation.
     mock_llm.reset_call_log()
     _run_mock_sequence(
         [
@@ -440,34 +417,17 @@ def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() 
     ]
 
 
-def test_feasibility_negotiation_call_sequences_are_pinned_from_data_and_from_text() -> None:
-    """fromData feasibility run; fromText adds the server propose and the client accept extractions."""
+def test_feasibility_negotiation_call_sequence_is_pinned() -> None:
+    """The run adds one propose extraction and one accept extraction to the Task-T calls."""
     feasibility_input = scenario_data.NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN
     from_data_slot_messages = _slot_extraction_messages('{"operationType": "create"}')
     filled_validation_messages = _content_validation_messages(_FILLED_REGION_PROMPT, _REGION_TEMPLATE_TAIL)
     propose_schema = build_extraction_schema(NegotiationType.FEASIBILITY, NegotiationPerformative.PROPOSE)
     accept_schema = build_extraction_schema(NegotiationType.FEASIBILITY, NegotiationPerformative.ACCEPT)
 
-    # fromData: client slot extraction (feasibility input) -> server feasibility validation ->
-    # the client's from-data prompt regeneration slot call -> the server's filled-prompt validation.
-    mock_llm.reset_call_log()
-    _run_mock_sequence(
-        [
-            (_slot_extraction_messages(feasibility_input), _slot_extraction_schema()),
-            (_content_validation_messages(feasibility_input, _REGION_TEMPLATE_TAIL), _content_validation_schema()),
-            (from_data_slot_messages, _slot_extraction_schema()),
-            (filled_validation_messages, _content_validation_schema()),
-        ]
-    )
-    assert llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
-        mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
-        mock_llm.STAGE_SLOT_EXTRACTION,
-        mock_llm.STAGE_CONTENT_VALIDATION,
-    ]
-
-    # fromText: the server propose extraction joins between the feasibility validation and the
-    # accept slot call, and the client accept extraction joins before the final validation.
+    # client slot extraction (feasibility input) -> server feasibility validation -> the server
+    # propose extraction -> the client's prompt-regeneration slot call -> the client accept
+    # extraction -> the server's filled-prompt validation.
     mock_llm.reset_call_log()
     _run_mock_sequence(
         [
@@ -649,8 +609,7 @@ def test_negotiation_accessors_match_the_canned_extraction_responses(tmp_path: P
     feasibility_propose = _resource(language, "negotiation_feasibility_propose_extraction.json")
     feasibility_accept = _resource(language, "negotiation_feasibility_accept_extraction.json")
 
-    # The client-generated accept texts equal the canned accept-extraction content, so the
-    # from-data and from-text channels produce equivalent messages.
+    # The client-generated accept texts equal the canned accept-extraction content.
     assert target_accept["conclusion"] == "Accept"
     assert target_accept["failure_reason"] is None
     assert negotiation_target_confirmation(env_path=env_path) == target_accept["confirmed_intent"]
@@ -751,9 +710,8 @@ def test_negotiation_filled_params_and_answers_are_region_filled(tmp_path: Path,
     assert params == resource_params
 
 
-def test_negotiation_kinds_and_channels_constants() -> None:
+def test_negotiation_kind_constants() -> None:
     assert SUPPORTED_NEGOTIATION_KINDS == ("information", "target", "feasibility")
-    assert SUPPORTED_CHANNELS == ("data", "text")
     assert set(NEGOTIATION_INPUT_KEYS) == set(SUPPORTED_NEGOTIATION_KINDS)
 
 
@@ -762,30 +720,6 @@ def _kind_input(kind: str, language: str) -> str:
     en_input, zh_input = NEGOTIATION_INPUT_KEYS[kind]
     return en_input if language == "en-US" else zh_input
 
-
-def test_resolve_channel_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)  # no .env next to the cwd
-
-    # No .env and no OS environment entry -> data.
-    assert resolve_channel() == CHANNEL_DATA
-
-    # Unknown value -> data.
-    env_path = tmp_path / ".env"
-    env_path.write_text("A2AT_SAMPLE_CHANNEL=bogus\n", encoding="utf-8")
-    assert resolve_channel(env_path=env_path) == CHANNEL_DATA
-
-    # Known value -> itself.
-    env_path.write_text("A2AT_SAMPLE_CHANNEL=text\n", encoding="utf-8")
-    assert resolve_channel(env_path=env_path) == CHANNEL_TEXT
-
-    # OS environment fallback when the .env does not carry the key.
-    env_path.write_text("A2AT_LANGUAGE=en-US\n", encoding="utf-8")
-    monkeypatch.setenv(CHANNEL_ENV_KEY, CHANNEL_TEXT)
-    assert resolve_channel(env_path=env_path) == CHANNEL_TEXT
-
-    # The .env value wins over the OS environment.
-    env_path.write_text("A2AT_SAMPLE_CHANNEL=data\n", encoding="utf-8")
-    assert resolve_channel(env_path=env_path) == CHANNEL_DATA
 
 
 def test_resolve_negotiation_kind_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

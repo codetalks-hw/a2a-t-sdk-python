@@ -26,14 +26,6 @@ from a2a_t.core.standard_templates import (
     TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from a2a_t.negotiation.content.enums import NegotiationConclusion
-from a2a_t.negotiation.content.models import (
-    FeasibilityEndingContent,
-    InformationEndingContent,
-    NegotiationEndingData,
-    NegotiationItem,
-    TargetEndingContent,
-)
 from common.logging_utils import format_payload_log, format_stage_log
 from common.sse_event_consumer import normalize_event
 from common.task_schema import TASK_PARAM_SCHEMA
@@ -45,8 +37,6 @@ from client.negotiation_response import (
     ScriptedNegotiationResponseProvider,
 )
 from client.scenario_data import (
-    CHANNEL_DATA,
-    CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
     NEGOTIATION_KIND_FEASIBILITY,
     NEGOTIATION_KIND_INFORMATION,
@@ -419,7 +409,6 @@ async def _run_webhook_flow(
     negotiation_params: dict[str, object] | None,
     negotiation_kind: str | None,
     negotiation_response_provider: NegotiationResponseProvider | None,
-    channel: str,
     normalized_events: list[dict[str, object]],
     artifact_count: int,
     log_sink: Callable[[str], None] | None,
@@ -513,7 +502,6 @@ async def _run_webhook_flow(
         initial_input=initial_input,
         session=session,
         plan=plan,
-        channel=channel,
         negotiation_params=negotiation_params,
         log_sink=log_sink,
     )
@@ -604,40 +592,12 @@ def _stringify_filled_params(filled_params: dict[str, object]) -> dict[str, str]
     return {name: value if isinstance(value, str) else str(value) for name, value in filled_params.items()}
 
 
-def _negotiation_accept_content(
-    negotiation_kind: str,
-    *,
-    plan: _NegotiationAcceptPlan,
-) -> InformationEndingContent | TargetEndingContent | FeasibilityEndingContent:
-    """Build the typed accept content of one negotiation type from the provider's decision (plan R3).
-
-    Information keeps the v1 path: the accept items come from the decision's filled parameters.
-    Target accepts the clarified target and feasibility confirms the feasibility evaluation, both
-    with the decision's text — the scripted provider supplies the scenario-owned content of the
-    resolved language, a customer provider its own.
-    """
-    if negotiation_kind == NEGOTIATION_KIND_TARGET:
-        return TargetEndingContent(
-            conclusion=NegotiationConclusion.ACCEPT,
-            confirmed_intent=plan.confirmed_intent,
-            failure_reason=None,
-        )
-    if negotiation_kind == NEGOTIATION_KIND_FEASIBILITY:
-        return FeasibilityEndingContent(
-            conclusion=NegotiationConclusion.ACCEPT,
-            feasibility_summary=plan.feasibility_summary,
-        )
-    return InformationEndingContent(
-        conclusion=NegotiationConclusion.ACCEPT,
-        items=[NegotiationItem(name=name, value=value) for name, value in plan.filled_params.items()],
-    )
-
 
 def _negotiation_accept_text(negotiation_kind: str, *, plan: _NegotiationAcceptPlan) -> str:
     """Render the natural-language input of the from-text accept generation for one type.
 
     The rendering carries the same content as the typed accept builders (so the extraction step of
-    the from-text channel returns the canonical content and both channels produce equivalent
+    the from-text accept returns the canonical content and the rendering stays equivalent
     messages).
     """
     if negotiation_kind == NEGOTIATION_KIND_TARGET:
@@ -662,7 +622,6 @@ def _build_negotiation_accept_request(
     initial_input: dict[str, object],
     session: NegotiationContext,
     plan: _NegotiationAcceptPlan,
-    channel: str,
     negotiation_params: dict[str, object],
     log_sink: object | None,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
@@ -673,12 +632,10 @@ def _build_negotiation_accept_request(
     plus the answer to it, so the accept does not advance the round), the Task-T prompt is
     regenerated from the filled parameters (the flow-owned message construction fed by the caller), and
     both travel in the accept message metadata under their extension URIs. The accept content comes
-    from the provider's decision via ``plan``. The channel switches only the accept generation call:
-    ``data`` builds the typed content and calls the deterministic from-data API (zero LLM calls),
-    ``text`` renders the same content as a natural-language message and calls the from-text API,
-    whose extraction step parses it back into the canonical typed content (one LLM call). Returns
-    the request and its call context; the caller decides HOW to send it (SSE streaming / webhook
-    non-blocking).
+    from the provider's decision via ``plan``. The accept is written as a natural-language message
+    and generated through the from-text API: the SDK extracts the canonical typed content (one LLM
+    call), then renders the template. Returns the request and its call context; the caller decides
+    HOW to send it (SSE streaming / webhook non-blocking).
     """
     # Filled Task-T prompt: the parameters the propose asked for, regenerated from data. All types
     # complete the same four parameters, so one regeneration serves every negotiation kind.
@@ -691,20 +648,11 @@ def _build_negotiation_accept_request(
     # plus its answer; only a new propose advances the round), performative ACCEPT.
     accept_context = session.with_performative(NegotiationPerformative.ACCEPT)
     accept_template_uri = _NEGOTIATION_ACCEPT_URI_BY_KIND[plan.negotiation_kind]
-    if channel == CHANNEL_TEXT:
-        accept = prompt_client.generate_negotiation_accept_prompt_from_text(
-            _negotiation_accept_text(plan.negotiation_kind, plan=plan),
-            accept_context,
-            accept_template_uri,
-        )
-    else:
-        accept = prompt_client.generate_negotiation_accept_prompt_from_data(
-            NegotiationEndingData(
-                context=accept_context,
-                content=_negotiation_accept_content(plan.negotiation_kind, plan=plan),
-            ),
-            accept_template_uri,
-        )
+    accept = prompt_client.generate_negotiation_accept_prompt_from_text(
+        _negotiation_accept_text(plan.negotiation_kind, plan=plan),
+        accept_context,
+        accept_template_uri,
+    )
     accept_text, _ = _require_prompt_text(accept)
     accept_template_uri = str(getattr(accept, "template_uri", None) or accept_template_uri)
     accept_negotiation_context = getattr(accept, "negotiation_context", None)
@@ -876,7 +824,6 @@ async def _run_negotiation_accept(
     task_id: str,
     context_id: str,
     plan: _NegotiationAcceptPlan,
-    channel: str,
     negotiation_params: dict[str, object],
     normalized_events: list[dict[str, object]],
     artifact_count: int,
@@ -894,7 +841,6 @@ async def _run_negotiation_accept(
         initial_input=initial_input,
         session=session,
         plan=plan,
-        channel=channel,
         negotiation_params=negotiation_params,
         log_sink=log_sink,
     )
@@ -934,7 +880,6 @@ async def run_client_flow(
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     negotiation_response_provider: NegotiationResponseProvider | None = None,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     transport: str = TRANSPORT_SSE,
     webhook_queue: asyncio.Queue[dict[str, object]] | None = None,
@@ -982,7 +927,7 @@ async def run_client_flow(
          provider for the decision on the propose view, regenerate the Task-T prompt from the
          filled parameters, render the Negotiation-T accept of that type for the parsed session
          from the decision (from typed data, or from a natural-language rendering plus one
-         extraction LLM call per the configured channel), and re-send over a second request
+         extraction LLM call), and re-send over a second request
                                                             -> ``[client] negotiation-accept`` /
                                                                ``[client] a2a-send-message``
                                                                (phase=continuation)
@@ -1078,8 +1023,7 @@ async def run_client_flow(
             negotiation_params=negotiation_params,
             negotiation_kind=negotiation_kind,
             negotiation_response_provider=negotiation_provider,
-            channel=channel,
-            normalized_events=normalized_events,
+                normalized_events=normalized_events,
             artifact_count=artifact_count,
             log_sink=log_sink,
         )
@@ -1136,8 +1080,7 @@ async def run_client_flow(
                     task_id=_first_task_id(normalized_events),
                     context_id=str(input_required_event.get("context_id", "")),
                     plan=plan,
-                    channel=channel,
-                    negotiation_params=negotiation_params,
+                                negotiation_params=negotiation_params,
                     normalized_events=normalized_events,
                     artifact_count=artifact_count,
                     max_artifacts=max_artifacts,

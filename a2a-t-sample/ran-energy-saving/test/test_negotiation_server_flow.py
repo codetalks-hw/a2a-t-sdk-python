@@ -69,9 +69,6 @@ from client.scenario_data import (
 from common import mock_llm
 from common.llm_logger import install_llm_logger
 from server.constants_data import (
-    CHANNEL_DATA,
-    CHANNEL_ENV_KEY,
-    CHANNEL_TEXT,
     COMPLETED_MESSAGE,
     ENERGY_SAVING_REGION,
     INPUT_REQUIRED_MESSAGE,
@@ -80,7 +77,6 @@ from server.constants_data import (
     TASK_T_EXTENSION_URI,
     get_energy_saving_intent_report,
     get_energy_saving_progress_steps,
-    resolve_negotiation_channel,
 )
 from server.server_flow import (
     _NEGOTIATION_TYPE_BY_ERROR_CODE,
@@ -113,7 +109,6 @@ def _offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Force-install the scripted mock LLM (en-US) for every test, regardless of any real ``.env``."""
     monkeypatch.chdir(PROJECT_ROOT)
     monkeypatch.delenv(scenario_data.SCENARIO_ENV_KEY, raising=False)
-    monkeypatch.delenv(scenario_data.CHANNEL_ENV_KEY, raising=False)
     env_path = _write_offline_env(tmp_path, "en-US")
     mock_llm.install_mock_llm(env_path=env_path)
     install_llm_logger(role="test", verbose=False)
@@ -793,31 +788,5 @@ def test_propose_carries_the_relationship_only_for_multiple_items(_offline_env: 
 
 
 # --- executor plumbing ------------------------------------------------------------------------
-
-
-def test_resolve_negotiation_channel_defaults_and_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)  # isolate the cwd; this test writes its own .env files below
-
-    # No .env and no OS environment entry -> data.
-    assert resolve_negotiation_channel() == CHANNEL_DATA
-
-    # Unknown value -> data.
-    env_path = tmp_path / ".env"
-    env_path.write_text(f"{CHANNEL_ENV_KEY}=bogus\n", encoding="utf-8")
-    assert resolve_negotiation_channel(env_path=env_path) == CHANNEL_DATA
-
-    # Known value -> itself.
-    env_path.write_text(f"{CHANNEL_ENV_KEY}=text\n", encoding="utf-8")
-    assert resolve_negotiation_channel(env_path=env_path) == CHANNEL_TEXT
-
-    # OS environment fallback when the .env does not carry the key.
-    env_path.write_text("A2AT_LANGUAGE=en-US\n", encoding="utf-8")
-    monkeypatch.setenv(CHANNEL_ENV_KEY, CHANNEL_TEXT)
-    assert resolve_negotiation_channel(env_path=env_path) == CHANNEL_TEXT
-
-    # The .env value wins over the OS environment.
-    env_path.write_text(f"A2AT_LANGUAGE=en-US\n{CHANNEL_ENV_KEY}=data\n", encoding="utf-8")
-    assert resolve_negotiation_channel(env_path=env_path) == CHANNEL_DATA
-
 
 

@@ -11,11 +11,11 @@ keep writing their logs to the run directory, and a follower thread echoes every
 the terminal as it happens, so the server prints when the server runs and the client prints when the
 client runs.
 
-The language, the sample scenario, the negotiation kind, the generation channel and the event
-transport default to English / ``default`` / ``information`` / ``fromData`` / ``sse`` and are
+The language, the sample scenario, the negotiation kind and the event transport default to
+English / ``default`` / ``information`` / ``sse`` and are
 applied without touching the shared ``a2a-t-sample/.env``: the launcher writes a temporary
 ``.env`` (a copy of the shared one with ``A2AT_LANGUAGE``, ``A2AT_SAMPLE_SCENARIO``,
-``A2AT_SAMPLE_NEGOTIATION_KIND``, ``A2AT_SAMPLE_CHANNEL``, ``A2AT_SAMPLE_TRANSPORT`` and
+``A2AT_SAMPLE_NEGOTIATION_KIND``, ``A2AT_SAMPLE_TRANSPORT`` and
 ``A2AT_SAMPLE_WEBHOOK_PORT`` overridden) into its own run directory and points the child
 processes at that working directory. Temporary files are removed on exit (see ``--keep-logs`` /
 ``--keep-alive``).
@@ -28,7 +28,7 @@ Usage:
     python run_demo.py --language zh-CN
     python run_demo.py --scenario negotiation   # missing-region input; information negotiation
     python run_demo.py --negotiation target     # overlapping time segments; target negotiation
-    python run_demo.py --negotiation feasibility --channel fromText
+    python run_demo.py --negotiation feasibility
     python run_demo.py --transport webhook      # task events via the embedded webhook receiver
     python run_demo.py --keep-alive         # leave registry/server running; stop with --stop
     python run_demo.py --stop               # stop a previous --keep-alive run
@@ -62,10 +62,6 @@ PID_FILE = RUN_DIR / "pids.json"
 REGISTRY_PORT = 5001
 SERVER_PORT = 8000
 
-#: ``--channel`` value -> ``A2AT_SAMPLE_CHANNEL`` written into the per-run ``.env``.
-_CHANNEL_VALUES = {"fromData": "data", "fromText": "text"}
-
-
 def _port_open(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.3)
@@ -97,21 +93,19 @@ _RUN_ENV_OVERRIDES = (
     "A2AT_LANGUAGE",
     "A2AT_SAMPLE_SCENARIO",
     "A2AT_SAMPLE_NEGOTIATION_KIND",
-    "A2AT_SAMPLE_CHANNEL",
     "A2AT_SAMPLE_TRANSPORT",
     "A2AT_SAMPLE_WEBHOOK_PORT",
 )
 
 
 def _write_run_env(
-    language: str, scenario: str, negotiation_kind: str, channel: str, transport: str, webhook_port: int
+    language: str, scenario: str, negotiation_kind: str, transport: str, webhook_port: int
 ) -> None:
     """Write the per-run ``.env`` (shared .env copy with the run-specific keys overridden)."""
     values = {
         "A2AT_LANGUAGE": language,
         "A2AT_SAMPLE_SCENARIO": scenario,
         "A2AT_SAMPLE_NEGOTIATION_KIND": negotiation_kind,
-        "A2AT_SAMPLE_CHANNEL": channel,
         "A2AT_SAMPLE_TRANSPORT": transport,
         "A2AT_SAMPLE_WEBHOOK_PORT": str(webhook_port),
     }
@@ -290,16 +284,6 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--channel",
-        default="fromData",
-        choices=["fromData", "fromText"],
-        help=(
-            "generation channel of the negotiation propose/accept messages: fromData generates "
-            "them from typed content, fromText from a natural-language rendering plus one "
-            "extraction LLM call (default: fromData)"
-        ),
-    )
-    parser.add_argument(
         "--transport",
         default="sse",
         choices=["sse", "webhook"],
@@ -346,7 +330,7 @@ def main() -> int:
         existing = []
 
     _write_run_env(
-        args.language, args.scenario, args.negotiation, _CHANNEL_VALUES[args.channel], args.transport, args.webhook_port
+        args.language, args.scenario, args.negotiation, args.transport, args.webhook_port
     )
     managed: list[int] = list(existing)
     started_pids: list[int] = []
@@ -433,7 +417,7 @@ def main() -> int:
 
         print(
             f"[run_demo] running client (language = {args.language}, scenario = {args.scenario}, "
-            f"negotiation = {args.negotiation}, channel = {args.channel}, "
+            f"negotiation = {args.negotiation}, "
             f"transport = {args.transport}, webhook_port = {args.webhook_port}) ..."
         )
         client_returncode = subprocess.run(

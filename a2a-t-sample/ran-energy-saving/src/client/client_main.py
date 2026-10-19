@@ -26,7 +26,6 @@ from google.protobuf.json_format import ParseDict
 from client.client_flow import run_client_flow
 from client.negotiation_response import NegotiationResponseProvider, ScriptedNegotiationResponseProvider
 from client.scenario_data import (
-    CHANNEL_DATA,
     NEGOTIATION_KIND_FEASIBILITY,
     NEGOTIATION_KIND_TARGET,
     SCENARIO_NEGOTIATION,
@@ -36,7 +35,6 @@ from client.scenario_data import (
     build_task_request,
     negotiation_answers,
     negotiation_filled_params,
-    resolve_channel,
     resolve_negotiation_kind,
     resolve_scenario,
     resolve_transport,
@@ -165,7 +163,6 @@ async def run_main(
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     negotiation_response_provider: NegotiationResponseProvider | None = None,
-    channel: str = CHANNEL_DATA,
     transport: str = TRANSPORT_SSE,
     webhook_port: int | None = None,
     webhook_token: str | None = None,
@@ -271,7 +268,6 @@ async def run_main(
             "negotiation_answers": negotiation_answers,
             "negotiation_kind": negotiation_kind,
             "negotiation_response_provider": negotiation_response_provider,
-            "channel": channel,
             "env_path": env_path,
         }
         if transport == TRANSPORT_WEBHOOK:
@@ -305,12 +301,11 @@ def main(
         raw_max_artifacts = int(os.environ.get("A2AT_SAMPLE_MAX_ARTIFACTS", "0") or "0")
         max_artifacts = raw_max_artifacts if raw_max_artifacts > 0 else None
         scenario = resolve_scenario(env_path=resolved_env_path)
-        channel = resolve_channel(env_path=sample_env_path)
         negotiation_kind = resolve_negotiation_kind(env_path=sample_env_path)
         transport = resolve_transport(env_path=sample_env_path)
         print(
             f"[client] startup: server_url={resolve_server_url(env_path=resolved_env_path)} "
-            f"debug={'true' if debug_enabled else 'false'} scenario={scenario} channel={channel} "
+            f"debug={'true' if debug_enabled else 'false'} scenario={scenario} "
             f"transport={transport}"
         )
         # The target/feasibility kinds select their own (complete) scenario input regardless of the
@@ -347,7 +342,6 @@ def main(
                 negotiation_answers=negotiation_answers_map,
                 negotiation_kind=negotiation_kind,
                 negotiation_response_provider=negotiation_response_provider,
-                channel=channel,
                 transport=transport,
             )
         )
