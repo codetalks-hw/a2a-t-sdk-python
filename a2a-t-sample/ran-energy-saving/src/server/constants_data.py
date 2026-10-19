@@ -41,12 +41,12 @@ NEGOTIATION_T_EXTENSION_URI = "https://projects.tmforum.org/a2aproject/telecommu
 #: Template addressed by this case.
 ENERGY_SAVING_TEMPLATE_URI = "Task-T/network-layer/ran-energy-saving/v1"
 
-#: Negotiation-T information-propose template addressed by the server's round-1 propose
+#: Negotiation-T information-propose template addressed by the server's propose
 #: (re-exported from ``a2a_t.core.standard_templates``; the URIs used by this sample are
 #: centralized here).
 NEGOTIATION_PROPOSE_TEMPLATE_URI = INFORMATION_NEGOTIATION_PROPOSE_URI
 
-#: Negotiation-T per-type propose templates addressed by the server's round-1 propose
+#: Negotiation-T per-type propose templates addressed by the server's propose
 #: (re-exported from ``a2a_t.core.standard_templates``). The proposal type is selected at runtime
 #: by the first content-validation error's code (plan R1); the templateUri inside the INPUT_REQUIRED
 #: metadata carries the per-type URI, which is what the client dispatches its accept on.

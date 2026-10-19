@@ -147,7 +147,7 @@ def _find_negotiation_input_required(events: list[dict[str, object]]) -> dict[st
 
 
 def _first_task_id(events: list[dict[str, object]]) -> str:
-    """Return the first non-blank task id carried by the round-1 events."""
+    """Return the first non-blank task id carried by the initial-phase events."""
     for event in events:
         task_id = event.get("task_id")
         if isinstance(task_id, str) and task_id.strip():
@@ -199,10 +199,11 @@ async def _send_and_consume(
 
 # --- webhook transport (v3)：事件管线复用 ------------------------------------------------------
 
-#: Webhook 事件循环的结束信号（plan R5/D7 + final fix）：round 1 以 artifact（默认场景结束信号）、
-#: INPUT_REQUIRED（协商场景的应答点——中断信号，非终态）或任一 SDK 终态结束；round 2（协商 accept
-#: 之后）以任一 SDK 终态结束。终态集 COMPLETED / CANCELED / FAILED / REJECTED 对齐 a2a-sdk
-#: ``DefaultRequestHandler.TERMINAL_TASK_STATES``：服务端在协商拒绝（round-2 校验失败、round-1 未映射
+#: Webhook 事件循环的结束信号（plan R5/D7 + final fix）。初始发送阶段（initial phase：初次 Task-T
+#: 请求）以 artifact（默认场景结束信号）、INPUT_REQUIRED（协商场景的应答点——中断信号，非终态）或任一
+#: SDK 终态结束；协商续传阶段（continuation phase：filled Task-T + accept 之后）以任一 SDK 终态结束。
+#: 终态集 COMPLETED / CANCELED / FAILED / REJECTED 对齐 a2a-sdk
+#: ``DefaultRequestHandler.TERMINAL_TASK_STATES``：服务端在协商拒绝（accept 校验失败、初始请求未映射
 #: 错误码）时推送 REJECTED、流异常时推送 FAILED——webhook 客户端必须立即结束流程（summary 记
 #: ``end=<state>``），而不是等空闲超时兜底。空闲超时（idle timeout）是所有场景的兜底结束信号。
 _WEBHOOK_SIGNAL_ARTIFACT = "artifact"
@@ -217,8 +218,8 @@ _TERMINAL_STATE_SIGNALS: frozenset[str] = frozenset(
         TaskState.TASK_STATE_REJECTED,
     )
 )
-_ROUND1_END_SIGNALS = _TERMINAL_STATE_SIGNALS | {_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED}
-_ROUND2_END_SIGNALS = _TERMINAL_STATE_SIGNALS  # 终态即 round-2 的全部结束信号
+_INITIAL_PHASE_END_SIGNALS = _TERMINAL_STATE_SIGNALS | {_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED}
+_CONTINUATION_PHASE_END_SIGNALS = _TERMINAL_STATE_SIGNALS  # 终态即协商续传阶段的全部结束信号
 
 
 def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -373,7 +374,7 @@ async def _consume_webhook_events(
             return signal, artifact_count
 
 
-async def _send_webhook_round(
+async def _send_webhook_message(
     *,
     # Any (not object): the fake-friendly client of the SSE helpers is `object`, but the SSE path
     # tolerates the resulting baseline diagnostics while this new code must add none (plan: ty
@@ -425,10 +426,10 @@ async def _run_webhook_flow(
 ) -> tuple[int, str]:
     """Drive the whole task over the webhook transport (v3, plan R2/R4/R5/R6).
 
-    Round 1: register the push config INLINE on the request (the task id is unknown before the
-    send — the only registration path available here), send ``message:send`` with
+    Initial phase: register the push config INLINE on the request (the task id is unknown before
+    the send — the only registration path available here), send ``message:send`` with
     ``return_immediately=True`` through the ``streaming=False`` client, then consume webhook
-    events. An INPUT_REQUIRED propose is answered in-round: re-register the SAME url/token via
+    events. An INPUT_REQUIRED propose opens the negotiation: re-register the SAME url/token via
     ``create_task_push_notification_config`` (the REST endpoint — the second registration path),
     send the accept (non-blocking, NO inline config — already registered), and keep consuming. The
     default scenario ends on the report artifact; any terminal state (COMPLETED / FAILED /
@@ -438,7 +439,7 @@ async def _run_webhook_flow(
     last consumed phase (``artifact`` / ``input-required`` / a ``TASK_STATE_*`` terminal state /
     ``timeout``) — the caller derives the timeout flag and the ``end=`` summary note from it.
     """
-    # Round-1 request additions (R2/R4): non-blocking + inline push registration.
+    # Initial-phase request additions (R2/R4): non-blocking + inline push registration.
     request.configuration.return_immediately = True
     request.configuration.task_push_notification_config.CopyFrom(
         TaskPushNotificationConfig(url=push_url, token=push_token)
@@ -449,29 +450,30 @@ async def _run_webhook_flow(
                 role="client",
                 stage="a2a-send-message",
                 detail=(
-                    f"round=1 webhook text_part={_build_request_metadata(initial_input)} "
+                    f"phase=initial webhook text_part={_build_request_metadata(initial_input)} "
                     f"metadata_keys=[{TASK_T_EXTENSION_URI}, templateUri] "
                     f"return_immediately=true push_registration=inline"
                 ),
             )
         )
-    await _send_webhook_round(a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink)
+    await _send_webhook_message(a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink)
 
-    # Phase 1 consume: default scenario ends on the artifact; a negotiation propose pauses on
-    # INPUT_REQUIRED; a terminal state (e.g. a round-1 REJECTED validation failure) ends the whole
-    # flow right here — no round 2; the idle timeout backstops all of them (R5 + final fix).
+    # Initial-phase consume: default scenario ends on the artifact; a negotiation propose pauses on
+    # INPUT_REQUIRED; a terminal state (e.g. a REJECTED validation failure on the initial request)
+    # ends the whole flow right here — the accept is never sent; the idle timeout backstops all of
+    # them (R5 + final fix).
     end_signal, artifact_count = await _consume_webhook_events(
         webhook_queue=webhook_queue,
         webhook_idle_timeout=webhook_idle_timeout,
         normalized_events=normalized_events,
         artifact_count=artifact_count,
         log_sink=log_sink,
-        end_signals=_ROUND1_END_SIGNALS,
+        end_signals=_INITIAL_PHASE_END_SIGNALS,
     )
     if end_signal != _WEBHOOK_SIGNAL_INPUT_REQUIRED:
         return artifact_count, end_signal
 
-    # Negotiation round 2 (reuses the SSE-path detection/provider seam/builders verbatim; same
+    # Negotiation continuation (reuses the SSE-path detection/provider seam/builders verbatim; same
     # unhandled logs).
     input_required_event = _find_negotiation_input_required(normalized_events)
     if input_required_event is None:
@@ -484,7 +486,8 @@ async def _run_webhook_flow(
                     role="client",
                     stage="negotiation-unhandled",
                     detail=(
-                        "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, staying on round 1"
+                        "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, "
+                        "the propose stays unanswered"
                     ),
                 )
             )
@@ -505,7 +508,7 @@ async def _run_webhook_flow(
 
     task_id = _first_task_id(normalized_events)
     context_id = str(input_required_event.get("context_id", ""))
-    round2_request, round2_call_context = _build_negotiation_accept_request(
+    accept_request, accept_call_context = _build_negotiation_accept_request(
         prompt_client=prompt_client,
         initial_input=initial_input,
         session=session,
@@ -514,11 +517,11 @@ async def _run_webhook_flow(
         negotiation_params=negotiation_params,
         log_sink=log_sink,
     )
-    round2_request.message.task_id = task_id
-    round2_request.message.context_id = context_id
+    accept_request.message.task_id = task_id
+    accept_request.message.context_id = context_id
 
     # R4: re-register the SAME url/token via the REST endpoint before re-sending (the task now
-    # exists, so the endpoint path is available; round 1 could only register inline).
+    # exists, so the endpoint path is available; the initial send could only register inline).
     registration = TaskPushNotificationConfig(task_id=task_id, url=push_url, token=push_token)
     if log_sink is not None:
         log_sink(
@@ -533,14 +536,14 @@ async def _run_webhook_flow(
         )
     await a2a_client.create_task_push_notification_config(registration)
 
-    round2_request.configuration.return_immediately = True  # NO inline config — registered above
+    accept_request.configuration.return_immediately = True  # NO inline config — registered above
     if log_sink is not None:
         log_sink(
             format_stage_log(
                 role="client",
                 stage="a2a-send-message",
                 detail=(
-                    f"round=2 webhook text_part={_build_request_metadata(initial_input)} "
+                    f"phase=continuation webhook text_part={_build_request_metadata(initial_input)} "
                     f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
                     f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
                     f"header[A2A-Extensions]={','.join(sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI}))} "
@@ -548,29 +551,29 @@ async def _run_webhook_flow(
                 ),
             )
         )
-    await _send_webhook_round(
-        a2a_client=a2a_client, request=round2_request, call_context=round2_call_context, log_sink=log_sink
+    await _send_webhook_message(
+        a2a_client=a2a_client, request=accept_request, call_context=accept_call_context, log_sink=log_sink
     )
 
-    # Phase 2 consume: the negotiation closes on a terminal state — COMPLETED normally, REJECTED
-    # (round-2 validation failure) / FAILED (stream exception) instead of hanging (final fix);
-    # the idle timeout backstops (R5).
+    # Continuation-phase consume: the negotiation closes on a terminal state — COMPLETED normally,
+    # REJECTED (accept validation failure) / FAILED (stream exception) instead of hanging (final
+    # fix); the idle timeout backstops (R5).
     end_signal, artifact_count = await _consume_webhook_events(
         webhook_queue=webhook_queue,
         webhook_idle_timeout=webhook_idle_timeout,
         normalized_events=normalized_events,
         artifact_count=artifact_count,
         log_sink=log_sink,
-        end_signals=_ROUND2_END_SIGNALS,
+        end_signals=_CONTINUATION_PHASE_END_SIGNALS,
     )
     return artifact_count, end_signal
 
 
 def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
-    """Render items as one numbered list: ``N. name：value；`` per item (the negotiation demo rule).
+    """Render items as one numbered list: ``N. name：value；`` per item.
 
-    The value is omitted when blank; the full-width separators keep the rendering identical to the
-    ``a2a-t-sample/negotiation`` demo's ``_numbered_items`` for both languages.
+    The value is omitted when blank; the full-width separators render the list the same way in
+    both languages.
     """
     lines: list[str] = []
     for index, (name, value) in enumerate(items, start=1):
@@ -663,18 +666,19 @@ def _build_negotiation_accept_request(
     negotiation_params: dict[str, object],
     log_sink: object | None,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
-    """Build the negotiation round-2 accept request (shared by the SSE and webhook drivers).
+    """Build the negotiation accept request (shared by the SSE and webhook drivers).
 
-    Round 2 of the negotiation flow (demo ``run_four_message_flow`` message 3): the session context
-    parsed from the propose metadata drives the accept (round advanced by one, performative ACCEPT)
-    of the planned negotiation type, the Task-T prompt is regenerated from the filled parameters
-    (the flow-owned wire mechanic fed by the caller), and both travel in the round-2 message
-    metadata under their extension URIs. The accept content comes from the provider's decision via
-    ``plan``. The channel switches only the accept generation call: ``data`` builds the typed
-    content and calls the deterministic from-data API (zero LLM calls), ``text`` renders the same
-    content as a natural-language message and calls the from-text API, whose extraction step parses
-    it back into the canonical typed content (one LLM call). Returns the request and its call
-    context; the caller decides HOW to send it (SSE streaming / webhook non-blocking).
+    The accept is the second message of the current negotiation round: the session context parsed
+    from the propose metadata drives it (same round, performative ACCEPT — a round is one propose
+    plus the answer to it, so the accept does not advance the round), the Task-T prompt is
+    regenerated from the filled parameters (the flow-owned wire mechanic fed by the caller), and
+    both travel in the accept message metadata under their extension URIs. The accept content comes
+    from the provider's decision via ``plan``. The channel switches only the accept generation call:
+    ``data`` builds the typed content and calls the deterministic from-data API (zero LLM calls),
+    ``text`` renders the same content as a natural-language message and calls the from-text API,
+    whose extraction step parses it back into the canonical typed content (one LLM call). Returns
+    the request and its call context; the caller decides HOW to send it (SSE streaming / webhook
+    non-blocking).
     """
     # Filled Task-T prompt: the parameters the propose asked for, regenerated from data. All types
     # complete the same four parameters, so one regeneration serves every negotiation kind.
@@ -683,8 +687,9 @@ def _build_negotiation_accept_request(
     )
     filled_text, _ = _require_prompt_text(filled_prompt)
 
-    # Negotiation-T accept continuing the server's session (round advanced, performative ACCEPT).
-    accept_context = session.next_round().with_performative(NegotiationPerformative.ACCEPT)
+    # Negotiation-T accept answering the server's propose: the SAME round (a round is one propose
+    # plus its answer; only a new propose advances the round), performative ACCEPT.
+    accept_context = session.with_performative(NegotiationPerformative.ACCEPT)
     accept_template_uri = _NEGOTIATION_ACCEPT_URI_BY_KIND[plan.negotiation_kind]
     if channel == CHANNEL_TEXT:
         accept = prompt_client.generate_negotiation_accept_prompt_from_text(
@@ -710,25 +715,25 @@ def _build_negotiation_accept_request(
                 role="client",
                 stage="negotiation-accept",
                 detail=(
-                    f"generated (round={session.round + 1}) "
+                    f"generated (round={session.round}) "
                     f"template_uri={accept_template_uri} "
                     + _negotiation_accept_log_detail(plan.negotiation_kind, plan=plan)
                 ),
             )
         )
 
-    round2_request = SendMessageRequest()
-    round2_request.message.message_id = str(uuid.uuid4())
-    round2_request.message.role = Role.ROLE_USER
-    # task_id / context_id are filled by the caller from the round-1 events (the builder sees no
-    # events); the wire shape is identical for both drivers once set.
-    round2_request.message.parts.add().text = _build_request_metadata(initial_input)
-    round2_request.message.metadata[TASK_T_EXTENSION_URI] = filled_text
-    round2_request.message.metadata[NEGOTIATION_T_EXTENSION_URI] = accept_text
-    round2_request.message.metadata[TEMPLATE_URI_METADATA_KEY] = accept_template_uri
-    round2_request.message.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = {
+    accept_request = SendMessageRequest()
+    accept_request.message.message_id = str(uuid.uuid4())
+    accept_request.message.role = Role.ROLE_USER
+    # task_id / context_id are filled by the caller from the initial-phase events (the builder sees
+    # no events); the wire shape is identical for both drivers once set.
+    accept_request.message.parts.add().text = _build_request_metadata(initial_input)
+    accept_request.message.metadata[TASK_T_EXTENSION_URI] = filled_text
+    accept_request.message.metadata[NEGOTIATION_T_EXTENSION_URI] = accept_text
+    accept_request.message.metadata[TEMPLATE_URI_METADATA_KEY] = accept_template_uri
+    accept_request.message.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = {
         "id": session.id,
-        "round": session.round + 1,
+        "round": session.round,
         "maxRounds": session.max_rounds,
         "performative": (
             accept_negotiation_context.performative.value
@@ -740,8 +745,8 @@ def _build_negotiation_accept_request(
     # The A2A-Extensions header carries both extension URIs as the comma-joined string the
     # a2a-sdk service-parameter helper emits (see with_a2a_extensions).
     extension_uris = sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI})
-    round2_call_context = ClientCallContext(service_parameters={"A2A-Extensions": ",".join(extension_uris)})
-    return round2_request, round2_call_context
+    accept_call_context = ClientCallContext(service_parameters={"A2A-Extensions": ",".join(extension_uris)})
+    return accept_request, accept_call_context
 
 
 def _plan_negotiation_accept(
@@ -752,12 +757,12 @@ def _plan_negotiation_accept(
     negotiation_kind: str | None,
     log_sink: Callable[[str], None] | None,
 ) -> _NegotiationAcceptPlan | None:
-    """Ask the provider how to answer the propose, or log why round 2 stays unsent.
+    """Ask the provider how to answer the propose, or log why the accept stays unsent.
 
     Shared by the SSE and webhook drivers (the seam replaced the scripted answer selection, plan
     R3): the existing unhandled degradations (malformed/missing session context, unrecognized
     propose templateUri) keep their logs; a reject/abort decision logs the dedicated
-    ``negotiation-decision`` line and ends the flow with the unhandled semantics (no round-2 send,
+    ``negotiation-decision`` line and ends the flow with the unhandled semantics (no accept sent,
     plan R5); an accept whose per-conclusion field is missing — or an unsupported conclusion —
     logs the problem the same way. The propose view carries the resolved kind, the propose's
     ``templateUri`` and its rendered text verbatim (no text parsing).
@@ -770,7 +775,7 @@ def _plan_negotiation_accept(
                     stage="negotiation-unhandled",
                     detail=(
                         "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
-                        "(malformed/missing session context), staying on round 1"
+                        "(malformed/missing session context), the propose stays unanswered"
                     ),
                 )
             )
@@ -784,7 +789,7 @@ def _plan_negotiation_accept(
                     stage="negotiation-unhandled",
                     detail=(
                         "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
-                        "(unrecognized propose templateUri), staying on round 1"
+                        "(unrecognized propose templateUri), the propose stays unanswered"
                     ),
                 )
             )
@@ -801,7 +806,7 @@ def _plan_negotiation_accept(
                 format_stage_log(
                     role="client",
                     stage="negotiation-decision",
-                    detail=f"{decision.conclusion} (not wired in this demo; see the integration guide)",
+                    detail=f"{decision.conclusion} (not wired in this demo; see the sample README)",
                 )
             )
         return None
@@ -811,7 +816,7 @@ def _plan_negotiation_accept(
                 format_stage_log(
                     role="client",
                     stage="negotiation-decision",
-                    detail=f"unsupported conclusion {decision.conclusion!r}; staying on round 1",
+                    detail=f"unsupported conclusion {decision.conclusion!r}; the propose stays unanswered",
                 )
             )
         return None
@@ -851,18 +856,18 @@ def _plan_negotiation_accept(
 
 
 def _log_decision_problem(log_sink: Callable[[str], None] | None, problem: str) -> None:
-    """Log a decision that cannot be turned into a round-2 accept (the flow ends as unhandled)."""
+    """Log a decision that cannot be turned into an accept (the flow ends as unhandled)."""
     if log_sink is not None:
         log_sink(
             format_stage_log(
                 role="client",
                 stage="negotiation-decision",
-                detail=f"{problem}; staying on round 1",
+                detail=f"{problem}; the propose stays unanswered",
             )
         )
 
 
-async def _run_negotiation_accept_round(
+async def _run_negotiation_accept(
     *,
     prompt_client: A2ATClient,
     a2a_client: object,
@@ -880,11 +885,11 @@ async def _run_negotiation_accept_round(
 ) -> int:
     """Answer the server's INPUT_REQUIRED propose with the filled Task-T prompt and the accept.
 
-    SSE-path round 2: builds the accept request (shared builder, from the provider's decision plan)
-    and consumes the round-2 stream into ``normalized_events`` (stream cut once ``max_artifacts``
-    is reached).
+    SSE-path accept: builds the accept request (shared builder, from the provider's decision plan)
+    and consumes the continuation stream into ``normalized_events`` (stream cut once
+    ``max_artifacts`` is reached).
     """
-    round2_request, round2_call_context = _build_negotiation_accept_request(
+    accept_request, accept_call_context = _build_negotiation_accept_request(
         prompt_client=prompt_client,
         initial_input=initial_input,
         session=session,
@@ -893,8 +898,8 @@ async def _run_negotiation_accept_round(
         negotiation_params=negotiation_params,
         log_sink=log_sink,
     )
-    round2_request.message.task_id = task_id
-    round2_request.message.context_id = context_id
+    accept_request.message.task_id = task_id
+    accept_request.message.context_id = context_id
 
     # The A2A-Extensions header carries both extension URIs as the comma-joined string the
     # a2a-sdk service-parameter helper emits (see with_a2a_extensions).
@@ -902,10 +907,10 @@ async def _run_negotiation_accept_round(
 
     return await _send_and_consume(
         a2a_client=a2a_client,
-        request=round2_request,
-        call_context=round2_call_context,
+        request=accept_request,
+        call_context=accept_call_context,
         send_log_detail=(
-            f"round=2 streaming text_part={_build_request_metadata(initial_input)} "
+            f"phase=continuation streaming text_part={_build_request_metadata(initial_input)} "
             f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
             f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
             f"header[A2A-Extensions]={','.join(extension_uris)}"
@@ -943,7 +948,7 @@ async def run_client_flow(
     before; ``webhook`` embeds no SSE at all — the request goes out as non-blocking
     ``message:send`` with ``return_immediately=True`` and an inline push-notification config, and
     every task event arrives as a webhook POST on the embedded receiver's ``webhook_queue``
-    (``_run_webhook_flow`` drives rounds/end-signals there — any SDK terminal state ends both
+    (``_run_webhook_flow`` drives the phases/end-signals there — any SDK terminal state ends both
     phases and the summary notes ``end=<state>``; the events summary counts WEBHOOK-received
     events and adds ``transport=webhook``). ``max_artifacts`` is inert under webhook — the
     artifact end signal itself closes the default flow there, so the stream-cut cap does not
@@ -954,14 +959,14 @@ async def run_client_flow(
     (``NegotiationResponseProvider.respond`` — the client-side INTEGRATION POINT). Supplying a
     provider replaces the scripted answer derivation entirely: ``negotiation_answers`` is not
     consulted and the accept content comes from the provider's decision (a reject/abort decision
-    ends the flow with the dedicated ``negotiation-decision`` log, no round-2 send). The flow keeps
+    ends the flow with the dedicated ``negotiation-decision`` log, no accept sent). The flow keeps
     the wire mechanics: ``negotiation_params`` remains the Task-T prompt refill input of the
-    round-2 message and ``negotiation_kind`` keeps hinting the propose view's kind resolution (the
+    accept message and ``negotiation_kind`` keeps hinting the propose view's kind resolution (the
     flag wins, else the propose's ``templateUri`` dispatches on the wire). Without a provider, the
     legacy scripted arguments keep the pre-seam behavior unchanged: when both
     ``negotiation_params`` and ``negotiation_answers`` are supplied, the flow internally builds the
     demo ``ScriptedNegotiationResponseProvider`` around them (back-compat shim); without them an
-    INPUT_REQUIRED propose is logged as unhandled and the flow ends after round 1. The default
+    INPUT_REQUIRED propose is logged as unhandled and the propose stays unanswered. The default
     flow (no INPUT_REQUIRED) is unchanged.
 
     Pipeline and its logged boundaries:
@@ -979,17 +984,18 @@ async def run_client_flow(
          from the decision (from typed data, or from a natural-language rendering plus one
          extraction LLM call per the configured channel), and re-send over a second request
                                                             -> ``[client] negotiation-accept`` /
-                                                               ``[client] a2a-send-message`` (round=2)
+                                                               ``[client] a2a-send-message``
+                                                               (phase=continuation)
 
     Without a provider (or with a propose carrying no parseable session context, or resolving to no
-    negotiation kind) an INPUT_REQUIRED propose is logged as unhandled and the flow ends after
-    round 1.
+    negotiation kind) an INPUT_REQUIRED propose is logged as unhandled and the propose stays
+    unanswered.
 
     Message-body convention:
       * text part                 -> task name (request metadata)
       * metadata[Task-T/v1]       -> generated prompt text
-      * metadata[Negotiation-T/v1]-> accept prompt text (round 2 only)
-      * header A2A-Extensions     -> Task-T/v1 (plus Negotiation-T/v1 on round 2)
+      * metadata[Negotiation-T/v1]-> accept prompt text (accept message only)
+      * header A2A-Extensions     -> Task-T/v1 (plus Negotiation-T/v1 on the accept message)
     """
     if log_sink is not None:
         log_sink(format_payload_log(role="client", stage="scenario-data", payload=initial_input))
@@ -1093,9 +1099,9 @@ async def run_client_flow(
             log_sink=log_sink,
         )
 
-    # (5) negotiation round trip: answer the server's INPUT_REQUIRED propose with the accept.
-    # SSE-only: the webhook driver answers the propose inline inside its event loop (round 2 with
-    # the endpoint re-registration happens there).
+    # (5) negotiation continuation: answer the server's INPUT_REQUIRED propose with the accept.
+    # SSE-only: the webhook driver answers the propose inline inside its event loop (the accept send
+    # with the endpoint re-registration happens there).
     if transport != TRANSPORT_WEBHOOK:
         input_required_event = _find_negotiation_input_required(normalized_events)
         if input_required_event is not None and (negotiation_provider is None or negotiation_params is None):
@@ -1105,7 +1111,8 @@ async def run_client_flow(
                         role="client",
                         stage="negotiation-unhandled",
                         detail=(
-                            "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, staying on round 1"
+                            "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, "
+                            "the propose stays unanswered"
                         ),
                     )
                 )
@@ -1121,7 +1128,7 @@ async def run_client_flow(
             )
             if plan is not None and session is not None:
                 # The session check only narrows the type (a resolved plan always parsed it).
-                artifact_count = await _run_negotiation_accept_round(
+                artifact_count = await _run_negotiation_accept(
                     prompt_client=prompt_client,
                     a2a_client=a2a_client,
                     initial_input=initial_input,

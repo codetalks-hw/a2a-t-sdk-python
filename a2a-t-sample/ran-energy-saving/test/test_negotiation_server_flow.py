@@ -1,8 +1,8 @@
 """Offline tests of the server-side negotiation flow of the ran-energy-saving demo.
 
 Drives ``execute_server_flow`` with the real A2A-T facades, the scripted mock LLM and a real
-a2a-sdk ``EventQueue``: round 1 (missing region) answers SUBMITTED + INPUT_REQUIRED carrying the
-Negotiation-T information propose metadata, round 2 (continuation) streams the UC1 result and
+a2a-sdk ``EventQueue``: initial phase (missing region) answers SUBMITTED + INPUT_REQUIRED carrying the
+Negotiation-T information propose metadata, the continuation streams the UC1 result and
 closes with COMPLETED, a failure without slot-named errors keeps the plain REJECTED branch, and
 the target/feasibility content-validation failures propose their per-type Negotiation-T content
 over both generation channels (from-data without and from-text with one extraction LLM call).
@@ -214,38 +214,38 @@ def _message_metadata(event: object) -> dict[str, object]:
 
 
 def _missing_region_prompt(client: A2ATClient, env_path: Path) -> MetadataContent:
-    """Generate the round-1 Task-T prompt (missing region) through the real client facade."""
+    """Generate the initial Task-T prompt (missing region) through the real client facade."""
     return client.generate_task_prompt_from_text(
         build_prompt_input(env_path=env_path, scenario=scenario_data.SCENARIO_NEGOTIATION),
         ENERGY_SAVING_TEMPLATE_URI,
     )
 
 
-def _run_two_round_flow(env_path: Path) -> tuple[list[object], list[object], dict[str, object]]:
+def _run_two_phase_flow(env_path: Path) -> tuple[list[object], list[object], dict[str, object]]:
     """Drive the two negotiation rounds (missing region, then the filled continuation).
 
-    Returns the round-1 events, the round-2 events and the round-1 propose context as a dict.
+    Returns the initial-phase events, the continuation events and the propose context as a dict.
     """
     client = A2ATClient(env_path=env_path)
     server = A2ATServer(env_path=env_path)
 
-    # Round 1: the client submits the missing-region prompt, the server proposes.
-    round1_prompt = _missing_region_prompt(client, env_path)
-    round1_events = asyncio.run(
+    # Initial phase: the client submits the missing-region prompt, the server proposes.
+    initial_prompt = _missing_region_prompt(client, env_path)
+    initial_events = asyncio.run(
         _run_flow(
             metadata={
-                round1_prompt.extension_uri: round1_prompt.prompt_text,
+                initial_prompt.extension_uri: initial_prompt.prompt_text,
                 TEMPLATE_URI_METADATA_KEY: ENERGY_SAVING_TEMPLATE_URI,
             },
             prompt_server=server,
         )
     )
-    propose_context = dict(_message_metadata(round1_events[-1])[NEGOTIATION_CONTEXT_METADATA_KEY])
+    propose_context = dict(_message_metadata(initial_events[-1])[NEGOTIATION_CONTEXT_METADATA_KEY])
 
-    # Round 2: the client answers with the accept prompt and the filled Task-T prompt.
+    # Continuation: the client answers with the accept prompt and the filled Task-T prompt.
     accept_context = NegotiationContext(
         id=str(propose_context["id"]),
-        round=int(propose_context["round"]) + 1,
+        round=int(propose_context["round"]),
         max_rounds=int(propose_context["maxRounds"]),
         performative=NegotiationPerformative.ACCEPT,
     )
@@ -265,7 +265,7 @@ def _run_two_round_flow(env_path: Path) -> tuple[list[object], list[object], dic
     filled_prompt = client.generate_task_prompt_from_data_with_schema(
         negotiation_filled_params(env_path=env_path), TASK_PARAM_SCHEMA, ENERGY_SAVING_TEMPLATE_URI
     )
-    round2_events = asyncio.run(
+    continuation_events = asyncio.run(
         _run_flow(
             metadata={
                 TASK_T_EXTENSION_URI: filled_prompt.prompt_text,
@@ -282,7 +282,7 @@ def _run_two_round_flow(env_path: Path) -> tuple[list[object], list[object], dic
             requested_extensions={TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI},
         )
     )
-    return round1_events, round2_events, propose_context
+    return initial_events, continuation_events, propose_context
 
 
 class _SlotlessRejectingPromptServer:
@@ -295,7 +295,7 @@ class _SlotlessRejectingPromptServer:
         )
 
 
-# --- round 1: missing params -> Negotiation-T propose on INPUT_REQUIRED ---------------------
+# --- initial phase: missing params -> Negotiation-T propose on INPUT_REQUIRED ---------------------
 
 
 def test_round_1_missing_region_answers_input_required_carrying_the_propose(_offline_env: Path) -> None:
@@ -332,8 +332,8 @@ def test_round_1_missing_region_answers_input_required_carrying_the_propose(_off
     assert "Coverage region" in propose_text
 
 
-def _kind_round1_metadata(client: A2ATClient, env_path: Path, kind: str) -> dict[str, object]:
-    """Generate the round-1 Task-T prompt of one negotiation kind and build the flow metadata."""
+def _kind_initial_metadata(client: A2ATClient, env_path: Path, kind: str) -> dict[str, object]:
+    """Generate the initial Task-T prompt of one negotiation kind and build the flow metadata."""
     prompt = client.generate_task_prompt_from_text(
         build_prompt_input(env_path=env_path, negotiation_kind=kind), ENERGY_SAVING_TEMPLATE_URI
     )
@@ -343,12 +343,12 @@ def _kind_round1_metadata(client: A2ATClient, env_path: Path, kind: str) -> dict
     }
 
 
-# --- round 1: per-type proposes (target / feasibility) over the from-data channel ------------
+# --- initial phase: per-type proposes (target / feasibility) over the from-data channel ------------
 
 
 def test_round_1_target_failure_answers_input_required_carrying_the_target_propose(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
     )
 
@@ -382,7 +382,7 @@ def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibi
     _offline_env: Path,
 ) -> None:
     mock_llm.reset_call_log()
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
     )
 
@@ -407,12 +407,12 @@ def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibi
     ]
 
 
-# --- round 1: per-type proposes over the from-text channel -----------------------------------
+# --- initial phase: per-type proposes over the from-text channel -----------------------------------
 
 
 def test_round_1_target_failure_from_text_channel_generates_via_extraction(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
     )
 
@@ -432,7 +432,7 @@ def test_round_1_target_failure_from_text_channel_generates_via_extraction(_offl
     assert negotiation_target_confirm_request(env_path=_offline_env) in str(
         propose_metadata[NEGOTIATION_T_EXTENSION_URI]
     )
-    # from-text propose generation runs exactly one extraction call after the round-1 validation.
+    # from-text propose generation runs exactly one extraction call after the initial validation.
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
         mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
@@ -442,7 +442,7 @@ def test_round_1_target_failure_from_text_channel_generates_via_extraction(_offl
 
 def test_round_1_feasibility_failure_from_text_channel_generates_via_extraction(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
     )
 
@@ -474,7 +474,7 @@ def test_target_propose_messages_are_equivalent_across_channels(_offline_env: Pa
     """The from-data and from-text channels produce equivalent messages (the mock extraction
     returns the canonical content the scenario accessors mirror); only the fresh session id
     differs."""
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
     )
     server = A2ATServer(env_path=_offline_env)
@@ -500,7 +500,7 @@ def test_feasibility_propose_messages_are_equivalent_across_channels(_offline_en
     """The from-data and from-text feasibility proposes produce equivalent messages (the mock
     extraction returns the canonical content the scenario accessors mirror); only the fresh
     session id differs."""
-    metadata = _kind_round1_metadata(
+    metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
     )
     server = A2ATServer(env_path=_offline_env)
@@ -558,27 +558,27 @@ def test_feasibility_propose_text_renders_the_contents_to_evaluate(_offline_env:
         assert f"{name}：{value}" in text
 
 
-# --- round 2: continuation -> validate -> progress -> artifact -> COMPLETED -----------------
+# --- continuation: validate -> progress -> artifact -> COMPLETED -----------------
 
 
 def test_round_2_continuation_streams_the_uc1_result_and_completes(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
-    _, round2_events, _ = _run_two_round_flow(_offline_env)
+    _, continuation_events, _ = _run_two_phase_flow(_offline_env)
 
     expected_steps = get_energy_saving_progress_steps()
-    assert _event_states(round2_events) == [TaskState.TASK_STATE_WORKING] * len(expected_steps) + [
+    assert _event_states(continuation_events) == [TaskState.TASK_STATE_WORKING] * len(expected_steps) + [
         TaskState.TASK_STATE_COMPLETED
     ]
     # No SUBMITTED event on the continuation round.
-    assert not any(isinstance(event, Task) for event in round2_events)
+    assert not any(isinstance(event, Task) for event in continuation_events)
     # One artifact event, arriving between the last WORKING step and COMPLETED.
-    artifacts = [event for event in round2_events if isinstance(event, TaskArtifactUpdateEvent)]
+    artifacts = [event for event in continuation_events if isinstance(event, TaskArtifactUpdateEvent)]
     assert len(artifacts) == 1
-    artifact_index = round2_events.index(artifacts[0])
-    assert _event_state(round2_events[artifact_index - 1]) == TaskState.TASK_STATE_WORKING
-    assert _event_state(round2_events[artifact_index + 1]) == TaskState.TASK_STATE_COMPLETED
+    artifact_index = continuation_events.index(artifacts[0])
+    assert _event_state(continuation_events[artifact_index - 1]) == TaskState.TASK_STATE_WORKING
+    assert _event_state(continuation_events[artifact_index + 1]) == TaskState.TASK_STATE_COMPLETED
     assert artifacts[0].artifact.name == "energy saving intent report"
-    completed = round2_events[-1]
+    completed = continuation_events[-1]
     assert isinstance(completed, TaskStatusUpdateEvent)
     assert completed.status.message.parts[0].text == COMPLETED_MESSAGE
 
@@ -586,9 +586,9 @@ def test_round_2_continuation_streams_the_uc1_result_and_completes(_offline_env:
 def test_two_round_sequence_pins_the_mock_call_log(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
 
-    _run_two_round_flow(_offline_env)
+    _run_two_phase_flow(_offline_env)
 
-    # Round 1: extraction of the missing input + its failing content validation; round 2: the
+    # Initial phase: extraction of the missing input + its failing content validation; the accept:
     # from-data filled-params extraction (no scenario input) + its passing content validation.
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_MISSING,

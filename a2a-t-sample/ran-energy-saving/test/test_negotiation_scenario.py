@@ -163,14 +163,14 @@ _REGION_TEMPLATE_TAIL = (
     f'physically real community name such as "{NEGOTIATION_REGION_STRINGS["en-US"]}"'
 )
 
-#: Collapse-rendered round-1 prompt: the Task Object slot carries the region placeholder, so the
+#: Collapse-rendered initial prompt: the Task Object slot carries the region placeholder, so the
 #: rendered text carries no region display string.
 _MISSING_REGION_PROMPT = (
     f"## Operation Type\n\nCreate\n\n## Task Object\n\n{_REGION_PLACEHOLDERS['en-US']}"
     "\n\n## Task Target\n\nMaximize energy saving."
 )
 
-#: Collapse-rendered round-2 prompt with the region slot filled.
+#: Collapse-rendered accept prompt with the region slot filled.
 _FILLED_REGION_PROMPT = (
     f"## Operation Type\n\nCreate\n\n## Task Object\n\nThe area is the "
     f"{NEGOTIATION_REGION_STRINGS['en-US']}.\n\n## Task Target\n\nMaximize energy saving."
@@ -212,7 +212,7 @@ def test_slot_extraction_routing_selects_the_variant_by_the_scenario_input(
 
 
 def test_slot_extraction_routing_defaults_to_the_complete_variant_without_the_scenario_input() -> None:
-    """A from-data extraction (e.g. the round-2 filled-params regeneration) keeps the complete variant."""
+    """A from-data extraction (e.g. the accept filled-params regeneration) keeps the complete variant."""
     messages = _slot_extraction_messages('{"operationType": "create", "region": "Songshanhu Administration Committee"}')
 
     assert route_structured_call(messages, _slot_extraction_schema()) == mock_llm.STAGE_SLOT_EXTRACTION
@@ -416,7 +416,7 @@ def test_target_negotiation_call_sequences_are_pinned_from_data_and_from_text() 
         mock_llm.STAGE_CONTENT_VALIDATION,
     ]
 
-    # fromText: the server propose extraction joins between the target validation and the round-2
+    # fromText: the server propose extraction joins between the target validation and the accept
     # slot call, and the client accept extraction joins before the final validation.
     mock_llm.reset_call_log()
     _run_mock_sequence(
@@ -466,7 +466,7 @@ def test_feasibility_negotiation_call_sequences_are_pinned_from_data_and_from_te
     ]
 
     # fromText: the server propose extraction joins between the feasibility validation and the
-    # round-2 slot call, and the client accept extraction joins before the final validation.
+    # accept slot call, and the client accept extraction joins before the final validation.
     mock_llm.reset_call_log()
     _run_mock_sequence(
         [
@@ -909,7 +909,7 @@ def test_negotiation_client_generation_renders_the_missing_region_prompt(tmp_pat
 def test_negotiation_kind_client_generation_routes_to_its_content_validation_variant(
     tmp_path: Path, language: str, kind: str, expected_slot_stage: str, expected_validation_stage: str
 ) -> None:
-    """The real client path renders the distinguishing values, so the round-1 trigger works.
+    """The real client path renders the distinguishing values, so the initial trigger works.
 
     ``generate_task_prompt_from_text`` serves the kind's slot-extraction variant whose rendered
     prompt carries the distinguishing values, so the server-side content validation of that
