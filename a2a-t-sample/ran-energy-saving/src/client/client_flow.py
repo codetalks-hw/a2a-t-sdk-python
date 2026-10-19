@@ -570,10 +570,10 @@ async def _run_webhook_flow(
 
 
 def _numbered_items(items: Iterable[tuple[str, str | None]]) -> str:
-    """Render items as one numbered list: ``N. name：value；`` per item (the negotiation demo rule).
+    """Render items as one numbered list: ``N. name：value；`` per item.
 
-    The value is omitted when blank; the full-width separators keep the rendering identical to the
-    ``a2a-t-sample/negotiation`` demo's ``_numbered_items`` for both languages.
+    The value is omitted when blank; the full-width separators render the list the same way in
+    both languages.
     """
     lines: list[str] = []
     for index, (name, value) in enumerate(items, start=1):
