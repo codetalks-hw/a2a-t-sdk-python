@@ -191,6 +191,17 @@ the answer keeps the propose's round, and only a *new* propose advances it. The 
 request is not a negotiation round — the negotiation starts with the server's propose.
 `maxRounds` (default 5) bounds the session.
 
+**Either side can propose.** Negotiation is symmetric: the client and the server SDK expose the same
+four generation methods (propose / accept / reject / abort) and the same validation methods, so
+either agent can open a negotiation and either can answer one. This demo has the **server** propose
+because the server is the side that discovers the request cannot be executed as-is. That is a choice
+of this scenario, not a property of the wire: a client could open a negotiation just as well, for
+example when it cannot meet a constraint the server announced, and the server would answer with
+accept, reject or abort. The role only decides who sends the propose — the message forms, the
+session handling and the transport are identical. This demo wires the decision on the client side
+(the provider integration point); if your client proposes, the equivalent decision belongs on the
+server side.
+
 **The closed loop, in four messages:**
 
 1. client → server: the energy-saving request as it stands — in the demo: a missing region, an
