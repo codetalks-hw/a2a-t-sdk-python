@@ -81,8 +81,8 @@ class NegotiationResponseProvider(Protocol):
 
     The DECISION of how to derive the answer is entirely yours (human confirmation, a policy
     engine, an upstream system call); the WIRE MECHANICS stay in the flow: the flow regenerates the
-    Task-T prompt, builds the typed accept from your decision, advances the session context and
-    sends the accept over the configured transport.
+    Task-T prompt, builds the typed accept from your decision with the same round stamped as
+    ACCEPT, and sends it over the configured transport.
 
     ``respond`` is synchronous — the flow calls it at the decision point. A customer implementation
     that needs asynchrony (waiting for a human, calling a remote service) owns that internally and
