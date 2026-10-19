@@ -28,12 +28,12 @@ Read it one of three ways:
 | Path | Core responsibility |
 | --- | --- |
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
-| [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the wire mechanics (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision seam but owns no decision. |
-| [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision seam: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
+| [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the wire mechanics (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
+| [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
 | [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see the [replace checklist](#5-replace-checklist-demo--production)); not removable as-is. |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | The server flow: validate → negotiate-or-execute → stream progress and the report. |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution seam plus the demo UC1 service. |
+| [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution integration point plus the demo UC1 service. |
 | [`src/common/`](src/common) | Shared adapters, the schema-routed mock LLM, the `WebhookReceiver`, and the shared `TASK_PARAM_SCHEMA`. |
 | [`src/registry/`](src/registry) | Mock registry center (AgentCard register/query, port 5001). |
 | [`resources/mock_llm/`](resources/mock_llm) | Scripted slot-extraction and content-validation replies. |
@@ -101,14 +101,14 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 `_extract_prompt_text` reads the metadata and `validate_task_prompt_and_data_filling` validates and
 extracts ([`server_flow.py:82`](src/server/server_flow.py#L82), [`server_flow.py:486`](src/server/server_flow.py#L486)).
 A rejected prompt is mapped to `TASK_STATE_REJECTED` instead of crashing the server; the validated
-parameters go into the execution seam.
+parameters go into the execution integration point.
 
 ### 3.4 What you replace
 
 The template (`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`) and the
 parameter schema are sample-specific — bring your own
 ([`scenario_data.py`](src/client/scenario_data.py)); the business execution runs behind the
-server-side `TaskExecutionService` seam (see the
+server-side `TaskExecutionService` integration point (see the
 [replace checklist](#5-replace-checklist-demo--production)).
 
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
@@ -127,28 +127,35 @@ three such situations:
 a time window and a throughput target, but never says which region. The server cannot start without
 it, so it says which piece is missing; the client supplies it and the task proceeds.
 
-**Target — the request asks for more than the server can deliver.** The client asks for a
-guaranteed 100 Mbps across the region. The target is well-formed, but it exceeds what the cells can
-guarantee. The server restates the intent it understood and asks the client to confirm a workable
-target before it commits.
+**Target — the request is internally inconsistent.** The client sends a segmented guaranteed
+throughput target in which two time windows overlap: `{17:30~23:00,20Mbps}` and
+`{20:00~00:00,10Mbps}`. The request is well-formed, but the guaranteed rate for the overlapping
+period cannot be determined. The server restates the intent it understood and asks which time
+window should be adjusted; the client answers with the corrected segments.
 
-**Feasibility — the request may be impossible under current conditions.** The client asks for a
-30 % energy saving while guaranteeing 50 Mbps. The two goals pull in opposite directions, and
-whether both can hold depends on the live network state. The server asks the client to evaluate
-feasibility jointly and answer with a summary.
+**Feasibility — the request may be impossible under current conditions.** The client asks two
+stations to hold `{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}` through an outage that lasts from
+00:00 to 18:00, while an existing constraint requires at least 18 hours of power autonomy. Holding
+that rate would drain the batteries faster than the outage lasts. The server reports the
+infeasibility together with the evidence and a proposal (lower the 06:00~18:00 rate from 10 Mbps to
+2 Mbps); the client accepts the adjusted target.
 
-**How the demo wires it.** Which situation applies — and whether to negotiate at all — is **your
-business decision; the SDK has no opinion**. In this demo it is data-driven: the first
-content-validation error's code selects the kind, via the `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
+### 4.2 How the demo decides which one applies
+
+Which situation applies — and whether to negotiate at all — is **your business decision; the SDK
+has no opinion**. In this demo it is data-driven: the first content-validation error's code selects
+the kind, via the `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
 ([`server_flow.py:64`](src/server/server_flow.py#L64)). That table is a **sample convention, not an
 SDK contract** — edit your copy freely (remap codes, add your own, or drop the mapping and decide
 from your own business rules; an unmapped failure is simply rejected).
 
-The wire does not depend on that table: every propose self-describes through its own `templateUri`
-(`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`), so the client picks its
-answer — accept, reject or abort — from the URI it received, not from any error code.
+The wire does not depend on that table. Each propose records its `templateUri` — the prompt
+template its message text was rendered from, such as
+`Negotiation-T/information-negotiation/propose/v1`. That URI also tells the client which kind of
+propose it received, so the client picks its answer — accept, reject or abort — from the message it
+got, not from any error code.
 
-### 4.2 Shared mechanics
+### 4.3 Shared mechanics
 
 These apply to all three kinds; the per-kind sections below do not repeat them.
 
@@ -161,16 +168,15 @@ request is not a negotiation round — the negotiation starts with the server's 
 
 1. client → server: the energy-saving request as it stands — in the demo, missing the region.
 2. server → client: the propose — what is missing, what needs clarifying, or what needs evaluating.
-3. client → server: the answer (the values, the confirmation, or the feasibility summary) together
-   with the completed request.
+3. client → server: the request re-sent with the missing or corrected content filled in; the
+   answer travels in that same message (it is one message, not two).
 4. server → client: the result — progress, then the report.
 
 The session (`id` / `round` / `maxRounds` / performative) travels with every negotiation message in
-the `negotiationContext` metadata map, so the SDK itself stays stateless; each propose also carries
-its `templateUri`, which is what the client dispatches its answer on.
+the `negotiationContext` metadata map, so the SDK itself stays stateless.
 
-**The decision seam.** When message 2 arrives, the client flow builds a lightweight
-`NegotiationProposeView` (kind, `templateUri`, rendered text) and calls
+**Where your decision plugs in.** When message 2 arrives, the client flow builds a lightweight
+`NegotiationProposeView` (kind, `templateUri`, rendered text) and calls the provider
 ([`negotiation_response.py`](src/client/negotiation_response.py)):
 
 ```python
@@ -192,7 +198,7 @@ that internally.
 > The provider replaces only the scripted **answer** to a propose — the Task-T refill parameters
 > (`negotiation_params`) stay caller input to the flow, which will not engage a negotiation without them.
 
-### 4.3 Information negotiation
+### 4.4 Information negotiation
 
 **① When the server opens it.** The request is incomplete — it lacks a parameter the server needs
 (in the demo, the region). The demo's trigger is a `content.param_missing` validation error, but
@@ -214,7 +220,7 @@ the decision itself.
 
 **④ What you must write yourself.** The propose's business phrasing (which parameters to ask for
 and how to name them — `server_flow._missing_items_from_errors` plus your slot schema) and the
-answer source behind the provider seam:
+answer source behind the provider integration point:
 
 ```python
 class MyProvider:
@@ -223,63 +229,64 @@ class MyProvider:
         return NegotiationDecision(conclusion="accept", filled_params=values)
 ```
 
-### 4.4 Target negotiation
+### 4.5 Target negotiation
 
-**① When the server opens it.** The target is well-formed but beyond or ambiguous for the server's
-capability (in the demo, a 100 Mbps throughput target beyond what the cells can guarantee). The
-demo's trigger is a `content.value_not_allowed` validation error.
+**① When the server opens it.** The request contradicts itself: two time windows of the segmented
+guaranteed throughput target overlap, so the guaranteed rate for the overlapping period is
+ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
 
 **② What the reference code does.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
-| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, TargetProposeContent(description, target_confirm_request=...)), TARGET_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
+| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, TargetProposeContent(description, intent_understanding=[...], request_for_clarification=[...])), TARGET_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
 | Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, TargetEndingContent(ACCEPT, confirmed_intent, failure_reason=None)), TARGET_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
 | Answer source | `NegotiationDecision(conclusion="accept", confirmed_intent="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
 
-The demo proposes the *confirm-request* form (`target_confirm_request` non-blank, the three
-conditional lists empty — the mutual-exclusion rule the SDK enforces) and the accept confirms the
-clarified intent.
+The demo proposes the *clarification* form: the server restates the intent it understood
+(`intent_understanding`) and asks for the time adjustment (`request_for_clarification`). The accept
+carries the corrected target as `confirmed_intent`.
 
 **③ What you can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What you must write yourself.** The clarified-target wording for the propose
+**④ What you must write yourself.** The clarification wording for the propose
 (`_negotiation_propose_data`'s target branch) and how your side derives `confirmed_intent` — the
-demo reads it from `scenario_data`; yours comes from whoever confirms the target.
+demo reads it from `scenario_data`; yours comes from whoever resolves the ambiguity.
 
-> `TargetProposeContent` also supports multi-round clarification (`intent_understanding` on the
-> first round, `alignment_and_clarification` on later rounds, `request_for_clarification` for open
-> questions). The demo uses the confirm-request form only; the SDK renders all four.
+> `TargetProposeContent` also supports the confirm-request form (`target_confirm_request`, with the
+> three conditional lists empty — the mutual-exclusion rule the SDK enforces) and
+> `alignment_and_clarification` for later rounds. The demo uses the first-round clarification form.
 
-### 4.5 Feasibility negotiation
+### 4.6 Feasibility negotiation
 
-**① When the server opens it.** The goal may not be achievable in the current network state (in the
-demo, a 30 % saving goal conflicting with a 50 Mbps throughput guarantee). The demo's trigger is a
-`content.semantic_conflict` validation error.
+**① When the server opens it.** The request may be impossible under current conditions: the
+guaranteed rate cannot sustain the declared outage duration for the listed stations. The demo's
+trigger is a `content.semantic_conflict` validation error.
 
 **② What the reference code does.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
-| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, FeasibilityProposeContent(description, action=REQUEST_FEASIBILITY_EVALUATION, contents_to_evaluate=[...])), FEASIBILITY_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
+| Server propose | `generate_negotiation_propose_prompt_from_data(NegotiationProposeData(context, FeasibilityProposeContent(description, action=PROPOSE_ALTERNATIVE_ON_FAILURE, infeasibility_details_and_proposal=[...])), FEASIBILITY_NEGOTIATION_PROPOSE_URI)` | [`server_flow.py:207`](src/server/server_flow.py#L207) |
 | Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, FeasibilityEndingContent(ACCEPT, feasibility_summary)), FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
 | Answer source | `NegotiationDecision(conclusion="accept", feasibility_summary="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
 
-The propose requests an evaluation (`action=REQUEST_FEASIBILITY_EVALUATION` with
-`contents_to_evaluate`); the accept returns the evaluation summary.
+The demo reports the completed assessment as infeasible and attaches the evidence plus an
+alternative proposal (`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with
+`infeasibility_details_and_proposal`); the accept states the adjustment it agrees to.
 
 **③ What you can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What you must write yourself.** The evaluation request wording and, more importantly, the
-actual evaluation: `feasibility_summary` must come from your planning or simulation system.
+**④ What you must write yourself.** The assessment itself — the infeasibility findings and the
+proposal — and the answer: both must come from your planning, simulation or power-capacity system.
 
-> `FeasibilityProposeContent` also supports `PROPOSE_ALTERNATIVE_ON_FAILURE`
-> (`infeasibility_details_and_proposal`) and the `feasibility_confirm_request` form. The demo uses
-> the evaluation-request form only.
+> `FeasibilityProposeContent` also supports `REQUEST_FEASIBILITY_EVALUATION` (asking the client to
+> evaluate `contents_to_evaluate`) and the `feasibility_confirm_request` form. The demo uses the
+> infeasibility-and-proposal form.
 
-### 4.6 Reject and abort — the extension point
+### 4.7 Reject and abort — the extension point
 
 A `reject`/`abort` decision is **not wired in this demo**: the flow logs
 `negotiation-decision: {conclusion} (not wired in this demo...)` and ends without sending. The
@@ -293,25 +300,28 @@ ending content's `failure_reason`), and generate the message with the SDK's
 `NegotiationAbortContent(termination_reason)` renders against the common
 `Negotiation-T/common/abort/v1` template via `generate_negotiation_abort_prompt_from_data`.
 
-### 4.7 fromData or fromText
+### 4.8 Generating messages from structured data or from natural language
 
-The default `fromData` channel renders the typed content deterministically — no LLM call.
-`fromText` (`--channel fromText`) renders each message as natural-language text first and the SDK
-extracts the structured content back — one extraction LLM call per generated message; the wire
-format is identical.
+There are two ways to produce a negotiation message, and both end up on the wire in the same form:
+
+- **from structured data (default).** You build the typed content in code and the SDK renders the
+  template directly — deterministic, no model call.
+- **from natural language** (`--channel fromText`). You write the message as plain text and the SDK
+  asks the model to extract the structured content first, then renders the template — one extra
+  extraction call per generated message.
 
 ## 5. Replace checklist (demo → production)
 
 | Demo piece | What it does in the demo | Keep or replace |
 | --- | --- | --- |
 | mock LLM — [`resources/mock_llm/`](resources/mock_llm) + the schema-routed mock in `src/common/` | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI/offline runs; in production remove it and configure a real OpenAI-compatible endpoint |
-| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | the UC1 progress steps and intent report the demo execution streams | **REPLACE** via the `TaskExecutionService` seam ([`src/server/task_execution.py`](src/server/task_execution.py)); once your service is assembled, the demo service and data can be deleted |
+| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | the UC1 progress steps and intent report the demo execution streams | **REPLACE** via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once your service is assembled, the demo service and data can be deleted |
 | scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | feeds BOTH sides (see below) | **REPLACE** on both sides: the client answers via your `NegotiationResponseProvider`; the server's propose texts in your copy of `server_flow._negotiation_propose_data` become your business phrasing |
 | mock registry — [`src/registry/`](src/registry) (port 5001) | AgentCard register/query for discovery | **REPLACE** with your registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
 | static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | shared static token in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-pair secrets, rotation, TLS); treat the receiver as an exposed HTTP endpoint |
 
 > **`scenario_data` feeds BOTH sides** — the client's scripted answers (filled parameters,
-> confirmed intent, feasibility summary) go through the provider seam, and the server's propose
+> confirmed intent, feasibility summary) go through the provider integration point, and the server's propose
 > content is built from the same module: `_negotiation_propose_data`
 > ([`server_flow.py:207`](src/server/server_flow.py#L207)) fills the target/feasibility propose
 > texts from its accessors. Replacing only the provider and the execution service still leaves
@@ -371,7 +381,7 @@ transports.
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`; selects the natural-language input and the mock/template tree |
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`; selects the sample scenario variant (same semantics as `--scenario`) |
 | `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility` (default `information`); negotiation scenario input, same semantics as `--negotiation` |
-| `A2AT_SAMPLE_CHANNEL` | `data` / `text` (default `data`); generation channel of the negotiation propose/accept messages, same semantics as `--channel` |
+| `A2AT_SAMPLE_CHANNEL` | `data` / `text` (default `data`); whether negotiation messages are generated from structured data or from natural language, same semantics as `--channel` |
 | `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook` (default `sse`); client event transport, same semantics as `--transport` |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | Bind port of the embedded webhook receiver (default `9000`; `0` = OS-assigned ephemeral port) |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | Push token the server must carry in the `X-A2A-Notification-Token` header (default `demo-webhook-token`); a mismatch answers `401` |
@@ -433,8 +443,8 @@ content-validation responses of [`resources/mock_llm/{zh-CN,en-US}/`](resources/
 | --- | --- |
 | `--language {en-US,zh-CN}` | Run language (default `en-US`) |
 | `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation) |
-| `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = 100Mbps throughput beyond cell capability; `feasibility` = 30% saving goal conflicting with a 50Mbps throughput target). `information` keeps the `--scenario` switch (only `--scenario negotiation` runs the missing-region flow); `target`/`feasibility` engage without it. The flag only selects the input — the server stays data-driven on the validation error code |
-| `--channel {fromData,fromText}` | Generation channel of the negotiation propose/accept messages (default `fromData`; `fromText` adds one extraction LLM call per generated message) |
+| `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = two overlapping time segments in the guaranteed throughput target; `feasibility` = the guaranteed rate cannot sustain an 18-hour power outage). `information` keeps the `--scenario` switch (only `--scenario negotiation` runs the missing-region flow); `target`/`feasibility` engage without it. The flag only selects the input — the server stays data-driven on the validation error code |
+| `--channel {fromData,fromText}` | Whether negotiation messages are generated from structured data (`fromData`, default) or from natural language (`fromText`, one extra extraction model call per message) |
 | `--transport {sse,webhook}` | Event transport of the client (default `sse`); see [§6.1](#61-webhook-transport) |
 | `--webhook-port N` | Bind port of the embedded webhook receiver used with `--transport webhook` (default 9000; `0` selects an OS-assigned ephemeral port) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |
