@@ -166,7 +166,8 @@ request is not a negotiation round — the negotiation starts with the server's 
 
 **The closed loop, in four messages:**
 
-1. client → server: the energy-saving request as it stands — in the demo, missing the region.
+1. client → server: the energy-saving request as it stands — in the demo: a missing region, an
+   overlapping target, or an outage the guaranteed rate cannot sustain.
 2. server → client: the propose — what is missing, what needs clarifying, or what needs evaluating.
 3. client → server: the request re-sent with the missing or corrected content filled in; the
    answer travels in that same message (it is one message, not two).
