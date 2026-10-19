@@ -27,7 +27,7 @@ Usage:
     python run_demo.py                      # English, streams the energy-saving steps, then exits
     python run_demo.py --language zh-CN
     python run_demo.py --scenario negotiation   # missing-region input; information negotiation
-    python run_demo.py --negotiation target     # 100Mbps input; target negotiation
+    python run_demo.py --negotiation target     # overlapping time segments; target negotiation
     python run_demo.py --negotiation feasibility --channel fromText
     python run_demo.py --transport webhook      # task events via the embedded webhook receiver
     python run_demo.py --keep-alive         # leave registry/server running; stop with --stop
@@ -281,8 +281,8 @@ def main() -> int:
         choices=["information", "target", "feasibility"],
         help=(
             "negotiation kind selecting the client scenario input: information (missing region), "
-            "target (100Mbps throughput beyond cell capability), feasibility (30-percent saving "
-            "goal conflicting with 50Mbps throughput). information engages only together with "
+            "target (overlapping time segments in the guaranteed throughput target), feasibility "
+            "(the guaranteed rate cannot sustain the outage duration). information engages only together with "
             "--scenario negotiation; target/feasibility engage without it. The KIND flag only "
             "selects the scenario input — the server stays data-driven on the content-validation "
             "error code "

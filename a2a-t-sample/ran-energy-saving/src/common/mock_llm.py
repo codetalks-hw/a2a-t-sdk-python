@@ -17,7 +17,7 @@ schema signature                      served response
                                       ``slot_extraction_target`` / ``slot_extraction_feasibility``
                                       variants for the target/feasibility negotiation inputs
                                       (complete slot sets that preserve the distinguishing
-                                      100Mbps / 30%+50Mbps values in the rendered prompt), told
+                                      overlapping-segment / outage values in the rendered prompt), told
                                       apart by the scenario natural-language constants of
                                       ``client.scenario_data``
 ``semantic_verdict`` property         content semantic validation — 4-way by the scenario
