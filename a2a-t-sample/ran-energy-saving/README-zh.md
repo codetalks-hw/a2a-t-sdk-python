@@ -162,8 +162,8 @@ agent 决定请求何时无法按原样执行、值得先谈一谈；client agen
 ### 4.2 样例如何判断属于哪一种
 
 判断属于哪种情况、以及到底要不要协商，是**server agent 的业务决策，SDK 不持立场** —— client
-只对收到的 propose 作出反应。本样例是数据驱动的：
-首个内容校验错误的错误码通过 `_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
+只对收到的 propose 作出反应。本样例是数据驱动的：首个内容校验错误的错误码通过
+`_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
 （[`server_flow.py:64`](src/server/server_flow.py#L64)）选出类型。这张表是**样例约定，不是 SDK
 契约** —— server 实现可随意改自己的副本（重映射、新增、或干脆不用映射、按自己的业务规则判断；
 未映射的失败就是普通拒绝）。
