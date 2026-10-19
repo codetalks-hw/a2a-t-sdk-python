@@ -114,47 +114,60 @@ server-side `TaskExecutionService` seam (see the
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
 
 The boundary in one sentence: the SDK owns the wire — rendering, validation, the negotiation
-session map, the transport mechanics — your system owns the business: when a validation failure
-turns into a negotiation, and how your side answers a propose.
+session map, the transport mechanics — your system owns the business: when a request cannot be
+carried out as-is and a conversation would settle it, and how your side answers a propose.
 
-### 4.1 When the server opens a negotiation
+### 4.1 When a negotiation happens
 
-When the Task-T content validation fails with a content error the server prefers to resolve by
-talking instead of rejecting. Which failure means which kind is a **sample-level convention, not an
-SDK contract** — the wire is self-describing: each propose carries its own `templateUri`
-(`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`) and the client dispatches
-its accept on that URI.
+A negotiation opens when the server cannot carry out the request as it stands, but the gap is
+something the two agents can settle by talking rather than by refusing to act. The demo covers
+three such situations:
 
-| Validation error code | Negotiation kind | Business trigger | Demo input |
-| --- | --- | --- | --- |
-| `content.param_missing` | **information** | the request lacks a parameter the server needs | `--scenario negotiation` |
-| `content.value_not_allowed` | **target** | the target is well-formed but beyond or ambiguous for the server's capability | `--negotiation target` |
-| `content.semantic_conflict` | **feasibility** | the goal may not be achievable in the current network state | `--negotiation feasibility --channel fromText` |
+**Information — the request is incomplete.** The client asks to run energy saving and names a goal,
+a time window and a throughput target, but never says which region. The server cannot start without
+it, so it says which piece is missing; the client supplies it and the task proceeds.
 
-The mapping constant is `_NEGOTIATION_TYPE_BY_ERROR_CODE`
-([`server_flow.py:64`](src/server/server_flow.py#L64)) — edit your copy freely (remap codes, add
-your own, or leave codes unmapped; unmapped codes keep the plain `TASK_STATE_REJECTED`).
+**Target — the request asks for more than the server can deliver.** The client asks for a
+guaranteed 100 Mbps across the region. The target is well-formed, but it exceeds what the cells can
+guarantee. The server restates the intent it understood and asks the client to confirm a workable
+target before it commits.
+
+**Feasibility — the request may be impossible under current conditions.** The client asks for a
+30 % energy saving while guaranteeing 50 Mbps. The two goals pull in opposite directions, and
+whether both can hold depends on the live network state. The server asks the client to evaluate
+feasibility jointly and answer with a summary.
+
+**How the demo wires it.** Which situation applies — and whether to negotiate at all — is **your
+business decision; the SDK has no opinion**. In this demo it is data-driven: the first
+content-validation error's code selects the kind, via the `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
+([`server_flow.py:64`](src/server/server_flow.py#L64)). That table is a **sample convention, not an
+SDK contract** — edit your copy freely (remap codes, add your own, or drop the mapping and decide
+from your own business rules; an unmapped failure is simply rejected).
+
+The wire does not depend on that table: every propose self-describes through its own `templateUri`
+(`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`), so the client dispatches
+the accept on the URI it received, not on any error code.
 
 ### 4.2 Shared mechanics
 
 These apply to all three kinds; the per-kind sections below do not repeat them.
 
 **A round is one propose plus the answer to it.** The session context carries a 1-based `round`;
-the accept answering a propose keeps that propose's round, and only a *new* propose advances it.
-The initial Task-T request is not a negotiation round — it is an ordinary task request, and the
-negotiation starts with the server's propose. `maxRounds` (default 5) bounds the session.
+the answer keeps the propose's round, and only a *new* propose advances it. The client's opening
+request is not a negotiation round — the negotiation starts with the server's propose.
+`maxRounds` (default 5) bounds the session.
 
 **The closed loop, in four messages:**
 
-1. client → server: the Task-T task request; the content validation fails.
-2. server → client: `TASK_STATE_INPUT_REQUIRED` with the Negotiation-T propose in the status
-   message metadata (`build_metadata_content()`); the session travels in the nested
-   `negotiationContext` metadata map — the SDK is stateless.
-3. client → server: the filled Task-T prompt regenerated from the parameters plus the
-   Negotiation-T accept, both in the message metadata; the same task re-sent (`task_id` /
-   `context_id` from the initial request) with both extension URIs in the `A2A-Extensions` header.
-4. server → client: the now-valid prompt executes — progress updates, the report artifact, and
-   `TASK_STATE_COMPLETED` close the negotiation run.
+1. client → server: the energy-saving request as it stands — in the demo, missing the region.
+2. server → client: the propose — what is missing, what needs clarifying, or what needs evaluating.
+3. client → server: the answer (the values, the confirmation, or the feasibility summary) together
+   with the completed request.
+4. server → client: the result — progress, then the report.
+
+The session (`id` / `round` / `maxRounds` / performative) travels with every negotiation message in
+the `negotiationContext` metadata map, so the SDK itself stays stateless; each propose also carries
+its `templateUri`, which is what the client dispatches its answer on.
 
 **The decision seam.** When message 2 arrives, the client flow builds a lightweight
 `NegotiationProposeView` (kind, `templateUri`, rendered text) and calls
@@ -181,8 +194,9 @@ that internally.
 
 ### 4.3 Information negotiation
 
-**① When the server opens it.** The Task-T validation fails with `content.param_missing`: the
-request lacks a parameter the server needs (in the demo, `region`).
+**① When the server opens it.** The request is incomplete — it lacks a parameter the server needs
+(in the demo, the region). The demo's trigger is a `content.param_missing` validation error, but
+that code is the sample's wiring, not part of the protocol.
 
 **② What the reference code does.**
 
@@ -211,9 +225,9 @@ class MyProvider:
 
 ### 4.4 Target negotiation
 
-**① When the server opens it.** The Task-T validation fails with `content.value_not_allowed`: the
-target is well-formed but beyond or ambiguous for the server's capability (in the demo, a 100 Mbps
-throughput target beyond the cell's capability).
+**① When the server opens it.** The target is well-formed but beyond or ambiguous for the server's
+capability (in the demo, a 100 Mbps throughput target beyond what the cells can guarantee). The
+demo's trigger is a `content.value_not_allowed` validation error.
 
 **② What the reference code does.**
 
@@ -240,9 +254,9 @@ demo reads it from `scenario_data`; yours comes from whoever confirms the target
 
 ### 4.5 Feasibility negotiation
 
-**① When the server opens it.** The Task-T validation fails with `content.semantic_conflict`: the
-goal may not be achievable in the current network state (in the demo, a 30 % saving goal
-conflicting with a 50 Mbps throughput guarantee).
+**① When the server opens it.** The goal may not be achievable in the current network state (in the
+demo, a 30 % saving goal conflicting with a 50 Mbps throughput guarantee). The demo's trigger is a
+`content.semantic_conflict` validation error.
 
 **② What the reference code does.**
 

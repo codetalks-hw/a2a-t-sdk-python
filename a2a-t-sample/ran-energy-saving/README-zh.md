@@ -107,45 +107,50 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
-一句话分界：SDK 拥有报文 —— 渲染、校验、协商会话映射、传输机制；你的系统拥有业务 —— 校验失败
-何时转为协商、以及你这一侧如何应答 propose。
+一句话分界：SDK 拥有报文 —— 渲染、校验、协商会话映射、传输机制；你的系统拥有业务 —— 请求何时
+无法按原样执行、值得先谈一谈，以及你这一侧如何应答 propose。
 
-### 4.1 服务端何时开启协商
+### 4.1 什么时候会发生协商
 
-当 Task-T 内容校验以某条内容错误码失败、且服务端倾向于通过对话而非直接拒绝来解决时。哪种失败对应
-哪种协商类型是**样例层的约定，不是 SDK 契约** —— 报文是自描述的：每个 propose 携带各自的
-`templateUri`（`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`），客户端
-基于该 URI 分派 accept。
+服务端无法按请求原样执行，但这个差距又是双方**谈一谈就能补齐**、而不是只能拒绝的时候。样例覆盖三种
+情况：
 
-| 内容校验错误码 | 协商类型 | 业务语义的触发条件 | 样例输入 |
-| --- | --- | --- | --- |
-| `content.param_missing` | **信息协商（information）** | 请求缺少服务端必需的参数 | `--scenario negotiation` |
-| `content.value_not_allowed` | **目标协商（target）** | 目标本身合法但超出或偏离服务端能力口径 | `--negotiation target` |
-| `content.semantic_conflict` | **可行性协商（feasibility）** | 目标在当前网络状态下可能不可达 | `--negotiation feasibility --channel fromText` |
+**信息不完整。** 客户端要求执行节能，给了目标、时段和吞吐目标，却没说在哪个区域。服务端缺这一项
+无法开工，于是告诉客户端缺什么；客户端补上，任务继续。
 
-映射常量是 `_NEGOTIATION_TYPE_BY_ERROR_CODE`
-([`server_flow.py:64`](src/server/server_flow.py#L64)) —— 你可以随意编辑自己的副本（重映射错误码、
-新增自有错误码、或让某些码不映射；不映射的码保持普通 `TASK_STATE_REJECTED`）。
+**要求超出服务端能力。** 客户端要求全区保障 100Mbps。目标本身是合法的，但超出了小区能做到的范围。
+服务端复述它理解的意图，请客户端确认一个可行的目标，再作承诺。
+
+**目标在当前条件下可能做不到。** 客户端要求节能 30% 同时保障 50Mbps。两个目标方向相反，能否同时
+成立取决于实时网络状态。服务端请客户端共同做可行性评估，并把结论摘要回来。
+
+**样例是怎么接线的。** 判断属于哪种情况、以及到底要不要协商，是**你的业务决策，SDK 不持立场**。
+本样例是数据驱动的：首个内容校验错误的错误码通过 `_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
+（[`server_flow.py:64`](src/server/server_flow.py#L64)）选出类型。这张表是**样例约定，不是 SDK
+契约** —— 可随意改自己的副本（重映射、新增、或干脆不用映射、按自己的业务规则判断；未映射的失败就是
+普通拒绝）。
+
+报文并不依赖这张表：每个 propose 通过自身的 `templateUri`
+（`Negotiation-T/{information,target,feasibility}-negotiation/propose/v1`）自我描述，客户端按收到
+的 URI 分派应答，而不是按错误码。
 
 ### 4.2 共享机制
 
 以下对三类协商通用，各类型小节不再重复。
 
-**一轮 = 一次 propose 加上对它的应答。** 会话上下文携带 1 起始的 `round`；应答 propose 的 accept
-沿用该 propose 的轮次，只有**新的** propose 才会推进轮次。初始的 Task-T 请求不是协商轮 —— 它是一次
-普通任务请求，协商从服务端的 propose 才开始。`maxRounds`（默认 5）限制会话轮次。
+**一轮 = 一次 propose 加上对它的应答。** 会话上下文携带 1 起始的 `round`；应答沿用 propose 的轮次，
+只有**新的** propose 才会推进轮次。客户端最初那条请求不算协商轮 —— 协商从服务端的 propose 才开始。
+`maxRounds`（默认 5）限制会话轮次。
 
 **四条报文的闭环：**
 
-1. 客户端 → 服务端：Task-T 任务请求；内容校验失败。
-2. 服务端 → 客户端：`TASK_STATE_INPUT_REQUIRED`，Negotiation-T propose 放在该状态消息的 metadata
-   中（`build_metadata_content()`）；会话随嵌套的 `negotiationContext` metadata 映射往返 ——
-   SDK 本身无状态。
-3. 客户端 → 服务端：由补全后的参数重新生成的 Task-T 提示词，加上 Negotiation-T accept，一并放在
-   消息 metadata 中；重发同一任务（`task_id` / `context_id` 沿用初始请求），`A2A-Extensions`
-   头同时携带两个扩展 URI。
-4. 服务端 → 客户端：补全后的提示词校验通过并执行 —— 进度更新、报告 artifact 与
-   `TASK_STATE_COMPLETED` 收尾协商运行。
+1. 客户端 → 服务端：按原样的节能请求 —— 样例中缺少区域。
+2. 服务端 → 客户端：propose —— 缺什么、需要澄清什么、或需要评估什么。
+3. 客户端 → 服务端：应答（补齐的取值、确认、或可行性摘要），连同补全后的请求一并发出。
+4. 服务端 → 客户端：结果 —— 先进度，后报告。
+
+会话（`id` / `round` / `maxRounds` / performative）随每条协商消息放在 `negotiationContext` metadata
+中，因此 SDK 本身无状态；每个 propose 还携带自己的 `templateUri`，客户端据此分派应答。
 
 **决策接缝。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
 `templateUri`、渲染文本）并调用（[`negotiation_response.py`](src/client/negotiation_response.py)）：
@@ -169,8 +174,8 @@ flow 根据你的决策重新生成 Task-T 提示词、构建带同轮 `ACCEPT` 
 
 ### 4.3 信息协商（information）
 
-**① 服务端何时开启。** Task-T 校验以 `content.param_missing` 失败：请求缺少服务端必需的参数
-（样例中为 `region`）。
+**① 服务端何时开启。** 请求不完整 —— 缺少服务端必需的参数（样例中为区域）。样例的触发条件是
+`content.param_missing` 校验错误，但这个错误码是样例的接线方式，不属于协议本身。
 
 **② 参考代码做了什么。**
 
@@ -197,8 +202,8 @@ class MyProvider:
 
 ### 4.4 目标协商（target）
 
-**① 服务端何时开启。** Task-T 校验以 `content.value_not_allowed` 失败：目标本身合法但超出或偏离
-服务端能力口径（样例中为 100Mbps 吞吐目标，超出小区能力）。
+**① 服务端何时开启。** 目标本身合法但超出或偏离服务端能力口径（样例中为 100Mbps 吞吐目标，超出
+小区能力）。样例的触发条件是 `content.value_not_allowed` 校验错误。
 
 **② 参考代码做了什么。**
 
@@ -222,8 +227,8 @@ class MyProvider:
 
 ### 4.5 可行性协商（feasibility）
 
-**① 服务端何时开启。** Task-T 校验以 `content.semantic_conflict` 失败：目标在当前网络状态下可能
-不可达（样例中为 30% 节能目标与 50Mbps 吞吐保障冲突）。
+**① 服务端何时开启。** 目标在当前网络状态下可能做不到（样例中为 30% 节能目标与 50Mbps 吞吐保障
+冲突）。样例的触发条件是 `content.semantic_conflict` 校验错误。
 
 **② 参考代码做了什么。**
 
