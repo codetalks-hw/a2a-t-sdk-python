@@ -278,15 +278,6 @@ _NEGOTIATION_FEASIBILITY_INFEASIBILITY: dict[str, list[tuple[str, str]]] = {
     "en-US": [
         ("Conclusion", "Infeasible."),
         (
-            "Basis",
-            'The original request asks stations "Station 1" and "Station 2" to guarantee '
-            "{00:00~06:00,2Mbps} and {06:00~18:00,10Mbps}, while the sites carry an existing "
-            "constraint of at least 18 hours of power autonomy during an outage. With the current "
-            "guaranteed rate the power consumption in that period cannot meet the outage-duration "
-            "requirement; the conclusion is based on the sites' battery capacity and historical "
-            "power curves.",
-        ),
-        (
             "Proposal",
             "Lower the guaranteed throughput target for 06:00~18:00 from 10Mbps to 2Mbps, which "
             "extends the supportable outage duration to the required 18 hours. If lowering the "
@@ -296,13 +287,6 @@ _NEGOTIATION_FEASIBILITY_INFEASIBILITY: dict[str, list[tuple[str, str]]] = {
     ],
     "zh-CN": [
         ("评估结论", "不可行。"),
-        (
-            "评估依据",
-            "原始请求要求“站点名称1”“站点名称2”2个站点执行 {00:00~06:00,2Mbps}、"
-            "{06:00~18:00,10Mbps} 的速率保障目标，同时该站点存在停电场景下需保障至少18小时供电"
-            "时长的既有约束。经评估，若按当前速率保障目标执行，该时段内设备功耗无法满足停电时长"
-            "要求，两项要求之间存在冲突，判断依据为当前站点的备电容量及历史功耗曲线。",
-        ),
         (
             "提案",
             "建议将06:00~18:00时段的速率保障目标由10Mbps下调至2Mbps，以延长可支撑的停电时长至"

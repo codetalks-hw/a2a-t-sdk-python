@@ -3,6 +3,33 @@
 An A2A-T sample with a client agent, a RAN domain server agent, and a mock registry center for
 AgentCard discovery.
 
+## Contents
+
+- [1. What this sample demonstrates](#1-what-this-sample-demonstrates)
+  - [1.1 Project layout](#11-project-layout)
+- [2. Quickstart](#2-quickstart)
+- [3. Using the A2A-T SDK to implement Task-T interaction](#3-using-the-a2a-t-sdk-to-implement-task-t-interaction)
+  - [3.1 The four steps](#31-the-four-steps)
+  - [3.2 Client side](#32-client-side)
+  - [3.3 Server side](#33-server-side)
+  - [3.4 What you replace](#34-what-you-replace)
+- [4. Using the A2A-T SDK to implement Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-negotiation-t-interaction)
+  - [4.1 When a negotiation happens](#41-when-a-negotiation-happens)
+  - [4.2 How the demo decides which one applies](#42-how-the-demo-decides-which-one-applies)
+  - [4.3 Shared mechanics](#43-shared-mechanics)
+  - [4.4 Information negotiation](#44-information-negotiation)
+  - [4.5 Target negotiation](#45-target-negotiation)
+  - [4.6 Feasibility negotiation](#46-feasibility-negotiation)
+  - [4.7 Reject and abort — the extension point](#47-reject-and-abort--the-extension-point)
+  - [4.8 Generating messages from structured data or from natural language](#48-generating-messages-from-structured-data-or-from-natural-language)
+- [5. Replace checklist (demo → production)](#5-replace-checklist-demo--production)
+- [6. Appendix](#6-appendix)
+  - [6.1 Webhook transport](#61-webhook-transport)
+  - [6.2 Configuration (a2a-t-sample/.env)](#62-configuration-a2a-t-sampleenv)
+  - [6.3 Run the two sides separately](#63-run-the-two-sides-separately)
+  - [6.4 Mock LLM mechanism](#64-mock-llm-mechanism)
+  - [6.5 Supported flags (`run_demo.py`)](#65-supported-flags-run_demopy)
+
 ## 1. What this sample demonstrates
 
 A client agent commissions a RAN domain agent to run an energy-saving task over A2A. On this one
@@ -136,9 +163,9 @@ window should be adjusted; the client answers with the corrected segments.
 **Feasibility — the request may be impossible under current conditions.** The client asks two
 stations to hold `{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}` through an outage that lasts from
 00:00 to 18:00, while an existing constraint requires at least 18 hours of power autonomy. Holding
-that rate would drain the batteries faster than the outage lasts. The server reports the
-infeasibility together with the evidence and a proposal (lower the 06:00~18:00 rate from 10 Mbps to
-2 Mbps); the client accepts the adjusted target.
+that rate would drain the batteries faster than the outage lasts. The server reports that the target
+is infeasible and proposes an alternative (lower the 06:00~18:00 rate from 10 Mbps to 2 Mbps); the
+client accepts the adjusted target.
 
 ### 4.2 How the demo decides which one applies
 
@@ -273,9 +300,9 @@ trigger is a `content.semantic_conflict` validation error.
 | Client accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, FeasibilityEndingContent(ACCEPT, feasibility_summary)), FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
 | Answer source | `NegotiationDecision(conclusion="accept", feasibility_summary="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
 
-The demo reports the completed assessment as infeasible and attaches the evidence plus an
-alternative proposal (`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with
-`infeasibility_details_and_proposal`); the accept states the adjustment it agrees to.
+The demo reports the completed assessment as infeasible and attaches an alternative proposal
+(`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with `infeasibility_details_and_proposal`); the accept
+states the adjustment it agrees to.
 
 **③ What you can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.

@@ -3,6 +3,33 @@
 一个 A2A-T 样例：包含一个客户端 Agent、一个 RAN 域服务端 Agent，以及用于发现 AgentCard 的 mock
 注册中心。
 
+## 目录
+
+- [1. 本样例演示了什么](#1-本样例演示了什么)
+  - [1.1 目录结构](#11-目录结构)
+- [2. 快速开始](#2-快速开始)
+- [3. 使用 A2A-T SDK 实现 Task-T 交互](#3-使用-a2a-t-sdk-实现-task-t-交互)
+  - [3.1 四个步骤](#31-四个步骤)
+  - [3.2 客户端侧](#32-客户端侧)
+  - [3.3 服务端侧](#33-服务端侧)
+  - [3.4 你要替换什么](#34-你要替换什么)
+- [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
+  - [4.1 什么时候会发生协商](#41-什么时候会发生协商)
+  - [4.2 样例如何判断属于哪一种](#42-样例如何判断属于哪一种)
+  - [4.3 共享机制](#43-共享机制)
+  - [4.4 信息协商（information）](#44-信息协商information)
+  - [4.5 目标协商（target）](#45-目标协商target)
+  - [4.6 可行性协商（feasibility）](#46-可行性协商feasibility)
+  - [4.7 reject 与 abort —— 扩展点](#47-reject-与-abort--扩展点)
+  - [4.8 从结构化数据生成，还是从自然语言生成](#48-从结构化数据生成还是从自然语言生成)
+- [5. 替换清单（demo 到生产）](#5-替换清单demo-到生产)
+- [6. 附录](#6-附录)
+  - [6.1 Webhook 传输](#61-webhook-传输)
+  - [6.2 配置（a2a-t-sample/.env）](#62-配置a2a-t-sampleenv)
+  - [6.3 分别启动两端](#63-分别启动两端)
+  - [6.4 mock LLM 机制](#64-mock-llm-机制)
+  - [6.5 支持的参数（`run_demo.py`）](#65-支持的参数run_demopy)
+
 ## 1. 本样例演示了什么
 
 一个客户端 Agent 通过 A2A 委托一个 RAN 域 Agent 执行节能任务。在这一个场景上，样例按顺序覆盖客户
@@ -124,8 +151,8 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 
 **目标在当前条件下可能做不到。** 客户端要求两个站点在 00:00~18:00 的停电期间保障
 `{00:00~06:00,2Mbps}、{06:00~18:00,10Mbps}`，而站点既有的备电要求是至少支撑 18 小时。按这个
-速率执行，电池撑不到停电结束。服务端给出不可行的结论、判断依据和提案（把 06:00~18:00 的保障速率
-从 10Mbps 下调到 2Mbps）；客户端接受调整后的目标。
+速率执行，电池撑不到停电结束。服务端给出不可行的结论和提案（把 06:00~18:00 的保障速率从 10Mbps 下调
+到 2Mbps）；客户端接受调整后的目标。
 
 ### 4.2 样例如何判断属于哪一种
 
@@ -245,13 +272,13 @@ class MyProvider:
 | 客户端 accept | `generate_negotiation_accept_prompt_from_data(NegotiationEndingData(context, FeasibilityEndingContent(ACCEPT, feasibility_summary)), FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI)` | [`client_flow.py:607`](src/client/client_flow.py#L607) |
 | 应答来源 | `NegotiationDecision(conclusion="accept", feasibility_summary="...")` | [`negotiation_response.py`](src/client/negotiation_response.py) |
 
-样例把已完成的评估结论作为不可行上报，并附上判断依据和替代提案
+样例把已完成的评估结论作为不可行上报，并附上替代提案
 （`action=PROPOSE_ALTERNATIVE_ON_FAILURE` 加 `infeasibility_details_and_proposal`）；accept 说明
 它同意的调整。
 
 **③ 哪些可以原样复用。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ 哪些必须你自己写。** 评估本身 —— 不可行的判定依据和提案 —— 以及应答：两者都必须来自你的规划、
+**④ 哪些必须你自己写。** 评估本身 —— 不可行的结论和提案 —— 以及应答：两者都必须来自你的规划、
 仿真或备电容量系统。
 
 > `FeasibilityProposeContent` 还支持 `REQUEST_FEASIBILITY_EVALUATION`（请对方评估

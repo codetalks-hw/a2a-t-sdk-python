@@ -877,7 +877,7 @@ def test_negotiation_kind_inputs_and_accessors_are_complete(tmp_path: Path, lang
     assert negotiation_target_intent_understanding(env_path=env_path)
     assert negotiation_target_clarifications(env_path=env_path)
     assert negotiation_target_confirmation(env_path=env_path)
-    assert len(negotiation_feasibility_infeasibility(env_path=env_path)) == 3
+    assert len(negotiation_feasibility_infeasibility(env_path=env_path)) == 2
     assert negotiation_feasibility_summary(env_path=env_path)
 
 
