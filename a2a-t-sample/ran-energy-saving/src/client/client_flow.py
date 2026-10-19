@@ -473,7 +473,7 @@ async def _run_webhook_flow(
     if end_signal != _WEBHOOK_SIGNAL_INPUT_REQUIRED:
         return artifact_count, end_signal
 
-    # Negotiation continuation (reuses the SSE-path detection/provider seam/builders verbatim; same
+    # Negotiation continuation (reuses the SSE-path detection/provider integration point/builders verbatim; same
     # unhandled logs).
     input_required_event = _find_negotiation_input_required(normalized_events)
     if input_required_event is None:
@@ -759,7 +759,7 @@ def _plan_negotiation_accept(
 ) -> _NegotiationAcceptPlan | None:
     """Ask the provider how to answer the propose, or log why the accept stays unsent.
 
-    Shared by the SSE and webhook drivers (the seam replaced the scripted answer selection, plan
+    Shared by the SSE and webhook drivers (the integration point replaced the scripted answer selection, plan
     R3): the existing unhandled degradations (malformed/missing session context, unrecognized
     propose templateUri) keep their logs; a reject/abort decision logs the dedicated
     ``negotiation-decision`` line and ends the flow with the unhandled semantics (no accept sent,
@@ -954,7 +954,7 @@ async def run_client_flow(
     artifact end signal itself closes the default flow there, so the stream-cut cap does not
     apply.
 
-    Negotiation response seam (plan R3/R4): when the server answers INPUT_REQUIRED with a
+    Negotiation response integration point (plan R3/R4): when the server answers INPUT_REQUIRED with a
     Negotiation-T propose, HOW to answer is decided by ``negotiation_response_provider``
     (``NegotiationResponseProvider.respond`` — the client-side INTEGRATION POINT). Supplying a
     provider replaces the scripted answer derivation entirely: ``negotiation_answers`` is not
@@ -963,7 +963,7 @@ async def run_client_flow(
     the wire mechanics: ``negotiation_params`` remains the Task-T prompt refill input of the
     accept message and ``negotiation_kind`` keeps hinting the propose view's kind resolution (the
     flag wins, else the propose's ``templateUri`` dispatches on the wire). Without a provider, the
-    legacy scripted arguments keep the pre-seam behavior unchanged: when both
+    legacy scripted arguments keep the pre-integration-point behavior unchanged: when both
     ``negotiation_params`` and ``negotiation_answers`` are supplied, the flow internally builds the
     demo ``ScriptedNegotiationResponseProvider`` around them (back-compat shim); without them an
     INPUT_REQUIRED propose is logged as unhandled and the propose stays unanswered. The default
@@ -1000,7 +1000,7 @@ async def run_client_flow(
     if log_sink is not None:
         log_sink(format_payload_log(role="client", stage="scenario-data", payload=initial_input))
 
-    # Negotiation response seam (plan R4): the explicit provider wins; without one, the legacy
+    # Negotiation response integration point (plan R4): the explicit provider wins; without one, the legacy
     # scripted answers keep working through an internally built demo provider (identical
     # behavior), and with neither the propose stays unhandled below.
     negotiation_provider = negotiation_response_provider

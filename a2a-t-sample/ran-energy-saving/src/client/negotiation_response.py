@@ -1,4 +1,4 @@
-"""Client-side negotiation response seam (INTEGRATION POINT) of the ran-energy-saving demo.
+"""Client-side negotiation response integration point (INTEGRATION POINT) of the ran-energy-saving demo.
 
 ``NegotiationResponseProvider`` is the Protocol the client flow depends on: it is where a
 customer's system decides how to answer a negotiation propose. ``ScriptedNegotiationResponseProvider``
@@ -72,7 +72,7 @@ class NegotiationDecision:
 class NegotiationResponseProvider(Protocol):
     """INTEGRATION POINT (client): decide how to answer a negotiation propose.
 
-    The client flow calls this seam once the server answers the initial task request with an
+    The client flow calls this integration point once the server answers the initial task request with an
     INPUT_REQUIRED Negotiation-T propose: ``propose`` is the lightweight
     :class:`NegotiationProposeView` observed from the wire (negotiation kind, template URI, rendered
     text) and ``session`` the parsed :class:`NegotiationContext` of the server's session. The

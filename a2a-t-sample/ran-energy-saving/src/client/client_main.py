@@ -319,7 +319,9 @@ def main(
             NEGOTIATION_KIND_TARGET,
             NEGOTIATION_KIND_FEASIBILITY,
         )
-        negotiation_params = negotiation_filled_params(env_path=sample_env_path) if negotiation_engaged else None
+        negotiation_params = (
+            negotiation_filled_params(negotiation_kind, env_path=sample_env_path) if negotiation_engaged else None
+        )
         negotiation_answers_map = negotiation_answers(env_path=sample_env_path) if negotiation_engaged else None
         # INTEGRATION POINT: replace ScriptedNegotiationResponseProvider with your negotiation
         # response provider (human confirmation, policy engine, upstream system...)

@@ -47,13 +47,14 @@ from client.scenario_data import (
     SUPPORTED_SCENARIOS,
     build_prompt_input,
     negotiation_answers,
-    negotiation_feasibility_contents,
     negotiation_feasibility_description,
+    negotiation_feasibility_infeasibility,
     negotiation_feasibility_summary,
     negotiation_filled_params,
-    negotiation_target_confirm_request,
+    negotiation_target_clarifications,
     negotiation_target_confirmation,
     negotiation_target_description,
+    negotiation_target_intent_understanding,
     resolve_channel,
     resolve_negotiation_kind,
     resolve_scenario,
@@ -524,7 +525,6 @@ def test_missing_mock_resources_mirror_the_complete_variants(language: str) -> N
 def test_negotiation_slot_resources_preserve_the_distinguishing_values(language: str) -> None:
     region_slot = _REGION_SLOT_NAMES[language]
     context_slot = _SLOT_SECTION_NAMES[language]["context"]
-    target_slot = _SLOT_SECTION_NAMES[language]["target"]
     complete = _resource(language, "slot_extraction.json")
     target = _resource(language, "slot_extraction_target.json")
     feasibility = _resource(language, "slot_extraction_feasibility.json")
@@ -538,10 +538,10 @@ def test_negotiation_slot_resources_preserve_the_distinguishing_values(language:
     assert target["slots"][region_slot] == complete["slots"][region_slot]
     assert feasibility["slots"][region_slot] == complete["slots"][region_slot]
     # Every slot equals the complete variant except the distinguishing ones: the target variant
-    # keeps the 100Mbps throughput, the feasibility variant the 30% goal and the 50Mbps throughput.
+    # carries the overlapping segments, the feasibility variant the outage context.
     for variant, distinguishing in (
-        (target, {context_slot: "100Mbps"}),
-        (feasibility, {context_slot: "50Mbps", target_slot: "30%"}),
+        (target, {context_slot: "20:00~00:00,10Mbps"}),
+        (feasibility, {context_slot: "00:00~18:00" if language == "zh-CN" else "00:00 to 18:00"}),
     ):
         for name, value in complete["slots"].items():  # type: ignore[union-attr]
             if name in distinguishing:
@@ -618,7 +618,8 @@ def test_content_validation_variant_resources_carry_the_trigger_codes(language: 
     feasibility = _resource(language, "content_validation_feasibility.json")
 
     # The target variant reports the value-not-allowed error on the throughput param; the
-    # feasibility variant reports the semantic-conflict error on the energy goal param.
+    # feasibility variant reports the semantic-conflict error on the throughput param too — the
+    # conflict is between the guaranteed rate and the outage duration, not the energy goal.
     assert target["semantic_verdict"] is False
     assert target["errors"] == [
         {
@@ -631,12 +632,12 @@ def test_content_validation_variant_resources_carry_the_trigger_codes(language: 
     assert feasibility["semantic_verdict"] is False
     assert feasibility["errors"] == [
         {
-            "slot_name": "energySavingGoal",
+            "slot_name": "guaranteedThroughputTarget",
             "code": "content.semantic_conflict",
-            "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_target"]},
+            "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_context"]},
         }
     ]
-    assert feasibility["params"] == {**complete["params"], "energySavingGoal": None}
+    assert feasibility["params"] == {**complete["params"], "guaranteedThroughputTarget": None}
 
 
 @pytest.mark.parametrize("language", ["en-US", "zh-CN"])
@@ -654,23 +655,29 @@ def test_negotiation_accessors_match_the_canned_extraction_responses(tmp_path: P
     assert negotiation_target_confirmation(env_path=env_path) == target_accept["confirmed_intent"]
     assert feasibility_accept["conclusion"] == "Accept"
     assert negotiation_feasibility_summary(env_path=env_path) == feasibility_accept["feasibility_summary"]
-    # The server-side propose texts mirror the canned propose extraction (confirm-request round:
-    # all three conditional lists stay null; evaluation request: details/request stay null).
+    # The server-side propose texts mirror the canned propose extraction (clarification form: the
+    # intent restatement plus the clarification request; infeasibility form: the details/proposal).
     assert negotiation_target_description(env_path=env_path) == target_propose["target_negotiation_description"]
-    assert negotiation_target_confirm_request(env_path=env_path) == target_propose["target_confirm_request"]
-    assert target_propose["intent_understanding"] is None
+    assert negotiation_target_intent_understanding(env_path=env_path) == [
+        (item["name"], item["value"])
+        for item in target_propose["intent_understanding"]  # type: ignore[union-attr]
+    ]
+    assert negotiation_target_clarifications(env_path=env_path) == [
+        (item["name"], item["value"])
+        for item in target_propose["request_for_clarification"]  # type: ignore[union-attr]
+    ]
     assert target_propose["alignment_and_clarification"] is None
-    assert target_propose["request_for_clarification"] is None
-    assert feasibility_propose["action"] == "REQUEST_FEASIBILITY_EVALUATION"
+    assert target_propose["target_confirm_request"] is None
+    assert feasibility_propose["action"] == "PROPOSE_ALTERNATIVE_ON_FAILURE"
     assert (
         negotiation_feasibility_description(env_path=env_path)
         == feasibility_propose["feasibility_negotiation_description"]
     )
-    assert negotiation_feasibility_contents(env_path=env_path) == [
+    assert negotiation_feasibility_infeasibility(env_path=env_path) == [
         (item["name"], item["value"])
-        for item in feasibility_propose["contents_to_evaluate"]  # type: ignore[union-attr]
+        for item in feasibility_propose["infeasibility_details_and_proposal"]  # type: ignore[union-attr]
     ]
-    assert feasibility_propose["infeasibility_details_and_proposal"] is None
+    assert feasibility_propose["contents_to_evaluate"] is None
     assert feasibility_propose["feasibility_confirm_request"] is None
 
 
@@ -847,11 +854,11 @@ def test_negotiation_kind_inputs_and_accessors_are_complete(tmp_path: Path, lang
     # Both kind inputs are complete inputs: they carry the region display string.
     assert NEGOTIATION_REGION_STRINGS[language] in target_input
     assert NEGOTIATION_REGION_STRINGS[language] in feasibility_input
-    # The target input carries the 100Mbps target; the feasibility input carries both the 30%
-    # goal and the 50Mbps throughput.
-    assert "100Mbps" in target_input
-    assert "30%" in feasibility_input
-    assert "50Mbps" in feasibility_input
+    # The target input carries the overlapping segments; the feasibility input carries the
+    # station list and the power outage.
+    assert "20:00~00:00,10Mbps" in target_input
+    assert "06:00~18:00,10Mbps" in feasibility_input
+    assert ("停电" in feasibility_input) if language == "zh-CN" else ("power outage" in feasibility_input)
     # Each kind input maps to its own content-validation stage via the router.
     assert (
         route_structured_call(
@@ -867,9 +874,10 @@ def test_negotiation_kind_inputs_and_accessors_are_complete(tmp_path: Path, lang
     )
     # All per-type accessors return non-empty values for both languages.
     assert negotiation_target_description(env_path=env_path)
-    assert negotiation_target_confirm_request(env_path=env_path)
+    assert negotiation_target_intent_understanding(env_path=env_path)
+    assert negotiation_target_clarifications(env_path=env_path)
     assert negotiation_target_confirmation(env_path=env_path)
-    assert len(negotiation_feasibility_contents(env_path=env_path)) == 2
+    assert len(negotiation_feasibility_infeasibility(env_path=env_path)) == 3
     assert negotiation_feasibility_summary(env_path=env_path)
 
 

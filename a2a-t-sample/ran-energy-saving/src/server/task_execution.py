@@ -1,4 +1,4 @@
-"""Server-side task execution seam (INTEGRATION POINT) of the ran-energy-saving demo.
+"""Server-side task execution integration point (INTEGRATION POINT) of the ran-energy-saving demo.
 
 ``TaskExecutionService`` is the Protocol the server flow depends on: it is where a customer's
 business system executes the negotiated task. ``Uc1DemoExecutionService`` is the colocated demo
@@ -41,7 +41,7 @@ class TaskExecutionResult:
 class TaskExecutionService(Protocol):
     """INTEGRATION POINT (server): execute the negotiated task in YOUR business system.
 
-    The server flow calls this seam once the Task-T prompt validated and the negotiation
+    The server flow calls this integration point once the Task-T prompt validated and the negotiation
     concluded: ``params`` carries the filled task parameters extracted by the Task-T content
     validation, and the implementation runs the real business logic (in this demo, the scripted
     UC1 energy-saving execution; in production, your EMS/NMS northbound call).

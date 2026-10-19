@@ -106,31 +106,39 @@ NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN = (
     "{17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}."
 )
 
-#: Chinese natural-language task request of the target negotiation: the complete input with a
-#: 100Mbps throughput target beyond the cell capability, so the Task-T validation reports the
-#: value-not-allowed content error that triggers the target negotiation.
+#: Chinese natural-language task request of the target negotiation: the guaranteed throughput
+#: target has two overlapping time segments ({17:30~23:00,20Mbps} and {20:00~00:00,10Mbps}), so
+#: the Task-T validation reports the value-not-allowed content error that triggers the target
+#: negotiation (spec case 2: a time conflict within the segmented target).
 NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH = (
     "在松山湖管委会创建无线网络节能任务：在满足任务上下文的前提下最大化节能；"
-    "分时段保障速率目标为 {00:00~07:00,100Mbps}。"
+    "分时段保障速率目标为 {00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+    "{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}。"
 )
 
-#: English natural-language task request of the target negotiation (100Mbps target).
+#: English natural-language task request of the target negotiation (overlapping segments).
 NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN = (
     "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
-    "energy saving. The time-segment-based guaranteed throughput target is {00:00~07:00,100Mbps}."
+    "energy saving. The time-segment-based guaranteed throughput target is {00:00~07:00,2Mbps}, "
+    "{07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}."
 )
 
-#: Chinese natural-language task request of the feasibility negotiation: a 30% energy saving goal
-#: conflicting with the 50Mbps guaranteed throughput target, so the Task-T validation reports the
-#: semantic-conflict content error that triggers the feasibility negotiation.
+#: Chinese natural-language task request of the feasibility negotiation: two stations must keep
+#: a guaranteed rate through an 18-hour power outage, so the Task-T validation reports the
+#: semantic-conflict content error that triggers the feasibility negotiation (spec case 3: the
+#: guaranteed rate cannot sustain the outage duration).
 NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH = (
-    "在松山湖管委会创建无线网络节能任务：节能目标为30%；分时段保障速率目标为 {00:00~06:00,50Mbps}。"
+    "在松山湖管委会创建无线网络节能任务：站点列表1为[站点名称1, 站点名称2]；"
+    "分时段保障速率目标为 {00:00~06:00,2Mbps}、{06:00~18:00,10Mbps}；"
+    "背景事件为在00:00~18:00停电；在满足任务上下文的前提下最大化节能。"
 )
 
-#: English natural-language task request of the feasibility negotiation (30% goal, 50Mbps target).
+#: English natural-language task request of the feasibility negotiation (outage case).
 NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN = (
-    "Create a RAN energy saving task in the Songshanhu Administration Committee area with a 30% "
-    "energy saving goal. The time-segment-based guaranteed throughput target is {00:00~06:00,50Mbps}."
+    "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
+    "energy saving. Station list 1 is [Station 1, Station 2]; the time-segment-based guaranteed "
+    "throughput target is {00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}; the background event is a "
+    "power outage from 00:00 to 18:00."
 )
 
 #: Natural-language task requests keyed by negotiation kind, each as ``(en-US, zh-CN)``. The
@@ -191,57 +199,126 @@ def resolve_language(*, env_path: Path | None = None) -> str:
 #: accept-extraction content so the from-data and from-text channels produce equivalent messages.
 _NEGOTIATION_TARGET_DESCRIPTIONS: dict[str, str] = {
     "en-US": (
-        "Target negotiation for the RAN energy saving task: the submitted guaranteed throughput "
-        "target of 100Mbps exceeds the cell capability, so the clarified target needs confirmation."
+        "Target negotiation for the RAN energy saving task: the guaranteed throughput target has "
+        "two overlapping time segments, {17:30~23:00,20Mbps} and {20:00~00:00,10Mbps}, so the "
+        "guaranteed rate for the overlapping period cannot be determined uniquely."
     ),
-    "zh-CN": "无线网络节能任务的目标协商：用户提交的保障速率目标100Mbps超出小区能力，需对澄清后的目标进行确认。",
+    "zh-CN": (
+        "无线网络节能任务的目标协商：分时段保障速率目标中 {17:30~23:00,20Mbps} 与 "
+        "{20:00~00:00,10Mbps} 两个时段存在时间重叠，无法唯一确定重叠时段的速率保障目标。"
+    ),
 }
 
-#: Clarified-target confirm request of the target negotiation propose per language.
-_NEGOTIATION_TARGET_CONFIRM_REQUESTS: dict[str, str] = {
-    "en-US": "The clarified target is a guaranteed throughput of 20Mbps for the region; please confirm.",
-    "zh-CN": "澄清后的目标为该区域保障速率20Mbps，请确认。",
+#: Restatement of the original intent carried by the target propose (``intent_understanding``).
+_NEGOTIATION_TARGET_INTENT_UNDERSTANDINGS: dict[str, list[tuple[str, str]]] = {
+    "en-US": [
+        ("Region", "Songshanhu Administration Committee"),
+        (
+            "Time-segment-based guaranteed throughput target",
+            "{00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, "
+            "{17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}",
+        ),
+    ],
+    "zh-CN": [
+        ("区域", "松山湖管委会"),
+        (
+            "分时段保障速率目标",
+            "{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+            "{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}",
+        ),
+    ],
 }
 
-#: Confirmed intent of the target negotiation accept (the confirmed-target sentence) per language.
+#: Clarification requests carried by the target propose (``request_for_clarification``).
+_NEGOTIATION_TARGET_CLARIFICATIONS: dict[str, list[tuple[str, str]]] = {
+    "en-US": [
+        (
+            "Time-segment-based guaranteed throughput target",
+            "The two segments {17:30~23:00,20Mbps} and {20:00~00:00,10Mbps} overlap, so the "
+            "guaranteed rate for the overlapping period is ambiguous; please adjust the time.",
+        )
+    ],
+    "zh-CN": [
+        (
+            "分时段保障速率目标",
+            "如下两个时段存在时间重叠，无法唯一确定重叠时段的速率保障目标，请调整时间："
+            "{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}",
+        )
+    ],
+}
+
+#: Confirmed intent of the target negotiation accept (the corrected target) per language.
 _NEGOTIATION_TARGET_CONFIRMATIONS: dict[str, str] = {
-    "en-US": "The clarified target is a guaranteed throughput of 20Mbps for the region.",
-    "zh-CN": "澄清后的目标为该区域保障速率20Mbps。",
+    "en-US": (
+        "The energy saving target is corrected to {00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, "
+        "{09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~00:00,10Mbps}."
+    ),
+    "zh-CN": (
+        "节能目标修正为{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+        "{17:30~23:00,20Mbps}、{23:00~00:00,10Mbps}。"
+    ),
 }
 
 #: Feasibility description of the feasibility negotiation propose per language.
 _NEGOTIATION_FEASIBILITY_DESCRIPTIONS: dict[str, str] = {
     "en-US": (
-        "Feasibility negotiation for the RAN energy saving task: the 30% energy saving goal "
-        "conflicts with the 50Mbps guaranteed throughput target, so the feasibility needs a joint "
-        "evaluation."
+        "The feasibility assessment for the station-level energy saving task is complete: the "
+        "current guaranteed throughput target cannot satisfy the power-outage duration "
+        "requirement; see the infeasibility details and proposal."
     ),
-    "zh-CN": "无线网络节能任务的可行性协商：节能目标30%与保障速率目标50Mbps存在冲突，需对可行性进行联合评估。",
+    "zh-CN": (
+        "站点级节能任务的目标达成可行性评估已完成，当前速率目标无法同时满足停电时长要求，"
+        "详见评估不可行时的详情和提案，请确认。"
+    ),
 }
 
-#: Contents to evaluate of the feasibility negotiation propose per language (corpus
-#: "Target achievement" / "Resource status" style).
-_NEGOTIATION_FEASIBILITY_CONTENTS: dict[str, list[tuple[str, str]]] = {
+#: Infeasibility details and proposal of the feasibility propose
+#: (``infeasibility_details_and_proposal``).
+_NEGOTIATION_FEASIBILITY_INFEASIBILITY: dict[str, list[tuple[str, str]]] = {
     "en-US": [
+        ("Conclusion", "Infeasible."),
         (
-            "Target achievement",
-            "The area runs energy saving from 00:00 to 06:00 while guaranteeing a throughput target of 50Mbps.",
+            "Basis",
+            'The original request asks stations "Station 1" and "Station 2" to guarantee '
+            "{00:00~06:00,2Mbps} and {06:00~18:00,10Mbps}, while the sites carry an existing "
+            "constraint of at least 18 hours of power autonomy during an outage. With the current "
+            "guaranteed rate the power consumption in that period cannot meet the outage-duration "
+            "requirement; the conclusion is based on the sites' battery capacity and historical "
+            "power curves.",
         ),
         (
-            "Resource status",
-            "The cells in the area are NR with carrier shutdown available during the low-traffic period.",
+            "Proposal",
+            "Lower the guaranteed throughput target for 06:00~18:00 from 10Mbps to 2Mbps, which "
+            "extends the supportable outage duration to the required 18 hours. If lowering the "
+            "rate is not acceptable, shorten the required outage duration instead. One of the two "
+            "must be adjusted; no third option satisfies both original requirements.",
         ),
     ],
     "zh-CN": [
-        ("目标达成", "区域在00:00~06:00时段执行节能，同时保障速率目标为50Mbps。"),
-        ("能源现状", "区域内小区为NR制式，低话务时段具备关断载频条件。"),
+        ("评估结论", "不可行。"),
+        (
+            "评估依据",
+            "原始请求要求“站点名称1”“站点名称2”2个站点执行 {00:00~06:00,2Mbps}、"
+            "{06:00~18:00,10Mbps} 的速率保障目标，同时该站点存在停电场景下需保障至少18小时供电"
+            "时长的既有约束。经评估，若按当前速率保障目标执行，该时段内设备功耗无法满足停电时长"
+            "要求，两项要求之间存在冲突，判断依据为当前站点的备电容量及历史功耗曲线。",
+        ),
+        (
+            "提案",
+            "建议将06:00~18:00时段的速率保障目标由10Mbps下调至2Mbps，以延长可支撑的停电时长至"
+            "满足要求的18小时。若无法接受下调速率，则需相应缩短停电时长保障要求。两者需二选一"
+            "调整，暂无第三种可同时满足原有两项要求的方案。",
+        ),
     ],
 }
 
-#: Feasibility summary of the feasibility negotiation accept per language.
+#: Feasibility summary of the feasibility negotiation accept (the accepted proposal) per language.
 _NEGOTIATION_FEASIBILITY_SUMMARIES: dict[str, str] = {
-    "en-US": "The energy saving target is achievable; the negotiation is confirmed.",
-    "zh-CN": "节能目标可达成，本次协商确认结束。",
+    "en-US": (
+        "Agreed to lower the guaranteed throughput target for 06:00~18:00 from 10Mbps to 2Mbps; "
+        "the negotiation is confirmed as complete."
+    ),
+    "zh-CN": "同意将06:00~18:00时段的速率保障目标由10Mbps下调至2Mbps，本次协商确认结束。",
 }
 
 
@@ -376,11 +453,44 @@ def build_prompt_input(
     return NATURAL_LANGUAGE_PROMPT_INPUT_EN if is_english else NATURAL_LANGUAGE_PROMPT_INPUT_ZH
 
 
-def negotiation_filled_params(*, env_path: Path | None = None) -> dict[str, object]:
-    """Return the four Task-T parameters with the region filled (the negotiation accept input)."""
+#: Guaranteed-throughput target of the Task-T refill between negotiation kinds: the target case
+#: accepts the corrected non-overlapping segments, the feasibility case the lowered rate. The
+#: information case keeps the complete input's target (the missing parameter is the region only).
+_NEGOTIATION_FILLED_TARGETS: dict[str, dict[str, str]] = {
+    NEGOTIATION_KIND_TARGET: {
+        "en-US": (
+            "{00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, "
+            "{17:30~23:00,20Mbps}, {23:00~00:00,10Mbps}"
+        ),
+        "zh-CN": (
+            "{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+            "{17:30~23:00,20Mbps}、{23:00~00:00,10Mbps}"
+        ),
+    },
+    NEGOTIATION_KIND_FEASIBILITY: {
+        "en-US": "{00:00~06:00,2Mbps}, {06:00~18:00,2Mbps}",
+        "zh-CN": "{00:00~06:00,2Mbps}、{06:00~18:00,2Mbps}",
+    },
+}
+
+
+def negotiation_filled_params(
+    negotiation_kind: str = NEGOTIATION_KIND_INFORMATION,
+    *,
+    env_path: Path | None = None,
+) -> dict[str, object]:
+    """Return the four Task-T parameters for the refill, adjusted to what the negotiation accepted.
+
+    The target case refills the corrected (non-overlapping) segments and the feasibility case the
+    lowered guaranteed rate, so the re-validated Task-T prompt carries the agreed target; the
+    information case only fills the region and keeps the complete input's target.
+    """
     language = resolve_language(env_path=env_path)
-    filled = _NEGOTIATION_FILLED_PARAMS.get(language, _NEGOTIATION_FILLED_PARAMS["zh-CN"])
-    return dict(filled)
+    filled = dict(_NEGOTIATION_FILLED_PARAMS.get(language, _NEGOTIATION_FILLED_PARAMS["zh-CN"]))
+    kind_targets = _NEGOTIATION_FILLED_TARGETS.get(negotiation_kind)
+    if kind_targets is not None:
+        filled["guaranteedThroughputTarget"] = kind_targets.get(language, kind_targets["zh-CN"])
+    return filled
 
 
 def negotiation_answers(*, env_path: Path | None = None) -> dict[str, str]:
@@ -394,9 +504,20 @@ def negotiation_target_description(*, env_path: Path | None = None) -> str:
     return _localized_text(_NEGOTIATION_TARGET_DESCRIPTIONS, env_path=env_path)
 
 
-def negotiation_target_confirm_request(*, env_path: Path | None = None) -> str:
-    """Return the clarified-target confirm request (mirrors the canned propose extraction)."""
-    return _localized_text(_NEGOTIATION_TARGET_CONFIRM_REQUESTS, env_path=env_path)
+def negotiation_target_intent_understanding(*, env_path: Path | None = None) -> list[tuple[str, str]]:
+    """Return the intent restatement of the target propose (canned propose extraction)."""
+    language = resolve_language(env_path=env_path)
+    items = _NEGOTIATION_TARGET_INTENT_UNDERSTANDINGS.get(
+        language, _NEGOTIATION_TARGET_INTENT_UNDERSTANDINGS["zh-CN"]
+    )
+    return list(items)
+
+
+def negotiation_target_clarifications(*, env_path: Path | None = None) -> list[tuple[str, str]]:
+    """Return the clarification requests of the target propose (canned propose extraction)."""
+    language = resolve_language(env_path=env_path)
+    items = _NEGOTIATION_TARGET_CLARIFICATIONS.get(language, _NEGOTIATION_TARGET_CLARIFICATIONS["zh-CN"])
+    return list(items)
 
 
 def negotiation_target_confirmation(*, env_path: Path | None = None) -> str:
@@ -409,11 +530,13 @@ def negotiation_feasibility_description(*, env_path: Path | None = None) -> str:
     return _localized_text(_NEGOTIATION_FEASIBILITY_DESCRIPTIONS, env_path=env_path)
 
 
-def negotiation_feasibility_contents(*, env_path: Path | None = None) -> list[tuple[str, str]]:
-    """Return the contents to evaluate of the feasibility propose (canned propose extraction)."""
+def negotiation_feasibility_infeasibility(*, env_path: Path | None = None) -> list[tuple[str, str]]:
+    """Return the infeasibility details and proposal of the feasibility propose (canned extraction)."""
     language = resolve_language(env_path=env_path)
-    contents = _NEGOTIATION_FEASIBILITY_CONTENTS.get(language, _NEGOTIATION_FEASIBILITY_CONTENTS["zh-CN"])
-    return list(contents)
+    items = _NEGOTIATION_FEASIBILITY_INFEASIBILITY.get(
+        language, _NEGOTIATION_FEASIBILITY_INFEASIBILITY["zh-CN"]
+    )
+    return list(items)
 
 
 def negotiation_feasibility_summary(*, env_path: Path | None = None) -> str:

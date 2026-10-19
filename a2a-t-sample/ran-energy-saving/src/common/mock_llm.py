@@ -128,9 +128,12 @@ _FEASIBILITY_SCENARIO_INPUTS = (
 
 #: Distinguishing values the target/feasibility rendered prompts carry (the dedicated
 #: slot-extraction variants preserve them), so the content-validation routing also fires on real
-#: rendered-prompt heads and not only on the scenario natural-language inputs.
-_TARGET_VALIDATION_MARKER = "100Mbps"
-_FEASIBILITY_VALIDATION_MARKERS = ("30%", "50Mbps")
+#: rendered-prompt heads and not only on the scenario natural-language inputs. Each marker is a
+#: value the FAILING input carries and the negotiated refill does not, so the continuation routes
+#: to the complete variant: the target marker is the overlapping segment, the feasibility marker
+#: the pre-proposal guaranteed rate.
+_TARGET_VALIDATION_MARKER = "20:00~00:00,10Mbps"
+_FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
 #: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
@@ -156,7 +159,7 @@ _PLACEHOLDER_API_KEY = "mock-key-not-real"
 #: Language the canned script was loaded for (region-string routing reads it).
 _script_language = "zh-CN"
 
-#: Routed stage name of every served structured call (test seam).
+#: Routed stage name of every served structured call (test hook).
 llm_calls: list[str] = []
 
 _mock_enabled = False
@@ -189,7 +192,7 @@ def is_mock_enabled() -> bool:
 
 
 def reset_call_log() -> None:
-    """Clear the routed stage log (test seam)."""
+    """Clear the routed stage log (test hook)."""
     llm_calls.clear()
 
 

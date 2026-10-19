@@ -60,11 +60,12 @@ from client.scenario_data import (
     ENERGY_SAVING_TEMPLATE_URI,
     build_prompt_input,
     negotiation_answers,
-    negotiation_feasibility_contents,
     negotiation_feasibility_description,
+    negotiation_feasibility_infeasibility,
     negotiation_filled_params,
-    negotiation_target_confirm_request,
+    negotiation_target_clarifications,
     negotiation_target_description,
+    negotiation_target_intent_understanding,
 )
 from common import mock_llm
 from common.llm_logger import install_llm_logger
@@ -368,9 +369,10 @@ def test_round_1_target_failure_answers_input_required_carrying_the_target_propo
     assert context["round"] == 1
     assert context["maxRounds"] == NegotiationContext.DEFAULT_MAX_ROUNDS
     assert context["performative"] == "PROPOSE"
-    # The propose text carries the clarified-target confirm request of the scenario data.
+    # The propose text carries the clarification request of the scenario data.
     propose_text = str(metadata[NEGOTIATION_T_EXTENSION_URI])
-    assert negotiation_target_confirm_request(env_path=_offline_env) in propose_text
+    for name, _value in negotiation_target_clarifications(env_path=_offline_env):
+        assert name in propose_text
     # from-data propose generation is deterministic: no negotiation extraction call is logged.
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
@@ -397,9 +399,9 @@ def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibi
     context = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
     assert context["round"] == 1
     assert context["performative"] == "PROPOSE"
-    # The propose text renders the contents to evaluate of the scenario data.
+    # The propose text renders the infeasibility details and proposal of the scenario data.
     propose_text = str(metadata[NEGOTIATION_T_EXTENSION_URI])
-    for name, _value in negotiation_feasibility_contents(env_path=_offline_env):
+    for name, _value in negotiation_feasibility_infeasibility(env_path=_offline_env):
         assert name in propose_text
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
@@ -429,7 +431,7 @@ def test_round_1_target_failure_from_text_channel_generates_via_extraction(_offl
     propose_metadata = _message_metadata(events[-1])
     # The templateUri still carries the target propose URI — the client's dispatch key is unchanged.
     assert propose_metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_PROPOSE_URI
-    assert negotiation_target_confirm_request(env_path=_offline_env) in str(
+    assert negotiation_target_clarifications(env_path=_offline_env)[0][0] in str(
         propose_metadata[NEGOTIATION_T_EXTENSION_URI]
     )
     # from-text propose generation runs exactly one extraction call after the initial validation.
@@ -461,7 +463,7 @@ def test_round_1_feasibility_failure_from_text_channel_generates_via_extraction(
     # The rendered text carries the description and the contents to evaluate of the scenario data.
     propose_text = str(propose_metadata[NEGOTIATION_T_EXTENSION_URI])
     assert negotiation_feasibility_description(env_path=_offline_env) in propose_text
-    for name, value in negotiation_feasibility_contents(env_path=_offline_env):
+    for name, value in negotiation_feasibility_infeasibility(env_path=_offline_env):
         assert f"{name}: {value}" in propose_text
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
@@ -539,22 +541,23 @@ def test_information_propose_text_renders_numbered_items_and_the_relationship() 
     assert _numbered_items([("a", ""), ("b", None)]) == "1. a；2. b；"
 
 
-def test_target_propose_text_joins_the_description_and_the_confirm_request(_offline_env: Path) -> None:
+def test_target_propose_text_joins_the_description_and_the_clarification_request(_offline_env: Path) -> None:
     text = _negotiation_propose_text(NEGOTIATION_TYPE_TARGET, [], env_path=_offline_env)
 
     assert text == (
         f"{negotiation_target_description(env_path=_offline_env)} "
-        f"{negotiation_target_confirm_request(env_path=_offline_env)}"
+        f"{_numbered_items(negotiation_target_intent_understanding(env_path=_offline_env))} "
+        f"{_numbered_items(negotiation_target_clarifications(env_path=_offline_env))}"
     )
 
 
-def test_feasibility_propose_text_renders_the_contents_to_evaluate(_offline_env: Path) -> None:
+def test_feasibility_propose_text_renders_the_infeasibility_details(_offline_env: Path) -> None:
     text = _negotiation_propose_text(NEGOTIATION_TYPE_FEASIBILITY, [], env_path=_offline_env)
 
     assert text.startswith(
-        f"{scenario_data.negotiation_feasibility_description(env_path=_offline_env)} Contents to evaluate: "
+        f"{scenario_data.negotiation_feasibility_description(env_path=_offline_env)} "
     )
-    for name, value in negotiation_feasibility_contents(env_path=_offline_env):
+    for name, value in negotiation_feasibility_infeasibility(env_path=_offline_env):
         assert f"{name}：{value}" in text
 
 

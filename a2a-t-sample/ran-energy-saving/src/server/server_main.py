@@ -130,7 +130,7 @@ def build_server_runtime(
     The negotiation generation channel is resolved here from the run's ``.env``
     (``A2AT_SAMPLE_CHANNEL``, default ``data``) and, with the ``env_path`` itself, threaded into
     the executor so the propose builders read the same scenario configuration. The execution
-    service of the task seam is assembled here too and threaded through the executor into
+    service of the task execution integration point is assembled here too and threaded through the executor into
     ``execute_server_flow``.
     """
     resolved_logger = logger

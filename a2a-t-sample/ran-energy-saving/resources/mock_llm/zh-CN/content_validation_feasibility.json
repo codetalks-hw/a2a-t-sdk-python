@@ -2,17 +2,17 @@
   "semantic_verdict": false,
   "errors": [
     {
-      "slot_name": "energySavingGoal",
+      "slot_name": "guaranteedThroughputTarget",
       "code": "content.semantic_conflict",
       "facts": {
-        "section_label": "任务目标"
+        "section_label": "任务上下文"
       }
     }
   ],
   "params": {
     "operationType": "create",
     "region": "松山湖管委会",
-    "energySavingGoal": null,
-    "guaranteedThroughputTarget": "{00:00~07:00,2Mbps}、{07:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~24:00,2Mbps}"
+    "energySavingGoal": "在满足任务上下文的前提下最大化节能。",
+    "guaranteedThroughputTarget": null
   }
 }
