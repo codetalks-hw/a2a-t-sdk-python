@@ -4,8 +4,8 @@
 customer's system decides how to answer a negotiation propose. ``ScriptedNegotiationResponseProvider``
 is the colocated demo implementation, wrapping the scripted answers of ``client.scenario_data`` (the
 data stays there so tests keep importing it unchanged). Replace the demo provider at the assembly
-site in ``client.client_main`` with your own implementation — see the integration guide
-(``docs/en/negotiation_integration_guide.md`` / ``docs/zh/协商集成指南.md``).
+site in ``client.client_main`` with your own implementation — see the sample README
+(``a2a-t-sample/ran-energy-saving/README.md``), Layer 2 (Negotiation-T).
 """
 
 from __future__ import annotations
