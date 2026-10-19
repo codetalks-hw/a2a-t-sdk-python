@@ -69,10 +69,10 @@ Client side, the whole exchange is ([`client_flow.py`](src/client/client_flow.py
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
 prompt_text, extension_uri = _require_prompt_text(prompt_content)
 request = SendMessageRequest()
+...  # message_id / role omitted
 request.message.parts.add().text = _build_request_metadata(initial_input)
 request.message.metadata[extension_uri] = prompt_text   # the prompt travels in the metadata
 request.message.metadata["templateUri"] = getattr(prompt_content, "template_uri", None) or ENERGY_SAVING_TEMPLATE_URI
-
 call_context = ClientCallContext(service_parameters={"A2A-Extensions": extension_uri})
 async for stream_response in a2a_client.send_message(request, context=call_context):
     ...  # consume the status updates and the report artifact
@@ -155,6 +155,9 @@ an implementation that needs asynchrony (human confirmation, an upstream call) o
 internally. The demo implementation is `ScriptedNegotiationResponseProvider`, assembled in
 [`client_main.py`](src/client/client_main.py) under the `INTEGRATION POINT` comment.
 
+> The provider replaces only the scripted **answer** to a propose — the Task-T refill parameters
+> (`negotiation_params`) stay caller input to the flow, which will not engage a negotiation without them.
+
 **reject / abort — the extension point.** A `reject`/`abort` decision is **not wired in this
 demo**: the flow logs `negotiation-decision: {conclusion} (not wired in this demo...)` and ends
 without sending. The extension point is the reject/abort branch of `_plan_negotiation_accept` in
@@ -215,30 +218,28 @@ Both transports deliver the same task events; the difference is how the client r
   (`SendMessageConfiguration.task_push_notification_config`, a flat
   `TaskPushNotificationConfig(url, token)` — the task id is still unknown at this point); round 2
   re-registers the same URL/token through the `POST /tasks/{id}/pushNotificationConfigs` REST
-  endpoint (a2a-sdk `BaseClient.create_task_push_notification_config`) before the negotiation
-  accept is sent.
+  endpoint (a2a-sdk `BaseClient.create_task_push_notification_config`).
 - **No server-side mode switch.** The server assembles the push machinery unconditionally
   (a2a-sdk `DefaultRequestHandler` with `InMemoryPushNotificationConfigStore` +
-  `BasePushNotificationSender`, [`server_main.py`](src/server/server_main.py)); in SSE mode it
-  simply idles.
-- **Non-blocking path.** The a2a client is built with `ClientConfig(streaming=False)`, which is
-  required to select the non-blocking `message:send` path (the `return_immediately` flag alone
-  does not switch it). Push bodies are StreamResponse-shaped JSON — the same shape as the SSE
-  events — so negotiation detection, artifact counting, and presentation are shared with SSE.
+  `BasePushNotificationSender`, [`server_main.py`](src/server/server_main.py)); in SSE mode it simply idles.
+- **Non-blocking path.** The a2a client is built with `ClientConfig(streaming=False)`, required to
+  select the non-blocking `message:send` path (the `return_immediately` flag alone does not switch
+  it). Push bodies are StreamResponse-shaped JSON — the same shape as the SSE events — so
+  negotiation detection, artifact counting, and presentation are shared with SSE.
 - **Token auth.** The receiver ([`webhook_receiver.py`](src/common/webhook_receiver.py)) validates
   `X-A2A-Notification-Token` on every POST: a mismatch answers `401` (the event is dropped), a
   malformed or unrecognized body answers `400`. The demo's static shared token is demo-grade — for
   production use per-client secrets with rotation over TLS.
 - **End signals.** Any SDK terminal state (`TASK_STATE_COMPLETED` / `FAILED` / `CANCELED` /
-  `REJECTED`) ends the flow in both phases — the negotiation scenarios normally end on
-  `COMPLETED`, a failed validation or stream error ends on `REJECTED` / `FAILED` right away, and
-  the summary notes a terminal end as `end=<state>`. The default scenario still ends on the report
-  artifact; `INPUT_REQUIRED` (a negotiation propose) is a phase-1 interrupt, not a flow end. The
-  idle backstop (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`, default 30 s, reset per received event) logs
-  a `webhook-idle-timeout` line and ends the flow normally with what was collected.
-  `A2AT_SAMPLE_MAX_ARTIFACTS` does not apply in webhook mode; each round's single RPC reply is
-  logged once as `webhook-rpc-reply` and not counted again, and the `stream-completed` summary
-  counts the webhook-received events and appends `transport=webhook`.
+  `REJECTED`) ends the flow in both phases — negotiation scenarios normally end on `COMPLETED`, a
+  failed validation or stream error on `REJECTED` / `FAILED`; the summary notes a terminal end as
+  `end=<state>`. The default scenario still ends on the report artifact; `INPUT_REQUIRED` (a
+  negotiation propose) is a phase-1 interrupt, not a flow end. The idle backstop
+  (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`, default 30 s, reset per received event) logs
+  `webhook-idle-timeout` and ends the flow with what was collected. `A2AT_SAMPLE_MAX_ARTIFACTS`
+  does not apply in webhook mode; each round's single RPC reply is logged once as
+  `webhook-rpc-reply` and not counted again, and the `stream-completed` summary counts the
+  webhook-received events and appends `transport=webhook`.
 
 ### Configuration (a2a-t-sample/.env)
 

@@ -67,10 +67,10 @@ python run_demo.py           # 默认英文；加 --language zh-CN 运行中文
 prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
 prompt_text, extension_uri = _require_prompt_text(prompt_content)
 request = SendMessageRequest()
+...  # 此处省略 message_id / role
 request.message.parts.add().text = _build_request_metadata(initial_input)
 request.message.metadata[extension_uri] = prompt_text   # 提示词放在 metadata 中传输
 request.message.metadata["templateUri"] = getattr(prompt_content, "template_uri", None) or ENERGY_SAVING_TEMPLATE_URI
-
 call_context = ClientCallContext(service_parameters={"A2A-Extensions": extension_uri})
 async for stream_response in a2a_client.send_message(request, context=call_context):
     ...  # 消费状态更新与报告 artifact
@@ -147,6 +147,9 @@ flow 根据你的决策重新生成 Task-T 提示词、构建类型化 accept、
 `respond` 是同步的 —— 需要异步的实现（人工确认、上游系统调用）在实现内部自行处理。demo 实现是
 `ScriptedNegotiationResponseProvider`，装配在 [`client_main.py`](src/client/client_main.py) 的
 `INTEGRATION POINT` 标注处。
+
+> Provider 只替换对 propose 的脚本化**应答** —— Task-T 补全参数（`negotiation_params`）始终是
+> flow 的调用方输入，缺了它们协商不会开启。
 
 **reject / abort —— 扩展点。** `reject`/`abort` 决策**在本 demo 中未接线**：flow 打日志
 `negotiation-decision: {conclusion} (not wired in this demo...)` 后结束、不发送任何报文。扩展点是

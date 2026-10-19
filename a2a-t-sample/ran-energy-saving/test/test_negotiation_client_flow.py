@@ -1042,7 +1042,7 @@ def test_reject_decision_logs_negotiation_decision_and_stays_on_round_1(_offline
     assert prompt_client.from_data_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
-        "[client] negotiation-decision: reject (not wired in this demo; see the integration guide)"
+        "[client] negotiation-decision: reject (not wired in this demo; see the sample README)"
     ]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
@@ -1070,7 +1070,7 @@ def test_abort_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_
     assert len(a2a_client.calls) == 1
     assert prompt_client.accept_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
-    assert decision_logs == ["[client] negotiation-decision: abort (not wired in this demo; see the integration guide)"]
+    assert decision_logs == ["[client] negotiation-decision: abort (not wired in this demo; see the sample README)"]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]

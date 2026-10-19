@@ -59,8 +59,8 @@ NEGOTIATION_TYPE_FEASIBILITY = "feasibility"
 #: Sample-level convention mapping the first content-validation error's code to the Negotiation-T
 #: type it proposes (plan R6): ``content.param_missing`` -> information, ``content.value_not_allowed``
 #: -> target, ``content.semantic_conflict`` -> feasibility. This is a sample convention, not an SDK
-#: rule — customers edit their copy of this table to their own error codes (see the integration
-#: guide); codes absent from the table keep the plain rejection.
+#: rule — customers edit their copy of this table to their own error codes (see the sample README,
+#: Layer 2); codes absent from the table keep the plain rejection.
 _NEGOTIATION_TYPE_BY_ERROR_CODE: dict[str, str] = {
     CONTENT_ERROR_CODE_INFORMATION: NEGOTIATION_TYPE_INFORMATION,
     CONTENT_ERROR_CODE_TARGET: NEGOTIATION_TYPE_TARGET,

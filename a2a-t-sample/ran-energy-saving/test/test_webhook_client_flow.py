@@ -731,7 +731,7 @@ def test_reject_decision_webhook_logs_and_ends_after_round1(_offline_env: Path) 
     assert prompt_client.accept_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
-        "[client] negotiation-decision: reject (not wired in this demo; see the integration guide)"
+        "[client] negotiation-decision: reject (not wired in this demo; see the sample README)"
     ]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]

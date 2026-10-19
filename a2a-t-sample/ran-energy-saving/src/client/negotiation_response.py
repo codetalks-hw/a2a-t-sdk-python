@@ -54,10 +54,10 @@ class NegotiationDecision:
       ``confirmed_intent`` (target) or ``feasibility_summary`` (feasibility). The accept goes
       through the existing accept builders, so the wire behavior is the demo's accept.
     * ``"reject"`` / ``"abort"`` — not wired in this demo: the flow logs the decision and ends the
-      round without sending anything (see the integration guide for the SDK reject/abort APIs a
-      customer wires to actually emit them). ``reason`` is accepted for reject/abort but unused by
+      round without sending anything (see the sample README, Layer 2, for the SDK reject/abort APIs
+      a customer wires to actually emit them). ``reason`` is accepted for reject/abort but unused by
       the demo flow — it becomes the ending content's ``failure_reason`` once you wire the
-      reject/abort send yourself (see the integration guide).
+      reject/abort send yourself (see the sample README, Layer 2).
     """
 
     conclusion: Literal["accept", "reject", "abort"]
