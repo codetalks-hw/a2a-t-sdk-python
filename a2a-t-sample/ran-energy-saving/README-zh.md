@@ -235,15 +235,17 @@ flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `
 | 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# 服务端：把 propose 写成业务报文，再经 from-text API 渲染
+# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # 缺失的参数，写成编号列表
     context,
     INFORMATION_NEGOTIATION_PROPOSE_URI,
 )
 
-# 客户端：先决策，再根据决策渲染 accept
+# 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # filled_params = 要补的取值
+
+# 客户端 accept：根据决策渲染 accept
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,
@@ -284,15 +286,17 @@ class MyProvider:
 | 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# 服务端：把 propose 写成业务报文，再经 from-text API 渲染
+# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # 意图复述 + 待澄清请求
     context,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
 
-# 客户端：先决策，再确认修正后的目标
+# 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # confirmed_intent = 修正后的目标
+
+# 客户端 accept：根据决策渲染 accept
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,
@@ -324,15 +328,17 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 | 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# 服务端：把 propose 写成业务报文，再经 from-text API 渲染
+# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # 不可行结论 + 替代提案
     context,
     FEASIBILITY_NEGOTIATION_PROPOSE_URI,
 )
 
-# 客户端：先决策，再应答同意的调整
+# 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # feasibility_summary = 应答内容
+
+# 客户端 accept：根据决策渲染 accept
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,

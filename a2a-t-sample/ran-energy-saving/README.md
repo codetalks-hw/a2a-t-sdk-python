@@ -263,15 +263,17 @@ that code is the sample's choice, not part of the protocol.
 | Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# server: write the propose as a business message, then render it through the from-text API
+# Server propose: write the business message, then render it through the from-text API
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # the missing parameters, written as a numbered list
     context,
     INFORMATION_NEGOTIATION_PROPOSE_URI,
 )
 
-# client: decide, then render the accept from that decision
+# Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # filled_params = the values to deliver
+
+# Client accept: render the typed accept from the decision
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,
@@ -315,15 +317,17 @@ ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
 | Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# server: write the propose as a business message, then render it through the from-text API
+# Server propose: write the business message, then render it through the from-text API
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # intent restatement + the clarification request
     context,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
 
-# client: decide, then confirm the corrected target
+# Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # confirmed_intent = the corrected target
+
+# Client accept: render the typed accept from the decision
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,
@@ -359,15 +363,17 @@ trigger is a `content.rule_violation` validation error.
 | Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
 
 ```python
-# server: write the propose as a business message, then render it through the from-text API
+# Server propose: write the business message, then render it through the from-text API
 propose = server.generate_negotiation_propose_prompt_from_text(
     propose_text,   # infeasibility conclusion + the alternative proposal
     context,
     FEASIBILITY_NEGOTIATION_PROPOSE_URI,
 )
 
-# client: decide, then answer with the agreed adjustment
+# Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # feasibility_summary = the answer
+
+# Client accept: render the typed accept from the decision
 accept = client.generate_negotiation_accept_prompt_from_data(
     NegotiationEndingData(
         context,
