@@ -3,6 +3,9 @@
 一个 A2A-T 样例：包含一个客户端 Agent、一个 RAN 域服务端 Agent，以及用于发现 AgentCard 的 mock
 注册中心。
 
+**读者定位。** 本文档面向实现 **client agent** 的团队；**server agent** 是可运行的参考对端 ——
+生产中两端通常归属不同厂商，因此下文统一按角色说明各自负责什么，不使用含混的第二人称。
+
 ## 目录
 
 - [1. 本样例演示了什么](#1-本样例演示了什么)
@@ -12,7 +15,7 @@
   - [3.1 四个步骤](#31-四个步骤)
   - [3.2 客户端侧](#32-客户端侧)
   - [3.3 服务端侧](#33-服务端侧)
-  - [3.4 你要替换什么](#34-你要替换什么)
+  - [3.4 client 侧要替换什么](#34-client-侧要替换什么)
 - [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
   - [4.1 什么时候会发生协商](#41-什么时候会发生协商)
   - [4.2 样例如何判断属于哪一种](#42-样例如何判断属于哪一种)
@@ -87,7 +90,7 @@ python run_demo.py           # 默认英文；加 --language zh-CN 运行中文
 `..\..\.venv\Scripts\python.exe run_demo.py`；两端输出会实时交错打印到终端，随后后台进程被停止。
 
 加 `--scenario negotiation`（或 `--negotiation target` / `--negotiation feasibility`）改为运行
-协商。若你的客户端无法保持流式连接，加 `--transport webhook` —— 见 [§6.1](#61-webhook-传输)。
+协商。若客户端无法保持流式连接，加 `--transport webhook` —— 见 [§6.1](#61-webhook-传输)。
 
 ## 3. 使用 A2A-T SDK 实现 Task-T 交互
 
@@ -126,16 +129,18 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 ([`server_flow.py:82`](src/server/server_flow.py#L82)、[`server_flow.py:486`](src/server/server_flow.py#L486))。
 被拒绝的提示词映射为 `TASK_STATE_REJECTED`，而不是让服务崩溃；校验通过的参数进入执行接入点。
 
-### 3.4 你要替换什么
+### 3.4 client 侧要替换什么
 
-模板（`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`）与参数 schema
-都是本样例特有的 —— 请换成你自己的（[`scenario_data.py`](src/client/scenario_data.py)）；业务执行
-运行在服务端 `TaskExecutionService` 接入点之后（见[替换清单](#5-替换清单demo-到生产)）。
+模板与参数 schema 是两端共享的契约：客户端用它渲染任务请求，服务端用它做校验。本样例的模板
+（`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`）与 schema 都是样例
+特有的，因此 client 实现要换成自己的（[`scenario_data.py`](src/client/scenario_data.py)）；服务端
+`TaskExecutionService` 接入点之后的业务执行属于 server agent（见
+[替换清单](#5-替换清单demo-到生产)）。
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
-一句话分界：SDK 拥有报文 —— 渲染、校验、协商会话映射、传输机制；你的系统拥有业务 —— 请求何时
-无法按原样执行、值得先谈一谈，以及你这一侧如何应答 propose。
+一句话分界：SDK 拥有报文 —— 渲染、校验、协商会话映射、传输机制。业务由两端各自负责：server
+agent 决定请求何时无法按原样执行、值得先谈一谈；client agent 决定如何应答收到的 propose。
 
 ### 4.1 什么时候会发生协商
 
@@ -156,11 +161,12 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 
 ### 4.2 样例如何判断属于哪一种
 
-判断属于哪种情况、以及到底要不要协商，是**你的业务决策，SDK 不持立场**。本样例是数据驱动的：
+判断属于哪种情况、以及到底要不要协商，是**server agent 的业务决策，SDK 不持立场** —— client
+只对收到的 propose 作出反应。本样例是数据驱动的：
 首个内容校验错误的错误码通过 `_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
 （[`server_flow.py:64`](src/server/server_flow.py#L64)）选出类型。这张表是**样例约定，不是 SDK
-契约** —— 可随意改自己的副本（重映射、新增、或干脆不用映射、按自己的业务规则判断；未映射的失败就是
-普通拒绝）。
+契约** —— server 实现可随意改自己的副本（重映射、新增、或干脆不用映射、按自己的业务规则判断；
+未映射的失败就是普通拒绝）。
 
 报文并不依赖这张表。每个 propose 都记录自己的 `templateUri` —— 即 metadata 中这段报文由哪个
 Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propose/v1`。这个 URI 同时告诉
@@ -180,7 +186,7 @@ Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propos
 本样例让**服务端**发起，是因为发现"请求无法按原样执行"的是服务端 —— 这是本场景的选择，不是报文本身
 的约束：客户端同样可以发起协商，例如它无法满足服务端公布的某项约束时，由服务端来 accept / reject /
 abort。角色只决定谁发 propose；报文形态、会话处理与传输完全一致。本样例只在客户端侧接了决策
-（provider 接入点）；如果你的客户端发起协商，对等的决策逻辑要放在服务端侧。
+（provider 接入点）；如果由客户端发起协商，对等的决策逻辑要放在服务端侧。
 
 **四条报文的闭环：**
 
@@ -193,7 +199,7 @@ abort。角色只决定谁发 propose；报文形态、会话处理与传输完�
 会话（`id` / `round` / `maxRounds` / performative）随每条协商消息放在 `negotiationContext` metadata
 中，因此 SDK 本身无状态。
 
-**你要接的地方。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
+**client 侧要接的地方。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
 `templateUri`、渲染文本）并调用（[`negotiation_response.py`](src/client/negotiation_response.py)）：
 
 ```python
@@ -207,7 +213,7 @@ class NegotiationResponseProvider(Protocol):
 `NegotiationDecision` 携带 `conclusion`（`accept` / `reject` / `abort`）加上对应类型的 accept
 字段：`filled_params`（信息协商，name → value）、`confirmed_intent`（目标协商）、
 `feasibility_summary`（可行性协商），以及 `reason`（reject/abort）。**`accept` 已端到端接线**：
-flow 根据你的决策重新生成 Task-T 提示词、构建带同轮 `ACCEPT` 标记的类型化 accept，并经所选传输发送。
+flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `ACCEPT` 标记的类型化 accept，并经所选传输发送。
 `respond` 是同步的 —— 需要异步的实现（人工确认、上游系统调用）在实现内部自行处理。
 
 > Provider 只替换对 propose 的脚本化**应答** —— Task-T 补全参数（`negotiation_params`）始终是
@@ -228,16 +234,17 @@ flow 根据你的决策重新生成 Task-T 提示词、构建带同轮 `ACCEPT` 
 
 propose 的 `items` 是缺失的参数；accept 的 `items` 是补全后的取值。
 
-**③ 哪些可以原样复用。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
+**③ client 侧可以原样复用的部分。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
 会话处理与传输 —— `client_flow.py` 中除决策本身以外的全部内容。
 
-**④ 哪些必须你自己写。** propose 的业务措辞（要问哪些参数、如何命名 ——
-`server_flow._missing_items_from_errors` 加上你的槽位 schema），以及 provider 接入点背后的应答来源：
+**④ client 侧必须自己实现的部分。** provider 接入点背后的应答来源。propose 的业务措辞 ——
+要问哪些参数、如何命名 —— 属于 server agent（`server_flow._missing_items_from_errors` 加上它的
+槽位 schema）。
 
 ```python
 class MyProvider:
     def respond(self, propose: NegotiationProposeView, session: NegotiationContext) -> NegotiationDecision:
-        values = my_system.look_up(propose.kind, propose.prompt_text)   # 你的查询
+        values = my_system.look_up(propose.kind, propose.prompt_text)   # client 侧的查询
         return NegotiationDecision(conclusion="accept", filled_params=values)
 ```
 
@@ -257,11 +264,11 @@ class MyProvider:
 样例用的是**澄清**形态：服务端复述它理解的意图（`intent_understanding`），并请求调整时间
 （`request_for_clarification`）。accept 把修正后的目标放进 `confirmed_intent`。
 
-**③ 哪些可以原样复用。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
+**③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ 哪些必须你自己写。** propose 中澄清请求的措辞（`_negotiation_propose_data` 的 target 分支），
-以及你这一侧如何得出 `confirmed_intent` —— 样例从 `scenario_data` 读取；你的来自把歧义解决掉的那
-一方。
+**④ client 侧必须自己实现的部分。** 如何得出 `confirmed_intent` —— 样例从 `scenario_data`
+读取；真实 client 的值来自把歧义解决掉的那一方。propose 中澄清请求的措辞属于 server agent
+（`_negotiation_propose_data` 的 target 分支）。
 
 > `TargetProposeContent` 还支持确认请求形态（`target_confirm_request` 非空，三个条件列表为空 ——
 > SDK 强制的互斥规则），以及后续轮的 `alignment_and_clarification`。样例用的是首轮澄清形态。
@@ -283,10 +290,11 @@ class MyProvider:
 （`action=PROPOSE_ALTERNATIVE_ON_FAILURE` 加 `infeasibility_details_and_proposal`）；accept 说明
 它同意的调整。
 
-**③ 哪些可以原样复用。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
+**③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ 哪些必须你自己写。** 评估本身 —— 不可行的结论和提案 —— 以及应答：两者都必须来自你的规划、
-仿真或备电容量系统。
+**④ client 侧必须自己实现的部分。** 应答：`feasibility_summary` 必须来自 client 自己的规划、
+仿真或备电容量系统。评估本身 —— 不可行的结论和提案 —— 属于 server agent，在
+`_negotiation_propose_data` 的 feasibility 分支构建。
 
 > `FeasibilityProposeContent` 还支持 `REQUEST_FEASIBILITY_EVALUATION`（请对方评估
 > `contents_to_evaluate`）与 `feasibility_confirm_request` 形态。样例用的是「不可行 + 提案」形态。
@@ -313,13 +321,16 @@ SDK 的 `generate_negotiation_reject_prompt_from_data` / `..._from_text` 生成�
 
 ## 5. 替换清单（demo 到生产）
 
-| demo 组成 | demo 中的作用 | 保留还是替换 |
-| --- | --- | --- |
-| mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；生产中移除并配置真实的 OpenAI 兼容端点 |
-| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | demo 执行流式推送的 UC1 进度步骤与意图报告 | 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；你的服务装配后，demo 服务与数据即可删除 |
-| 脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 同时喂两侧（见下） | 两侧都要**替换**：客户端应答经你的 `NegotiationResponseProvider`；你副本中 `server_flow._negotiation_propose_data` 的 propose 文案改为你的业务措辞 |
-| mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | AgentCard 注册/查询，用于发现 | **替换**为你的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
-| 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐对密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
+**归属**列标明该项由哪一端负责。client 团队只需处理标注为 client 的行；server 行说明对端换成真实系统
+时要替换什么。
+
+| demo 组成 | 归属 | demo 中的作用 | 保留还是替换 |
+| --- | --- | --- | --- |
+| mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 两端 | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；生产中两端各自移除并配置真实的 OpenAI 兼容端点 |
+| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的 UC1 进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
+| 脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | 同时喂两侧 | 两侧都要**替换**：client 侧应答经自己的 `NegotiationResponseProvider`；server 侧在其副本的 `server_flow._negotiation_propose_data` 中改为自己的业务措辞 |
+| mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | client | AgentCard 注册/查询，用于发现 | **替换**为 client 侧的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
+| 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | 两端 | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐对密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
 
 > **`scenario_data` 同时喂两侧** —— 客户端的脚本化应答（补全参数、确认意图、可行性摘要）经
 > provider 接入点使用；服务端的 propose 内容也由同一模块构建：`_negotiation_propose_data`

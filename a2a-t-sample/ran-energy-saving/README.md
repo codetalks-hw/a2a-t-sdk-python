@@ -3,6 +3,11 @@
 An A2A-T sample with a client agent, a RAN domain server agent, and a mock registry center for
 AgentCard discovery.
 
+**Audience.** This sample is written for the team implementing the **client agent**. The **server
+agent** is a runnable reference counterpart — in production the two agents usually belong to
+different parties, so the sections below name the responsible side instead of addressing an
+unspecified reader.
+
 ## Contents
 
 - [1. What this sample demonstrates](#1-what-this-sample-demonstrates)
@@ -12,7 +17,7 @@ AgentCard discovery.
   - [3.1 The four steps](#31-the-four-steps)
   - [3.2 Client side](#32-client-side)
   - [3.3 Server side](#33-server-side)
-  - [3.4 What you replace](#34-what-you-replace)
+  - [3.4 What the client replaces](#34-what-the-client-replaces)
 - [4. Using the A2A-T SDK to implement Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-negotiation-t-interaction)
   - [4.1 When a negotiation happens](#41-when-a-negotiation-happens)
   - [4.2 How the demo decides which one applies](#42-how-the-demo-decides-which-one-applies)
@@ -89,7 +94,7 @@ Use an interpreter that has the sample dependencies (the repository `.venv`), e.
 terminal live and interleaved, then the background processes are stopped.
 
 Add `--scenario negotiation` (or `--negotiation target` / `--negotiation feasibility`) to run a
-negotiation instead. If your client cannot hold a stream open, add `--transport webhook` — see
+negotiation instead. If the client cannot hold a stream open, add `--transport webhook` — see
 [§6.1](#61-webhook-transport).
 
 ## 3. Using the A2A-T SDK to implement Task-T interaction
@@ -130,19 +135,22 @@ extracts ([`server_flow.py:82`](src/server/server_flow.py#L82), [`server_flow.py
 A rejected prompt is mapped to `TASK_STATE_REJECTED` instead of crashing the server; the validated
 parameters go into the execution integration point.
 
-### 3.4 What you replace
+### 3.4 What the client replaces
 
-The template (`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`) and the
-parameter schema are sample-specific — bring your own
-([`scenario_data.py`](src/client/scenario_data.py)); the business execution runs behind the
-server-side `TaskExecutionService` integration point (see the
+The template and the parameter schema are the contract shared by both agents: the client renders
+its task request from them, and the server validates against them. This sample's template
+(`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`) and schema are
+sample-specific, so a client implementation brings its own
+([`scenario_data.py`](src/client/scenario_data.py)). The business execution behind the server's
+`TaskExecutionService` integration point belongs to the server agent (see the
 [replace checklist](#5-replace-checklist-demo--production)).
 
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
 
 The boundary in one sentence: the SDK owns the wire — rendering, validation, the negotiation
-session map, the transport mechanics — your system owns the business: when a request cannot be
-carried out as-is and a conversation would settle it, and how your side answers a propose.
+session map, the transport mechanics. The two agents own the business, each on its own side: the
+server agent decides when a request cannot be carried out as-is and a conversation would settle it;
+the client agent decides how to answer the propose.
 
 ### 4.1 When a negotiation happens
 
@@ -169,12 +177,13 @@ client accepts the adjusted target.
 
 ### 4.2 How the demo decides which one applies
 
-Which situation applies — and whether to negotiate at all — is **your business decision; the SDK
-has no opinion**. In this demo it is data-driven: the first content-validation error's code selects
-the kind, via the `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
+Which situation applies — and whether to negotiate at all — is **the server agent's business
+decision; the SDK has no opinion** — and the client only reacts to the propose it receives. In this
+demo it is data-driven: the first content-validation error's code selects the kind, via the
+`_NEGOTIATION_TYPE_BY_ERROR_CODE` table
 ([`server_flow.py:64`](src/server/server_flow.py#L64)). That table is a **sample convention, not an
-SDK contract** — edit your copy freely (remap codes, add your own, or drop the mapping and decide
-from your own business rules; an unmapped failure is simply rejected).
+SDK contract** — the server implementation edits its copy freely (remap codes, add its own, or
+drop the mapping and decide from its own business rules; an unmapped failure is simply rejected).
 
 The wire does not depend on that table. Each propose records its `templateUri` — the prompt
 template its message text was rendered from, such as
@@ -199,7 +208,7 @@ of this scenario, not a property of the wire: a client could open a negotiation 
 example when it cannot meet a constraint the server announced, and the server would answer with
 accept, reject or abort. The role only decides who sends the propose — the message forms, the
 session handling and the transport are identical. This demo wires the decision on the client side
-(the provider integration point); if your client proposes, the equivalent decision belongs on the
+(the provider integration point); if the client opens a negotiation, the equivalent decision belongs on the
 server side.
 
 **The closed loop, in four messages:**
@@ -214,7 +223,7 @@ server side.
 The session (`id` / `round` / `maxRounds` / performative) travels with every negotiation message in
 the `negotiationContext` metadata map, so the SDK itself stays stateless.
 
-**Where your decision plugs in.** When message 2 arrives, the client flow builds a lightweight
+**Where the client's decision plugs in.** When message 2 arrives, the client flow builds a lightweight
 `NegotiationProposeView` (kind, `templateUri`, rendered text) and calls the provider
 ([`negotiation_response.py`](src/client/negotiation_response.py)):
 
@@ -229,7 +238,7 @@ class NegotiationResponseProvider(Protocol):
 `NegotiationDecision` carries a `conclusion` (`accept` / `reject` / `abort`) plus the per-kind
 accept field: `filled_params` (information, name → value), `confirmed_intent` (target),
 `feasibility_summary` (feasibility), and `reason` (reject/abort). **`accept` is wired
-end-to-end**: from your decision the flow regenerates the Task-T prompt, builds the typed accept
+end-to-end**: from the client's decision the flow regenerates the Task-T prompt, builds the typed accept
 with the same round stamped as `ACCEPT`, and sends it over the configured transport. `respond` is
 synchronous — an implementation that needs asynchrony (human confirmation, an upstream call) owns
 that internally.
@@ -253,18 +262,19 @@ that code is the sample's wiring, not part of the protocol.
 
 The propose's `items` are the missing parameters; the accept's `items` are the filled values.
 
-**③ What you can copy as-is.** The prompt rendering, the `templateUri`/`negotiationContext`
+**③ What the client implementation can copy as-is.** The prompt rendering, the `templateUri`/`negotiationContext`
 metadata assembly, the session handling, and the transport — everything in `client_flow.py` except
 the decision itself.
 
-**④ What you must write yourself.** The propose's business phrasing (which parameters to ask for
-and how to name them — `server_flow._missing_items_from_errors` plus your slot schema) and the
-answer source behind the provider integration point:
+**④ What the client implementation must provide.** The answer source behind the provider
+integration point. The propose's business phrasing — which parameters to ask for and how to name
+them — belongs to the server agent (`server_flow._missing_items_from_errors` plus its slot
+schema).
 
 ```python
 class MyProvider:
     def respond(self, propose: NegotiationProposeView, session: NegotiationContext) -> NegotiationDecision:
-        values = my_system.look_up(propose.kind, propose.prompt_text)   # your lookup
+        values = my_system.look_up(propose.kind, propose.prompt_text)   # the client's lookup
         return NegotiationDecision(conclusion="accept", filled_params=values)
 ```
 
@@ -286,12 +296,13 @@ The demo proposes the *clarification* form: the server restates the intent it un
 (`intent_understanding`) and asks for the time adjustment (`request_for_clarification`). The accept
 carries the corrected target as `confirmed_intent`.
 
-**③ What you can copy as-is.** The same as information: rendering, metadata assembly, session
+**③ What the client implementation can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What you must write yourself.** The clarification wording for the propose
-(`_negotiation_propose_data`'s target branch) and how your side derives `confirmed_intent` — the
-demo reads it from `scenario_data`; yours comes from whoever resolves the ambiguity.
+**④ What the client implementation must provide.** How the client derives `confirmed_intent` —
+the demo reads it from `scenario_data`; a real client gets it from whoever resolves the ambiguity.
+The clarification wording of the propose belongs to the server agent (`_negotiation_propose_data`'s
+target branch).
 
 > `TargetProposeContent` also supports the confirm-request form (`target_confirm_request`, with the
 > three conditional lists empty — the mutual-exclusion rule the SDK enforces) and
@@ -315,11 +326,13 @@ The demo reports the completed assessment as infeasible and attaches an alternat
 (`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with `infeasibility_details_and_proposal`); the accept
 states the adjustment it agrees to.
 
-**③ What you can copy as-is.** The same as information: rendering, metadata assembly, session
+**③ What the client implementation can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What you must write yourself.** The assessment itself — the infeasibility findings and the
-proposal — and the answer: both must come from your planning, simulation or power-capacity system.
+**④ What the client implementation must provide.** The answer: `feasibility_summary` must come
+from the client's own planning, simulation or power-capacity system. The assessment itself — the
+infeasibility conclusion and the proposal — is the server agent's, built in
+`_negotiation_propose_data`'s feasibility branch.
 
 > `FeasibilityProposeContent` also supports `REQUEST_FEASIBILITY_EVALUATION` (asking the client to
 > evaluate `contents_to_evaluate`) and the `feasibility_confirm_request` form. The demo uses the
@@ -343,21 +356,24 @@ ending content's `failure_reason`), and generate the message with the SDK's
 
 There are two ways to produce a negotiation message, and both end up on the wire in the same form:
 
-- **from structured data (default).** You build the typed content in code and the SDK renders the
-  template directly — deterministic, no model call.
-- **from natural language** (`--channel fromText`). You write the message as plain text and the SDK
+- **from structured data (default).** The implementation builds the typed content in code and the
+  SDK renders the template directly — deterministic, no model call.
+- **from natural language** (`--channel fromText`). The implementation writes the message as plain text and the SDK
   asks the model to extract the structured content first, then renders the template — one extra
   extraction call per generated message.
 
 ## 5. Replace checklist (demo → production)
 
-| Demo piece | What it does in the demo | Keep or replace |
-| --- | --- | --- |
-| mock LLM — [`resources/mock_llm/`](resources/mock_llm) + the schema-routed mock in `src/common/` | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI/offline runs; in production remove it and configure a real OpenAI-compatible endpoint |
-| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | the UC1 progress steps and intent report the demo execution streams | **REPLACE** via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once your service is assembled, the demo service and data can be deleted |
-| scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | feeds BOTH sides (see below) | **REPLACE** on both sides: the client answers via your `NegotiationResponseProvider`; the server's propose texts in your copy of `server_flow._negotiation_propose_data` become your business phrasing |
-| mock registry — [`src/registry/`](src/registry) (port 5001) | AgentCard register/query for discovery | **REPLACE** with your registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
-| static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | shared static token in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-pair secrets, rotation, TLS); treat the receiver as an exposed HTTP endpoint |
+The **Side** column says which agent owns the piece. The client team's rows are the ones to act on;
+the server rows show what the counterpart replaces when the server is a real system.
+
+| Demo piece | Side | What it does in the demo | Keep or replace |
+| --- | --- | --- | --- |
+| mock LLM — [`resources/mock_llm/`](resources/mock_llm) + the schema-routed mock in `src/common/` | both | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI/offline runs; in production each side removes it and configures a real OpenAI-compatible endpoint |
+| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | server | the UC1 progress steps and intent report the demo execution streams | **REPLACE** by the server agent via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once its service is assembled, the demo service and data can be deleted |
+| scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | both (see below) | feeds BOTH sides | **REPLACE** on both sides: the client answers via its `NegotiationResponseProvider`; the server's propose texts in its copy of `server_flow._negotiation_propose_data` become its business phrasing |
+| mock registry — [`src/registry/`](src/registry) (port 5001) | client | AgentCard register/query for discovery | **REPLACE** with the client's registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
+| static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | both | shared static token in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-pair secrets, rotation, TLS); treat the receiver as an exposed HTTP endpoint |
 
 > **`scenario_data` feeds BOTH sides** — the client's scripted answers (filled parameters,
 > confirmed intent, feasibility summary) go through the provider integration point, and the server's propose

@@ -4,7 +4,7 @@
 customer's system decides how to answer a negotiation propose. ``ScriptedNegotiationResponseProvider``
 is the colocated demo implementation, wrapping the scripted answers of ``client.scenario_data`` (the
 data stays there so tests keep importing it unchanged). Replace the demo provider at the assembly
-site in ``client.client_main`` with your own implementation — see the sample README
+site in ``client.client_main`` with the client's own implementation — see the sample README
 (``a2a-t-sample/ran-energy-saving/README.md``), the Negotiation-T chapter.
 """
 
@@ -57,7 +57,7 @@ class NegotiationDecision:
       round without sending anything (see the sample README, Negotiation-T chapter, for the SDK
       reject/abort APIs a customer wires to actually emit them). ``reason`` is accepted for
       reject/abort but unused by the demo flow — it becomes the ending content's
-      ``failure_reason`` once you wire the reject/abort send yourself (see the sample README,
+      ``failure_reason`` once the client implementation wires the reject/abort send (see the sample README,
       Negotiation-T chapter).
     """
 
@@ -81,7 +81,7 @@ class NegotiationResponseProvider(Protocol):
 
     The DECISION of how to derive the answer is entirely yours (human confirmation, a policy
     engine, an upstream system call); the WIRE MECHANICS stay in the flow: the flow regenerates the
-    Task-T prompt, builds the typed accept from your decision with the same round stamped as
+    Task-T prompt, builds the typed accept from the client's decision with the same round stamped as
     ACCEPT, and sends it over the configured transport.
 
     ``respond`` is synchronous — the flow calls it at the decision point. A customer implementation

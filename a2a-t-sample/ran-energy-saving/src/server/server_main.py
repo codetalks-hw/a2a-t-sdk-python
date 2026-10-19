@@ -137,7 +137,8 @@ def build_server_runtime(
     if resolved_logger is None and log_sink is not None and debug_enabled:
         resolved_logger = build_sample_logger(sink=log_sink, debug_enabled=True)
     prompt_server = A2ATServer(env_path=env_path, logger=resolved_logger)
-    # INTEGRATION POINT: replace Uc1DemoExecutionService with your business execution service
+    # INTEGRATION POINT: the server implementation replaces Uc1DemoExecutionService with its business
+    # execution service
     # (the server flow depends only on the TaskExecutionService Protocol it implements).
     execution_service: TaskExecutionService = Uc1DemoExecutionService()
     executor = SampleAgentExecutor(
