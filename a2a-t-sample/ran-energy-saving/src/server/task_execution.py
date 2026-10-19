@@ -47,8 +47,8 @@ class TaskExecutionService(Protocol):
     UC1 energy-saving execution; in production, the server's EMS/NMS northbound call).
 
     The implementation only PRODUCES: progress texts and the final result. The flow owns all A2A
-    emission — each ``emit_progress`` call becomes a ``TASK_STATE_WORKING`` status update on the
-    wire, the returned :class:`TaskExecutionResult` becomes the report artifact, and an exception
+    emission — each ``emit_progress`` call becomes a ``TASK_STATE_WORKING`` status update in the
+    event stream, the returned :class:`TaskExecutionResult` becomes the report artifact, and an exception
     raised by the implementation is caught by the flow, which emits ``TASK_STATE_FAILED`` and
     re-raises. A customer implementation therefore gets the streaming and terminal-state semantics
     for free.

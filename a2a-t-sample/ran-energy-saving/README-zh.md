@@ -212,7 +212,7 @@ class NegotiationResponseProvider(Protocol):
 
 `NegotiationDecision` 携带 `conclusion`（`accept` / `reject` / `abort`）加上对应类型的 accept
 字段：`filled_params`（信息协商，name → value）、`confirmed_intent`（目标协商）、
-`feasibility_summary`（可行性协商），以及 `reason`（reject/abort）。**`accept` 已端到端接线**：
+`feasibility_summary`（可行性协商），以及 `reason`（reject/abort）。**`accept` 已端到端实现**：
 flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `ACCEPT` 标记的类型化 accept，并经所选传输发送。
 `respond` 是同步的 —— 需要异步的实现（人工确认、上游系统调用）在实现内部自行处理。
 
@@ -222,7 +222,7 @@ flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `
 ### 4.4 信息协商（information）
 
 **① 服务端何时开启。** 请求不完整 —— 缺少服务端必需的参数（样例中为区域）。样例的触发条件是
-`content.param_missing` 校验错误，但这个错误码是样例的接线方式，不属于协议本身。
+`content.param_missing` 校验错误，但这个错误码是样例的判断方式，不属于协议本身。
 
 **② 参考代码做了什么。**
 
@@ -261,9 +261,7 @@ propose 的 `items` 是缺失的参数；accept 的 `items` 是补全后的取�
 **③ client 侧可以原样复用的部分。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
 会话处理与传输 —— `client_flow.py` 中除决策本身以外的全部内容。
 
-**④ client 侧必须自己实现的部分。** provider 接入点背后的应答来源。propose 的业务措辞 ——
-要问哪些参数、如何命名 —— 属于 server agent（`server_flow._missing_items_from_errors` 加上它的
-槽位 schema）。
+**④ client 侧必须自己实现的部分。** provider 接入点背后的应答来源。
 
 ```python
 class MyProvider:
@@ -316,8 +314,7 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 **③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
 **④ client 侧必须自己实现的部分。** 如何得出 `confirmed_intent` —— 样例从 `scenario_data`
-读取；真实 client 的值来自把歧义解决掉的那一方。propose 中澄清请求的措辞属于 server agent
-（`_negotiation_propose_data` 的 target 分支）。
+读取；真实 client 的值来自把歧义解决掉的那一方。
 
 ### 4.6 可行性协商（feasibility）
 
@@ -363,13 +360,12 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 
 **③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ client 侧必须自己实现的部分。** 应答：`feasibility_summary` 必须来自 client 自己的规划、
-仿真或备电容量系统。评估本身 —— 不可行的结论和提案 —— 属于 server agent，在
-`_negotiation_propose_data` 的 feasibility 分支构建。
+**④ client 侧必须自己实现的部分。** 应答内容 `feasibility_summary` —— 即 client 对服务端
+提案的答复。
 
 ### 4.7 reject 与 abort —— 扩展点
 
-`reject`/`abort` 决策**在本 demo 中未接线**：flow 打日志
+`reject`/`abort` 决策**在本 demo 中未实现**：flow 打日志
 `negotiation-decision: {conclusion} (not wired in this demo...)` 后结束、不发送任何报文。扩展点是
 [`client_flow.py:752`](src/client/client_flow.py#L752) 中 `_plan_negotiation_accept` 的 reject/abort
 分支：扩展它、仿照 `_run_negotiation_accept`（[`client_flow.py:870`](src/client/client_flow.py#L870)）

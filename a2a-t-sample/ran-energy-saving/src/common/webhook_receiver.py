@@ -86,7 +86,7 @@ def _recognized_stream_key(payload: object) -> str | None:
 class WebhookReceiver:
     """In-process webhook receiver serving one authenticated ``POST /webhook`` route.
 
-    The wire contract is the a2a-sdk push-notification POST: a StreamResponse JSON body (one of
+    The message contract is the a2a-sdk push-notification POST: a StreamResponse JSON body (one of
     the ``task`` / ``statusUpdate`` / ``artifactUpdate`` / ``message`` top-level keys) with the
     push token in the ``X-A2A-Notification-Token`` header. A token mismatch answers ``401`` and
     the event is dropped; a malformed or unrecognized body answers ``400``; a valid event is

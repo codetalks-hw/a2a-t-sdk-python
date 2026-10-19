@@ -98,7 +98,7 @@ def _parse_negotiation_context(metadata: dict[str, object]) -> NegotiationContex
 
 #: Negotiation kinds the client-side accept generation dispatches on. The kind resolves from the
 #: explicit flag when supplied, else from the propose's ``templateUri`` inside the INPUT_REQUIRED
-#: metadata (dispatch on the wire); each kind addresses its own accept-reject template.
+#: metadata (dispatch on the received message); each kind addresses its own accept-reject template.
 _NEGOTIATION_KIND_BY_PROPOSE_URI: dict[str, str] = {
     INFORMATION_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_INFORMATION,
     TARGET_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_TARGET,
@@ -115,9 +115,9 @@ _NEGOTIATION_ACCEPT_URI_BY_KIND: dict[str, str] = {
 def _resolve_negotiation_kind(metadata: dict[str, object], negotiation_kind: str | None) -> str | None:
     """Resolve the accept's negotiation kind: the explicit flag wins, else the propose's templateUri.
 
-    A ``None`` flag dispatches on the wire: the ``templateUri`` of the INPUT_REQUIRED metadata maps
+    A ``None`` flag dispatches on the received message: the ``templateUri`` of the INPUT_REQUIRED metadata maps
     to the negotiation kind, so the client accepts whatever type the server proposed. An unknown
-    flag, or a missing/unknown propose template URI when dispatching on the wire, returns ``None``
+    flag, or a missing/unknown propose template URI when dispatching on the received message, returns ``None``
     (the caller keeps the unhandled path).
     """
     if negotiation_kind is not None:
@@ -671,7 +671,7 @@ def _build_negotiation_accept_request(
     The accept is the second message of the current negotiation round: the session context parsed
     from the propose metadata drives it (same round, performative ACCEPT — a round is one propose
     plus the answer to it, so the accept does not advance the round), the Task-T prompt is
-    regenerated from the filled parameters (the flow-owned wire mechanic fed by the caller), and
+    regenerated from the filled parameters (the flow-owned message construction fed by the caller), and
     both travel in the accept message metadata under their extension URIs. The accept content comes
     from the provider's decision via ``plan``. The channel switches only the accept generation call:
     ``data`` builds the typed content and calls the deterministic from-data API (zero LLM calls),
@@ -726,7 +726,7 @@ def _build_negotiation_accept_request(
     accept_request.message.message_id = str(uuid.uuid4())
     accept_request.message.role = Role.ROLE_USER
     # task_id / context_id are filled by the caller from the initial-phase events (the builder sees
-    # no events); the wire shape is identical for both drivers once set.
+    # no events); the message shape is identical for both drivers once set.
     accept_request.message.parts.add().text = _build_request_metadata(initial_input)
     accept_request.message.metadata[TASK_T_EXTENSION_URI] = filled_text
     accept_request.message.metadata[NEGOTIATION_T_EXTENSION_URI] = accept_text
@@ -960,9 +960,9 @@ async def run_client_flow(
     provider replaces the scripted answer derivation entirely: ``negotiation_answers`` is not
     consulted and the accept content comes from the provider's decision (a reject/abort decision
     ends the flow with the dedicated ``negotiation-decision`` log, no accept sent). The flow keeps
-    the wire mechanics: ``negotiation_params`` remains the Task-T prompt refill input of the
+    the message handling: ``negotiation_params`` remains the Task-T prompt refill input of the
     accept message and ``negotiation_kind`` keeps hinting the propose view's kind resolution (the
-    flag wins, else the propose's ``templateUri`` dispatches on the wire). Without a provider, the
+    flag wins, else the propose's ``templateUri`` dispatches on the received message). Without a provider, the
     legacy scripted arguments keep the pre-integration-point behavior unchanged: when both
     ``negotiation_params`` and ``negotiation_answers`` are supplied, the flow internally builds the
     demo ``ScriptedNegotiationResponseProvider`` around them (back-compat shim); without them an
@@ -978,7 +978,7 @@ async def run_client_flow(
                                                                    ``[client] webhook-event`` (webhook)
       5. Negotiation round trip: when the server answers INPUT_REQUIRED with a Negotiation-T
          propose and a negotiation response provider is in place, resolve the negotiation kind (the
-         explicit flag, else the propose's ``templateUri`` — dispatch on the wire), ask the
+         explicit flag, else the propose's ``templateUri`` — dispatch on the received message), ask the
          provider for the decision on the propose view, regenerate the Task-T prompt from the
          filled parameters, render the Negotiation-T accept of that type for the parsed session
          from the decision (from typed data, or from a natural-language rendering plus one

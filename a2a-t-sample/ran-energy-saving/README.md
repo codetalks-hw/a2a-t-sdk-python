@@ -60,7 +60,7 @@ Read it one of three ways:
 | Path | Core responsibility |
 | --- | --- |
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
-| [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the wire mechanics (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
+| [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the message handling (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
 | [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see the [replace checklist](#5-replace-checklist-demo--production)); not removable as-is. |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
@@ -147,8 +147,8 @@ sample-specific, so a client implementation brings its own
 
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
 
-The boundary in one sentence: the SDK owns the wire — rendering, validation, the negotiation
-session map, the transport mechanics. The two agents own the business, each on its own side: the
+The boundary in one sentence: the SDK handles the protocol details — rendering, validation, the
+negotiation session map, the transport mechanics. The two agents own the business, each on its own side: the
 server agent decides when a request cannot be carried out as-is and a conversation would settle it;
 the client agent decides how to answer the propose.
 
@@ -185,7 +185,7 @@ demo it is data-driven: the first content-validation error's code selects the ki
 SDK contract** — the server implementation edits its copy freely (remap codes, add its own, or
 drop the mapping and decide from its own business rules; an unmapped failure is simply rejected).
 
-The wire does not depend on that table. Each propose records its `templateUri` — the prompt
+The message format does not depend on that table. Each propose records its `templateUri` — the prompt
 template its message text was rendered from, such as
 `Negotiation-T/information-negotiation/propose/v1`. That URI also tells the client which kind of
 propose it received, so the client picks its answer — accept, reject or abort — from the message it
@@ -204,7 +204,7 @@ request is not a negotiation round — the negotiation starts with the server's 
 four generation methods (propose / accept / reject / abort) and the same validation methods, so
 either agent can open a negotiation and either can answer one. This demo has the **server** propose
 because the server is the side that discovers the request cannot be executed as-is. That is a choice
-of this scenario, not a property of the wire: a client could open a negotiation just as well, for
+of this scenario, not a property of the protocol: a client could open a negotiation just as well, for
 example when it cannot meet a constraint the server announced, and the server would answer with
 accept, reject or abort. The role only decides who sends the propose — the message forms, the
 session handling and the transport are identical. This demo wires the decision on the client side
@@ -291,9 +291,7 @@ metadata assembly, the session handling, and the transport — everything in `cl
 the decision itself.
 
 **④ What the client implementation must provide.** The answer source behind the provider
-integration point. The propose's business phrasing — which parameters to ask for and how to name
-them — belongs to the server agent (`server_flow._missing_items_from_errors` plus its slot
-schema).
+integration point.
 
 ```python
 class MyProvider:
@@ -349,9 +347,8 @@ carries the corrected target as `confirmed_intent`.
 handling, transport.
 
 **④ What the client implementation must provide.** How the client derives `confirmed_intent` —
-the demo reads it from `scenario_data`; a real client gets it from whoever resolves the ambiguity.
-The clarification wording of the propose belongs to the server agent (`_negotiation_propose_data`'s
-target branch).
+the demo reads it from `scenario_data`; a real client gets it from whatever resolves the
+ambiguity.
 
 ### 4.6 Feasibility negotiation
 
@@ -399,10 +396,8 @@ states the adjustment it agrees to.
 **③ What the client implementation can copy as-is.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What the client implementation must provide.** The answer: `feasibility_summary` must come
-from the client's own planning, simulation or power-capacity system. The assessment itself — the
-infeasibility conclusion and the proposal — is the server agent's, built in
-`_negotiation_propose_data`'s feasibility branch.
+**④ What the client implementation must provide.** The answer — `feasibility_summary`, i.e. how
+the client responds to the server's proposal.
 
 ### 4.7 Reject and abort — the extension point
 
@@ -420,7 +415,7 @@ ending content's `failure_reason`), and generate the message with the SDK's
 
 ### 4.8 Generating messages from structured data or from natural language
 
-There are two ways to produce a negotiation message, and both end up on the wire in the same form:
+There are two ways to produce a negotiation message, and both produce the same message format:
 
 - **from structured data (default).** The implementation builds the typed content in code and the
   SDK renders the template directly — deterministic, no model call.
