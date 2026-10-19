@@ -26,7 +26,6 @@ unspecified reader.
   - [4.5 Target negotiation](#45-target-negotiation)
   - [4.6 Feasibility negotiation](#46-feasibility-negotiation)
   - [4.7 Reject and abort](#47-reject-and-abort)
-  - [4.8 Generating messages from structured data or from natural language](#48-generating-messages-from-structured-data-or-from-natural-language)
 - [5. Replace checklist (demo → production)](#5-replace-checklist-demo--production)
 - [6. Appendix](#6-appendix)
   - [6.1 Webhook transport](#61-webhook-transport)
@@ -184,8 +183,7 @@ decision; the SDKs have no opinion** — and the client only reacts to the propo
 demo it is data-driven: the first content-validation error's code selects the kind, via the
 `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
 ([`server_flow.py:55`](src/server/server_flow.py#L55)). That table is a **sample convention, not an
-SDK contract** — the server implementation edits its copy freely (remap codes, add its own, or
-drop the mapping and decide from its own business rules; an unmapped failure is simply rejected).
+SDK contract**.
 
 The message format does not depend on that table. Each propose records its `templateUri` — the prompt
 template its message text was rendered from, such as
@@ -259,8 +257,8 @@ that code is the sample's choice, not part of the protocol.
 | Step | SDK call | Reference code |
 | --- | --- | --- |
 | Server propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
-| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:700`](src/client/client_flow.py#L700) |
+| Client accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # Server propose: write the business message, then render it through the from-text API
@@ -273,20 +271,16 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # filled_params = the values to deliver
 
-# Client accept: render the typed accept from the decision
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        InformationEndingContent(
-            conclusion=ACCEPT,
-            items=[NegotiationItem(name=n, value=v) for n, v in decision.filled_params.items()],
-        ),
-    ),
+# Client accept: write the answer as a business message and render it through the from-text API
+accept_text = f"Accept. {_numbered_items(decision.filled_params.items())}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
 
-The propose's `items` are the missing parameters; the accept's `items` are the filled values.
+The propose lists the missing parameters; the accept text lists the filled values.
 
 **③ What the client implementation can copy as-is.** The prompt rendering, the `templateUri`/`negotiationContext`
 metadata assembly, the session handling, and the transport — everything in `client_flow.py` except
@@ -313,8 +307,8 @@ ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
 | Step | SDK call | Reference code |
 | --- | --- | --- |
 | Server propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
-| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:700`](src/client/client_flow.py#L700) |
+| Client accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # Server propose: write the business message, then render it through the from-text API
@@ -327,12 +321,11 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # confirmed_intent = the corrected target
 
-# Client accept: render the typed accept from the decision
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        TargetEndingContent(conclusion=ACCEPT, confirmed_intent=decision.confirmed_intent),
-    ),
+# Client accept: write the answer as a business message and render it through the from-text API
+accept_text = f"Accept. {decision.confirmed_intent}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
@@ -359,8 +352,8 @@ trigger is a `content.rule_violation` validation error.
 | Step | SDK call | Reference code |
 | --- | --- | --- |
 | Server propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:752`](src/client/client_flow.py#L752) |
-| Client accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| Client decision | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py), [`client_flow.py:700`](src/client/client_flow.py#L700) |
+| Client accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # Server propose: write the business message, then render it through the from-text API
@@ -373,12 +366,11 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # Client decision: ask the provider how to answer the propose
 decision = provider.respond(propose_view, session)   # feasibility_summary = the answer
 
-# Client accept: render the typed accept from the decision
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        FeasibilityEndingContent(conclusion=ACCEPT, feasibility_summary=decision.feasibility_summary),
-    ),
+# Client accept: write the answer as a business message and render it through the from-text API
+accept_text = f"Accept. {decision.feasibility_summary}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
@@ -400,18 +392,6 @@ implements the accept path: a reject/abort decision is logged and the flow ends 
 message. The SDK provides the matching generation methods
 (`generate_negotiation_reject_prompt_from_data` / `..._from_text`, and
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`) when a client needs to send one.
-
-### 4.8 Generating messages from structured data or from natural language
-
-The **propose** is always written as a business message: the server composes the text, and the A2A-T SDK
-extracts the structured content and renders the template (one extraction call).
-
-The **accept** can be generated either way, selected by `--channel`:
-
-- **from structured data (default)** — the client builds the typed content in code; the A2A-T SDK renders
-  the template directly, with no model call.
-- **from natural language** (`--channel fromText`) — the client writes the accept as plain text; the
-  SDK asks the model to extract the structured content first, then renders the template.
 
 ## 5. Replace checklist (demo → production)
 
@@ -487,7 +467,6 @@ transports.
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`; selects the natural-language input and the mock/template tree |
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`; selects the sample scenario variant (same semantics as `--scenario`) |
 | `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility` (default `information`); negotiation scenario input, same semantics as `--negotiation` |
-| `A2AT_SAMPLE_CHANNEL` | `data` / `text` (default `data`); how the client generates its accept message — from structured data or from natural language, same semantics as `--channel` |
 | `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook` (default `sse`); client event transport, same semantics as `--transport` |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | Bind port of the embedded webhook receiver (default `9000`; `0` = OS-assigned ephemeral port) |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | Push token the server must carry in the `X-A2A-Notification-Token` header (default `demo-webhook-token`); a mismatch answers `401` |
@@ -550,7 +529,6 @@ content-validation responses of [`resources/mock_llm/{zh-CN,en-US}/`](resources/
 | `--language {en-US,zh-CN}` | Run language (default `en-US`) |
 | `--scenario {default,negotiation}` | Scenario variant (default `default`; `negotiation` runs the missing-region information negotiation) |
 | `--negotiation {information,target,feasibility}` | Negotiation kind selecting the client scenario input (default `information` = missing region; `target` = two overlapping time segments in the guaranteed throughput target; `feasibility` = the guaranteed rate cannot sustain an 18-hour power outage). `information` keeps the `--scenario` switch (only `--scenario negotiation` runs the missing-region flow); `target`/`feasibility` engage without it. The flag only selects the input — the server stays data-driven on the validation error code |
-| `--channel {fromData,fromText}` | How the client generates its accept message: from structured data (`fromData`, default) or from natural language (`fromText`, one extra extraction model call) |
 | `--transport {sse,webhook}` | Event transport of the client (default `sse`); see [§6.1](#61-webhook-transport) |
 | `--webhook-port N` | Bind port of the embedded webhook receiver used with `--transport webhook` (default 9000; `0` selects an OS-assigned ephemeral port) |
 | `--keep-alive` | Leave registry/server running; stop later with `--stop` |

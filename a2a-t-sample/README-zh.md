@@ -13,4 +13,4 @@
 | 目录 | 说明 |
 | --- | --- |
 | [fault-management/](fault-management/) | 事件订阅样例——流式推送 Incident 通知 |
-| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——运行 RAN 节能任务，并包含三类 Negotiation-T 协商（信息 / 目标 / 可行性），协商消息可从结构化数据或自然语言生成，另支持可选的 webhook 传输（`--transport webhook`）：全部任务事件以 A2A 推送通知回调送达客户端内嵌的接收器 |
+| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——运行 RAN 节能任务，并包含三类 Negotiation-T 协商（信息 / 目标 / 可行性），协商消息由自然语言业务文本生成，另支持可选的 webhook 传输（`--transport webhook`）：全部任务事件以 A2A 推送通知回调送达客户端内嵌的接收器 |

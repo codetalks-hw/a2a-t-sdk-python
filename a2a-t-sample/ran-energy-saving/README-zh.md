@@ -24,7 +24,6 @@
   - [4.5 目标协商（target）](#45-目标协商target)
   - [4.6 可行性协商（feasibility）](#46-可行性协商feasibility)
   - [4.7 reject 与 abort](#47-reject-与-abort)
-  - [4.8 从结构化数据生成，还是从自然语言生成](#48-从结构化数据生成还是从自然语言生成)
 - [5. 替换清单（demo 到生产）](#5-替换清单demo-到生产)
 - [6. 附录](#6-附录)
   - [6.1 Webhook 传输](#61-webhook-传输)
@@ -167,8 +166,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 只对收到的 propose 作出反应。本样例是数据驱动的：首个内容校验错误的错误码通过
 `_NEGOTIATION_TYPE_BY_ERROR_CODE` 表
 （[`server_flow.py:55`](src/server/server_flow.py#L55)）选出类型。这张表是**样例约定，不是 SDK
-契约** —— server 实现可随意改自己的副本（重映射、新增、或干脆不用映射、按自己的业务规则判断；
-未映射的失败就是普通拒绝）。
+契约**。
 
 报文并不依赖这张表。每个 propose 都记录自己的 `templateUri` —— 即 metadata 中这段报文由哪个
 Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propose/v1`。这个 URI 同时告诉
@@ -231,8 +229,8 @@ flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
 | 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:700`](src/client/client_flow.py#L700) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
@@ -245,20 +243,16 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # filled_params = 要补的取值
 
-# 客户端 accept：根据决策渲染 accept
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        InformationEndingContent(
-            conclusion=ACCEPT,
-            items=[NegotiationItem(name=n, value=v) for n, v in decision.filled_params.items()],
-        ),
-    ),
+# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
+accept_text = f"Accept. {_numbered_items(decision.filled_params.items())}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
 
-propose 的 `items` 是缺失的参数；accept 的 `items` 是补全后的取值。
+propose 列出缺失的参数；accept 文本列出补全后的取值。
 
 **③ client 侧可以原样复用的部分。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
 会话处理与传输 —— `client_flow.py` 中除决策本身以外的全部内容。
@@ -282,8 +276,8 @@ class MyProvider:
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
 | 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:700`](src/client/client_flow.py#L700) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
@@ -296,12 +290,11 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # confirmed_intent = 修正后的目标
 
-# 客户端 accept：根据决策渲染 accept
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        TargetEndingContent(conclusion=ACCEPT, confirmed_intent=decision.confirmed_intent),
-    ),
+# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
+accept_text = f"Accept. {decision.confirmed_intent}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
@@ -324,8 +317,8 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
 | 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py:199`](src/server/server_flow.py#L199) |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:752`](src/client/client_flow.py#L752) |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_data` | [`client_flow.py:659`](src/client/client_flow.py#L659) |
+| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py:700`](src/client/client_flow.py#L700) |
+| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py:619`](src/client/client_flow.py#L619) |
 
 ```python
 # 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
@@ -338,12 +331,11 @@ propose = server.generate_negotiation_propose_prompt_from_text(
 # 客户端决策：询问 provider 如何应答 propose
 decision = provider.respond(propose_view, session)   # feasibility_summary = 应答内容
 
-# 客户端 accept：根据决策渲染 accept
-accept = client.generate_negotiation_accept_prompt_from_data(
-    NegotiationEndingData(
-        context,
-        FeasibilityEndingContent(conclusion=ACCEPT, feasibility_summary=decision.feasibility_summary),
-    ),
+# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
+accept_text = f"Accept. {decision.feasibility_summary}"
+accept = client.generate_negotiation_accept_prompt_from_text(
+    accept_text,
+    context,
     FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
 )
 ```
@@ -363,16 +355,6 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 reject/abort 决策只会打日志并结束流程，不发送报文。需要发送时，A2A-T SDK 提供对应的生成方法
 （`generate_negotiation_reject_prompt_from_data` / `..._from_text`，以及
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`）。
-
-### 4.8 从结构化数据生成，还是从自然语言生成
-
-**propose 固定按业务报文生成**：服务端写好文本，A2A-T SDK 抽取成结构化内容后渲染模板（一次抽取调用）。
-
-**accept** 两种方式都支持，由 `--channel` 选择：
-
-- **从结构化数据生成（默认）**：client 在代码里构造类型化内容，A2A-T SDK 直接渲染模板，不调用模型。
-- **从自然语言生成**（`--channel fromText`）：client 把 accept 写成一段自然语言，A2A-T SDK 先让模型抽取成
-  结构化内容，再渲染模板。
 
 ## 5. 替换清单（demo 到生产）
 
@@ -438,7 +420,6 @@ webhook 模式下的变化：客户端非阻塞发送（`return_immediately`）�
 | `A2AT_LANGUAGE` | `zh-CN` / `en-US`；决定自然语言输入与 mock/模板语言树 |
 | `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`；样例场景变体（与 `--scenario` 语义相同） |
 | `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility`（默认 `information`）；协商场景输入，与 `--negotiation` 语义相同 |
-| `A2AT_SAMPLE_CHANNEL` | `data` / `text`（默认 `data`）；client 的 accept 消息从结构化数据生成还是从自然语言生成，与 `--channel` 语义相同 |
 | `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook`（默认 `sse`）；客户端事件传输方式，与 `--transport` 语义相同 |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | 内嵌 webhook 接收器的绑定端口（默认 `9000`；`0` = 操作系统分配临时端口） |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | 服务端在 `X-A2A-Notification-Token` 头中必须携带的推送 token（默认 `demo-webhook-token`）；不匹配回 `401` |
@@ -498,7 +479,6 @@ uv run --no-sync python -m client.client_main
 | `--language {en-US,zh-CN}` | 运行语言（默认 `en-US`） |
 | `--scenario {default,negotiation}` | 场景变体（默认 `default`；`negotiation` 运行缺失 region 的信息协商） |
 | `--negotiation {information,target,feasibility}` | 协商类型，选择客户端场景输入（默认 `information` = 缺失 region；`target` = 分时段保障速率目标中两个时段重叠；`feasibility` = 保障速率无法支撑 18 小时停电）。`information` 仍受 `--scenario` 开关控制（只有 `--scenario negotiation` 运行缺失 region 流程）；`target`/`feasibility` 无需该开关即可触发。该参数只选择输入 —— 服务端依据内容校验错误码数据驱动地分派 |
-| `--channel {fromData,fromText}` | client 的 accept 消息怎么生成：从结构化数据（`fromData`，默认）或从自然语言（`fromText`，多一次抽取模型调用） |
 | `--transport {sse,webhook}` | 客户端的事件传输方式（默认 `sse`）；见 [§6.1](#61-webhook-传输) |
 | `--webhook-port N` | `--transport webhook` 时内嵌 webhook 接收器的绑定端口（默认 9000；`0` 表示由操作系统分配临时端口） |
 | `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
