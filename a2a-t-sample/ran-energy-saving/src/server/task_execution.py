@@ -5,7 +5,7 @@ business system executes the negotiated task. ``Uc1DemoExecutionService`` is the
 implementation, delegating to the static UC1 data in ``server.constants_data`` (the data stays
 there so tests keep importing it unchanged). Replace the demo service at the assembly site in
 ``server.server_main`` with your own implementation — see the sample README
-(``a2a-t-sample/ran-energy-saving/README.md``), Layer 1 / the replace checklist.
+(``a2a-t-sample/ran-energy-saving/README.md``), the Task-T chapter / the replace checklist.
 """
 
 from __future__ import annotations

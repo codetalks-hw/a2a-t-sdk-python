@@ -165,7 +165,8 @@ def build_rest_app(
     store and the BasePushNotificationSender (with its own httpx client) go into the
     DefaultRequestHandler whether or not any client registers a push config — in SSE transport
     mode nothing registers and the machinery simply idles; in webhook mode the client registers
-    its callback (round 1 inline config / round 2 REST endpoint re-registration) and every task
+    its callback (inline config on the initial send / REST endpoint re-registration before the
+    accept) and every task
     event is POSTed to it. There is deliberately no server-side transport switch.
 
     Lifecycle: the sender's httpx client is closed by the app's lifespan (uvicorn runs it on

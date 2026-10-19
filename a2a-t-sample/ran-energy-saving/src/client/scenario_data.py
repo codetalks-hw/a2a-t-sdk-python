@@ -377,7 +377,7 @@ def build_prompt_input(
 
 
 def negotiation_filled_params(*, env_path: Path | None = None) -> dict[str, object]:
-    """Return the four Task-T parameters with the region filled (negotiation round 2 input)."""
+    """Return the four Task-T parameters with the region filled (the negotiation accept input)."""
     language = resolve_language(env_path=env_path)
     filled = _NEGOTIATION_FILLED_PARAMS.get(language, _NEGOTIATION_FILLED_PARAMS["zh-CN"])
     return dict(filled)

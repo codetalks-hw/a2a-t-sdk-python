@@ -174,8 +174,8 @@ async def run_main(
     """Run the full client flow: bootstrap runtime, discover agent, generate prompt, consume events.
 
     The negotiation arguments are supplied by the caller for the negotiation kinds: when the server
-    answers the round-1 prompt with an INPUT_REQUIRED propose, the flow answers it with the filled
-    Task-T prompt and the Negotiation-T accept of the resolved type (round 2). The ``negotiation_kind``
+    answers the initial request with an INPUT_REQUIRED propose, the flow answers it with the filled
+    Task-T prompt and the Negotiation-T accept of the resolved type. The ``negotiation_kind``
     flag selects the accept type directly; ``None`` dispatches on the propose's ``templateUri``.
     ``negotiation_response_provider`` is the client-side INTEGRATION POINT: when supplied, the flow
     derives the answer from it and the scripted answers are bypassed (``main`` assembles the demo

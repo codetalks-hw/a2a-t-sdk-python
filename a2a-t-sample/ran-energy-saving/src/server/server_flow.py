@@ -60,7 +60,7 @@ NEGOTIATION_TYPE_FEASIBILITY = "feasibility"
 #: type it proposes (plan R6): ``content.param_missing`` -> information, ``content.value_not_allowed``
 #: -> target, ``content.semantic_conflict`` -> feasibility. This is a sample convention, not an SDK
 #: rule — customers edit their copy of this table to their own error codes (see the sample README,
-#: Layer 2); codes absent from the table keep the plain rejection.
+#: Negotiation-T chapter); codes absent from the table keep the plain rejection.
 _NEGOTIATION_TYPE_BY_ERROR_CODE: dict[str, str] = {
     CONTENT_ERROR_CODE_INFORMATION: NEGOTIATION_TYPE_INFORMATION,
     CONTENT_ERROR_CODE_TARGET: NEGOTIATION_TYPE_TARGET,
@@ -90,8 +90,8 @@ def _extract_prompt_text(request_context: RequestContext) -> str:
 def _is_negotiation_continuation(request_context: RequestContext) -> bool:
     """Report whether the inbound message metadata carries the Negotiation-T extension URI.
 
-    The Negotiation-T URI in the message metadata marks the negotiation round-2 continuation: the
-    client re-sends the Task-T prompt with the data the server's information propose asked for.
+    The Negotiation-T URI in the message metadata marks the negotiation continuation: the client
+    re-sends the Task-T prompt with the data the server's propose asked for.
     """
     if request_context.message is None or request_context.message.metadata is None:
         return False
@@ -509,7 +509,7 @@ async def execute_server_flow(
         if log_sink is not None:
             log_sink(format_stage_log(role="server", stage="sdk-result", detail=f"invalid input {validation_failure}"))
 
-    # Negotiation continuation (round 2): no SUBMITTED — the completed Task-T prompt is validated,
+    # Negotiation continuation: no SUBMITTED — the completed Task-T prompt is validated,
     # the task executes through the seam, and the task closes with COMPLETED.
     if negotiation_continuation:
         if validation_failure is not None:

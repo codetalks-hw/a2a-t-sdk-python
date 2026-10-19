@@ -5,7 +5,7 @@ customer's system decides how to answer a negotiation propose. ``ScriptedNegotia
 is the colocated demo implementation, wrapping the scripted answers of ``client.scenario_data`` (the
 data stays there so tests keep importing it unchanged). Replace the demo provider at the assembly
 site in ``client.client_main`` with your own implementation — see the sample README
-(``a2a-t-sample/ran-energy-saving/README.md``), Layer 2 (Negotiation-T).
+(``a2a-t-sample/ran-energy-saving/README.md``), the Negotiation-T chapter.
 """
 
 from __future__ import annotations
@@ -49,15 +49,16 @@ class NegotiationDecision:
     ``conclusion`` selects how the flow continues; the remaining fields are per-conclusion and
     stay ``None`` when they do not apply:
 
-    * ``"accept"`` — the flow builds the round-2 accept from the decision field of the proposed
-      type: ``filled_params`` (information: the name->value items the client fills in),
+    * ``"accept"`` — the flow builds the accept from the decision field of the proposed type:
+      ``filled_params`` (information: the name->value items the client fills in),
       ``confirmed_intent`` (target) or ``feasibility_summary`` (feasibility). The accept goes
       through the existing accept builders, so the wire behavior is the demo's accept.
     * ``"reject"`` / ``"abort"`` — not wired in this demo: the flow logs the decision and ends the
-      round without sending anything (see the sample README, Layer 2, for the SDK reject/abort APIs
-      a customer wires to actually emit them). ``reason`` is accepted for reject/abort but unused by
-      the demo flow — it becomes the ending content's ``failure_reason`` once you wire the
-      reject/abort send yourself (see the sample README, Layer 2).
+      round without sending anything (see the sample README, Negotiation-T chapter, for the SDK
+      reject/abort APIs a customer wires to actually emit them). ``reason`` is accepted for
+      reject/abort but unused by the demo flow — it becomes the ending content's
+      ``failure_reason`` once you wire the reject/abort send yourself (see the sample README,
+      Negotiation-T chapter).
     """
 
     conclusion: Literal["accept", "reject", "abort"]
@@ -71,7 +72,7 @@ class NegotiationDecision:
 class NegotiationResponseProvider(Protocol):
     """INTEGRATION POINT (client): decide how to answer a negotiation propose.
 
-    The client flow calls this seam once the server answers the round-1 task with an
+    The client flow calls this seam once the server answers the initial task request with an
     INPUT_REQUIRED Negotiation-T propose: ``propose`` is the lightweight
     :class:`NegotiationProposeView` observed from the wire (negotiation kind, template URI, rendered
     text) and ``session`` the parsed :class:`NegotiationContext` of the server's session. The
@@ -81,7 +82,7 @@ class NegotiationResponseProvider(Protocol):
     The DECISION of how to derive the answer is entirely yours (human confirmation, a policy
     engine, an upstream system call); the WIRE MECHANICS stay in the flow: the flow regenerates the
     Task-T prompt, builds the typed accept from your decision, advances the session context and
-    sends round 2 over the configured transport.
+    sends the accept over the configured transport.
 
     ``respond`` is synchronous — the flow calls it at the decision point. A customer implementation
     that needs asynchrony (waiting for a human, calling a remote service) owns that internally and

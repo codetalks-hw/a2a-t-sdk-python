@@ -3,7 +3,7 @@
 The Task-T content validation pipeline extracts these parameters from the submitted prompt, aligned
 with the UC1 RAN energy-saving intent (region-level task with a time-segment-based guaranteed
 throughput target). Both sides of the sample share the schema: the server validates the submitted
-prompt against it, and the client's negotiation round 2 regenerates the filled Task-T prompt from it.
+prompt against it, and the client's negotiation accept regenerates the filled Task-T prompt from it.
 """
 
 from __future__ import annotations
