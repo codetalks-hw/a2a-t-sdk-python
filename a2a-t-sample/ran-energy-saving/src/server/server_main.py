@@ -25,7 +25,7 @@ from common.registry_client import register_agentcard
 from dotenv import dotenv_values
 from starlette.applications import Starlette
 
-from server.constants_data import CHANNEL_DATA, get_public_agent_card, resolve_negotiation_channel
+from server.constants_data import get_public_agent_card
 from server.server_flow import execute_server_flow
 from server.task_execution import TaskExecutionService, Uc1DemoExecutionService
 
@@ -51,14 +51,12 @@ class SampleAgentExecutor(AgentExecutor):
         prompt_server: object,
         log_sink: object | None = None,
         execute_flow: object,
-        channel: str = CHANNEL_DATA,
         env_path: Path | None = None,
         execution_service: TaskExecutionService | None = None,
     ) -> None:
         self._prompt_server = prompt_server
         self._log_sink = log_sink
         self._execute_flow = execute_flow
-        self._channel = channel
         self._env_path = env_path
         self._execution_service = execution_service
 
@@ -68,7 +66,6 @@ class SampleAgentExecutor(AgentExecutor):
             "event_queue": event_queue,
             "prompt_server": self._prompt_server,
             "log_sink": self._log_sink,
-            "channel": self._channel,
             "env_path": self._env_path,
             "execution_service": self._execution_service,
         }
@@ -127,11 +124,9 @@ def build_server_runtime(
 ) -> dict[str, object]:
     """Build the server runtime: an A2ATServer prompt server and a SampleAgentExecutor.
 
-    The negotiation generation channel is resolved here from the run's ``.env``
-    (``A2AT_SAMPLE_CHANNEL``, default ``data``) and, with the ``env_path`` itself, threaded into
-    the executor so the propose builders read the same scenario configuration. The execution
-    service of the task execution integration point is assembled here too and threaded through the executor into
-    ``execute_server_flow``.
+    The ``env_path`` is threaded into the executor so the propose builders read the same scenario
+    configuration. The execution service of the task execution integration point is assembled here
+    too and threaded through the executor into ``execute_server_flow``.
     """
     resolved_logger = logger
     if resolved_logger is None and log_sink is not None and debug_enabled:
@@ -145,7 +140,6 @@ def build_server_runtime(
         prompt_server=prompt_server,
         log_sink=log_sink,
         execute_flow=execute_server_flow,
-        channel=resolve_negotiation_channel(env_path=env_path),
         env_path=env_path,
         execution_service=execution_service,
     )

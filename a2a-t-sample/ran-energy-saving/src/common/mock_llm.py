@@ -295,6 +295,12 @@ def _is_feasibility_validation_head(head: str) -> bool:
     )
 
 
+#: Sentence the information-propose input carries when more than one item is missing; the canned
+#: propose-extraction response has no relationship by default, so the mock re-adds it here to keep
+#: the from-text propose equivalent to the content the caller wrote.
+_PROPOSE_RELATIONSHIP_MARKER = "Multiple items must be provided together."
+
+
 def get_routed_response(
     messages: list[dict[str, str]],
     json_schema: dict[str, Any] | None,
@@ -302,8 +308,15 @@ def get_routed_response(
     """Serve the canned response routed by the output schema of one structured call."""
     stage = route_structured_call(messages, json_schema)
     llm_calls.append(stage)
+    content = _script[stage]
+    if stage == STAGE_NEGOTIATION_PROPOSE_EXTRACTION and _PROPOSE_RELATIONSHIP_MARKER in _first_user_content(
+        messages
+    ):
+        extracted = json.loads(content)
+        extracted["relationship"] = _PROPOSE_RELATIONSHIP_MARKER
+        content = json.dumps(extracted, ensure_ascii=False)
     return LLMResponse(
-        content=_script[stage],
+        content=content,
         model="mock-llm",
         usage={"prompt_tokens": 0, "completion_tokens": 0},
         metadata={},

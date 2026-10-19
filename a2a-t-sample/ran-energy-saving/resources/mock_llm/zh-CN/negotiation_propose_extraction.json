@@ -1,12 +1,8 @@
 {
   "items": [
     {
-      "name": "区域",
-      "value": "请提供节能任务的覆盖区域"
-    },
-    {
-      "name": "节能目标",
-      "value": "请提供节能任务的节能目标"
+      "name": "region",
+      "value": "Please provide region: Coverage region (task object) of the energy-saving task; a concrete physical area name.."
     }
   ],
   "relationship": null

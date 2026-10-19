@@ -601,8 +601,9 @@ def test_information_extraction_resources_mirror_the_scenario_answers(language: 
     propose = _resource(language, "negotiation_propose_extraction.json")
     accept = _resource(language, "negotiation_accept_extraction.json")
 
-    # The propose asks for the region (plus one more item) with no relationship note.
-    assert len(propose["items"]) == 2  # type: ignore[arg-type]
+    # The propose asks for the region the demo input omits, with no relationship note.
+    assert len(propose["items"]) == 1  # type: ignore[arg-type]
+    assert propose["items"][0]["name"] == "region"  # type: ignore[index]
     assert propose["relationship"] is None
     # The accept confirms the region exactly as the scenario answers carry it.
     assert accept == {
@@ -618,8 +619,8 @@ def test_content_validation_variant_resources_carry_the_trigger_codes(language: 
     feasibility = _resource(language, "content_validation_feasibility.json")
 
     # The target variant reports the value-not-allowed error on the throughput param; the
-    # feasibility variant reports the semantic-conflict error on the throughput param too — the
-    # conflict is between the guaranteed rate and the outage duration, not the energy goal.
+    # feasibility variant reports the rule-violation error on the throughput param — the requested
+    # rate cannot sustain the outage duration, which is not a semantic conflict of values.
     assert target["semantic_verdict"] is False
     assert target["errors"] == [
         {

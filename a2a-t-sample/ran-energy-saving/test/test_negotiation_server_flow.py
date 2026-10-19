@@ -60,7 +60,6 @@ from client.scenario_data import (
     ENERGY_SAVING_TEMPLATE_URI,
     build_prompt_input,
     negotiation_answers,
-    negotiation_feasibility_description,
     negotiation_feasibility_infeasibility,
     negotiation_filled_params,
     negotiation_target_clarifications,
@@ -154,7 +153,6 @@ async def _run_flow(
     metadata: dict[str, object],
     prompt_server: object,
     requested_extensions: set[str] | None = None,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     execution_service: TaskExecutionService | None = None,
 ) -> list[object]:
@@ -169,7 +167,6 @@ async def _run_flow(
         event_queue=queue,
         prompt_server=prompt_server,
         sleep_fn=_no_sleep,
-        channel=channel,
         env_path=env_path,
         execution_service=execution_service,
     )
@@ -344,7 +341,7 @@ def _kind_initial_metadata(client: A2ATClient, env_path: Path, kind: str) -> dic
     }
 
 
-# --- initial phase: per-type proposes (target / feasibility) over the from-data channel ------------
+# --- initial phase: per-type proposes (target / feasibility) ------------------------------------
 
 
 def test_round_1_target_failure_answers_input_required_carrying_the_target_propose(_offline_env: Path) -> None:
@@ -373,10 +370,12 @@ def test_round_1_target_failure_answers_input_required_carrying_the_target_propo
     propose_text = str(metadata[NEGOTIATION_T_EXTENSION_URI])
     for name, _value in negotiation_target_clarifications(env_path=_offline_env):
         assert name in propose_text
-    # from-data propose generation is deterministic: no negotiation extraction call is logged.
+    # The propose is generated from a natural-language message: one extraction call follows the
+    # initial validation.
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
         mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
+        mock_llm.STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
     ]
 
 
@@ -406,125 +405,16 @@ def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibi
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
         mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
-    ]
-
-
-# --- initial phase: per-type proposes over the from-text channel -----------------------------------
-
-
-def test_round_1_target_failure_from_text_channel_generates_via_extraction(_offline_env: Path) -> None:
-    mock_llm.reset_call_log()
-    metadata = _kind_initial_metadata(
-        A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
-    )
-
-    events = asyncio.run(
-        _run_flow(
-            metadata=metadata,
-            prompt_server=A2ATServer(env_path=_offline_env),
-            channel=CHANNEL_TEXT,
-            env_path=_offline_env,
-        )
-    )
-
-    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
-    propose_metadata = _message_metadata(events[-1])
-    # The templateUri still carries the target propose URI — the client's dispatch key is unchanged.
-    assert propose_metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_PROPOSE_URI
-    assert negotiation_target_clarifications(env_path=_offline_env)[0][0] in str(
-        propose_metadata[NEGOTIATION_T_EXTENSION_URI]
-    )
-    # from-text propose generation runs exactly one extraction call after the initial validation.
-    assert mock_llm.llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION_TARGET,
-        mock_llm.STAGE_CONTENT_VALIDATION_TARGET,
-        mock_llm.STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
-    ]
-
-
-def test_round_1_feasibility_failure_from_text_channel_generates_via_extraction(_offline_env: Path) -> None:
-    mock_llm.reset_call_log()
-    metadata = _kind_initial_metadata(
-        A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
-    )
-
-    events = asyncio.run(
-        _run_flow(
-            metadata=metadata,
-            prompt_server=A2ATServer(env_path=_offline_env),
-            channel=CHANNEL_TEXT,
-            env_path=_offline_env,
-        )
-    )
-
-    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
-    propose_metadata = _message_metadata(events[-1])
-    assert propose_metadata[TEMPLATE_URI_METADATA_KEY] == FEASIBILITY_NEGOTIATION_PROPOSE_URI
-    # The rendered text carries the description and the contents to evaluate of the scenario data.
-    propose_text = str(propose_metadata[NEGOTIATION_T_EXTENSION_URI])
-    assert negotiation_feasibility_description(env_path=_offline_env) in propose_text
-    for name, value in negotiation_feasibility_infeasibility(env_path=_offline_env):
-        assert f"{name}: {value}" in propose_text
-    assert mock_llm.llm_calls == [
-        mock_llm.STAGE_SLOT_EXTRACTION_FEASIBILITY,
-        mock_llm.STAGE_CONTENT_VALIDATION_FEASIBILITY,
         mock_llm.STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION,
     ]
 
 
-def test_target_propose_messages_are_equivalent_across_channels(_offline_env: Path) -> None:
-    """The from-data and from-text channels produce equivalent messages (the mock extraction
-    returns the canonical content the scenario accessors mirror); only the fresh session id
-    differs."""
-    metadata = _kind_initial_metadata(
-        A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
-    )
-    server = A2ATServer(env_path=_offline_env)
-
-    mock_llm.reset_call_log()
-    data_events = asyncio.run(_run_flow(metadata=metadata, prompt_server=server, env_path=_offline_env))
-    mock_llm.reset_call_log()
-    text_events = asyncio.run(
-        _run_flow(metadata=metadata, prompt_server=server, channel=CHANNEL_TEXT, env_path=_offline_env)
-    )
-
-    data_metadata = _message_metadata(data_events[-1])
-    text_metadata = _message_metadata(text_events[-1])
-    assert data_metadata[NEGOTIATION_T_EXTENSION_URI] == text_metadata[NEGOTIATION_T_EXTENSION_URI]
-    assert data_metadata[TEMPLATE_URI_METADATA_KEY] == text_metadata[TEMPLATE_URI_METADATA_KEY]
-    data_context = dict(data_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
-    text_context = dict(text_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
-    assert data_context.pop("id") != text_context.pop("id")  # each channel opens its own session
-    assert data_context == text_context
 
 
-def test_feasibility_propose_messages_are_equivalent_across_channels(_offline_env: Path) -> None:
-    """The from-data and from-text feasibility proposes produce equivalent messages (the mock
-    extraction returns the canonical content the scenario accessors mirror); only the fresh
-    session id differs."""
-    metadata = _kind_initial_metadata(
-        A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_FEASIBILITY
-    )
-    server = A2ATServer(env_path=_offline_env)
-
-    mock_llm.reset_call_log()
-    data_events = asyncio.run(_run_flow(metadata=metadata, prompt_server=server, env_path=_offline_env))
-    mock_llm.reset_call_log()
-    text_events = asyncio.run(
-        _run_flow(metadata=metadata, prompt_server=server, channel=CHANNEL_TEXT, env_path=_offline_env)
-    )
-
-    data_metadata = _message_metadata(data_events[-1])
-    text_metadata = _message_metadata(text_events[-1])
-    assert data_metadata[NEGOTIATION_T_EXTENSION_URI] == text_metadata[NEGOTIATION_T_EXTENSION_URI]
-    assert data_metadata[TEMPLATE_URI_METADATA_KEY] == text_metadata[TEMPLATE_URI_METADATA_KEY]
-    data_context = dict(data_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
-    text_context = dict(text_metadata[NEGOTIATION_CONTEXT_METADATA_KEY])
-    assert data_context.pop("id") != text_context.pop("id")  # each channel opens its own session
-    assert data_context == text_context
 
 
-# --- per-type propose text renderings of the from-text channel -------------------------------
+
+# --- per-type propose text renderings ---------------------------------------------------------
 
 
 def test_information_propose_text_renders_numbered_items_and_the_relationship() -> None:
@@ -591,11 +481,13 @@ def test_two_round_sequence_pins_the_mock_call_log(_offline_env: Path) -> None:
 
     _run_two_phase_flow(_offline_env)
 
-    # Initial phase: extraction of the missing input + its failing content validation; the accept:
-    # from-data filled-params extraction (no scenario input) + its passing content validation.
+    # Initial phase: extraction of the missing input + its failing content validation + the
+    # propose extraction; the accept: from-data filled-params extraction (no scenario input) + its
+    # passing content validation.
     assert mock_llm.llm_calls == [
         mock_llm.STAGE_SLOT_EXTRACTION_MISSING,
         mock_llm.STAGE_CONTENT_VALIDATION_MISSING,
+        mock_llm.STAGE_NEGOTIATION_PROPOSE_EXTRACTION,
         mock_llm.STAGE_SLOT_EXTRACTION,
         mock_llm.STAGE_CONTENT_VALIDATION,
     ]
@@ -900,7 +792,7 @@ def test_propose_carries_the_relationship_only_for_multiple_items(_offline_env: 
     assert NEGOTIATION_RELATIONSHIP in multiple_text
 
 
-# --- channel resolution and executor plumbing ------------------------------------------------
+# --- executor plumbing ------------------------------------------------------------------------
 
 
 def test_resolve_negotiation_channel_defaults_and_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -928,46 +820,4 @@ def test_resolve_negotiation_channel_defaults_and_overrides(tmp_path: Path, monk
     assert resolve_negotiation_channel(env_path=env_path) == CHANNEL_DATA
 
 
-def test_executor_threads_the_channel_and_env_path_into_the_flow(
-    _offline_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)  # server_main's import-time mock install reads the cwd .env
-    from server.server_main import SampleAgentExecutor
 
-    captured: dict[str, object] = {}
-
-    async def _capture_flow(**kwargs: object) -> None:
-        captured.update(kwargs)
-
-    executor = SampleAgentExecutor(
-        prompt_server=object(),
-        log_sink=None,
-        execute_flow=_capture_flow,
-        channel=CHANNEL_TEXT,
-        env_path=_offline_env,
-    )
-    request_context = _build_request_context(metadata={}, requested_extensions={TASK_T_EXTENSION_URI})
-    asyncio.run(executor.execute(request_context, EventQueueLegacy()))
-
-    assert captured["channel"] == CHANNEL_TEXT
-    assert captured["env_path"] == _offline_env
-    assert captured["prompt_server"] is getattr(executor, "_prompt_server")
-
-
-def test_build_server_runtime_resolves_the_channel_from_the_env(
-    _offline_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)  # server_main's import-time mock install reads the cwd .env
-    from server.server_main import build_server_runtime
-
-    runtime = build_server_runtime(agent_card=None, env_path=_offline_env)
-    executor = runtime["executor"]
-
-    # The offline .env carries no channel key -> the default data channel.
-    assert getattr(executor, "_channel") == CHANNEL_DATA
-    assert getattr(executor, "_env_path") == _offline_env
-
-    text_env_path = tmp_path / "text-channel.env"
-    text_env_path.write_text(_OFFLINE_ENV_TEXT.format(language="en-US") + f"{CHANNEL_ENV_KEY}=text\n", encoding="utf-8")
-    text_runtime = build_server_runtime(agent_card=None, env_path=text_env_path)
-    assert getattr(text_runtime["executor"], "_channel") == CHANNEL_TEXT

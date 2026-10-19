@@ -11,14 +11,7 @@ from a2a.server.events.event_queue import EventQueue
 from a2a.types import Task, TaskArtifactUpdateEvent, TaskState
 from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
-from a2a_t.negotiation.content.enums import NegotiationAction
-from a2a_t.negotiation.content.models import (
-    FeasibilityProposeContent,
-    InformationProposeContent,
-    NegotiationItem,
-    NegotiationProposeData,
-    TargetProposeContent,
-)
+from a2a_t.negotiation.content.models import NegotiationItem
 from client import scenario_data
 from common.a2a_adapter import build_metadata_artifact, build_status, emit_status_update
 from common.logging_utils import format_payload_log, format_stage_log
@@ -29,8 +22,6 @@ if TYPE_CHECKING:
 
 from server.constants_data import (
     ARTIFACT_SEND_INTERVAL_SECONDS,
-    CHANNEL_DATA,
-    CHANNEL_TEXT,
     COMPLETED_MESSAGE,
     CONTENT_ERROR_CODE_FEASIBILITY,
     CONTENT_ERROR_CODE_INFORMATION,
@@ -205,61 +196,6 @@ def _negotiation_propose_template_uri(negotiation_type: str) -> str:
     return NEGOTIATION_PROPOSE_TEMPLATE_URI
 
 
-def _negotiation_propose_data(
-    negotiation_type: str,
-    missing_items: list[NegotiationItem],
-    context: NegotiationContext,
-    *,
-    env_path: Path | None,
-) -> NegotiationProposeData:
-    """Build the typed propose content of one negotiation type (spec scenario semantics).
-
-    Target proposes the intent restatement plus the clarification request (the overlapping
-    time segments), and feasibility proposes the infeasibility assessment plus the alternative
-    proposal (lower the guaranteed rate to sustain the outage duration); both fill their
-    scenario-owned texts from the ``client.scenario_data`` accessors. Information keeps the
-    missing-item propose.
-    """
-    if negotiation_type == NEGOTIATION_TYPE_TARGET:
-        return NegotiationProposeData(
-            context=context,
-            content=TargetProposeContent(
-                target_negotiation_description=scenario_data.negotiation_target_description(env_path=env_path),
-                intent_understanding=[
-                    NegotiationItem(name=name, value=value)
-                    for name, value in scenario_data.negotiation_target_intent_understanding(env_path=env_path)
-                ],
-                alignment_and_clarification=None,
-                request_for_clarification=[
-                    NegotiationItem(name=name, value=value)
-                    for name, value in scenario_data.negotiation_target_clarifications(env_path=env_path)
-                ],
-                target_confirm_request=None,
-            ),
-        )
-    if negotiation_type == NEGOTIATION_TYPE_FEASIBILITY:
-        return NegotiationProposeData(
-            context=context,
-            content=FeasibilityProposeContent(
-                feasibility_negotiation_description=scenario_data.negotiation_feasibility_description(
-                    env_path=env_path
-                ),
-                action=NegotiationAction.PROPOSE_ALTERNATIVE_ON_FAILURE,
-                contents_to_evaluate=None,
-                infeasibility_details_and_proposal=[
-                    NegotiationItem(name=name, value=value)
-                    for name, value in scenario_data.negotiation_feasibility_infeasibility(env_path=env_path)
-                ],
-                feasibility_confirm_request=None,
-            ),
-        )
-    relationship = NEGOTIATION_RELATIONSHIP if len(missing_items) > 1 else None
-    return NegotiationProposeData(
-        context=context,
-        content=InformationProposeContent(items=missing_items, relationship=relationship),
-    )
-
-
 async def _emit_negotiation_propose(
     *,
     request_context: RequestContext,
@@ -267,7 +203,6 @@ async def _emit_negotiation_propose(
     prompt_server: A2ATServer,
     missing_items: list[NegotiationItem],
     negotiation_type: str = NEGOTIATION_TYPE_INFORMATION,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     task_id: str,
     context_id: str,
@@ -275,14 +210,13 @@ async def _emit_negotiation_propose(
 ) -> None:
     """Generate the Negotiation-T propose for the negotiation type and emit INPUT_REQUIRED.
 
-    The type selects the propose template URI and the content (plan R1/R3). The channel switches
-    only the generation call: ``data`` builds the typed content and calls the deterministic
-    from-data API (zero LLM calls), ``text`` renders the same content as a natural-language message
-    and calls the from-text API, whose extraction step parses it back into the canonical typed
-    content (one LLM call) — both channels then render the addressed template from equivalent
-    content, so the produced messages are equivalent. The propose travels on the INPUT_REQUIRED
-    status event's message metadata (``propose.build_metadata_content()``); the templateUri inside
-    carries the per-type propose template URI, which is what the client dispatches its accept on.
+    The type selects the propose template URI and the content (plan R1/R3). The propose is written
+    as a business message and generated through the from-text API: the SDK first extracts the
+    canonical typed content (one LLM call), then renders the addressed template. The accept is the
+    client's decision; how it is generated is the client's choice. The propose travels on the
+    INPUT_REQUIRED status event's message metadata (``propose.build_metadata_content()``); the
+    templateUri inside carries the per-type propose template URI, which is what the client
+    dispatches its accept on.
     """
     propose_context = NegotiationContext(
         id=str(uuid.uuid4()),
@@ -291,20 +225,17 @@ async def _emit_negotiation_propose(
         performative=NegotiationPerformative.PROPOSE,
     )
     template_uri = _negotiation_propose_template_uri(negotiation_type)
-    if channel == CHANNEL_TEXT:
-        text = _negotiation_propose_text(negotiation_type, missing_items, env_path=env_path)
-        propose = prompt_server.generate_negotiation_propose_prompt_from_text(text, propose_context, template_uri)
-    else:
-        data = _negotiation_propose_data(negotiation_type, missing_items, propose_context, env_path=env_path)
-        propose = prompt_server.generate_negotiation_propose_prompt_from_data(data, template_uri)
+    propose_text = _negotiation_propose_text(negotiation_type, missing_items, env_path=env_path)
+    propose = prompt_server.generate_negotiation_propose_prompt_from_text(
+        propose_text, propose_context, template_uri
+    )
     if log_sink is not None:
         log_sink(
             format_stage_log(
                 role="server",
                 stage="negotiation-propose",
                 detail=(
-                    f"generated (type={negotiation_type} channel={channel} "
-                    f"round={propose_context.round}) "
+                    f"generated (type={negotiation_type} round={propose_context.round}) "
                     f"items={[(item.name, item.value) for item in missing_items]}"
                 ),
             )
@@ -410,7 +341,6 @@ async def execute_server_flow(
     sleep_fn: SleepFn | None = None,
     artifact_send_interval_seconds: float = ARTIFACT_SEND_INTERVAL_SECONDS,
     log_sink: object | None = None,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     execution_service: TaskExecutionService | None = None,
 ) -> None:
@@ -434,7 +364,7 @@ async def execute_server_flow(
          error's code selects a negotiation type (plan R1: ``content.param_missing`` information
          with slot-named errors, ``content.value_not_allowed`` target, ``content.rule_violation``
          feasibility), a Negotiation-T propose of that type on an INPUT_REQUIRED status update,
-         generated from typed data or from a natural-language rendering per the configured channel
+         generated from a natural-language business message through the from-text API
          (data-driven trigger, the server reads no scenario flag)
       5. Default success: execute the negotiated task through the integration point — each progress line
          becomes a ``TASK_STATE_WORKING`` status update and the ``TaskExecutionResult`` becomes
@@ -582,7 +512,6 @@ async def execute_server_flow(
                 prompt_server=prompt_server,
                 missing_items=missing_items,
                 negotiation_type=negotiation_type,
-                channel=channel,
                 env_path=env_path,
                 task_id=resolved_task_id,
                 context_id=resolved_context_id,
