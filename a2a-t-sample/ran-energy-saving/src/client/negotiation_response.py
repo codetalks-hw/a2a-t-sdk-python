@@ -53,11 +53,11 @@ class NegotiationDecision:
       ``filled_params`` (information: the name->value items the client fills in),
       ``confirmed_intent`` (target) or ``feasibility_summary`` (feasibility). The accept goes
       through the existing accept builders, so the message behavior is the demo's accept.
-    * ``"reject"`` / ``"abort"`` — not wired in this demo: the flow logs the decision and ends the
+    * ``"reject"`` / ``"abort"`` — not implemented in this demo: the flow logs the decision and ends the
       round without sending anything (see the sample README, Negotiation-T chapter, for the SDK
-      reject/abort APIs a customer wires to actually emit them). ``reason`` is accepted for
+      reject/abort APIs a customer implements to actually emit them). ``reason`` is accepted for
       reject/abort but unused by the demo flow — it becomes the ending content's
-      ``failure_reason`` once the client implementation wires the reject/abort send (see the sample README,
+      ``failure_reason`` once the client implementation adds the reject/abort send (see the sample README,
       Negotiation-T chapter).
     """
 

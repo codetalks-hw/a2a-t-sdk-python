@@ -207,7 +207,7 @@ because the server is the side that discovers the request cannot be executed as-
 of this scenario, not a property of the protocol: a client could open a negotiation just as well, for
 example when it cannot meet a constraint the server announced, and the server would answer with
 accept, reject or abort. The role only decides who sends the propose — the message forms, the
-session handling and the transport are identical. This demo wires the decision on the client side
+session handling and the transport are identical. This demo implements the decision on the client side
 (the provider integration point); if the client opens a negotiation, the equivalent decision belongs on the
 server side.
 
@@ -237,8 +237,8 @@ class NegotiationResponseProvider(Protocol):
 
 `NegotiationDecision` carries a `conclusion` (`accept` / `reject` / `abort`) plus the per-kind
 accept field: `filled_params` (information, name → value), `confirmed_intent` (target),
-`feasibility_summary` (feasibility), and `reason` (reject/abort). **`accept` is wired
-end-to-end**: from the client's decision the flow regenerates the Task-T prompt, builds the typed accept
+`feasibility_summary` (feasibility), and `reason` (reject/abort). **`accept` is implemented
+end to end**: from the client's decision the flow regenerates the Task-T prompt, builds the typed accept
 with the same round stamped as `ACCEPT`, and sends it over the configured transport. `respond` is
 synchronous — an implementation that needs asynchrony (human confirmation, an upstream call) owns
 that internally.
@@ -250,7 +250,7 @@ that internally.
 
 **① When the server opens it.** The request is incomplete — it lacks a parameter the server needs
 (in the demo, the region). The demo's trigger is a `content.param_missing` validation error, but
-that code is the sample's wiring, not part of the protocol.
+that code is the sample's choice, not part of the protocol.
 
 **② What the reference code does.**
 
@@ -401,8 +401,8 @@ the client responds to the server's proposal.
 
 ### 4.7 Reject and abort — the extension point
 
-A `reject`/`abort` decision is **not wired in this demo**: the flow logs
-`negotiation-decision: {conclusion} (not wired in this demo...)` and ends without sending. The
+A `reject`/`abort` decision is **not implemented in this demo**: the flow logs
+`negotiation-decision: {conclusion} (not implemented in this demo...)` and ends without sending. The
 extension point is the reject/abort branch of `_plan_negotiation_accept` in
 [`client_flow.py:752`](src/client/client_flow.py#L752): extend it to mirror
 `_run_negotiation_accept` ([`client_flow.py:870`](src/client/client_flow.py#L870)) — advance the

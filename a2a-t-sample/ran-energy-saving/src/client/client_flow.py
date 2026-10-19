@@ -806,7 +806,7 @@ def _plan_negotiation_accept(
                 format_stage_log(
                     role="client",
                     stage="negotiation-decision",
-                    detail=f"{decision.conclusion} (not wired in this demo; see the sample README)",
+                    detail=f"{decision.conclusion} (not implemented in this demo; see the sample README)",
                 )
             )
         return None

@@ -366,7 +366,7 @@ accept = client.generate_negotiation_accept_prompt_from_data(
 ### 4.7 reject 与 abort —— 扩展点
 
 `reject`/`abort` 决策**在本 demo 中未实现**：flow 打日志
-`negotiation-decision: {conclusion} (not wired in this demo...)` 后结束、不发送任何报文。扩展点是
+`negotiation-decision: {conclusion} (not implemented in this demo...)` 后结束、不发送任何报文。扩展点是
 [`client_flow.py:752`](src/client/client_flow.py#L752) 中 `_plan_negotiation_accept` 的 reject/abort
 分支：扩展它、仿照 `_run_negotiation_accept`（[`client_flow.py:870`](src/client/client_flow.py#L870)）
 —— 以 `session.next_round().with_performative(NegotiationPerformative.REJECT)` 推进会话，构建该

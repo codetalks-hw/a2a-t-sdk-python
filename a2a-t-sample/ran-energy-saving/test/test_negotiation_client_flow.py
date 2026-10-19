@@ -209,7 +209,7 @@ def _agent_message(*, text: str, metadata: dict[str, object] | None = None) -> M
 
 
 def _status_update(*, state: TaskState, text: str = "", metadata: dict[str, object] | None = None) -> StreamResponse:
-    """Build one streamed status update event (the wire shape the a2a-sdk client yields)."""
+    """Build one streamed status update event (the message shape the a2a-sdk client yields)."""
     return StreamResponse(
         status_update=TaskStatusUpdateEvent(
             task_id=_TASK_ID,
@@ -597,7 +597,7 @@ def test_feasibility_propose_answers_with_the_typed_feasibility_accept(_offline_
 def test_propose_template_uri_dispatches_the_accept_kind_without_a_flag(
     _offline_env: Path, propose_uri: str, accept_uri: str
 ) -> None:
-    """With no kind flag the accept type dispatches on the propose's templateUri (the wire)."""
+    """With no kind flag the accept type dispatches on the propose's templateUri (the received message)."""
     prompt_client = _ScriptedPromptClient()
     a2a_client = _ScriptedA2AClient(
         [_initial_events(metadata=_propose_metadata(template_uri=propose_uri)), _continuation_events()]
@@ -707,7 +707,7 @@ def test_from_text_channel_renders_the_feasibility_summary_and_numbered_answers(
 
 
 def test_target_accept_accept_requests_are_equivalent_across_channels(_offline_env: Path) -> None:
-    """The from-data and from-text target accepts produce the same accept wire metadata."""
+    """The from-data and from-text target accepts produce the same accept message metadata."""
     propose_metadata = _propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)
     accept_metadata: list[dict[str, object]] = []
     for channel in (CHANNEL_DATA, CHANNEL_TEXT):
@@ -1016,7 +1016,7 @@ def test_injected_provider_replaces_the_scripted_accept_end_to_end(_offline_env:
     assert len(prompt_client.accept_calls) == 1
     accept_data = prompt_client.accept_calls[0]
     assert [(item.name, item.value) for item in accept_data.content.items] == [("region", "Custom filled region")]
-    # The Task-T prompt refill remains the flow's wire mechanic fed by the caller.
+    # The Task-T prompt refill remains the flow's message construction fed by the caller.
     assert prompt_client.from_data_calls == [(_NEGOTIATION_PARAMS, ENERGY_SAVING_TEMPLATE_URI)]
     assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
 
@@ -1044,7 +1044,7 @@ def test_reject_decision_logs_negotiation_decision_and_stays_on_round_1(_offline
     assert prompt_client.from_data_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
-        "[client] negotiation-decision: reject (not wired in this demo; see the sample README)"
+        "[client] negotiation-decision: reject (not implemented in this demo; see the sample README)"
     ]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
@@ -1072,7 +1072,7 @@ def test_abort_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_
     assert len(a2a_client.calls) == 1
     assert prompt_client.accept_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
-    assert decision_logs == ["[client] negotiation-decision: abort (not wired in this demo; see the sample README)"]
+    assert decision_logs == ["[client] negotiation-decision: abort (not implemented in this demo; see the sample README)"]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]

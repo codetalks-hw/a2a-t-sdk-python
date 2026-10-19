@@ -16,7 +16,7 @@ check, the unhandled/malformed INPUT_REQUIRED degradations (identical to SSE), t
 end signals (a REJECTED in either phase ends promptly with ``end=<state>`` on the summary — no idle
 hang, final fix), the idle-timeout backstop (R5), the
 ``normalize_webhook_payload``/``normalize_event`` parity, and the server
-assembly (push store/sender wired unconditionally into ``build_rest_app``).
+assembly (push store/sender assembled unconditionally into ``build_rest_app``).
 """
 
 from __future__ import annotations
@@ -273,7 +273,7 @@ def _agent_message(*, text: str, metadata: dict[str, object] | None = None) -> M
 
 
 def _status_update(*, state: TaskState, text: str = "", metadata: dict[str, object] | None = None) -> StreamResponse:
-    """Build one streamed status update event (the wire shape the a2a-sdk client yields)."""
+    """Build one streamed status update event (the message shape the a2a-sdk client yields)."""
     return StreamResponse(
         status_update=TaskStatusUpdateEvent(
             task_id=_TASK_ID,
@@ -609,7 +609,7 @@ def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None
     assert context.performative == NegotiationPerformative.ACCEPT
     assert template_uri == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
 
-    # Round-2 wire shape unchanged across channels: send -> register -> send, COMPLETED end.
+    # Round-2 message shape unchanged across channels: send -> register -> send, COMPLETED end.
     assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
     accept_request = a2a_client.send_calls[1][0]
     metadata = _request_metadata(accept_request)
@@ -731,7 +731,7 @@ def test_reject_decision_webhook_logs_and_ends_after_the_initial_phase(_offline_
     assert prompt_client.accept_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
-        "[client] negotiation-decision: reject (not wired in this demo; see the sample README)"
+        "[client] negotiation-decision: reject (not implemented in this demo; see the sample README)"
     ]
     assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
@@ -876,7 +876,7 @@ def test_normalize_webhook_payload_keeps_metadata_so_int_coercion_absorbs_the_fl
     assert session.performative == NegotiationPerformative.PROPOSE
 
 
-# --- server assembly: push machinery wired unconditionally (R1) -----------------------------------
+# --- server assembly: push machinery assembled unconditionally (R1) -----------------------------------
 
 
 def test_build_rest_app_request_handler_carries_the_push_store_and_sender(
@@ -892,7 +892,7 @@ def test_build_rest_app_request_handler_carries_the_push_store_and_sender(
     handler = app.state.request_handler
     assert isinstance(handler._push_config_store, InMemoryPushNotificationConfigStore)
     assert isinstance(handler._push_sender, BasePushNotificationSender)
-    # The sender reads configs from the very store wired into the handler.
+    # The sender reads configs from the very store passed to the handler.
     assert handler._push_sender._config_store is handler._push_config_store
 
     # The sender's httpx client is managed by the app lifespan (closed on shutdown).
