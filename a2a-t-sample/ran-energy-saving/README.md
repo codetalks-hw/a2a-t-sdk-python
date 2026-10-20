@@ -17,10 +17,6 @@ unspecified reader.
   - [3.1 The four steps](#31-the-four-steps)
   - [3.2 Client side](#32-client-side)
   - [3.3 Server side](#33-server-side)
-  - [3.4 Notes for custom client agent development](#34-notes-for-custom-client-agent-development)
-    - [3.4.1 Client input](#341-client-input)
-    - [3.4.2 Template and parameter schema](#342-template-and-parameter-schema)
-    - [3.4.3 Server-side execution](#343-server-side-execution)
 - [4. Using the A2A-T SDK to implement the Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-the-negotiation-t-interaction)
   - [4.1 Negotiation scenarios](#41-negotiation-scenarios)
   - [4.2 How the demo selects the negotiation kind](#42-how-the-demo-selects-the-negotiation-kind)
@@ -142,32 +138,8 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 `TASK_STATE_REJECTED` instead of crashing the server; the validated parameters are passed to the
 execution integration point (`TaskExecutionService`).
 
-### 3.4 Notes for custom client agent development
-
-The sample ships demo values. A client implementation replaces the client-side values with its own
-business content, and uses the agreed versions of the values shared with the server.
-
-#### 3.4.1 Client input
-
-The natural-language task request is the client's own input: `scenario_data.py` holds the demo
-wording, which a client implementation replaces with the intent it needs to send. The task prompt
-is rendered from this input by `generate_task_prompt_from_text` (§3.1).
-
-#### 3.4.2 Template and parameter schema
-
-The template and the parameter schema are the contract between the two agents: the client renders
-its task request from them, and the server validates against them. This sample's template
-(`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`, in
-[`scenario_data.py`](src/client/scenario_data.py)) and schema (in
-[`src/common/task_schema.py`](src/common/task_schema.py)) are sample-specific. In a real deployment
-the two parties agree on the template and the schema, and each side uses the agreed versions.
-
-#### 3.4.3 Server-side execution
-
-The business execution behind the server's `TaskExecutionService` integration point belongs to the
-server agent. The client sends the request and consumes the progress updates and the report; it
-implements no part of the execution. See the
-[deployment checklist](#5-deployment-checklist).
+The template, the parameter schema and the natural-language input are sample-specific; the
+[deployment checklist](#5-deployment-checklist) lists what each side replaces.
 
 ## 4. Using the A2A-T SDK to implement the Negotiation-T interaction
 
@@ -436,15 +408,16 @@ counterpart replaces in a real system.
 
 | Demo piece | Side | What it does in the demo | Keep or replace |
 | --- | --- | --- | --- |
+| task template and parameter schema — `ENERGY_SAVING_TEMPLATE_URI` ([`scenario_data.py`](src/client/scenario_data.py)), [`src/common/task_schema.py`](src/common/task_schema.py) | both | the contract the client renders its request from and the server validates against | **REPLACE** with the template and schema agreed by both parties |
 | mock LLM — [`resources/mock_llm/`](resources/mock_llm) + the schema-routed mock in `src/common/` | both | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI / offline runs. In a real deployment, each side replaces it with a real OpenAI-compatible endpoint |
 | scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | server | the use-case (UC1) progress steps and intent report the demo execution streams | **REPLACE** by the server agent via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once its service is assembled, the demo service and data can be deleted |
-| scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | both (see below) | feeds BOTH sides | **REPLACE** on both sides: the client answers through its own `NegotiationResponseProvider`; the server replaces the canned propose texts in `server_flow._negotiation_propose_text` with its own business wording |
+| sample input and scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | both (see below) | the Task-T natural-language input, the negotiation answers, and the canned propose texts | **REPLACE** on both sides: the client supplies its own task intent and answers through its own `NegotiationResponseProvider`; the server replaces the canned propose texts in `server_flow._negotiation_propose_text` with its own business wording |
 | mock registry — [`src/registry/`](src/registry) (port 5001) | both | AgentCard registration (server) and query for discovery (client) | **REPLACE** with the deployment's registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
 | static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | both | shared static token in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-client secrets, rotation, TLS); treat the receiver as an exposed HTTP endpoint |
 
-> **`scenario_data` feeds BOTH sides** — the client's scripted answers (filled parameters,
-> confirmed intent, feasibility summary) go through the provider integration point, and the server's
-> propose text is built from the same module: `_negotiation_propose_text`
+> **`scenario_data` feeds BOTH sides** — the client's Task-T input and scripted negotiation answers
+> (filled parameters, confirmed intent, feasibility summary) go through the provider integration
+> point, and the server's propose text is built from the same module: `_negotiation_propose_text`
 > ([`server_flow.py`](src/server/server_flow.py)) fills the target/feasibility propose texts from
 > its accessors. Replacing only the provider and the execution service still leaves the server
 > proposing the demo's canned texts, so `scenario_data.py` cannot be deleted until both sides have

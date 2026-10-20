@@ -15,10 +15,6 @@
   - [3.1 四个步骤](#31-四个步骤)
   - [3.2 客户端侧](#32-客户端侧)
   - [3.3 服务端侧](#33-服务端侧)
-  - [3.4 自定义客户端 Agent 开发说明](#34-自定义客户端-agent-开发说明)
-    - [3.4.1 客户端输入](#341-客户端输入)
-    - [3.4.2 模板与参数 schema](#342-模板与参数-schema)
-    - [3.4.3 服务端执行](#343-服务端执行)
 - [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
   - [4.1 协商场景](#41-协商场景)
   - [4.2 样例如何选择协商类型](#42-样例如何选择协商类型)
@@ -136,28 +132,8 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 被拒绝的提示词映射为 `TASK_STATE_REJECTED`，而不是让服务崩溃；校验通过的参数会传给执行接入点
 （`TaskExecutionService`）。
 
-### 3.4 自定义客户端 Agent 开发说明
-
-样例中的取值都是演示数据。客户端实现需要用自身业务内容替换客户端侧的取值，并使用与服务端约定后
-的共享取值。
-
-#### 3.4.1 客户端输入
-
-自然语言任务请求属于客户端自身的输入：`scenario_data.py` 中是样例文案，客户端实现应替换为自己
-需要发送的意图。任务提示词由该输入经 `generate_task_prompt_from_text` 渲染（见 §3.1）。
-
-#### 3.4.2 模板与参数 schema
-
-模板与参数 schema 是两端之间的契约：客户端用它渲染任务请求，服务端用它做校验。本样例的模板
-（`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`，位于
-[`scenario_data.py`](src/client/scenario_data.py)）与 schema（位于
-[`src/common/task_schema.py`](src/common/task_schema.py)）都是样例特有的。真实部署中，双方约定
-模板与 schema，两端使用约定后的版本。
-
-#### 3.4.3 服务端执行
-
-服务端 `TaskExecutionService` 接入点之后的业务执行属于 server agent。客户端只发送请求并消费进度
-更新与报告，不实现任何执行逻辑。见[部署清单](#5-部署清单)。
+模板、参数 schema 与自然语言输入都是样例特有的；各端需要替换的内容见
+[部署清单](#5-部署清单)。
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
@@ -393,14 +369,15 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 
 | demo 组成 | 归属 | demo 中的作用 | 保留还是替换 |
 | --- | --- | --- | --- |
+| 任务模板与参数 schema —— `ENERGY_SAVING_TEMPLATE_URI`（[`scenario_data.py`](src/client/scenario_data.py)）、[`src/common/task_schema.py`](src/common/task_schema.py) | 两端 | 客户端据此渲染请求、服务端据此校验的契约 | **替换**为双方约定的模板与 schema |
 | mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 两端 | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；真实部署中两端各自替换为真实的 OpenAI 兼容端点 |
 | 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的用例（UC1）进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
-| 脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | 同时喂两侧 | 两侧都要**替换**：client 侧应答经自己的 `NegotiationResponseProvider`；server 侧把 `server_flow._negotiation_propose_text` 中的预制 propose 文案改为自己的业务措辞 |
+| 样例输入与脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | Task-T 自然语言输入、协商应答与预制 propose 文案 | 两侧都要**替换**：client 提供自己的任务意图，并经自己的 `NegotiationResponseProvider` 应答；server 把 `server_flow._negotiation_propose_text` 中的预制 propose 文案改为自己的业务措辞 |
 | mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | 两端 | AgentCard 注册（server）与查询发现（client） | **替换**为部署环境的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
 | 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | 两端 | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐客户端密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
 
-> **`scenario_data` 同时喂两侧** —— 客户端的脚本化应答（补全参数、确认意图、可行性摘要）经
-> provider 接入点使用；服务端的 propose 文本也由同一模块构建：`_negotiation_propose_text`
+> **`scenario_data` 同时喂两侧** —— 客户端的 Task-T 输入与脚本化协商应答（补全参数、确认意图、
+> 可行性摘要）经 provider 接入点使用；服务端的 propose 文本也由同一模块构建：`_negotiation_propose_text`
 > ([`server_flow.py`](src/server/server_flow.py)) 用其访问器填充 target/feasibility 的 propose
 > 文案。只替换 provider 与执行服务，服务端仍会用 demo 的预制文案发起 propose —— 因此两侧都完成
 > 替换前，`scenario_data.py` 不能删除。
