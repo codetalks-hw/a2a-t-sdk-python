@@ -189,7 +189,7 @@ the target is infeasible and proposes an alternative (lower the 06:00~18:00 rate
 ### 4.2 How the demo selects the negotiation kind
 
 Whether to negotiate at all, and which kind applies, is **the server agent's business decision; the
-SDKs do not prescribe it**, and the client only reacts to the propose it receives. In this demo the
+SDKs do not dictate it**, and the client only reacts to the propose it receives. In this demo the
 choice is data-driven: the code of the first content-validation error selects the kind through the
 `_NEGOTIATION_TYPE_BY_ERROR_CODE` table
 ([`server_flow.py`](src/server/server_flow.py)). That table is a **sample convention, not an SDK
