@@ -36,25 +36,24 @@ unspecified reader.
 
 ## 1. What this sample demonstrates
 
-A client agent commissions a RAN (Radio Access Network) domain agent to run an energy-saving task
-over the A2A protocol. Using this single scenario, the sample covers the two A2A-T capabilities a
-customer needs to integrate, in the following order:
+This sample demonstrates A2A-T agent collaboration, where a client agent interacts with a RAN
+(Radio Access Network) energy-saving agent to execute an energy-saving task. It uses both Task-T and
+Negotiation-T.
 
-```text
-Task-T          natural language ──> task prompt ──> validation ──> execution ──> report
+Key workflows:
 
-Negotiation-T   when the request needs completion or correction before it can be executed
-                (information missing / target self-contradictory / target infeasible)
-                  ──> negotiation ──> agreement ──> task execution
-```
+- **Task-T (without negotiation):**
 
-The remaining sections follow three usage paths:
+  ```text
+  natural language ──> task prompt ──> validation ──> task execution
+  ```
 
-- **Run the sample** — [§2 Quickstart](#2-quickstart).
-- **Implement the Task-T interaction** — [§3](#3-using-the-a2a-t-sdk-to-implement-the-task-t-interaction)
-  together with the [deployment checklist](#5-deployment-checklist).
-- **Implement the Negotiation-T interaction** —
-  [§4](#4-using-the-a2a-t-sdk-to-implement-the-negotiation-t-interaction).
+- **Task-T + Negotiation-T (with negotiation):**
+
+  ```text
+  natural language (incomplete / ambiguous / infeasible)
+    ──> task prompt ──> validation ──> negotiation ──> agreement ──> task execution
+  ```
 
 ### 1.1 Project layout
 
@@ -174,11 +173,11 @@ three such situations:
 a time window and a throughput target, but never says which region. The server cannot start without
 it, so it says which piece is missing; the client supplies it and the task proceeds.
 
-**Target — the request is self-contradictory.** The client sends a segmented guaranteed throughput
-target in which two time windows overlap: `{17:30~23:00,20Mbps}` and `{20:00~00:00,10Mbps}`. The
-request is well-formed, but the guaranteed rate for the overlapping period cannot be determined.
-The server restates the intent it understood and asks which time window should be adjusted; the
-client answers with the corrected segments.
+**Target — the target is ambiguous.** The client sends a segmented guaranteed throughput target in
+which two time windows overlap: `{17:30~23:00,20Mbps}` and `{20:00~00:00,10Mbps}`. The request is
+well-formed, but the guaranteed rate for the overlapping period cannot be determined. The server
+restates the intent it understood and asks which time window should be adjusted; the client answers
+with the corrected segments.
 
 **Feasibility — the request cannot be satisfied under current conditions.** The client asks two
 stations to guarantee `{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}` during a mains power outage that
@@ -314,9 +313,9 @@ class MyProvider:
 
 ### 4.5 Target negotiation
 
-**① Trigger condition.** The request is self-contradictory: two time windows of the segmented
-guaranteed throughput target overlap, so the guaranteed rate for the overlapping period is
-ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
+**① Trigger condition.** The target is ambiguous: two time windows of the segmented guaranteed
+throughput target overlap, so the guaranteed rate for the overlapping period cannot be determined.
+The demo's trigger is a `content.value_not_allowed` validation error.
 
 **② Reference implementation.**
 
