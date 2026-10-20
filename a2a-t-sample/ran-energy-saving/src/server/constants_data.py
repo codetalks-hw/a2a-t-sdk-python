@@ -14,11 +14,8 @@ from a2a_t.core.standard_templates import (
 SUBMITTED_MESSAGE = "Energy saving task accepted, starting RAN energy saving task"
 ARTIFACT_SEND_INTERVAL_SECONDS = 1.0
 
-#: Text part of the INPUT_REQUIRED status message carrying the Negotiation-T propose metadata.
-INPUT_REQUIRED_MESSAGE = "Additional information is required to start the energy saving task"
-
-#: Text part of the COMPLETED status message closing the negotiation continuation flow.
-COMPLETED_MESSAGE = "Energy saving task completed"
+#: Text part of the standalone Negotiation-T propose message sent before the task is created.
+PROPOSE_MESSAGE = "Additional information is required before the energy saving task can start"
 
 #: Hint rendered into each missing-item entry of a Negotiation-T information propose; the
 #: ``{slot}`` / ``{description}`` placeholders are filled from the validation error's slot name
@@ -45,8 +42,8 @@ NEGOTIATION_PROPOSE_TEMPLATE_URI = INFORMATION_NEGOTIATION_PROPOSE_URI
 
 #: Negotiation-T per-type propose templates addressed by the server's propose
 #: (re-exported from ``a2a_t.core.standard_templates``). The proposal type is selected at runtime
-#: by the first content-validation error's code (plan R1); the templateUri inside the INPUT_REQUIRED
-#: metadata carries the per-type URI, which is what the client dispatches its accept on.
+#: by the first content-validation error's code (plan R1); the templateUri inside the propose
+#: message metadata carries the per-type URI, which is what the client dispatches its accept on.
 TARGET_NEGOTIATION_PROPOSE_TEMPLATE_URI = TARGET_NEGOTIATION_PROPOSE_URI
 FEASIBILITY_NEGOTIATION_PROPOSE_TEMPLATE_URI = FEASIBILITY_NEGOTIATION_PROPOSE_URI
 

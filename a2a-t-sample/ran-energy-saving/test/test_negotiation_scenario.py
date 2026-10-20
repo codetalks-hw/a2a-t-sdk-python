@@ -135,7 +135,7 @@ def _content_validation_messages(
     """User-message layout of a real content validation call (head + template-content tail).
 
     ``template_content_label`` is the localized label starting the template-content block; the
-    real zh-CN SDK template uses the full-width ``模板正文：`` with no trailing space.
+    real zh-CN SDK template uses its full-width localized label with no trailing space.
     """
     return [
         {"role": "system", "content": "content validation system prompt"},
@@ -511,7 +511,7 @@ def test_negotiation_slot_resources_preserve_the_distinguishing_values(language:
 
 
 #: Localized section label per language of the sections the new content-validation variants
-#: report (the zh labels follow the v1 ``任务对象`` section-label convention).
+#: report (the zh labels follow the v1 section-label convention).
 _VARIANT_SECTION_LABELS = {
     "en-US": {"task_context": "task_context", "task_target": "task_target"},
     "zh-CN": {"task_context": "任务上下文", "task_target": "任务目标"},
@@ -598,7 +598,15 @@ def test_content_validation_variant_resources_carry_the_trigger_codes(language: 
             "facts": {"section_label": _VARIANT_SECTION_LABELS[language]["task_context"]},
         }
     ]
-    assert feasibility["params"] == {**complete["params"], "guaranteedThroughputTarget": None}
+    assert feasibility["params"] == {
+        **complete["params"],
+        "guaranteedThroughputTarget": None,
+        "siteList": {"en-US": "Station 1,Station 2", "zh-CN": "站点名称1,站点名称2"}[language],
+        "backgroundEvent": {
+            "en-US": "power outage from 00:00 to 18:00",
+            "zh-CN": "00:00~18:00 停电",
+        }[language],
+    }
 
 
 @pytest.mark.parametrize("language", ["en-US", "zh-CN"])

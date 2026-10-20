@@ -435,6 +435,20 @@ _NEGOTIATION_FILLED_TARGETS: dict[str, dict[str, str]] = {
     },
 }
 
+#: Site-level context of the feasibility refill: the station list and the power outage period the
+#: accepted lower rate applies to. The base refill is region-level, so these two optional schema
+#: fields are added only for the feasibility kind.
+_FEASIBILITY_REFILL_CONTEXT: dict[str, dict[str, str]] = {
+    "en-US": {
+        "siteList": "Station 1,Station 2",
+        "backgroundEvent": "power outage from 00:00 to 18:00",
+    },
+    "zh-CN": {
+        "siteList": "站点名称1,站点名称2",
+        "backgroundEvent": "00:00~18:00 停电",
+    },
+}
+
 
 def negotiation_filled_params(
     negotiation_kind: str = NEGOTIATION_KIND_INFORMATION,
@@ -452,6 +466,8 @@ def negotiation_filled_params(
     kind_targets = _NEGOTIATION_FILLED_TARGETS.get(negotiation_kind)
     if kind_targets is not None:
         filled["guaranteedThroughputTarget"] = kind_targets.get(language, kind_targets["zh-CN"])
+    if negotiation_kind == NEGOTIATION_KIND_FEASIBILITY:
+        filled.update(_FEASIBILITY_REFILL_CONTEXT.get(language, _FEASIBILITY_REFILL_CONTEXT["zh-CN"]))
     return filled
 
 

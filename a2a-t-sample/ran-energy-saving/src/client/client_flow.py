@@ -87,7 +87,7 @@ def _parse_negotiation_context(metadata: dict[str, object]) -> NegotiationContex
 
 
 #: Negotiation kinds the client-side accept generation dispatches on. The kind resolves from the
-#: explicit flag when supplied, else from the propose's ``templateUri`` inside the INPUT_REQUIRED
+#: explicit flag when supplied, else from the propose's ``templateUri`` inside the propose message
 #: metadata (dispatch on the received message); each kind addresses its own accept-reject template.
 _NEGOTIATION_KIND_BY_PROPOSE_URI: dict[str, str] = {
     INFORMATION_NEGOTIATION_PROPOSE_URI: NEGOTIATION_KIND_INFORMATION,
@@ -105,8 +105,8 @@ _NEGOTIATION_ACCEPT_URI_BY_KIND: dict[str, str] = {
 def _resolve_negotiation_kind(metadata: dict[str, object], negotiation_kind: str | None) -> str | None:
     """Resolve the accept's negotiation kind: the explicit flag wins, else the propose's templateUri.
 
-    A ``None`` flag dispatches on the received message: the ``templateUri`` of the INPUT_REQUIRED metadata maps
-    to the negotiation kind, so the client accepts whatever type the server proposed. An unknown
+    A ``None`` flag dispatches on the received message: the ``templateUri`` of the propose message
+    metadata maps to the negotiation kind, so the client accepts whatever type the server proposed. An unknown
     flag, or a missing/unknown propose template URI when dispatching on the received message, returns ``None``
     (the caller keeps the unhandled path).
     """
@@ -118,31 +118,23 @@ def _resolve_negotiation_kind(metadata: dict[str, object], negotiation_kind: str
     return _NEGOTIATION_KIND_BY_PROPOSE_URI.get(propose_uri)
 
 
-def _find_negotiation_input_required(events: list[dict[str, object]]) -> dict[str, object] | None:
-    """Find the INPUT_REQUIRED status event carrying a Negotiation-T propose.
+def _find_negotiation_propose(events: list[dict[str, object]]) -> dict[str, object] | None:
+    """Find the standalone Negotiation-T propose message.
 
-    The propose travels in the status message metadata under the Negotiation-T extension URI
-    together with the nested ``negotiationContext`` session map (any negotiation type; the
-    ``templateUri`` inside selects the client's accept type); ``None`` keeps the plain
-    single-round flow.
+    Negotiation runs before the task is created, so the propose arrives as an A2A ``Message``
+    (role ``ROLE_AGENT``), not a Task status event. The propose content travels in the message
+    metadata under the Negotiation-T extension URI together with the nested
+    ``negotiationContext`` session map (any negotiation type; the ``templateUri`` inside selects
+    the client's accept type); ``None`` keeps the plain single-round flow.
     """
     for event in events:
-        if event.get("kind") != "status" or event.get("state") != TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED):
+        if event.get("kind") != "message":
             continue
         metadata = event.get("metadata")
         if not isinstance(metadata, dict) or NEGOTIATION_T_EXTENSION_URI not in metadata:
             continue
         return event
     return None
-
-
-def _first_task_id(events: list[dict[str, object]]) -> str:
-    """Return the first non-blank task id carried by the initial-phase events."""
-    for event in events:
-        task_id = event.get("task_id")
-        if isinstance(task_id, str) and task_id.strip():
-            return task_id
-    return ""
 
 
 async def _send_and_consume(
@@ -187,17 +179,17 @@ async def _send_and_consume(
     return artifact_count
 
 
-# --- webhook transport (v3)：事件管线复用 ------------------------------------------------------
+# --- webhook transport (v3): shared event pipeline ---------------------------------------------
 
-#: Webhook 事件循环的结束信号（plan R5/D7 + final fix）。初始发送阶段（initial phase：初次 Task-T
-#: 请求）以 artifact（默认场景结束信号）、INPUT_REQUIRED（协商场景的应答点——中断信号，非终态）或任一
-#: SDK 终态结束；协商续传阶段（continuation phase：filled Task-T + accept 之后）以任一 SDK 终态结束。
-#: 终态集 COMPLETED / CANCELED / FAILED / REJECTED 对齐 a2a-sdk
-#: ``DefaultRequestHandler.TERMINAL_TASK_STATES``：服务端在协商拒绝（accept 校验失败、初始请求未映射
-#: 错误码）时推送 REJECTED、流异常时推送 FAILED——webhook 客户端必须立即结束流程（summary 记
-#: ``end=<state>``），而不是等空闲超时兜底。空闲超时（idle timeout）是所有场景的兜底结束信号。
+#: Webhook event-loop end signals (plan R5/D7 + final fix). Both the initial send phase (initial
+#: Task-T request) and the negotiation continuation phase (filled Task-T + accept) end on the report
+#: artifact — the energy-saving task is long-running and stays WORKING after the report — or on any
+#: SDK terminal state. The terminal set COMPLETED / CANCELED / FAILED / REJECTED aligns with
+#: a2a-sdk ``DefaultRequestHandler.TERMINAL_TASK_STATES``: the server pushes REJECTED when a prompt
+#: fails validation (an accept that still fails) and FAILED on a stream error, so the webhook client
+#: must end immediately (the summary records ``end=<state>``) instead of waiting for the idle
+#: backstop. The idle timeout is the backstop end signal for every scenario.
 _WEBHOOK_SIGNAL_ARTIFACT = "artifact"
-_WEBHOOK_SIGNAL_INPUT_REQUIRED = "input-required"
 _WEBHOOK_SIGNAL_TIMEOUT = "timeout"
 _TERMINAL_STATE_SIGNALS: frozenset[str] = frozenset(
     TaskState.Name(state)
@@ -208,8 +200,9 @@ _TERMINAL_STATE_SIGNALS: frozenset[str] = frozenset(
         TaskState.TASK_STATE_REJECTED,
     )
 )
-_INITIAL_PHASE_END_SIGNALS = _TERMINAL_STATE_SIGNALS | {_WEBHOOK_SIGNAL_ARTIFACT, _WEBHOOK_SIGNAL_INPUT_REQUIRED}
-_CONTINUATION_PHASE_END_SIGNALS = _TERMINAL_STATE_SIGNALS  # 终态即协商续传阶段的全部结束信号
+_PHASE_END_SIGNALS = _TERMINAL_STATE_SIGNALS | {_WEBHOOK_SIGNAL_ARTIFACT}
+_INITIAL_PHASE_END_SIGNALS = _PHASE_END_SIGNALS
+_CONTINUATION_PHASE_END_SIGNALS = _PHASE_END_SIGNALS
 
 
 def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
@@ -218,7 +211,7 @@ def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
     The receiver hands over the raw parsed JSON dict — the ``MessageToDict`` of a ``StreamResponse``
     (camelCase: ``task`` / ``statusUpdate`` / ``artifactUpdate`` / ``message`` top-level key) — and
     this adapts it to the flat event dict (``kind`` / ``task_id`` / ``state`` / ...) that the
-    negotiation detection (INPUT_REQUIRED + Negotiation-T URI + negotiationContext), the
+    negotiation detection (propose message + Negotiation-T URI + negotiationContext), the
     templateUri→kind dispatch and the summary counting already consume, so the SSE and webhook
     drivers share the whole event pipeline unchanged.
 
@@ -257,7 +250,16 @@ def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
         parts = message.get("parts")
         if isinstance(parts, list) and parts and isinstance(parts[0], dict):
             text = str(parts[0].get("text", ""))
-        return {"kind": "message", "text": text}
+        event: dict[str, object] = {
+            "kind": "message",
+            "text": text,
+            "context_id": str(message.get("contextId", "")),
+            "message_id": str(message.get("messageId", "")),
+        }
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            event["metadata"] = metadata
+        return event
 
     artifact_update = payload.get("artifactUpdate")
     if isinstance(artifact_update, dict):
@@ -298,19 +300,16 @@ def normalize_webhook_payload(payload: dict[str, object]) -> dict[str, object]:
 def _webhook_end_signal(event: dict[str, object], end_signals: frozenset[str]) -> str | None:
     """Return the webhook end signal this event matches, ``None`` to keep consuming (plan R5/D7).
 
-    Terminal task states (the SDK's COMPLETED / CANCELED / FAILED / REJECTED set) end BOTH phases
-    and are reported under their TaskState name (the summary notes ``end=<state>``) — a REJECTED
-    validation failure or a FAILED stream must end the flow instead of hanging to the idle
-    backstop. INPUT_REQUIRED stays the phase-1-only interrupt (not a terminal state); the artifact
-    signal stays phase-1-only (the default scenario's end).
+    The report artifact ends both phases (the task stays WORKING afterwards). Terminal task states
+    (the SDK's COMPLETED / CANCELED / FAILED / REJECTED set) also end both phases and are reported
+    under their TaskState name (the summary notes ``end=<state>``) — a REJECTED validation failure
+    or a FAILED stream must end the flow instead of hanging to the idle backstop.
     """
     if event.get("kind") == "artifact":
         return _WEBHOOK_SIGNAL_ARTIFACT if _WEBHOOK_SIGNAL_ARTIFACT in end_signals else None
     if event.get("kind") != "status":
         return None
     state = event.get("state")
-    if state == TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED):
-        return _WEBHOOK_SIGNAL_INPUT_REQUIRED if _WEBHOOK_SIGNAL_INPUT_REQUIRED in end_signals else None
     if isinstance(state, str) and state in end_signals:
         return state
     return None
@@ -373,19 +372,22 @@ async def _send_webhook_message(
     request: SendMessageRequest,
     call_context: ClientCallContext,
     log_sink: Callable[[str], None] | None,
-) -> None:
-    """Send one non-blocking ``message:send`` and log the single RPC reply (plan R6).
+) -> dict[str, object] | None:
+    """Send one non-blocking ``message:send`` and return the normalized RPC reply (plan R6).
 
     With ``return_immediately=True`` the RPC returns after the first event; the server's
     background consumer keeps pushing every event to the webhook. The reply overlaps with the
     webhook pushes (the SUBMITTED Task arrives both ways), so it is logged ONCE here as
     ``webhook-rpc-reply`` and deliberately NOT appended to ``normalized_events`` — the events
-    summary counts WEBHOOK-received events only (SSE parity).
+    summary counts WEBHOOK-received events only (SSE parity). A pre-task negotiation propose is the
+    exception: it is a Message and is never pushed, so the caller consumes the returned reply.
     """
     rpc_reply: StreamResponse | None = None
     async for stream_response in a2a_client.send_message(request, context=call_context):
         rpc_reply = stream_response
-    if log_sink is not None and rpc_reply is not None:
+    if rpc_reply is None:
+        return None
+    if log_sink is not None:
         log_sink(
             format_stage_log(
                 role="client",
@@ -393,6 +395,7 @@ async def _send_webhook_message(
                 detail=json.dumps(MessageToDict(rpc_reply), ensure_ascii=False),
             )
         )
+    return normalize_event(rpc_reply)
 
 
 async def _run_webhook_flow(
@@ -417,16 +420,15 @@ async def _run_webhook_flow(
 
     Initial phase: register the push config INLINE on the request (the task id is unknown before
     the send — the only registration path available here), send ``message:send`` with
-    ``return_immediately=True`` through the ``streaming=False`` client, then consume webhook
-    events. An INPUT_REQUIRED propose opens the negotiation: re-register the SAME url/token via
-    ``create_task_push_notification_config`` (the REST endpoint — the second registration path),
-    send the accept (non-blocking, NO inline config — already registered), and keep consuming. The
-    default scenario ends on the report artifact; any terminal state (COMPLETED / FAILED /
-    CANCELED / REJECTED) ends whichever phase is consuming right there — a REJECTED/FAILED push
-    must not hang until the idle backstop. The idle timeout is the backstop that ends any phase
-    with a diagnostic line and a normal exit. Returns the artifact count and the end signal of the
-    last consumed phase (``artifact`` / ``input-required`` / a ``TASK_STATE_*`` terminal state /
-    ``timeout``) — the caller derives the timeout flag and the ``end=`` summary note from it.
+    ``return_immediately=True`` through the ``streaming=False`` client, and inspect the RPC reply.
+    A pre-task Negotiation-T propose arrives as a Message reply (Messages are never pushed): the
+    flow answers it with the accept, registers the push config inline on that new task, and keeps
+    consuming. Otherwise the flow consumes the pushed task events. The scenario ends on the report
+    artifact; any terminal state (FAILED / CANCELED / REJECTED) ends whichever phase is consuming
+    right there — a REJECTED/FAILED push must not hang until the idle backstop. The task itself
+    stays long-running (WORKING). The idle timeout is the backstop that ends any phase with a
+    diagnostic line and a normal exit. Returns the artifact count and the end signal of the last
+    consumed phase (``artifact`` / a ``TASK_STATE_*`` terminal state / ``timeout``).
     """
     # Initial-phase request additions (R2/R4): non-blocking + inline push registration.
     request.configuration.return_immediately = True
@@ -445,12 +447,92 @@ async def _run_webhook_flow(
                 ),
             )
         )
-    await _send_webhook_message(a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink)
+    reply = await _send_webhook_message(
+        a2a_client=a2a_client, request=request, call_context=call_context, log_sink=log_sink
+    )
 
-    # Initial-phase consume: default scenario ends on the artifact; a negotiation propose pauses on
-    # INPUT_REQUIRED; a terminal state (e.g. a REJECTED validation failure on the initial request)
-    # ends the whole flow right here — the accept is never sent; the idle timeout backstops all of
-    # them (R5 + final fix).
+    # Pre-task negotiation: the propose is the RPC reply (a Message is never pushed). It is appended
+    # to the normalized events so the summary and the logs see it exactly as on the SSE path.
+    reply_metadata = reply.get("metadata") if reply is not None else None
+    if (
+        reply is not None
+        and reply.get("kind") == "message"
+        and isinstance(reply_metadata, dict)
+        and NEGOTIATION_T_EXTENSION_URI in reply_metadata
+    ):
+        normalized_events.append(reply)
+        if negotiation_response_provider is None or negotiation_params is None:
+            if log_sink is not None:
+                log_sink(
+                    format_stage_log(
+                        role="client",
+                        stage="negotiation-unhandled",
+                        detail=(
+                            "Negotiation-T propose received; no negotiation answers supplied, "
+                            "the propose stays unanswered"
+                        ),
+                    )
+                )
+            return artifact_count, ""
+        session = _parse_negotiation_context(reply_metadata)
+        plan = _plan_negotiation_accept(
+            negotiation_response_provider=negotiation_response_provider,
+            metadata=reply_metadata,
+            session=session,
+            negotiation_kind=negotiation_kind,
+            log_sink=log_sink,
+        )
+        if plan is None or session is None:
+            # plan None covers the unhandled/decision ends; the session check only narrows the type.
+            return artifact_count, ""
+
+        accept_request, accept_call_context = _build_negotiation_accept_request(
+            prompt_client=prompt_client,
+            initial_input=initial_input,
+            session=session,
+            plan=plan,
+            negotiation_params=negotiation_params,
+            log_sink=log_sink,
+        )
+        # The accept is a new message — no task exists yet — so its push config is registered
+        # inline against the task the server creates for it.
+        accept_request.message.context_id = str(reply.get("context_id", ""))
+        accept_request.configuration.return_immediately = True
+        accept_request.configuration.task_push_notification_config.CopyFrom(
+            TaskPushNotificationConfig(url=push_url, token=push_token)
+        )
+        if log_sink is not None:
+            extension_header = ",".join(sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI}))
+            log_sink(
+                format_stage_log(
+                    role="client",
+                    stage="a2a-send-message",
+                    detail=(
+                        f"phase=continuation webhook text_part={_build_request_text(initial_input)} "
+                        f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
+                        f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
+                        f"header[A2A-Extensions]={extension_header} "
+                        f"return_immediately=true push_registration=inline"
+                    ),
+                )
+            )
+        await _send_webhook_message(
+            a2a_client=a2a_client, request=accept_request, call_context=accept_call_context, log_sink=log_sink
+        )
+
+        # The continuation ends on the report artifact (the task stays WORKING) or a terminal state
+        # (REJECTED/FAILED); the idle timeout backstops.
+        end_signal, artifact_count = await _consume_webhook_events(
+            webhook_queue=webhook_queue,
+            webhook_idle_timeout=webhook_idle_timeout,
+            normalized_events=normalized_events,
+            artifact_count=artifact_count,
+            log_sink=log_sink,
+            end_signals=_CONTINUATION_PHASE_END_SIGNALS,
+        )
+        return artifact_count, end_signal
+
+    # Default flow: consume the pushed events until the report artifact or a terminal state.
     end_signal, artifact_count = await _consume_webhook_events(
         webhook_queue=webhook_queue,
         webhook_idle_timeout=webhook_idle_timeout,
@@ -458,101 +540,6 @@ async def _run_webhook_flow(
         artifact_count=artifact_count,
         log_sink=log_sink,
         end_signals=_INITIAL_PHASE_END_SIGNALS,
-    )
-    if end_signal != _WEBHOOK_SIGNAL_INPUT_REQUIRED:
-        return artifact_count, end_signal
-
-    # Negotiation continuation (reuses the SSE-path detection/provider integration point/builders verbatim; same
-    # unhandled logs).
-    input_required_event = _find_negotiation_input_required(normalized_events)
-    if input_required_event is None:
-        # Plain INPUT_REQUIRED without a Negotiation-T propose: SSE parity — the flow just ends.
-        return artifact_count, end_signal
-    if negotiation_response_provider is None or negotiation_params is None:
-        if log_sink is not None:
-            log_sink(
-                format_stage_log(
-                    role="client",
-                    stage="negotiation-unhandled",
-                    detail=(
-                        "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, "
-                        "the propose stays unanswered"
-                    ),
-                )
-            )
-        return artifact_count, end_signal
-    metadata = input_required_event.get("metadata")
-    session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
-    plan = _plan_negotiation_accept(
-        negotiation_response_provider=negotiation_response_provider,
-        metadata=metadata if isinstance(metadata, dict) else None,
-        session=session,
-        negotiation_kind=negotiation_kind,
-        log_sink=log_sink,
-    )
-    if plan is None or session is None:
-        # plan None covers the unhandled/decision ends; the session check only narrows the type
-        # (a resolved plan always parsed its session).
-        return artifact_count, end_signal
-
-    task_id = _first_task_id(normalized_events)
-    context_id = str(input_required_event.get("context_id", ""))
-    accept_request, accept_call_context = _build_negotiation_accept_request(
-        prompt_client=prompt_client,
-        initial_input=initial_input,
-        session=session,
-        plan=plan,
-        negotiation_params=negotiation_params,
-        log_sink=log_sink,
-    )
-    accept_request.message.task_id = task_id
-    accept_request.message.context_id = context_id
-
-    # R4: re-register the SAME url/token via the REST endpoint before re-sending (the task now
-    # exists, so the endpoint path is available; the initial send could only register inline).
-    registration = TaskPushNotificationConfig(task_id=task_id, url=push_url, token=push_token)
-    if log_sink is not None:
-        log_sink(
-            format_stage_log(
-                role="client",
-                stage="webhook-push-reregister",
-                detail=(
-                    f"task_id={task_id} url={push_url} method=create_task_push_notification_config "
-                    f"token={'***' if push_token else ''}"
-                ),
-            )
-        )
-    await a2a_client.create_task_push_notification_config(registration)
-
-    accept_request.configuration.return_immediately = True  # NO inline config — registered above
-    if log_sink is not None:
-        log_sink(
-            format_stage_log(
-                role="client",
-                stage="a2a-send-message",
-                detail=(
-                    f"phase=continuation webhook text_part={_build_request_text(initial_input)} "
-                    f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
-                    f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
-                    f"header[A2A-Extensions]={','.join(sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI}))} "
-                    f"return_immediately=true push_registration=endpoint"
-                ),
-            )
-        )
-    await _send_webhook_message(
-        a2a_client=a2a_client, request=accept_request, call_context=accept_call_context, log_sink=log_sink
-    )
-
-    # Continuation-phase consume: the negotiation closes on a terminal state — COMPLETED normally,
-    # REJECTED (accept validation failure) / FAILED (stream exception) instead of hanging (final
-    # fix); the idle timeout backstops (R5).
-    end_signal, artifact_count = await _consume_webhook_events(
-        webhook_queue=webhook_queue,
-        webhook_idle_timeout=webhook_idle_timeout,
-        normalized_events=normalized_events,
-        artifact_count=artifact_count,
-        log_sink=log_sink,
-        end_signals=_CONTINUATION_PHASE_END_SIGNALS,
     )
     return artifact_count, end_signal
 
@@ -722,7 +709,7 @@ def _plan_negotiation_accept(
                     role="client",
                     stage="negotiation-unhandled",
                     detail=(
-                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                        "Negotiation-T propose received; the negotiation request could not be used "
                         "(malformed/missing session context), the propose stays unanswered"
                     ),
                 )
@@ -736,7 +723,7 @@ def _plan_negotiation_accept(
                     role="client",
                     stage="negotiation-unhandled",
                     detail=(
-                        "Negotiation-T INPUT_REQUIRED received; the negotiation request could not be used "
+                        "Negotiation-T propose received; the negotiation request could not be used "
                         "(unrecognized propose templateUri), the propose stays unanswered"
                     ),
                 )
@@ -821,7 +808,6 @@ async def _run_negotiation_accept(
     a2a_client: object,
     initial_input: dict[str, object],
     session: NegotiationContext,
-    task_id: str,
     context_id: str,
     plan: _NegotiationAcceptPlan,
     negotiation_params: dict[str, object],
@@ -830,11 +816,12 @@ async def _run_negotiation_accept(
     max_artifacts: int | None,
     log_sink: object | None,
 ) -> int:
-    """Answer the server's INPUT_REQUIRED propose with the filled Task-T prompt and the accept.
+    """Answer the server's pre-task propose with the filled Task-T prompt and the accept.
 
     SSE-path accept: builds the accept request (shared builder, from the provider's decision plan)
     and consumes the continuation stream into ``normalized_events`` (stream cut once
-    ``max_artifacts`` is reached).
+    ``max_artifacts`` is reached). The accept is a new message in the propose's context — no task
+    exists yet, so it carries no ``taskId``; the server creates the task when the accept validates.
     """
     accept_request, accept_call_context = _build_negotiation_accept_request(
         prompt_client=prompt_client,
@@ -844,7 +831,6 @@ async def _run_negotiation_accept(
         negotiation_params=negotiation_params,
         log_sink=log_sink,
     )
-    accept_request.message.task_id = task_id
     accept_request.message.context_id = context_id
 
     # The A2A-Extensions header carries both extension URIs as the comma-joined string the
@@ -899,20 +885,21 @@ async def run_client_flow(
     artifact end signal itself closes the default flow there, so the stream-cut cap does not
     apply.
 
-    Negotiation response integration point (plan R3/R4): when the server answers INPUT_REQUIRED with a
-    Negotiation-T propose, HOW to answer is decided by ``negotiation_response_provider``
-    (``NegotiationResponseProvider.respond`` — the client-side INTEGRATION POINT). Supplying a
-    provider replaces the scripted answer derivation entirely: ``negotiation_answers`` is not
-    consulted and the accept content comes from the provider's decision (a reject/abort decision
-    ends the flow with the dedicated ``negotiation-decision`` log, no accept sent). The flow keeps
-    the message handling: ``negotiation_params`` remains the Task-T prompt refill input of the
-    accept message and ``negotiation_kind`` keeps hinting the propose view's kind resolution (the
-    flag wins, else the propose's ``templateUri`` dispatches on the received message). Without a provider, the
-    legacy scripted arguments keep the pre-integration-point behavior unchanged: when both
-    ``negotiation_params`` and ``negotiation_answers`` are supplied, the flow internally builds the
-    demo ``ScriptedNegotiationResponseProvider`` around them (back-compat shim); without them an
-    INPUT_REQUIRED propose is logged as unhandled and the propose stays unanswered. The default
-    flow (no INPUT_REQUIRED) is unchanged.
+    Negotiation response integration point (plan R3/R4): when the server answers the initial request
+    with a pre-task Negotiation-T propose Message, HOW to answer is decided by
+    ``negotiation_response_provider`` (``NegotiationResponseProvider.respond`` — the client-side
+    INTEGRATION POINT). Supplying a provider replaces the scripted answer derivation entirely:
+    ``negotiation_answers`` is not consulted and the accept content comes from the provider's
+    decision (a reject/abort decision ends the flow with the dedicated ``negotiation-decision``
+    log, no accept sent). The flow keeps the message handling: ``negotiation_params`` remains the
+    Task-T prompt refill input of the accept message and ``negotiation_kind`` keeps hinting the
+    propose view's kind resolution (the flag wins, else the propose's ``templateUri`` dispatches on
+    the received message). Without a provider, the legacy scripted arguments keep the
+    pre-integration-point behavior unchanged: when both ``negotiation_params`` and
+    ``negotiation_answers`` are supplied, the flow internally builds the demo
+    ``ScriptedNegotiationResponseProvider`` around them (back-compat shim); without them a propose
+    is logged as unhandled and the propose stays unanswered. The plain flow (no propose) is
+    unchanged.
 
     Pipeline and its logged boundaries:
       1. raw natural-language input                            -> ``[client] input-raw``
@@ -921,20 +908,19 @@ async def run_client_flow(
       3. A2A SDK ``send_message`` to the server                -> ``[client] a2a-send-message``
       4. each received A2A event, as raw JSON                 -> ``[client] a2a-event`` (SSE) /
                                                                    ``[client] webhook-event`` (webhook)
-      5. Negotiation round trip: when the server answers INPUT_REQUIRED with a Negotiation-T
-         propose and a negotiation response provider is in place, resolve the negotiation kind (the
-         explicit flag, else the propose's ``templateUri`` — dispatch on the received message), ask the
-         provider for the decision on the propose view, regenerate the Task-T prompt from the
-         filled parameters, render the Negotiation-T accept of that type for the parsed session
-         from the decision (from typed data, or from a natural-language rendering plus one
-         extraction LLM call), and re-send over a second request
+      5. Negotiation round trip: when the server answers with a pre-task Negotiation-T propose and a
+         negotiation response provider is in place, resolve the negotiation kind (the explicit flag,
+         else the propose's ``templateUri`` — dispatch on the received message), ask the provider for
+         the decision on the propose view, regenerate the Task-T prompt from the filled parameters,
+         render the Negotiation-T accept of that type for the parsed session from the decision
+         (from a natural-language rendering plus one extraction LLM call), and re-send over a
+         second request; the server creates the task when that accept validates
                                                             -> ``[client] negotiation-accept`` /
                                                                ``[client] a2a-send-message``
                                                                (phase=continuation)
 
     Without a provider (or with a propose carrying no parseable session context, or resolving to no
-    negotiation kind) an INPUT_REQUIRED propose is logged as unhandled and the propose stays
-    unanswered.
+    negotiation kind) a propose is logged as unhandled and the propose stays unanswered.
 
     Message-body convention:
       * text part                 -> task name (request metadata)
@@ -1043,25 +1029,24 @@ async def run_client_flow(
             log_sink=log_sink,
         )
 
-    # (5) negotiation continuation: answer the server's INPUT_REQUIRED propose with the accept.
-    # SSE-only: the webhook driver answers the propose inline inside its event loop (the accept send
-    # with the endpoint re-registration happens there).
+    # (5) negotiation continuation: answer the server's pre-task propose Message with the accept.
+    # SSE-only: the webhook driver answers the propose from the initial RPC reply inside its flow.
     if transport != TRANSPORT_WEBHOOK:
-        input_required_event = _find_negotiation_input_required(normalized_events)
-        if input_required_event is not None and (negotiation_provider is None or negotiation_params is None):
+        propose_event = _find_negotiation_propose(normalized_events)
+        if propose_event is not None and (negotiation_provider is None or negotiation_params is None):
             if log_sink is not None:
                 log_sink(
                     format_stage_log(
                         role="client",
                         stage="negotiation-unhandled",
                         detail=(
-                            "Negotiation-T INPUT_REQUIRED received; no negotiation answers supplied, "
+                            "Negotiation-T propose received; no negotiation answers supplied, "
                             "the propose stays unanswered"
                         ),
                     )
                 )
-        elif input_required_event is not None and negotiation_provider is not None and negotiation_params is not None:
-            metadata = input_required_event.get("metadata")
+        elif propose_event is not None and negotiation_provider is not None and negotiation_params is not None:
+            metadata = propose_event.get("metadata")
             session = _parse_negotiation_context(metadata) if isinstance(metadata, dict) else None
             plan = _plan_negotiation_accept(
                 negotiation_response_provider=negotiation_provider,
@@ -1077,10 +1062,9 @@ async def run_client_flow(
                     a2a_client=a2a_client,
                     initial_input=initial_input,
                     session=session,
-                    task_id=_first_task_id(normalized_events),
-                    context_id=str(input_required_event.get("context_id", "")),
+                    context_id=str(propose_event.get("context_id", "")),
                     plan=plan,
-                                negotiation_params=negotiation_params,
+                    negotiation_params=negotiation_params,
                     normalized_events=normalized_events,
                     artifact_count=artifact_count,
                     max_artifacts=max_artifacts,

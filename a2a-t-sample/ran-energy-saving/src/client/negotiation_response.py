@@ -26,7 +26,7 @@ from client.scenario_data import (
 
 @dataclass(frozen=True, slots=True)
 class NegotiationProposeView:
-    """What the flow observed from one INPUT_REQUIRED propose, handed to the provider.
+    """What the flow observed from one pre-task propose Message, handed to the provider.
 
     The A2A-T message carries no structured per-type propose content — only the propose's
     ``templateUri`` and its rendered text in the status metadata (plus the session context the
@@ -72,8 +72,8 @@ class NegotiationDecision:
 class NegotiationResponseProvider(Protocol):
     """INTEGRATION POINT (client): decide how to answer a negotiation propose.
 
-    The client flow calls this integration point once the server answers the initial task request with an
-    INPUT_REQUIRED Negotiation-T propose: ``propose`` is the lightweight
+    The client flow calls this integration point once the server answers the initial task request with a
+    pre-task Negotiation-T propose Message: ``propose`` is the lightweight
     :class:`NegotiationProposeView` observed from the message (negotiation kind, template URI, rendered
     text) and ``session`` the parsed :class:`NegotiationContext` of the server's session. The
     implementation returns the :class:`NegotiationDecision` — accept (with the per-type answer

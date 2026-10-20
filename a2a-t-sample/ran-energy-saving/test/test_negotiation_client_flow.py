@@ -2,7 +2,7 @@
 
 Drives ``run_client_flow`` against a scripted fake a2a client (real protobuf StreamResponse events)
 and a fake prompt client: initial phase sends the Task-T prompt and receives the Negotiation-T propose on
-INPUT_REQUIRED, the continuation re-sends the filled Task-T prompt together with the Negotiation-T accept and
+a pre-task propose Message, the continuation re-sends the filled Task-T prompt together with the Negotiation-T accept and
 consumes the UC1 result; the default path stays single-round and its stage logs are pinned. The
 accept generation covers all three negotiation types dispatched on the propose's ``templateUri``
 (the explicit kind flag wins when supplied) over both channels: from-data (typed content, zero LLM
@@ -222,25 +222,28 @@ def _artifact_event() -> StreamResponse:
     )
 
 
+def _propose_event(metadata: dict[str, object] | None = None) -> StreamResponse:
+    """Build the standalone pre-task propose Message (no task id, same context id)."""
+    message = Message(context_id=_CONTEXT_ID, role=Role.ROLE_AGENT)
+    message.message_id = str(uuid.uuid4())
+    message.parts.add(text="Additional information is required before the energy saving task can start")
+    for key, value in (metadata or {}).items():
+        message.metadata[key] = value
+    return StreamResponse(message=message)
+
+
 def _initial_events(*, metadata: dict[str, object] | None = None) -> list[StreamResponse]:
-    """Round-1 script: the SUBMITTED Task event, then INPUT_REQUIRED carrying the propose."""
-    return [
-        _task_event(TaskState.TASK_STATE_SUBMITTED),
-        _status_update(
-            state=TaskState.TASK_STATE_INPUT_REQUIRED,
-            text="Additional information is required to start the energy saving task",
-            metadata=metadata,
-        ),
-    ]
+    """Initial script: the pre-task propose Message only — no task exists yet."""
+    return [_propose_event(metadata)]
 
 
 def _continuation_events() -> list[StreamResponse]:
-    """Round-2 script: WORKING steps, the intent report artifact, then COMPLETED."""
+    """Continuation script: the task is created, WORKING steps, then the intent report artifact."""
     return [
+        _task_event(TaskState.TASK_STATE_SUBMITTED),
         _status_update(state=TaskState.TASK_STATE_WORKING, text="progress step 1"),
         _status_update(state=TaskState.TASK_STATE_WORKING, text="progress step 2"),
         _artifact_event(),
-        _status_update(state=TaskState.TASK_STATE_COMPLETED, text="Energy saving task completed"),
     ]
 
 
@@ -295,10 +298,10 @@ def _stage_names(logs: list[str]) -> list[str]:
     return [line[len(prefix) :].split(":", 1)[0] for line in logs if line.startswith(prefix)]
 
 
-# --- negotiation round trip: propose -> filled prompt + accept -> COMPLETED ------------------
+# --- negotiation round trip: propose -> filled prompt + accept -> task runs --------------------
 
 
-def test_negotiation_round_trip_answers_the_propose_and_completes() -> None:
+def test_negotiation_round_trip_answers_the_propose_and_the_task_stays_working() -> None:
     propose_metadata = _propose_metadata()
     session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
     prompt_client = _ScriptedPromptClient()
@@ -321,7 +324,8 @@ def test_negotiation_round_trip_answers_the_propose_and_completes() -> None:
     assert set(_request_metadata(initial_request)) == {TASK_T_EXTENSION_URI, TEMPLATE_URI_METADATA_KEY}
 
     accept_request, accept_context = a2a_client.calls[1]
-    assert accept_request.message.task_id == _TASK_ID
+    # The accept is a pre-task message: same context, no task id.
+    assert accept_request.message.task_id == ""
     assert accept_request.message.context_id == _CONTEXT_ID
     assert accept_request.message.role == Role.ROLE_USER
     assert accept_request.message.parts[0].text == "create ran energy saving task"
@@ -358,18 +362,18 @@ def test_negotiation_round_trip_answers_the_propose_and_completes() -> None:
     assert accept_session.round == 1
     assert accept_session.performative == NegotiationPerformative.ACCEPT
 
-    # The consumed stream spans both rounds and closes with the COMPLETED state.
+    # The propose is a Message; the continuation creates the task and ends on the report artifact
+    # without a terminal state (the task stays WORKING).
+    assert any(event["kind"] == "message" for event in events)
     assert _event_states(events) == [
         "TASK_STATE_SUBMITTED",
-        "TASK_STATE_INPUT_REQUIRED",
         "TASK_STATE_WORKING",
         "TASK_STATE_WORKING",
-        "TASK_STATE_COMPLETED",
     ]
     assert any(event["kind"] == "artifact" for event in events)
 
 
-def test_accept_reuses_the_task_and_context_ids_of_the_initial_request() -> None:
+def test_accept_reuses_the_context_id_of_the_propose_message() -> None:
     prompt_client = _ScriptedPromptClient()
     a2a_client = _ScriptedA2AClient([_initial_events(metadata=_propose_metadata()), _continuation_events()])
 
@@ -382,20 +386,19 @@ def test_accept_reuses_the_task_and_context_ids_of_the_initial_request() -> None
         )
     )
 
-    input_required = [event for event in events if event.get("state") == "TASK_STATE_INPUT_REQUIRED"][0]
-    assert input_required["context_id"] == _CONTEXT_ID
-    assert input_required["metadata"][NEGOTIATION_T_EXTENSION_URI]
-    # The accept request carries exactly the initial identity (task id from any initial-phase event,
-    # context id from the INPUT_REQUIRED status event).
+    propose = [event for event in events if event.get("kind") == "message"][0]
+    assert propose["context_id"] == _CONTEXT_ID
+    assert propose["metadata"][NEGOTIATION_T_EXTENSION_URI]
+    # The accept starts a new task in the propose's context: context id only, no task id.
     accept_request = a2a_client.calls[1][0]
-    assert accept_request.message.task_id == input_required["task_id"]
-    assert accept_request.message.context_id == input_required["context_id"]
+    assert accept_request.message.task_id == ""
+    assert accept_request.message.context_id == propose["context_id"]
 
 
-# --- INPUT_REQUIRED without negotiation answers / default path -------------------------------
+# --- propose without negotiation answers / default path ---------------------------------------
 
 
-def test_input_required_without_answers_is_logged_unhandled_and_stays_on_round_1() -> None:
+def test_propose_without_answers_is_logged_unhandled_and_stays_on_round_1() -> None:
     prompt_client = _ScriptedPromptClient()
     a2a_client = _ScriptedA2AClient([_initial_events(metadata=_propose_metadata())])
 
@@ -405,7 +408,7 @@ def test_input_required_without_answers_is_logged_unhandled_and_stays_on_round_1
     assert len(a2a_client.calls) == 1
     assert prompt_client.accept_from_text_calls == []
     assert prompt_client.from_data_calls == []
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]
     assert any("negotiation-unhandled" in line for line in logs)
 
 
@@ -428,7 +431,7 @@ def test_malformed_negotiation_context_is_logged_unhandled_and_stays_on_round_1(
     assert len(a2a_client.calls) == 1
     assert prompt_client.accept_from_text_calls == []
     assert prompt_client.from_data_calls == []
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "malformed/missing session context" in unhandled_logs[0]
@@ -527,7 +530,8 @@ def test_target_propose_answers_with_the_typed_target_accept(_offline_env: Path)
     assert accept_session.id == session_id
     assert accept_session.round == 1
     assert accept_session.performative == NegotiationPerformative.ACCEPT
-    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    assert any(event["kind"] == "artifact" for event in events)
+    assert "TASK_STATE_COMPLETED" not in _event_states(events)
     accept_logs = [line for line in logs if line.startswith("[client] negotiation-accept:")]
     assert len(accept_logs) == 1
     assert "Negotiation-T/target-negotiation/accept-reject/v1" in accept_logs[0]
@@ -563,7 +567,8 @@ def test_feasibility_propose_answers_with_the_typed_feasibility_accept(_offline_
     assert accept_uri == FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI
     assert accept_session.round == 1
     assert accept_session.performative == NegotiationPerformative.ACCEPT
-    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    assert any(event["kind"] == "artifact" for event in events)
+    assert "TASK_STATE_COMPLETED" not in _event_states(events)
 
 
 @pytest.mark.parametrize(
@@ -750,14 +755,23 @@ def test_malformed_context_degrades_to_unhandled_with_a_kind_flag_too(_offline_e
 
 def test_status_event_surfaces_the_message_metadata_and_context_id() -> None:
     event = normalize_event(
-        _status_update(state=TaskState.TASK_STATE_INPUT_REQUIRED, text="need more", metadata={"key": "value"})
+        _status_update(state=TaskState.TASK_STATE_WORKING, text="need more", metadata={"key": "value"})
     )
 
     assert event["kind"] == "status"
     assert event["task_id"] == _TASK_ID
     assert event["context_id"] == _CONTEXT_ID
-    assert event["state"] == "TASK_STATE_INPUT_REQUIRED"
+    assert event["state"] == "TASK_STATE_WORKING"
     assert event["text"] == "need more"
+    assert event["metadata"] == {"key": "value"}
+
+
+def test_message_event_surfaces_the_metadata_and_context_id() -> None:
+    event = normalize_event(_propose_event({"key": "value"}))
+
+    assert event["kind"] == "message"
+    assert event["context_id"] == _CONTEXT_ID
+    assert event["text"].startswith("Additional information is required")
     assert event["metadata"] == {"key": "value"}
 
 
@@ -964,7 +978,8 @@ def test_injected_provider_replaces_the_scripted_accept_end_to_end(_offline_env:
     assert prompt_client.accept_from_text_calls[0][0] == "Accept. 1. region：Custom filled region；"
     # The Task-T prompt refill remains the flow's message construction fed by the caller.
     assert prompt_client.from_data_calls == [(_NEGOTIATION_PARAMS, ENERGY_SAVING_TEMPLATE_URI)]
-    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    assert any(event["kind"] == "artifact" for event in events)
+    assert "TASK_STATE_COMPLETED" not in _event_states(events)
 
 
 def test_reject_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_env: Path) -> None:
@@ -992,9 +1007,9 @@ def test_reject_decision_logs_negotiation_decision_and_stays_on_round_1(_offline
     assert decision_logs == [
         "[client] negotiation-decision: reject (not implemented in this demo; see the sample README)"
     ]
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
-    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]
+    assert summary_lines == ["[client] stream-completed: events=1 artifacts=0"]
 
 
 def test_abort_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_env: Path) -> None:
@@ -1019,9 +1034,9 @@ def test_abort_decision_logs_negotiation_decision_and_stays_on_round_1(_offline_
     assert prompt_client.accept_from_text_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == ["[client] negotiation-decision: abort (not implemented in this demo; see the sample README)"]
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
-    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0"]
+    assert summary_lines == ["[client] stream-completed: events=1 artifacts=0"]
 
 
 def test_target_accept_missing_confirmed_intent_is_logged_and_stays_unhandled(_offline_env: Path) -> None:
@@ -1046,8 +1061,7 @@ def test_target_accept_missing_confirmed_intent_is_logged_and_stays_unhandled(_o
 
     assert len(a2a_client.calls) == 1
     assert prompt_client.accept_from_text_calls == []
-    assert prompt_client.accept_from_text_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert len(decision_logs) == 1
     assert "missing confirmed_intent" in decision_logs[0]
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]

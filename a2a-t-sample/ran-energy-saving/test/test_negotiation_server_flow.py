@@ -1,11 +1,11 @@
 """Offline tests of the server-side negotiation flow of the ran-energy-saving demo.
 
 Drives ``execute_server_flow`` with the real A2A-T facades, the scripted mock LLM and a real
-a2a-sdk ``EventQueue``: initial phase (missing region) answers SUBMITTED + INPUT_REQUIRED carrying the
-Negotiation-T information propose metadata, the continuation streams the UC1 result and
-closes with COMPLETED, a failure without slot-named errors keeps the plain REJECTED branch, and
-the target/feasibility content-validation failures propose their per-type Negotiation-T content
-over both generation channels (from-data without and from-text with one extraction LLM call).
+a2a-sdk ``EventQueue``: initial phase (missing region) answers a standalone Negotiation-T propose
+Message carrying the information propose metadata (no task is created), the continuation creates the
+task, streams the UC1 result and stays WORKING (no terminal state), a failure without slot-named
+errors keeps the plain REJECTED branch, and the target/feasibility content-validation failures
+propose their per-type Negotiation-T content with one extraction LLM call.
 The task-execution seam is covered too: the demo service satisfies the ``TaskExecutionService``
 Protocol, an injected fake replaces the demo behavior end-to-end, and an execution failure emits
 FAILED with the generic text.
@@ -24,7 +24,15 @@ import pytest
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.server.events.event_queue import EventQueueLegacy, QueueShutDown
-from a2a.types import Role, SendMessageRequest, Task, TaskArtifactUpdateEvent, TaskState, TaskStatusUpdateEvent
+from a2a.types import (
+    Message,
+    Role,
+    SendMessageRequest,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
 from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import (
@@ -69,11 +77,10 @@ from client.scenario_data import (
 from common import mock_llm
 from common.llm_logger import install_llm_logger
 from server.constants_data import (
-    COMPLETED_MESSAGE,
     ENERGY_SAVING_REGION,
-    INPUT_REQUIRED_MESSAGE,
     NEGOTIATION_RELATIONSHIP,
     NEGOTIATION_T_EXTENSION_URI,
+    PROPOSE_MESSAGE,
     TASK_T_EXTENSION_URI,
     get_energy_saving_intent_report,
     get_energy_saving_progress_steps,
@@ -206,6 +213,13 @@ def _message_metadata(event: object) -> dict[str, object]:
     return MessageToDict(status.message.metadata)
 
 
+def _event_metadata(event: object) -> dict[str, object]:
+    """Return the metadata map of a standalone Message or of an event's status message."""
+    if isinstance(event, Message):
+        return MessageToDict(event.metadata)
+    return _message_metadata(event)
+
+
 def _missing_region_prompt(client: A2ATClient, env_path: Path) -> MetadataContent:
     """Generate the initial Task-T prompt (missing region) through the real client facade."""
     return client.generate_task_prompt_from_text(
@@ -233,7 +247,7 @@ def _run_two_phase_flow(env_path: Path) -> tuple[list[object], list[object], dic
             prompt_server=server,
         )
     )
-    propose_context = dict(_message_metadata(initial_events[-1])[NEGOTIATION_CONTEXT_METADATA_KEY])
+    propose_context = dict(_event_metadata(initial_events[-1])[NEGOTIATION_CONTEXT_METADATA_KEY])
 
     # Continuation: the client answers with the accept prompt and the filled Task-T prompt.
     accept_context = NegotiationContext(
@@ -291,7 +305,7 @@ class _SlotlessRejectingPromptServer:
 # --- initial phase: missing params -> Negotiation-T propose on INPUT_REQUIRED ---------------------
 
 
-def test_round_1_missing_region_answers_input_required_carrying_the_propose(_offline_env: Path) -> None:
+def test_round_1_missing_region_answers_with_a_propose_message(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
     client = A2ATClient(env_path=_offline_env)
     prompt = _missing_region_prompt(client, _offline_env)
@@ -306,12 +320,13 @@ def test_round_1_missing_region_answers_input_required_carrying_the_propose(_off
         )
     )
 
-    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
-    input_required = events[-1]
-    assert isinstance(input_required, TaskStatusUpdateEvent)
-    # The status text part stays a short human line; the propose travels in the metadata.
-    assert input_required.status.message.parts[0].text == INPUT_REQUIRED_MESSAGE
-    metadata = _message_metadata(input_required)
+    # The negotiation is pre-task: one standalone propose Message, no SUBMITTED / Task event.
+    assert len(events) == 1
+    propose = events[0]
+    assert isinstance(propose, Message)
+    # The text part stays a short human line; the propose travels in the metadata.
+    assert propose.parts[0].text == PROPOSE_MESSAGE
+    metadata = _event_metadata(propose)
     assert NEGOTIATION_T_EXTENSION_URI in metadata
     assert metadata[TEMPLATE_URI_METADATA_KEY] == "Negotiation-T/information-negotiation/propose/v1"
     context = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
@@ -339,7 +354,7 @@ def _kind_initial_metadata(client: A2ATClient, env_path: Path, kind: str) -> dic
 # --- initial phase: per-type proposes (target / feasibility) ------------------------------------
 
 
-def test_round_1_target_failure_answers_input_required_carrying_the_target_propose(_offline_env: Path) -> None:
+def test_round_1_target_failure_answers_with_a_target_propose_message(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
     metadata = _kind_initial_metadata(
         A2ATClient(env_path=_offline_env), _offline_env, scenario_data.NEGOTIATION_KIND_TARGET
@@ -349,11 +364,11 @@ def test_round_1_target_failure_answers_input_required_carrying_the_target_propo
         _run_flow(metadata=metadata, prompt_server=A2ATServer(env_path=_offline_env), env_path=_offline_env)
     )
 
-    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
-    input_required = events[-1]
-    assert isinstance(input_required, TaskStatusUpdateEvent)
-    assert input_required.status.message.parts[0].text == INPUT_REQUIRED_MESSAGE
-    metadata = _message_metadata(input_required)
+    assert len(events) == 1
+    propose = events[0]
+    assert isinstance(propose, Message)
+    assert propose.parts[0].text == PROPOSE_MESSAGE
+    metadata = _event_metadata(propose)
     assert NEGOTIATION_T_EXTENSION_URI in metadata
     assert metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_PROPOSE_URI
     context = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
@@ -374,7 +389,7 @@ def test_round_1_target_failure_answers_input_required_carrying_the_target_propo
     ]
 
 
-def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibility_propose(
+def test_round_1_feasibility_failure_answers_with_a_feasibility_propose_message(
     _offline_env: Path,
 ) -> None:
     mock_llm.reset_call_log()
@@ -386,8 +401,10 @@ def test_round_1_feasibility_failure_answers_input_required_carrying_the_feasibi
         _run_flow(metadata=metadata, prompt_server=A2ATServer(env_path=_offline_env), env_path=_offline_env)
     )
 
-    assert _event_states(events) == [TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_INPUT_REQUIRED]
-    metadata = _message_metadata(events[-1])
+    assert len(events) == 1
+    propose = events[0]
+    assert isinstance(propose, Message)
+    metadata = _event_metadata(propose)
     assert NEGOTIATION_T_EXTENSION_URI in metadata
     assert metadata[TEMPLATE_URI_METADATA_KEY] == FEASIBILITY_NEGOTIATION_PROPOSE_URI
     context = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
@@ -446,29 +463,26 @@ def test_feasibility_propose_text_renders_the_infeasibility_details(_offline_env
         assert f"{name}：{value}" in text
 
 
-# --- continuation: validate -> progress -> artifact -> COMPLETED -----------------
+# --- continuation: create task -> validate -> progress -> artifact (stays WORKING) ------------
 
 
-def test_round_2_continuation_streams_the_uc1_result_and_completes(_offline_env: Path) -> None:
+def test_round_2_continuation_creates_the_task_and_keeps_it_working(_offline_env: Path) -> None:
     mock_llm.reset_call_log()
     _, continuation_events, _ = _run_two_phase_flow(_offline_env)
 
     expected_steps = get_energy_saving_progress_steps()
-    assert _event_states(continuation_events) == [TaskState.TASK_STATE_WORKING] * len(expected_steps) + [
-        TaskState.TASK_STATE_COMPLETED
-    ]
-    # No SUBMITTED event on the continuation round.
-    assert not any(isinstance(event, Task) for event in continuation_events)
-    # One artifact event, arriving between the last WORKING step and COMPLETED.
+    assert _event_states(continuation_events) == [TaskState.TASK_STATE_SUBMITTED] + [
+        TaskState.TASK_STATE_WORKING
+    ] * len(expected_steps)
+    # The task is created when the accept validates (the negotiation itself was pre-task).
+    assert any(isinstance(event, Task) for event in continuation_events)
+    # One artifact event, the last event: no terminal state follows it.
     artifacts = [event for event in continuation_events if isinstance(event, TaskArtifactUpdateEvent)]
     assert len(artifacts) == 1
     artifact_index = continuation_events.index(artifacts[0])
+    assert artifact_index == len(continuation_events) - 1
     assert _event_state(continuation_events[artifact_index - 1]) == TaskState.TASK_STATE_WORKING
-    assert _event_state(continuation_events[artifact_index + 1]) == TaskState.TASK_STATE_COMPLETED
     assert artifacts[0].artifact.name == "energy saving intent report"
-    completed = continuation_events[-1]
-    assert isinstance(completed, TaskStatusUpdateEvent)
-    assert completed.status.message.parts[0].text == COMPLETED_MESSAGE
 
 
 def test_two_round_sequence_pins_the_mock_call_log(_offline_env: Path) -> None:
@@ -770,7 +784,6 @@ def test_propose_carries_the_relationship_only_for_multiple_items(_offline_env: 
             event_queue=queue,
             prompt_server=A2ATServer(env_path=_offline_env),
             missing_items=items,
-            task_id=request_context.task_id or "",
             context_id=request_context.context_id or "",
             log_sink=None,
         )
@@ -779,10 +792,10 @@ def test_propose_carries_the_relationship_only_for_multiple_items(_offline_env: 
     single = asyncio.run(_emit([_missing_item("region")]))
     multiple = asyncio.run(_emit([_missing_item("region"), _missing_item("energySavingGoal")]))
 
-    assert _event_states(single) == [TaskState.TASK_STATE_INPUT_REQUIRED]
-    assert _event_states(multiple) == [TaskState.TASK_STATE_INPUT_REQUIRED]
-    single_text = str(_message_metadata(single[-1])[NEGOTIATION_T_EXTENSION_URI])
-    multiple_text = str(_message_metadata(multiple[-1])[NEGOTIATION_T_EXTENSION_URI])
+    assert len(single) == 1 and isinstance(single[0], Message)
+    assert len(multiple) == 1 and isinstance(multiple[0], Message)
+    single_text = str(_event_metadata(single[-1])[NEGOTIATION_T_EXTENSION_URI])
+    multiple_text = str(_event_metadata(multiple[-1])[NEGOTIATION_T_EXTENSION_URI])
     assert NEGOTIATION_RELATIONSHIP not in single_text
     assert NEGOTIATION_RELATIONSHIP in multiple_text
 
