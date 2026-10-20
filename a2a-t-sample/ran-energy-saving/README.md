@@ -403,8 +403,8 @@ message; the SDK provides the matching generation methods
 ## 5. Notes for Custom Agent Development
 
 The **Side** column identifies the agent responsible for each component. The client team is
-responsible for the rows marked `client` and `both`; the rows marked `server` describe what the
-counterpart replaces in a real system.
+responsible for the rows marked `client` and `both`; the server agent is responsible for the rows
+marked `server`.
 
 | Demo piece | Side | What it does in the demo | Keep or replace |
 | --- | --- | --- | --- |

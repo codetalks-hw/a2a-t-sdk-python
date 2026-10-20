@@ -364,8 +364,8 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 
 ## 5. 自定义 Agent 开发说明
 
-**归属**列标明各组件由哪一端负责。client 团队负责标注为 client 与 both 的行；标注为 server 的行
-说明对端为真实系统时需要替换的内容。
+**归属**列标明各组件由哪一端负责。client 团队负责标注为 client 与 both 的行；server agent 负责
+标注为 server 的行。
 
 | demo 组成 | 归属 | demo 中的作用 | 保留还是替换 |
 | --- | --- | --- | --- |
