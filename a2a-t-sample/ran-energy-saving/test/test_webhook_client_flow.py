@@ -1,22 +1,20 @@
 """Offline tests of the webhook transport flow (v3) of the ran-energy-saving demo.
 
 The powerful pattern: a REAL embedded ``WebhookReceiver`` (ephemeral port, in-process HTTP only)
-plus a fake a2a client whose ``send_message`` records every request (the initial send must carry
-``return_immediately=True`` and the inline push config; the accept must carry NO inline config) and
-whose side effect POSTs the scripted StreamResponse-shaped bodies to the receiver URL with the
-registered token header — simulating the server's push sender, so the ENTIRE webhook pipeline
-(normalize → queue → flow) runs without the server stack. The fake
-``create_task_push_notification_config`` records the accept endpoint re-registration
-(R4) with the same url/token, and the call order send→register→send is pinned.
+plus a fake a2a client whose ``send_message`` records every request (both the initial send and the
+pre-task accept carry ``return_immediately=True`` and the inline push config) and whose side effect
+POSTs the scripted StreamResponse-shaped task bodies to the receiver URL with the registered token
+header — simulating the server's push sender, so the ENTIRE webhook pipeline (normalize → queue →
+flow) runs without the server stack. A pre-task propose Message is returned as the RPC reply and is
+never pushed (the push sender only carries task events).
 
 Covered: the default scenario (artifact end, no accept sent, summary counts WEBHOOK-received events
-only — the RPC reply is logged separately per R6), the 3-type negotiation matrix over the fromData
-channel (per-type accept content + re-registration + COMPLETED end), the target fromText spot
-check, the unhandled/malformed INPUT_REQUIRED degradations (identical to SSE), the terminal-state
-end signals (a REJECTED in either phase ends promptly with ``end=<state>`` on the summary — no idle
-hang, final fix), the idle-timeout backstop (R5), the
-``normalize_webhook_payload``/``normalize_event`` parity, and the server
-assembly (push store/sender wired unconditionally into ``build_rest_app``).
+only — the RPC reply is logged separately per R6), the 3-type negotiation matrix (propose reply →
+inline-config accept → task stays WORKING), the target accept spot check, the unhandled/malformed
+propose degradations (identical to SSE), the terminal-state end signals (a REJECTED in either phase
+ends promptly with ``end=<state>`` on the summary — no idle hang, final fix), the idle-timeout
+backstop (R5), the ``normalize_webhook_payload``/``normalize_event`` parity, and the server
+assembly (push store/sender assembled unconditionally into ``build_rest_app``).
 """
 
 from __future__ import annotations
@@ -61,13 +59,6 @@ from a2a_t.core.standard_templates import (
     TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from a2a_t.negotiation.content.enums import NegotiationConclusion
-from a2a_t.negotiation.content.models import (
-    FeasibilityEndingContent,
-    InformationEndingContent,
-    NegotiationEndingData,
-    TargetEndingContent,
-)
 from google.protobuf.json_format import MessageToDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -83,8 +74,6 @@ from client.negotiation_response import (
     NegotiationResponseProvider,
 )
 from client.scenario_data import (
-    CHANNEL_DATA,
-    CHANNEL_TEXT,
     ENERGY_SAVING_TEMPLATE_URI,
     NEGOTIATION_KIND_TARGET,
     negotiation_feasibility_summary,
@@ -128,7 +117,6 @@ class _ScriptedPromptClient:
     def __init__(self) -> None:
         self.from_text_calls: list[tuple[str, str]] = []
         self.from_data_calls: list[tuple[dict[str, object], str]] = []
-        self.accept_calls: list[NegotiationEndingData] = []
         self.accept_from_text_calls: list[tuple[str, NegotiationContext, str]] = []
 
     def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent:
@@ -162,11 +150,6 @@ class _ScriptedPromptClient:
             ),
         )
 
-    def generate_negotiation_accept_prompt_from_data(
-        self, data: NegotiationEndingData, template_uri: str
-    ) -> MetadataContent:
-        self.accept_calls.append(data)
-        return self._accept_result(str(template_uri), data.context)
 
     def generate_negotiation_accept_prompt_from_text(
         self, text: str, context: NegotiationContext, template_uri: str
@@ -178,12 +161,10 @@ class _ScriptedPromptClient:
 class _WebhookFakeA2AClient:
     """Fake a2a client simulating the server side over the REAL receiver.
 
-    ``send_message`` records the request (and its call context), POSTs the round's scripted
-    StreamResponse-shaped bodies to the receiver URL with the registered token header (the push
-    sender's behavior), and yields the single non-streaming RPC reply — the first Task of the
-    round, per ``return_immediately`` semantics (R6: the reply also gets pushed, so it overlaps
-    with the webhook events). ``create_task_push_notification_config`` records the accept
-    re-registration call. ``call_log`` pins the send→register→send order.
+    ``send_message`` records the request (and its call context), POSTs the round's scripted task
+    bodies to the receiver URL with the registered token header (the push sender's behavior), and
+    yields the single non-streaming RPC reply — the first Task of the round, or a pre-task propose
+    Message (which is never pushed). ``call_log`` pins the send order.
     """
 
     def __init__(
@@ -211,6 +192,11 @@ class _WebhookFakeA2AClient:
         script = self._rounds[len(self.send_calls) - 1]
         reply: StreamResponse | None = None
         for event in script:
+            if event.HasField("message"):
+                # A pre-task propose Message is the RPC reply; the push sender never pushes Messages.
+                if reply is None:
+                    reply = StreamResponse(message=event.message)
+                continue
             # The script events are StreamResponse-shaped; MessageToDict(event) is exactly the
             # body the server's push sender POSTs (MessageToDict(to_stream_response(event))).
             body = MessageToDict(event)
@@ -273,7 +259,7 @@ def _agent_message(*, text: str, metadata: dict[str, object] | None = None) -> M
 
 
 def _status_update(*, state: TaskState, text: str = "", metadata: dict[str, object] | None = None) -> StreamResponse:
-    """Build one streamed status update event (the wire shape the a2a-sdk client yields)."""
+    """Build one streamed status update event (the message shape the a2a-sdk client yields)."""
     return StreamResponse(
         status_update=TaskStatusUpdateEvent(
             task_id=_TASK_ID,
@@ -309,25 +295,28 @@ def _default_initial_script() -> list[StreamResponse]:
     ]
 
 
+def _propose_event(metadata: dict[str, object]) -> StreamResponse:
+    """Build the standalone pre-task propose Message (the RPC reply, never pushed)."""
+    message = Message(context_id=_CONTEXT_ID, role=Role.ROLE_AGENT)
+    message.message_id = str(uuid.uuid4())
+    message.parts.add(text="Additional information is required before the energy saving task can start")
+    for key, value in metadata.items():
+        message.metadata[key] = value
+    return StreamResponse(message=message)
+
+
 def _negotiation_initial_script(metadata: dict[str, object]) -> list[StreamResponse]:
-    """Negotiation initial-phase script pushed via webhook: SUBMITTED Task, then INPUT_REQUIRED propose."""
-    return [
-        _task_event(TaskState.TASK_STATE_SUBMITTED),
-        _status_update(
-            state=TaskState.TASK_STATE_INPUT_REQUIRED,
-            text="Additional information is required to start the energy saving task",
-            metadata=metadata,
-        ),
-    ]
+    """Negotiation initial-phase script: the standalone propose Message only (no task yet)."""
+    return [_propose_event(metadata)]
 
 
 def _negotiation_continuation_script() -> list[StreamResponse]:
-    """Negotiation continuation script pushed via webhook: WORKING steps, artifact, then COMPLETED."""
+    """Negotiation continuation script: the created task, WORKING steps, then the report artifact."""
     return [
+        _task_event(TaskState.TASK_STATE_SUBMITTED),
         _status_update(state=TaskState.TASK_STATE_WORKING, text="progress step 1"),
         _status_update(state=TaskState.TASK_STATE_WORKING, text="progress step 2"),
         _artifact_event(),
-        _status_update(state=TaskState.TASK_STATE_COMPLETED, text="Energy saving task completed"),
     ]
 
 
@@ -339,7 +328,6 @@ async def _run_webhook_scenario(
     negotiation_answers: dict[str, str] | None = None,
     negotiation_kind: str | None = None,
     negotiation_response_provider: NegotiationResponseProvider | None = None,
-    channel: str = CHANNEL_DATA,
     idle_timeout: float = 2.0,
     token: str = _DEMO_TOKEN,
 ) -> tuple[list[dict[str, object]], _WebhookFakeA2AClient, _ScriptedPromptClient, list[str], WebhookReceiver]:
@@ -366,7 +354,6 @@ async def _run_webhook_scenario(
             negotiation_answers=negotiation_answers,
             negotiation_kind=negotiation_kind,
             negotiation_response_provider=negotiation_response_provider,
-            channel=channel,
             env_path=env_path,
             transport="webhook",
             webhook_queue=queue,
@@ -412,7 +399,7 @@ def test_default_scenario_webhook_ends_on_artifact_and_counts_webhook_events(_of
     assert len(events) == 3  # SUBMITTED + WORKING + artifact, all WEBHOOK-received
     assert len(a2a_client.send_calls) == 1  # no accept sent
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
 
     # Initial request carries return_immediately + the inline push config (R2/R4).
     request, context = a2a_client.send_calls[0]
@@ -447,7 +434,7 @@ def test_default_scenario_webhook_ends_on_artifact_and_counts_webhook_events(_of
     ]
 
 
-# --- negotiation matrix: 3 types x webhook (fromData) ------------------------------------------
+# --- negotiation matrix: 3 types x webhook -----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -458,10 +445,10 @@ def test_default_scenario_webhook_ends_on_artifact_and_counts_webhook_events(_of
         (FEASIBILITY_NEGOTIATION_PROPOSE_URI, FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI),
     ],
 )
-def test_negotiation_webhook_round_trip_re_registers_and_completes(
+def test_negotiation_webhook_round_trip_answers_the_propose(
     _offline_env: Path, propose_uri: str, accept_uri: str
 ) -> None:
-    """3-type matrix: INPUT_REQUIRED -> endpoint re-registration (R4) -> accept -> COMPLETED (R5)."""
+    """3-type matrix: propose Message reply -> inline config on the accept -> task runs (no terminal)."""
     propose_metadata = _propose_metadata(template_uri=propose_uri)
     session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
 
@@ -474,26 +461,25 @@ def test_negotiation_webhook_round_trip_re_registers_and_completes(
         )
     )
 
-    # Pushes all delivered; the flow ends on the COMPLETED webhook event.
-    assert a2a_client.push_status_codes == [200] * 6
+    # The propose is the RPC reply (not pushed); the continuation's 4 events are pushed.
+    assert a2a_client.push_status_codes == [200] * 4
     assert _event_states(events) == [
         "TASK_STATE_SUBMITTED",
-        "TASK_STATE_INPUT_REQUIRED",
         "TASK_STATE_WORKING",
         "TASK_STATE_WORKING",
-        "TASK_STATE_COMPLETED",
     ]
+    assert any(event["kind"] == "message" for event in events)
     assert any(event["kind"] == "artifact" for event in events)
 
-    # Order evidence: initial send -> endpoint re-registration -> accept send.
-    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
+    # Order evidence: initial send -> accept send (no endpoint re-registration on a new task).
+    assert a2a_client.call_log == ["send:1", "send:2"]
 
-    # Round-2 request: non-blocking, NO inline config (already registered via the endpoint),
-    # initial identity, per-type accept templateUri, same-round ACCEPT session.
+    # The accept is a new message: inline push config, same context, no task id, per-type
+    # accept templateUri, same-round ACCEPT session.
     accept_request, accept_context = a2a_client.send_calls[1]
     assert accept_request.configuration.return_immediately is True
-    assert not accept_request.configuration.HasField("task_push_notification_config")
-    assert accept_request.message.task_id == _TASK_ID
+    assert accept_request.configuration.HasField("task_push_notification_config")
+    assert accept_request.message.task_id == ""
     assert accept_request.message.context_id == _CONTEXT_ID
     metadata = _request_metadata(accept_request)
     assert metadata[TEMPLATE_URI_METADATA_KEY] == accept_uri
@@ -508,26 +494,17 @@ def test_negotiation_webhook_round_trip_re_registers_and_completes(
         TASK_T_EXTENSION_URI,
         NEGOTIATION_T_EXTENSION_URI,
     }
+    assert a2a_client.register_calls == []
 
-    # Re-registration (R4): same task id, SAME url/token as the initial inline config.
-    registered_task_id, registered_config = a2a_client.register_calls[0]
-    assert registered_task_id == _TASK_ID
-    assert registered_config.url == receiver.url
-    assert registered_config.token == _DEMO_TOKEN
-    reregister_logs = [line for line in logs if line.startswith("[client] webhook-push-reregister:")]
-    assert len(reregister_logs) == 1
-
-    # The accept was generated from typed data (fromData channel) for the proposed type.
+    # The accept goes through the extraction API for the proposed type.
     assert prompt_client.from_data_calls == [(_NEGOTIATION_PARAMS, ENERGY_SAVING_TEMPLATE_URI)]
-    assert len(prompt_client.accept_calls) == 1
-    assert prompt_client.accept_from_text_calls == []
-    assert prompt_client.accept_calls[0].content.conclusion == NegotiationConclusion.ACCEPT
-    assert prompt_client.accept_calls[0].context.round == 1
+    assert len(prompt_client.accept_from_text_calls) == 1
+    assert prompt_client.accept_from_text_calls[0][1].round == 1
 
-    # Summary: 2 webhook events (initial) + 4 (continuation), 1 artifact, terminal COMPLETED end.
+    # Summary: 1 propose reply + 4 continuation events, 1 artifact; the task stays WORKING.
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
-        "[client] stream-completed: events=6 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED"
+        "[client] stream-completed: events=5 artifacts=1 transport=webhook"
     ]
 
 
@@ -541,9 +518,8 @@ def test_information_webhook_accept_carries_the_answer_items(_offline_env: Path)
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, InformationEndingContent)
-    assert [(item.name, item.value) for item in accept_data.content.items] == list(_NEGOTIATION_ANSWERS.items())
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == "Accept. 1. region：Songshanhu Administration Committee；"
 
 
 def test_target_webhook_accept_carries_the_confirmed_intent(_offline_env: Path) -> None:
@@ -558,9 +534,8 @@ def test_target_webhook_accept_carries_the_confirmed_intent(_offline_env: Path) 
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, TargetEndingContent)
-    assert accept_data.content.confirmed_intent == negotiation_target_confirmation(env_path=_offline_env)
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == f"Accept. {negotiation_target_confirmation(env_path=_offline_env)}"
     accept_logs = [line for line in logs if line.startswith("[client] negotiation-accept:")]
     assert "Negotiation-T/target-negotiation/accept-reject/v1" in accept_logs[0]
 
@@ -577,16 +552,15 @@ def test_feasibility_webhook_accept_carries_the_feasibility_summary(_offline_env
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
         )
     )
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, FeasibilityEndingContent)
-    assert accept_data.content.feasibility_summary == negotiation_feasibility_summary(env_path=_offline_env)
+    accept_text = prompt_client.accept_from_text_calls[0][0]
+    assert accept_text == f"Accept. {negotiation_feasibility_summary(env_path=_offline_env)}"
 
 
-# --- target fromText x webhook spot check (D8) ---------------------------------------------------
+# --- target accept x webhook spot check ----------------------------------------------------------
 
 
-def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None:
-    """fromText accept generation works under webhook: rendered text -> extraction API call."""
+def test_target_accept_webhook_spot_check(_offline_env: Path) -> None:
+    """The accept generation works under webhook: rendered text -> extraction API call."""
     _, a2a_client, prompt_client, _logs, _receiver = asyncio.run(
         _run_webhook_scenario(
             rounds=[
@@ -597,11 +571,9 @@ def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None
             negotiation_params=dict(_NEGOTIATION_PARAMS),
             negotiation_answers=dict(_NEGOTIATION_ANSWERS),
             negotiation_kind="target",
-            channel=CHANNEL_TEXT,
         )
     )
 
-    assert prompt_client.accept_calls == []
     assert len(prompt_client.accept_from_text_calls) == 1
     text, context, template_uri = prompt_client.accept_from_text_calls[0]
     assert text == f"Accept. {negotiation_target_confirmation(env_path=_offline_env)}"
@@ -609,8 +581,8 @@ def test_target_from_text_channel_webhook_spot_check(_offline_env: Path) -> None
     assert context.performative == NegotiationPerformative.ACCEPT
     assert template_uri == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
 
-    # Round-2 wire shape unchanged across channels: send -> register -> send, COMPLETED end.
-    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
+    # Message shape: send (propose reply) -> send (accept, inline config).
+    assert a2a_client.call_log == ["send:1", "send:2"]
     accept_request = a2a_client.send_calls[1][0]
     metadata = _request_metadata(accept_request)
     assert metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_ACCEPT_REJECT_URI
@@ -630,12 +602,12 @@ def test_input_required_without_answers_is_unhandled_and_ends_after_the_initial_
 
     assert len(a2a_client.send_calls) == 1
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "no negotiation answers supplied" in unhandled_logs[0]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
-    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0 transport=webhook"]
+    assert summary_lines == ["[client] stream-completed: events=1 artifacts=0 transport=webhook"]
 
 
 def test_malformed_context_is_unhandled_and_ends_after_the_initial_phase_webhook(_offline_env: Path) -> None:
@@ -649,7 +621,7 @@ def test_malformed_context_is_unhandled_and_ends_after_the_initial_phase_webhook
     )
 
     assert len(a2a_client.send_calls) == 1
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     unhandled_logs = [line for line in logs if line.startswith("[client] negotiation-unhandled:")]
     assert len(unhandled_logs) == 1
     assert "malformed/missing session context" in unhandled_logs[0]
@@ -673,7 +645,7 @@ class _RecordingResponseProvider:
 
 
 def test_injected_provider_webhook_replaces_the_scripted_accept_end_to_end(_offline_env: Path) -> None:
-    """A custom accept decision drives the webhook accept: re-register, send, COMPLETED."""
+    """A custom accept decision drives the webhook accept; the task then stays WORKING."""
     propose_metadata = _propose_metadata(template_uri=TARGET_NEGOTIATION_PROPOSE_URI)
     session_id = propose_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"]
     provider = _RecordingResponseProvider(
@@ -699,22 +671,21 @@ def test_injected_provider_webhook_replaces_the_scripted_accept_end_to_end(_offl
     )
     assert provider.sessions[0].id == session_id
 
-    # Order evidence: initial send -> endpoint re-registration -> accept send.
-    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
-    # The typed accept carries the decision's confirmed intent (not the scenario text).
-    assert len(prompt_client.accept_calls) == 1
-    accept_data = prompt_client.accept_calls[0]
-    assert isinstance(accept_data.content, TargetEndingContent)
-    assert accept_data.content.confirmed_intent == "Custom confirmed target"
-    assert _event_states(events)[-1] == "TASK_STATE_COMPLETED"
+    # Order evidence: initial send (propose reply) -> accept send (inline config).
+    assert a2a_client.call_log == ["send:1", "send:2"]
+    # The accept text carries the decision's confirmed intent (not the scenario text).
+    assert len(prompt_client.accept_from_text_calls) == 1
+    assert prompt_client.accept_from_text_calls[0][0] == "Accept. Custom confirmed target"
+    assert any(event["kind"] == "artifact" for event in events)
+    assert "TASK_STATE_COMPLETED" not in _event_states(events)
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
-        "[client] stream-completed: events=6 artifacts=1 transport=webhook end=TASK_STATE_COMPLETED"
+        "[client] stream-completed: events=5 artifacts=1 transport=webhook"
     ]
 
 
 def test_reject_decision_webhook_logs_and_ends_after_the_initial_phase(_offline_env: Path) -> None:
-    """A reject decision over webhook: dedicated log, no re-registration, no accept sent (R5)."""
+    """A reject decision over webhook: dedicated log, no accept sent (R5)."""
     provider = _RecordingResponseProvider(NegotiationDecision(conclusion="reject", reason="policy"))
 
     events, a2a_client, prompt_client, logs, _receiver = asyncio.run(
@@ -728,14 +699,14 @@ def test_reject_decision_webhook_logs_and_ends_after_the_initial_phase(_offline_
 
     assert a2a_client.call_log == ["send:1"]
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     decision_logs = [line for line in logs if line.startswith("[client] negotiation-decision:")]
     assert decision_logs == [
-        "[client] negotiation-decision: reject (not wired in this demo; see the sample README)"
+        "[client] negotiation-decision: reject (not implemented in this demo; see the sample README)"
     ]
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED"]
+    assert [event["kind"] for event in events] == ["message"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
-    assert summary_lines == ["[client] stream-completed: events=2 artifacts=0 transport=webhook"]
+    assert summary_lines == ["[client] stream-completed: events=1 artifacts=0 transport=webhook"]
 
 
 # --- idle timeout backstop (R5) -------------------------------------------------------------------
@@ -782,7 +753,7 @@ def test_initial_phase_rejected_ends_the_flow_promptly_with_no_accept_sent(_offl
     # The answers were supplied, but a terminal REJECTED preempts the negotiation round trip.
     assert len(a2a_client.send_calls) == 1
     assert a2a_client.register_calls == []
-    assert prompt_client.accept_calls == []
+    assert prompt_client.accept_from_text_calls == []
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
         "[client] stream-completed: events=2 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"
@@ -795,7 +766,7 @@ def test_accept_rejected_ends_the_flow_with_the_state_noted(_offline_env: Path) 
         _run_webhook_scenario(
             rounds=[
                 _negotiation_initial_script(_propose_metadata()),
-                # The server pushes REJECTED instead of the normal progress/artifact/COMPLETED.
+                # The server pushes REJECTED instead of the normal progress/artifact flow.
                 [_status_update(state=TaskState.TASK_STATE_REJECTED, text="Prompt validation failed: region")],
             ],
             env_path=_offline_env,
@@ -805,13 +776,13 @@ def test_accept_rejected_ends_the_flow_with_the_state_noted(_offline_env: Path) 
     )
 
     # The accept WAS sent (a genuine accept failure), then REJECTED ended the flow — no hang.
-    assert a2a_client.call_log == ["send:1", "register:1", "send:2"]
+    assert a2a_client.call_log == ["send:1", "send:2"]
     timeout_logs = [line for line in logs if line.startswith("[client] webhook-idle-timeout:")]
     assert timeout_logs == []
-    assert _event_states(events) == ["TASK_STATE_SUBMITTED", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_REJECTED"]
+    assert _event_states(events) == ["TASK_STATE_REJECTED"]
     summary_lines = [line for line in logs if line.startswith("[client] stream-completed:")]
     assert summary_lines == [
-        "[client] stream-completed: events=3 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"
+        "[client] stream-completed: events=2 artifacts=0 transport=webhook end=TASK_STATE_REJECTED"
     ]
 
 
@@ -823,7 +794,7 @@ def test_normalize_webhook_payload_matches_normalize_event_for_every_event_kind(
     propose_metadata = _propose_metadata()
     events = [
         _task_event(TaskState.TASK_STATE_SUBMITTED),
-        _status_update(state=TaskState.TASK_STATE_INPUT_REQUIRED, text="need more", metadata=propose_metadata),
+        _propose_event(propose_metadata),
         _status_update(state=TaskState.TASK_STATE_WORKING, text="working"),
         _artifact_event(),
     ]
@@ -852,10 +823,16 @@ def test_normalize_webhook_payload_artifact_data_and_text_parts() -> None:
 
 
 def test_normalize_webhook_payload_message_body() -> None:
-    message = Message(role=Role.ROLE_AGENT)
+    message = Message(context_id=_CONTEXT_ID, role=Role.ROLE_AGENT)
+    message.message_id = "m-1"
     message.parts.add(text="plain agent message")
     event = normalize_webhook_payload(MessageToDict(StreamResponse(message=message)))
-    assert event == {"kind": "message", "text": "plain agent message"}
+    assert event == {
+        "kind": "message",
+        "text": "plain agent message",
+        "context_id": _CONTEXT_ID,
+        "message_id": "m-1",
+    }
 
 
 def test_normalize_webhook_payload_rejects_unrecognized_body() -> None:
@@ -867,8 +844,8 @@ def test_normalize_webhook_payload_keeps_metadata_so_int_coercion_absorbs_the_fl
     """``negotiationContext.round`` arrives as the JSON 1.0 float; the session parser absorbs it."""
     metadata = _propose_metadata()
     metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] = 1.0  # the Struct/JSON float round-trip
-    status = _status_update(state=TaskState.TASK_STATE_INPUT_REQUIRED, text="propose", metadata=metadata)
-    payload = MessageToDict(status)
+    propose = _propose_event(metadata)
+    payload = MessageToDict(propose)
     event = normalize_webhook_payload(payload)
     session = _parse_negotiation_context(event["metadata"])
     assert session is not None
@@ -876,7 +853,7 @@ def test_normalize_webhook_payload_keeps_metadata_so_int_coercion_absorbs_the_fl
     assert session.performative == NegotiationPerformative.PROPOSE
 
 
-# --- server assembly: push machinery wired unconditionally (R1) -----------------------------------
+# --- server assembly: push machinery assembled unconditionally (R1) -----------------------------------
 
 
 def test_build_rest_app_request_handler_carries_the_push_store_and_sender(
@@ -892,7 +869,7 @@ def test_build_rest_app_request_handler_carries_the_push_store_and_sender(
     handler = app.state.request_handler
     assert isinstance(handler._push_config_store, InMemoryPushNotificationConfigStore)
     assert isinstance(handler._push_sender, BasePushNotificationSender)
-    # The sender reads configs from the very store wired into the handler.
+    # The sender reads configs from the very store passed to the handler.
     assert handler._push_sender._config_store is handler._push_config_store
 
     # The sender's httpx client is managed by the app lifespan (closed on shutdown).

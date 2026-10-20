@@ -1,10 +1,10 @@
-"""Server-side task execution seam (INTEGRATION POINT) of the ran-energy-saving demo.
+"""Server-side task execution integration point (INTEGRATION POINT) of the ran-energy-saving demo.
 
 ``TaskExecutionService`` is the Protocol the server flow depends on: it is where a customer's
 business system executes the negotiated task. ``Uc1DemoExecutionService`` is the colocated demo
 implementation, delegating to the static UC1 data in ``server.constants_data`` (the data stays
 there so tests keep importing it unchanged). Replace the demo service at the assembly site in
-``server.server_main`` with your own implementation — see the sample README
+``server.server_main`` with the server's own implementation — see the sample README
 (``a2a-t-sample/ran-energy-saving/README.md``), the Task-T chapter / the replace checklist.
 """
 
@@ -39,16 +39,16 @@ class TaskExecutionResult:
 
 @runtime_checkable
 class TaskExecutionService(Protocol):
-    """INTEGRATION POINT (server): execute the negotiated task in YOUR business system.
+    """INTEGRATION POINT (server): execute the negotiated task in the server's business system.
 
-    The server flow calls this seam once the Task-T prompt validated and the negotiation
+    The server flow calls this integration point once the Task-T prompt validated and the negotiation
     concluded: ``params`` carries the filled task parameters extracted by the Task-T content
     validation, and the implementation runs the real business logic (in this demo, the scripted
-    UC1 energy-saving execution; in production, your EMS/NMS northbound call).
+    UC1 energy-saving execution; in production, the server's EMS/NMS northbound call).
 
     The implementation only PRODUCES: progress texts and the final result. The flow owns all A2A
-    emission — each ``emit_progress`` call becomes a ``TASK_STATE_WORKING`` status update on the
-    wire, the returned :class:`TaskExecutionResult` becomes the report artifact, and an exception
+    emission — each ``emit_progress`` call becomes a ``TASK_STATE_WORKING`` status update in the
+    event stream, the returned :class:`TaskExecutionResult` becomes the report artifact, and an exception
     raised by the implementation is caught by the flow, which emits ``TASK_STATE_FAILED`` and
     re-raises. A customer implementation therefore gets the streaming and terminal-state semantics
     for free.

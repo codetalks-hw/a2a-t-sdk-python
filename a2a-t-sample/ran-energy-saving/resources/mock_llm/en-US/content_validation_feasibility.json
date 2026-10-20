@@ -2,17 +2,19 @@
   "semantic_verdict": false,
   "errors": [
     {
-      "slot_name": "energySavingGoal",
-      "code": "content.semantic_conflict",
+      "slot_name": "guaranteedThroughputTarget",
+      "code": "content.rule_violation",
       "facts": {
-        "section_label": "task_target"
+        "section_label": "task_context"
       }
     }
   ],
   "params": {
     "operationType": "create",
     "region": "Songshanhu Administration Committee",
-    "energySavingGoal": null,
-    "guaranteedThroughputTarget": "{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}"
+    "energySavingGoal": "Maximize energy saving under the condition that the task context is met.",
+    "guaranteedThroughputTarget": null,
+    "siteList": "Station 1,Station 2",
+    "backgroundEvent": "power outage from 00:00 to 18:00"
   }
 }

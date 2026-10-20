@@ -1,10 +1,10 @@
-"""Client-side negotiation response seam (INTEGRATION POINT) of the ran-energy-saving demo.
+"""Client-side negotiation response integration point (INTEGRATION POINT) of the ran-energy-saving demo.
 
 ``NegotiationResponseProvider`` is the Protocol the client flow depends on: it is where a
 customer's system decides how to answer a negotiation propose. ``ScriptedNegotiationResponseProvider``
 is the colocated demo implementation, wrapping the scripted answers of ``client.scenario_data`` (the
 data stays there so tests keep importing it unchanged). Replace the demo provider at the assembly
-site in ``client.client_main`` with your own implementation — see the sample README
+site in ``client.client_main`` with the client's own implementation — see the sample README
 (``a2a-t-sample/ran-energy-saving/README.md``), the Negotiation-T chapter.
 """
 
@@ -26,9 +26,9 @@ from client.scenario_data import (
 
 @dataclass(frozen=True, slots=True)
 class NegotiationProposeView:
-    """What the flow observed from one INPUT_REQUIRED propose, handed to the provider.
+    """What the flow observed from one pre-task propose Message, handed to the provider.
 
-    The A2A-T wire carries no structured per-type propose content — only the propose's
+    The A2A-T message carries no structured per-type propose content — only the propose's
     ``templateUri`` and its rendered text in the status metadata (plus the session context the
     flow parses separately). The view mirrors exactly that: ``kind`` is the negotiation type the
     flow resolved (the configured flag, else the dispatch on ``template_uri``), ``template_uri``
@@ -52,12 +52,12 @@ class NegotiationDecision:
     * ``"accept"`` — the flow builds the accept from the decision field of the proposed type:
       ``filled_params`` (information: the name->value items the client fills in),
       ``confirmed_intent`` (target) or ``feasibility_summary`` (feasibility). The accept goes
-      through the existing accept builders, so the wire behavior is the demo's accept.
-    * ``"reject"`` / ``"abort"`` — not wired in this demo: the flow logs the decision and ends the
+      through the existing accept builders, so the message behavior is the demo's accept.
+    * ``"reject"`` / ``"abort"`` — not implemented in this demo: the flow logs the decision and ends the
       round without sending anything (see the sample README, Negotiation-T chapter, for the SDK
-      reject/abort APIs a customer wires to actually emit them). ``reason`` is accepted for
+      reject/abort APIs a customer implements to actually emit them). ``reason`` is accepted for
       reject/abort but unused by the demo flow — it becomes the ending content's
-      ``failure_reason`` once you wire the reject/abort send yourself (see the sample README,
+      ``failure_reason`` once the client implementation adds the reject/abort send (see the sample README,
       Negotiation-T chapter).
     """
 
@@ -72,16 +72,16 @@ class NegotiationDecision:
 class NegotiationResponseProvider(Protocol):
     """INTEGRATION POINT (client): decide how to answer a negotiation propose.
 
-    The client flow calls this seam once the server answers the initial task request with an
-    INPUT_REQUIRED Negotiation-T propose: ``propose`` is the lightweight
-    :class:`NegotiationProposeView` observed from the wire (negotiation kind, template URI, rendered
+    The client flow calls this integration point once the server answers the initial task request with a
+    pre-task Negotiation-T propose Message: ``propose`` is the lightweight
+    :class:`NegotiationProposeView` observed from the message (negotiation kind, template URI, rendered
     text) and ``session`` the parsed :class:`NegotiationContext` of the server's session. The
     implementation returns the :class:`NegotiationDecision` — accept (with the per-type answer
     content), reject or abort.
 
     The DECISION of how to derive the answer is entirely yours (human confirmation, a policy
-    engine, an upstream system call); the WIRE MECHANICS stay in the flow: the flow regenerates the
-    Task-T prompt, builds the typed accept from your decision with the same round stamped as
+    engine, an upstream system call); the MESSAGE HANDLING stays in the flow: the flow regenerates the
+    Task-T prompt, builds the typed accept from the client's decision with the same round stamped as
     ACCEPT, and sends it over the configured transport.
 
     ``respond`` is synchronous — the flow calls it at the decision point. A customer implementation
@@ -103,7 +103,7 @@ class ScriptedNegotiationResponseProvider:
     as the filled parameters, a target propose with the scenario's confirmed-target sentence and a
     feasibility propose with the scenario's feasibility summary — the scenario accessors keep
     resolving the configured language through ``env_path``. The view's ``kind`` (resolved by the
-    flow: the flag, else the propose's ``templateUri``) selects the answer, so the wire dispatch
+    flow: the flag, else the propose's ``templateUri``) selects the answer, so the dispatch from the message
     works unchanged; ``session`` is unused by the scripted demo (a customer implementation may
     branch on the round/performative).
 
@@ -129,7 +129,7 @@ class ScriptedNegotiationResponseProvider:
 
         ``propose`` selects the scripted answer by kind; ``session`` is unused (see the class
         docstring). ``negotiation_params`` is kept for assembly parity — the Task-T prompt refill
-        stays a flow-owned wire mechanic fed from the caller, not part of the decision.
+        stays a flow-owned message construction fed from the caller, not part of the decision.
         """
         if propose.kind == NEGOTIATION_KIND_TARGET:
             return NegotiationDecision(

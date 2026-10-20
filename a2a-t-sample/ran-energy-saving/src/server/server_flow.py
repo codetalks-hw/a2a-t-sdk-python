@@ -8,17 +8,10 @@ from typing import TYPE_CHECKING
 
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events.event_queue import EventQueue
-from a2a.types import Task, TaskArtifactUpdateEvent, TaskState
+from a2a.types import Message, Role, Task, TaskArtifactUpdateEvent, TaskState
 from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
-from a2a_t.negotiation.content.enums import NegotiationAction
-from a2a_t.negotiation.content.models import (
-    FeasibilityProposeContent,
-    InformationProposeContent,
-    NegotiationItem,
-    NegotiationProposeData,
-    TargetProposeContent,
-)
+from a2a_t.negotiation.content.models import NegotiationItem
 from client import scenario_data
 from common.a2a_adapter import build_metadata_artifact, build_status, emit_status_update
 from common.logging_utils import format_payload_log, format_stage_log
@@ -29,19 +22,16 @@ if TYPE_CHECKING:
 
 from server.constants_data import (
     ARTIFACT_SEND_INTERVAL_SECONDS,
-    CHANNEL_DATA,
-    CHANNEL_TEXT,
-    COMPLETED_MESSAGE,
     CONTENT_ERROR_CODE_FEASIBILITY,
     CONTENT_ERROR_CODE_INFORMATION,
     CONTENT_ERROR_CODE_TARGET,
     ENERGY_SAVING_TEMPLATE_URI,
     FEASIBILITY_NEGOTIATION_PROPOSE_TEMPLATE_URI,
-    INPUT_REQUIRED_MESSAGE,
     NEGOTIATION_MISSING_ITEM_HINT,
     NEGOTIATION_PROPOSE_TEMPLATE_URI,
     NEGOTIATION_RELATIONSHIP,
     NEGOTIATION_T_EXTENSION_URI,
+    PROPOSE_MESSAGE,
     SUBMITTED_MESSAGE,
     TARGET_NEGOTIATION_PROPOSE_TEMPLATE_URI,
     TASK_T_EXTENSION_URI,
@@ -58,7 +48,7 @@ NEGOTIATION_TYPE_FEASIBILITY = "feasibility"
 
 #: Sample-level convention mapping the first content-validation error's code to the Negotiation-T
 #: type it proposes (plan R6): ``content.param_missing`` -> information, ``content.value_not_allowed``
-#: -> target, ``content.semantic_conflict`` -> feasibility. This is a sample convention, not an SDK
+#: -> target, ``content.rule_violation`` -> feasibility. This is a sample convention, not an SDK
 #: rule — customers edit their copy of this table to their own error codes (see the sample README,
 #: Negotiation-T chapter); codes absent from the table keep the plain rejection.
 _NEGOTIATION_TYPE_BY_ERROR_CODE: dict[str, str] = {
@@ -140,7 +130,7 @@ def _resolve_negotiation_type(
     The FIRST error entry's code selects the type through the sample-level
     ``_NEGOTIATION_TYPE_BY_ERROR_CODE`` table (plan R6): ``content.param_missing`` keeps the v1
     information path (which still proposes only when the errors name slots),
-    ``content.value_not_allowed`` selects the target propose and ``content.semantic_conflict`` the
+    ``content.value_not_allowed`` selects the target propose and ``content.rule_violation`` the
     feasibility propose. Any other code — or a codeless error — selects no negotiation type, so the
     caller rejects the task exactly as v1 did (including the slotless case).
     """
@@ -182,12 +172,13 @@ def _negotiation_propose_text(
     """
     if negotiation_type == NEGOTIATION_TYPE_TARGET:
         description = scenario_data.negotiation_target_description(env_path=env_path)
-        confirm_request = scenario_data.negotiation_target_confirm_request(env_path=env_path)
-        return f"{description} {confirm_request}"
+        intent = scenario_data.negotiation_target_intent_understanding(env_path=env_path)
+        clarifications = scenario_data.negotiation_target_clarifications(env_path=env_path)
+        return f"{description} {_numbered_items(intent)} {_numbered_items(clarifications)}"
     if negotiation_type == NEGOTIATION_TYPE_FEASIBILITY:
         description = scenario_data.negotiation_feasibility_description(env_path=env_path)
-        contents = scenario_data.negotiation_feasibility_contents(env_path=env_path)
-        return f"{description} Contents to evaluate: {_numbered_items(contents)}"
+        infeasibility = scenario_data.negotiation_feasibility_infeasibility(env_path=env_path)
+        return f"{description} {_numbered_items(infeasibility)}"
     text = _numbered_items((item.name, item.value) for item in missing_items)
     relationship = NEGOTIATION_RELATIONSHIP if len(missing_items) > 1 else None
     if relationship:
@@ -204,53 +195,6 @@ def _negotiation_propose_template_uri(negotiation_type: str) -> str:
     return NEGOTIATION_PROPOSE_TEMPLATE_URI
 
 
-def _negotiation_propose_data(
-    negotiation_type: str,
-    missing_items: list[NegotiationItem],
-    context: NegotiationContext,
-    *,
-    env_path: Path | None,
-) -> NegotiationProposeData:
-    """Build the typed propose content of one negotiation type (plan R3 scenario semantics).
-
-    Target proposes the clarified-target confirm-request round and feasibility proposes the
-    feasibility evaluation request; both fill their scenario-owned texts from the
-    ``client.scenario_data`` accessors. Information keeps the v1 missing-item propose.
-    """
-    if negotiation_type == NEGOTIATION_TYPE_TARGET:
-        return NegotiationProposeData(
-            context=context,
-            content=TargetProposeContent(
-                target_negotiation_description=scenario_data.negotiation_target_description(env_path=env_path),
-                intent_understanding=None,
-                alignment_and_clarification=None,
-                request_for_clarification=None,
-                target_confirm_request=scenario_data.negotiation_target_confirm_request(env_path=env_path),
-            ),
-        )
-    if negotiation_type == NEGOTIATION_TYPE_FEASIBILITY:
-        return NegotiationProposeData(
-            context=context,
-            content=FeasibilityProposeContent(
-                feasibility_negotiation_description=scenario_data.negotiation_feasibility_description(
-                    env_path=env_path
-                ),
-                action=NegotiationAction.REQUEST_FEASIBILITY_EVALUATION,
-                contents_to_evaluate=[
-                    NegotiationItem(name=name, value=value)
-                    for name, value in scenario_data.negotiation_feasibility_contents(env_path=env_path)
-                ],
-                infeasibility_details_and_proposal=None,
-                feasibility_confirm_request=None,
-            ),
-        )
-    relationship = NEGOTIATION_RELATIONSHIP if len(missing_items) > 1 else None
-    return NegotiationProposeData(
-        context=context,
-        content=InformationProposeContent(items=missing_items, relationship=relationship),
-    )
-
-
 async def _emit_negotiation_propose(
     *,
     request_context: RequestContext,
@@ -258,22 +202,20 @@ async def _emit_negotiation_propose(
     prompt_server: A2ATServer,
     missing_items: list[NegotiationItem],
     negotiation_type: str = NEGOTIATION_TYPE_INFORMATION,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
-    task_id: str,
     context_id: str,
     log_sink: object | None,
 ) -> None:
-    """Generate the Negotiation-T propose for the negotiation type and emit INPUT_REQUIRED.
+    """Generate the Negotiation-T propose for the negotiation type and emit it as a Message.
 
-    The type selects the propose template URI and the content (plan R1/R3). The channel switches
-    only the generation call: ``data`` builds the typed content and calls the deterministic
-    from-data API (zero LLM calls), ``text`` renders the same content as a natural-language message
-    and calls the from-text API, whose extraction step parses it back into the canonical typed
-    content (one LLM call) — both channels then render the addressed template from equivalent
-    content, so the produced messages are equivalent. The propose travels on the INPUT_REQUIRED
-    status event's message metadata (``propose.build_metadata_content()``); the templateUri inside
-    carries the per-type propose template URI, which is what the client dispatches its accept on.
+    The negotiation runs before the task is created: the propose is a standalone A2A ``Message``
+    (role ``ROLE_AGENT``, same ``contextId`` as the request, no ``taskId``), not a Task status
+    event. The type selects the propose template URI and the content (plan R1/R3). The propose is
+    written as a business message and generated through the from-text API: the SDK first extracts
+    the canonical typed content (one LLM call), then renders the addressed template. The accept is
+    the client's decision; how it is generated is the client's choice. The propose content travels
+    in the message metadata (``propose.build_metadata_content()``); the templateUri inside carries
+    the per-type propose template URI, which is what the client dispatches its accept on.
     """
     propose_context = NegotiationContext(
         id=str(uuid.uuid4()),
@@ -282,35 +224,29 @@ async def _emit_negotiation_propose(
         performative=NegotiationPerformative.PROPOSE,
     )
     template_uri = _negotiation_propose_template_uri(negotiation_type)
-    if channel == CHANNEL_TEXT:
-        text = _negotiation_propose_text(negotiation_type, missing_items, env_path=env_path)
-        propose = prompt_server.generate_negotiation_propose_prompt_from_text(text, propose_context, template_uri)
-    else:
-        data = _negotiation_propose_data(negotiation_type, missing_items, propose_context, env_path=env_path)
-        propose = prompt_server.generate_negotiation_propose_prompt_from_data(data, template_uri)
+    propose_text = _negotiation_propose_text(negotiation_type, missing_items, env_path=env_path)
+    propose = prompt_server.generate_negotiation_propose_prompt_from_text(
+        propose_text, propose_context, template_uri
+    )
     if log_sink is not None:
         log_sink(
             format_stage_log(
                 role="server",
                 stage="negotiation-propose",
                 detail=(
-                    f"generated (type={negotiation_type} channel={channel} "
-                    f"round={propose_context.round}) "
+                    f"generated (type={negotiation_type} round={propose_context.round}) "
                     f"items={[(item.name, item.value) for item in missing_items]}"
                 ),
             )
         )
-    await emit_status_update(
-        request_context=request_context,
-        event_queue=event_queue,
-        context_id=context_id,
-        task_id=task_id,
-        state=TaskState.TASK_STATE_INPUT_REQUIRED,
-        text=INPUT_REQUIRED_MESSAGE,
-        metadata=propose.build_metadata_content(),
-    )
+    propose_message = Message(context_id=context_id, role=Role.ROLE_AGENT)
+    propose_message.message_id = str(uuid.uuid4())
+    propose_message.parts.add(text=PROPOSE_MESSAGE)
+    for key, value in propose.build_metadata_content().items():
+        propose_message.metadata[key] = value
+    await event_queue.enqueue_event(propose_message)
     if log_sink is not None:
-        log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_INPUT_REQUIRED"))
+        log_sink(format_stage_log(role="server", stage="negotiation-propose-sent", detail="message emitted"))
 
 
 async def _execute_and_emit_result(
@@ -323,7 +259,7 @@ async def _execute_and_emit_result(
     context_id: str,
     log_sink: object | None,
 ) -> None:
-    """Execute the negotiated task through the ``TaskExecutionService`` seam and push its artifact.
+    """Execute the negotiated task through the ``TaskExecutionService`` integration point and push its artifact.
 
     INTEGRATION POINT (server): the flow owns the A2A emission — each ``emit_progress`` call is a
     ``TASK_STATE_WORKING`` status update, the returned ``TaskExecutionResult`` becomes the report
@@ -401,7 +337,6 @@ async def execute_server_flow(
     sleep_fn: SleepFn | None = None,
     artifact_send_interval_seconds: float = ARTIFACT_SEND_INTERVAL_SECONDS,
     log_sink: object | None = None,
-    channel: str = CHANNEL_DATA,
     env_path: Path | None = None,
     execution_service: TaskExecutionService | None = None,
 ) -> None:
@@ -412,27 +347,27 @@ async def execute_server_flow(
     through it and the flow only emits the A2A events. ``None`` (the default) keeps the demo
     behavior — an internal :class:`Uc1DemoExecutionService` is constructed from the legacy
     ``progress_steps`` / ``intent_report`` / ``sleep_fn`` / ``artifact_send_interval_seconds``
-    parameters, whose defaults preserve the pre-seam behavior for existing call sites and tests.
+    parameters, whose defaults preserve the pre-integration-point behavior for existing call sites and tests.
 
     Flow (RAN energy-saving interface spec, UC1):
       1. Validate the A2A-Extensions header (Task-T) and extract the prompt text
       2. ``A2ATServer.validate_task_prompt_and_data_filling`` (A2A-T server SDK) validates the
          prompt and extracts the filled parameters
-      3. Negotiation continuation (Negotiation-T URI in the message metadata): no SUBMITTED —
-         validate, execute the task through the seam (progress messages and report artifact),
-         then COMPLETED
-      4. Default flow: emit SUBMITTED, then on failure REJECTED — or, when the first validation
-         error's code selects a negotiation type (plan R1: ``content.param_missing`` information
-         with slot-named errors, ``content.value_not_allowed`` target, ``content.semantic_conflict``
-         feasibility), a Negotiation-T propose of that type on an INPUT_REQUIRED status update,
-         generated from typed data or from a natural-language rendering per the configured channel
+      3. Pre-task negotiation: when the first validation error's code selects a negotiation type
+         (plan R1: ``content.param_missing`` information with slot-named errors,
+         ``content.value_not_allowed`` target, ``content.rule_violation`` feasibility), emit a
+         standalone Negotiation-T propose ``Message`` and return — the task is not created. The
+         propose is generated from a natural-language business message through the from-text API
          (data-driven trigger, the server reads no scenario flag)
-      5. Default success: execute the negotiated task through the seam — each progress line
-         becomes a ``TASK_STATE_WORKING`` status update and the ``TaskExecutionResult`` becomes
-         the report artifact as one ``TaskArtifactUpdateEvent`` (the report body travels in
+      4. The client's accept arrives as a new message (Negotiation-T URI in the metadata); its
+         Task-T prompt is validated, then the task is created (SUBMITTED) and executed
+      5. On success: execute the task through the integration point — each progress line becomes a
+         ``TASK_STATE_WORKING`` status update and the ``TaskExecutionResult`` becomes the report
+         artifact as one ``TaskArtifactUpdateEvent`` (the report body travels in
          ``artifact.metadata[Task-T/v1]``); the task then stays long-running — no terminal state
          is emitted
-      6. Exception during execution or artifact pushing -> emit FAILED (generic text) and re-raise
+      6. A failure that does not lead to a propose (or a failed accept) -> SUBMITTED then REJECTED
+      7. Exception during execution or artifact pushing -> emit FAILED (generic text) and re-raise
     """
     resolved_execution_service = execution_service or Uc1DemoExecutionService(
         progress_steps=progress_steps,
@@ -478,7 +413,7 @@ async def execute_server_flow(
     validation_failure: str | None = None
     content_errors: Sequence[SlotValidationError] | None = None
     missing_items: list[NegotiationItem] = []
-    # The object parameter mapping the execution seam consumes; set on validation success. The
+    # The object parameter mapping the execution integration point consumes; set on validation success. The
     # sample schema is object-shaped, so the filled data is always a mapping — the empty mapping
     # only keeps the (unused by this sample) array-shaped corner type-safe.
     filled_params_data: dict[str, object] = {}
@@ -509,43 +444,25 @@ async def execute_server_flow(
         if log_sink is not None:
             log_sink(format_stage_log(role="server", stage="sdk-result", detail=f"invalid input {validation_failure}"))
 
-    # Negotiation continuation: no SUBMITTED — the completed Task-T prompt is validated,
-    # the task executes through the seam, and the task closes with COMPLETED.
-    if negotiation_continuation:
-        if validation_failure is not None:
-            await emit_status_update(
+    # Pre-task negotiation: a failed validation that maps to a negotiation type is answered with a
+    # standalone propose Message — no Task is created. The client's accept comes back through this
+    # same flow (negotiation_continuation) and creates the task once it validates.
+    if validation_failure is not None and not negotiation_continuation:
+        negotiation_type = _resolve_negotiation_type(content_errors, missing_items)
+        if negotiation_type is not None:
+            await _emit_negotiation_propose(
                 request_context=request_context,
                 event_queue=event_queue,
+                prompt_server=prompt_server,
+                missing_items=missing_items,
+                negotiation_type=negotiation_type,
+                env_path=env_path,
                 context_id=resolved_context_id,
-                task_id=resolved_task_id,
-                state=TaskState.TASK_STATE_REJECTED,
-                text=f"Prompt validation failed: {validation_failure}",
+                log_sink=log_sink,
             )
-            if log_sink is not None:
-                log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_REJECTED"))
             return
-        await _execute_and_emit_result(
-            request_context=request_context,
-            event_queue=event_queue,
-            execution_service=resolved_execution_service,
-            params=filled_params_data,
-            task_id=resolved_task_id,
-            context_id=resolved_context_id,
-            log_sink=log_sink,
-        )
-        await emit_status_update(
-            request_context=request_context,
-            event_queue=event_queue,
-            context_id=resolved_context_id,
-            task_id=resolved_task_id,
-            state=TaskState.TASK_STATE_COMPLETED,
-            text=COMPLETED_MESSAGE,
-        )
-        if log_sink is not None:
-            log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_COMPLETED"))
-        return
 
-    # 1. SUBMITTED — always emitted before the validation result (default flow)
+    # The task is created only after the request (or the negotiation accept) validates.
     task = Task(
         id=resolved_task_id,
         context_id=resolved_context_id,
@@ -562,24 +479,8 @@ async def execute_server_flow(
     if log_sink is not None:
         log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_SUBMITTED"))
 
-    # 2. On failure → Negotiation-T propose selected by the first error's code (plan R1),
-    #    otherwise REJECTED
+    # A failure that does not lead to a propose (or a failed accept) → REJECTED.
     if validation_failure is not None:
-        negotiation_type = _resolve_negotiation_type(content_errors, missing_items)
-        if negotiation_type is not None:
-            await _emit_negotiation_propose(
-                request_context=request_context,
-                event_queue=event_queue,
-                prompt_server=prompt_server,
-                missing_items=missing_items,
-                negotiation_type=negotiation_type,
-                channel=channel,
-                env_path=env_path,
-                task_id=resolved_task_id,
-                context_id=resolved_context_id,
-                log_sink=log_sink,
-            )
-            return
         await emit_status_update(
             request_context=request_context,
             event_queue=event_queue,
@@ -592,7 +493,8 @@ async def execute_server_flow(
             log_sink(format_stage_log(role="server", stage="task-status", detail="TASK_STATE_REJECTED"))
         return
 
-    # 3. On success → execute the negotiated task through the seam (default flow stays long-running)
+    # Success → execute through the integration point; the task stays long-running (WORKING) after
+    # the report artifact — no terminal state is emitted.
     await _execute_and_emit_result(
         request_context=request_context,
         event_queue=event_queue,

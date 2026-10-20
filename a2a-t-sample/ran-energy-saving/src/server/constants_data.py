@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from a2a_t.core.standard_templates import (
@@ -12,16 +10,12 @@ from a2a_t.core.standard_templates import (
     INFORMATION_NEGOTIATION_PROPOSE_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from dotenv import dotenv_values
 
 SUBMITTED_MESSAGE = "Energy saving task accepted, starting RAN energy saving task"
 ARTIFACT_SEND_INTERVAL_SECONDS = 1.0
 
-#: Text part of the INPUT_REQUIRED status message carrying the Negotiation-T propose metadata.
-INPUT_REQUIRED_MESSAGE = "Additional information is required to start the energy saving task"
-
-#: Text part of the COMPLETED status message closing the negotiation continuation flow.
-COMPLETED_MESSAGE = "Energy saving task completed"
+#: Text part of the standalone Negotiation-T propose message sent before the task is created.
+PROPOSE_MESSAGE = "Additional information is required before the energy saving task can start"
 
 #: Hint rendered into each missing-item entry of a Negotiation-T information propose; the
 #: ``{slot}`` / ``{description}`` placeholders are filled from the validation error's slot name
@@ -48,29 +42,18 @@ NEGOTIATION_PROPOSE_TEMPLATE_URI = INFORMATION_NEGOTIATION_PROPOSE_URI
 
 #: Negotiation-T per-type propose templates addressed by the server's propose
 #: (re-exported from ``a2a_t.core.standard_templates``). The proposal type is selected at runtime
-#: by the first content-validation error's code (plan R1); the templateUri inside the INPUT_REQUIRED
-#: metadata carries the per-type URI, which is what the client dispatches its accept on.
+#: by the first content-validation error's code (plan R1); the templateUri inside the propose
+#: message metadata carries the per-type URI, which is what the client dispatches its accept on.
 TARGET_NEGOTIATION_PROPOSE_TEMPLATE_URI = TARGET_NEGOTIATION_PROPOSE_URI
 FEASIBILITY_NEGOTIATION_PROPOSE_TEMPLATE_URI = FEASIBILITY_NEGOTIATION_PROPOSE_URI
 
 #: Task-T content-validation error codes that select the negotiation type (demo convention, plan
 #: R1): the first structured error of a failed Task-T content validation carries the code —
 #: ``content.param_missing`` proposes information (v1), ``content.value_not_allowed`` target and
-#: ``content.semantic_conflict`` feasibility.
+#: ``content.rule_violation`` feasibility.
 CONTENT_ERROR_CODE_INFORMATION = "content.param_missing"
 CONTENT_ERROR_CODE_TARGET = "content.value_not_allowed"
-CONTENT_ERROR_CODE_FEASIBILITY = "content.semantic_conflict"
-
-#: Generation channel variants selected by ``A2AT_SAMPLE_CHANNEL``: ``data`` generates the
-#: negotiation propose from typed content (no extraction LLM call), ``text`` from a natural-language
-#: rendering plus one extraction LLM call. Server-side mirror of the ``client.scenario_data``
-#: resolver — the server imports no client resolver (only its scenario accessors).
-CHANNEL_DATA = "data"
-CHANNEL_TEXT = "text"
-SUPPORTED_CHANNELS = (CHANNEL_DATA, CHANNEL_TEXT)
-
-#: ``.env`` key selecting the generation channel.
-CHANNEL_ENV_KEY = "A2AT_SAMPLE_CHANNEL"
+CONTENT_ERROR_CODE_FEASIBILITY = "content.rule_violation"
 
 #: Area the sample energy-saving intent is scoped to (from the RAN energy-saving interface spec).
 ENERGY_SAVING_REGION = "Songshanhu Administration Committee"
@@ -198,15 +181,3 @@ def get_energy_saving_intent_report() -> dict[str, str]:
     return report
 
 
-def resolve_negotiation_channel(*, env_path: Path | None = None) -> str:
-    """Resolve the configured ``A2AT_SAMPLE_CHANNEL`` (defaults to ``data``).
-
-    The channel switches only the negotiation propose generation (typed data vs a natural-language
-    rendering plus one extraction LLM call); an unset or unknown value resolves to ``data``. The
-    ``.env`` value wins over the OS environment (the sample resolver convention, mirroring the
-    client-side ``client.scenario_data.resolve_channel`` without importing it).
-    """
-    resolved = env_path or Path.cwd() / ".env"
-    values = dotenv_values(resolved) if resolved.exists() else {}
-    raw_value = str(values.get(CHANNEL_ENV_KEY, "")).strip() or os.environ.get(CHANNEL_ENV_KEY, "").strip()
-    return raw_value if raw_value in SUPPORTED_CHANNELS else CHANNEL_DATA

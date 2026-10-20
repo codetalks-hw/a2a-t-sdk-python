@@ -59,13 +59,15 @@ _STOP_TIMEOUT_SECONDS = 5.0
 
 
 class _HostSignalServer(uvicorn.Server):
-    """不接管进程信号的 uvicorn Server（旧版 ``Config.install_signal_handlers=False`` 的等价物）。
+    """uvicorn Server that leaves process-signal handling to the host.
 
-    本机 uvicorn 0.52 已移除 ``install_signal_handlers`` 配置项，``Server.serve()`` 在主线程
-    无条件 ``capture_signals()``——不处理的话，第一次 Ctrl+C 会被 uvicorn 换成"优雅关闭接收器"
-    （流程继续跑），与 SSE 模式的 KeyboardInterrupt 语义不一致。重写为空操作后，Ctrl+C 照常
-    在宿主 client_main 里抛 KeyboardInterrupt，由 ``run_main`` 的 ``finally`` 调 ``stop()`` 收尾
-    接收器（webhook 模式与 SSE 模式的 Ctrl+C 行为完全一致）。
+    Equivalent to the retired ``Config.install_signal_handlers=False``: the bundled uvicorn 0.52
+    removed that option, and ``Server.serve()`` on the main thread calls ``capture_signals()``
+    unconditionally. Left as is, the first Ctrl+C would make uvicorn gracefully shut the receiver
+    down while the flow keeps running, which differs from the KeyboardInterrupt semantics of SSE
+    mode. Overriding it as a no-op lets Ctrl+C raise KeyboardInterrupt in the host ``client_main``,
+    whose ``run_main`` ``finally`` stops the receiver — so webhook and SSE mode behave identically
+    on Ctrl+C.
     """
 
     @contextlib.contextmanager
@@ -86,7 +88,7 @@ def _recognized_stream_key(payload: object) -> str | None:
 class WebhookReceiver:
     """In-process webhook receiver serving one authenticated ``POST /webhook`` route.
 
-    The wire contract is the a2a-sdk push-notification POST: a StreamResponse JSON body (one of
+    The message contract is the a2a-sdk push-notification POST: a StreamResponse JSON body (one of
     the ``task`` / ``statusUpdate`` / ``artifactUpdate`` / ``message`` top-level keys) with the
     push token in the ``X-A2A-Notification-Token`` header. A token mismatch answers ``401`` and
     the event is dropped; a malformed or unrecognized body answers ``400``; a valid event is

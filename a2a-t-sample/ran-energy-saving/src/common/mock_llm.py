@@ -13,19 +13,23 @@ schema signature                      served response
 ``slots`` + ``slot_errors``           Task-T slot extraction — the ``slot_extraction``
                                       complete variant (default scenario input or from-data
                                       regeneration), the ``slot_extraction_missing`` variant for
-                                      the missing-region scenario input, and the
+                                      the missing-region scenario input, the
                                       ``slot_extraction_target`` / ``slot_extraction_feasibility``
                                       variants for the target/feasibility negotiation inputs
                                       (complete slot sets that preserve the distinguishing
-                                      100Mbps / 30%+50Mbps values in the rendered prompt), told
-                                      apart by the scenario natural-language constants of
-                                      ``client.scenario_data``
-``semantic_verdict`` property         content semantic validation — 4-way by the scenario
-                                      natural-language input, or the distinguishing
-                                      target/feasibility values of the rendered prompt, carried
-                                      in the message head cut at the template-content labels
-                                      (``content_validation_target`` /
+                                      overlapping-segment / outage values in the rendered prompt),
+                                      and the ``*_refill`` variants for the from-data refill carrying
+                                      the accepted target / site-level context; told apart by the
+                                      scenario natural-language constants of
+                                      ``client.scenario_data`` and the refill values
+``semantic_verdict`` property         content semantic validation — by the scenario
+                                      natural-language input, the distinguishing
+                                      target/feasibility values of the rendered prompt (carried in
+                                      the message head cut at the template-content labels), or the
+                                      refill values (``content_validation_target`` /
                                       ``content_validation_feasibility`` /
+                                      ``content_validation_target_refill`` /
+                                      ``content_validation_feasibility_refill`` /
                                       ``content_validation`` / ``content_validation_missing``),
                                       falling back to the v1 region display-string heuristic for
                                       heads without either
@@ -79,10 +83,14 @@ STAGE_SLOT_EXTRACTION = "slot_extraction"
 STAGE_SLOT_EXTRACTION_MISSING = "slot_extraction_missing"
 STAGE_SLOT_EXTRACTION_TARGET = "slot_extraction_target"
 STAGE_SLOT_EXTRACTION_FEASIBILITY = "slot_extraction_feasibility"
+STAGE_SLOT_EXTRACTION_TARGET_REFILL = "slot_extraction_target_refill"
+STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL = "slot_extraction_feasibility_refill"
 STAGE_CONTENT_VALIDATION = "content_validation"
 STAGE_CONTENT_VALIDATION_MISSING = "content_validation_missing"
 STAGE_CONTENT_VALIDATION_TARGET = "content_validation_target"
 STAGE_CONTENT_VALIDATION_FEASIBILITY = "content_validation_feasibility"
+STAGE_CONTENT_VALIDATION_TARGET_REFILL = "content_validation_target_refill"
+STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL = "content_validation_feasibility_refill"
 STAGE_NEGOTIATION_PROPOSE_EXTRACTION = "negotiation_propose_extraction"
 STAGE_NEGOTIATION_ACCEPT_EXTRACTION = "negotiation_accept_extraction"
 STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION = "negotiation_target_propose_extraction"
@@ -96,10 +104,14 @@ _STAGE_FILES: dict[str, str] = {
     STAGE_SLOT_EXTRACTION_MISSING: "slot_extraction_missing.json",
     STAGE_SLOT_EXTRACTION_TARGET: "slot_extraction_target.json",
     STAGE_SLOT_EXTRACTION_FEASIBILITY: "slot_extraction_feasibility.json",
+    STAGE_SLOT_EXTRACTION_TARGET_REFILL: "slot_extraction_target_refill.json",
+    STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL: "slot_extraction_feasibility_refill.json",
     STAGE_CONTENT_VALIDATION: "content_validation.json",
     STAGE_CONTENT_VALIDATION_MISSING: "content_validation_missing.json",
     STAGE_CONTENT_VALIDATION_TARGET: "content_validation_target.json",
     STAGE_CONTENT_VALIDATION_FEASIBILITY: "content_validation_feasibility.json",
+    STAGE_CONTENT_VALIDATION_TARGET_REFILL: "content_validation_target_refill.json",
+    STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL: "content_validation_feasibility_refill.json",
     STAGE_NEGOTIATION_PROPOSE_EXTRACTION: "negotiation_propose_extraction.json",
     STAGE_NEGOTIATION_ACCEPT_EXTRACTION: "negotiation_accept_extraction.json",
     STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION: "negotiation_target_propose_extraction.json",
@@ -128,9 +140,19 @@ _FEASIBILITY_SCENARIO_INPUTS = (
 
 #: Distinguishing values the target/feasibility rendered prompts carry (the dedicated
 #: slot-extraction variants preserve them), so the content-validation routing also fires on real
-#: rendered-prompt heads and not only on the scenario natural-language inputs.
-_TARGET_VALIDATION_MARKER = "100Mbps"
-_FEASIBILITY_VALIDATION_MARKERS = ("30%", "50Mbps")
+#: rendered-prompt heads and not only on the scenario natural-language inputs. Each marker is a
+#: value the FAILING input carries and the negotiated refill does not, so the continuation routes
+#: to the complete variant: the target marker is the overlapping segment, the feasibility marker
+#: the pre-proposal guaranteed rate.
+_TARGET_VALIDATION_MARKER = "20:00~00:00,10Mbps"
+_FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
+
+#: From-data Task-T refill markers. The refill data is a parameter map, so the accepted values are
+#: the only distinguishing text: the corrected non-overlapping target for the target kind, and the
+#: site-level outage for the feasibility kind. Checked after the natural-language scenario inputs
+#: (the outage value also appears in the initial feasibility input) and before the default variant.
+_TARGET_REFILL_MARKERS = ("23:00~00:00,10Mbps",)
+_FEASIBILITY_REFILL_MARKERS = ("power outage from 00:00 to 18:00", "00:00~18:00 停电")
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
 #: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
@@ -156,7 +178,7 @@ _PLACEHOLDER_API_KEY = "mock-key-not-real"
 #: Language the canned script was loaded for (region-string routing reads it).
 _script_language = "zh-CN"
 
-#: Routed stage name of every served structured call (test seam).
+#: Routed stage name of every served structured call (test hook).
 llm_calls: list[str] = []
 
 _mock_enabled = False
@@ -189,7 +211,7 @@ def is_mock_enabled() -> bool:
 
 
 def reset_call_log() -> None:
-    """Clear the routed stage log (test seam)."""
+    """Clear the routed stage log (test hook)."""
     llm_calls.clear()
 
 
@@ -257,6 +279,10 @@ def route_structured_call(
             return STAGE_SLOT_EXTRACTION_TARGET
         if any(scenario_input in user_content for scenario_input in _FEASIBILITY_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION_FEASIBILITY
+        if any(marker in user_content for marker in _FEASIBILITY_REFILL_MARKERS):
+            return STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL
+        if any(marker in user_content for marker in _TARGET_REFILL_MARKERS):
+            return STAGE_SLOT_EXTRACTION_TARGET_REFILL
         return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
         head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
@@ -264,6 +290,10 @@ def route_structured_call(
             return STAGE_CONTENT_VALIDATION_TARGET
         if _is_feasibility_validation_head(head):
             return STAGE_CONTENT_VALIDATION_FEASIBILITY
+        if any(marker in head for marker in _FEASIBILITY_REFILL_MARKERS):
+            return STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL
+        if any(marker in head for marker in _TARGET_REFILL_MARKERS):
+            return STAGE_CONTENT_VALIDATION_TARGET_REFILL
         if any(scenario_input in head for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_CONTENT_VALIDATION
         if any(scenario_input in head for scenario_input in _MISSING_SCENARIO_INPUTS):
@@ -292,6 +322,12 @@ def _is_feasibility_validation_head(head: str) -> bool:
     )
 
 
+#: Sentence the information-propose input carries when more than one item is missing; the canned
+#: propose-extraction response has no relationship by default, so the mock re-adds it here to keep
+#: the from-text propose equivalent to the content the caller wrote.
+_PROPOSE_RELATIONSHIP_MARKER = "Multiple items must be provided together."
+
+
 def get_routed_response(
     messages: list[dict[str, str]],
     json_schema: dict[str, Any] | None,
@@ -299,8 +335,15 @@ def get_routed_response(
     """Serve the canned response routed by the output schema of one structured call."""
     stage = route_structured_call(messages, json_schema)
     llm_calls.append(stage)
+    content = _script[stage]
+    if stage == STAGE_NEGOTIATION_PROPOSE_EXTRACTION and _PROPOSE_RELATIONSHIP_MARKER in _first_user_content(
+        messages
+    ):
+        extracted = json.loads(content)
+        extracted["relationship"] = _PROPOSE_RELATIONSHIP_MARKER
+        content = json.dumps(extracted, ensure_ascii=False)
     return LLMResponse(
-        content=_script[stage],
+        content=content,
         model="mock-llm",
         usage={"prompt_tokens": 0, "completion_tokens": 0},
         metadata={},
