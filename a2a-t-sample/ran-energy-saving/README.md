@@ -72,19 +72,29 @@ Key workflows:
 
 ## 2. Quickstart
 
-Prerequisites: Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/). Step 1 creates the
-repository `.venv`.
+Prerequisites: Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/).
+
+**Step 1 — create the repository `.venv` and install the SDK.** Run this from the repository root.
 
 ```bash
-# 1) repository root: create .venv and install the SDK
+# Step 1: create the repository .venv and install the SDK
 uv sync --dev
+```
 
-# 2) a2a-t-sample/ — the directory that holds .env
+**Step 2 — configure the sample.** `a2a-t-sample/` holds the `.env` the sample reads.
+
+```bash
+# Step 2: create the sample .env and install its requirements
 cd a2a-t-sample
 cp env.example .env
 uv pip install -r requirements.txt
+```
 
-# 3) run the sample (registry + server as background subprocesses, client in the foreground)
+**Step 3 — run the sample.** The launcher starts the registry and the server as background
+subprocesses and runs the client in the foreground.
+
+```bash
+# Step 3: run the sample
 cd ran-energy-saving
 python run_demo.py           # English (default); add --language zh-CN for the Chinese run
 ```

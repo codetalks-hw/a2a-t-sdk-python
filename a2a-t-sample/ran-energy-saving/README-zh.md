@@ -69,19 +69,28 @@
 
 ## 2. 快速开始
 
-前置条件：Python 3.12 或更高版本与 [`uv`](https://docs.astral.sh/uv/)。第 1 步会创建仓库的
-`.venv`。
+前置条件：Python 3.12 或更高版本与 [`uv`](https://docs.astral.sh/uv/)。
+
+**Step 1 —— 创建仓库 `.venv` 并安装 SDK。** 在仓库根目录执行。
 
 ```bash
-# 1) 仓库根目录：创建 .venv 并安装 SDK
+# Step 1：创建仓库 .venv 并安装 SDK
 uv sync --dev
+```
 
-# 2) a2a-t-sample/ —— 存放 .env 的目录
+**Step 2 —— 配置样例。** `a2a-t-sample/` 存放样例读取的 `.env`。
+
+```bash
+# Step 2：创建样例 .env 并安装依赖
 cd a2a-t-sample
 cp env.example .env
 uv pip install -r requirements.txt
+```
 
-# 3) 运行样例（注册中心与服务端作为后台子进程启动，客户端在前台运行）
+**Step 3 —— 运行样例。** 启动器在后台启动注册中心与服务端，并在前台运行客户端。
+
+```bash
+# Step 3：运行样例
 cd ran-energy-saving
 python run_demo.py           # 默认英文；加 --language zh-CN 运行中文
 ```
