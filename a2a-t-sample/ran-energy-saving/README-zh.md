@@ -15,7 +15,10 @@
   - [3.1 四个步骤](#31-四个步骤)
   - [3.2 客户端侧](#32-客户端侧)
   - [3.3 服务端侧](#33-服务端侧)
-  - [3.4 client 侧要替换什么](#34-client-侧要替换什么)
+  - [3.4 自定义客户端 Agent 开发说明](#34-自定义客户端-agent-开发说明)
+    - [3.4.1 客户端输入](#341-客户端输入)
+    - [3.4.2 模板与参数 schema](#342-模板与参数-schema)
+    - [3.4.3 服务端执行](#343-服务端执行)
 - [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
   - [4.1 协商场景](#41-协商场景)
   - [4.2 样例如何选择协商类型](#42-样例如何选择协商类型)
@@ -133,14 +136,28 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 被拒绝的提示词映射为 `TASK_STATE_REJECTED`，而不是让服务崩溃；校验通过的参数会传给执行接入点
 （`TaskExecutionService`）。
 
-### 3.4 client 侧要替换什么
+### 3.4 自定义客户端 Agent 开发说明
+
+样例中的取值都是演示数据。客户端实现需要用自身业务内容替换客户端侧的取值，并使用与服务端约定后
+的共享取值。
+
+#### 3.4.1 客户端输入
+
+自然语言任务请求属于客户端自身的输入：`scenario_data.py` 中是样例文案，客户端实现应替换为自己
+需要发送的意图。任务提示词由该输入经 `generate_task_prompt_from_text` 渲染（见 §3.1）。
+
+#### 3.4.2 模板与参数 schema
 
 模板与参数 schema 是两端之间的契约：客户端用它渲染任务请求，服务端用它做校验。本样例的模板
-（`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`）与 schema 都是样例
-特有的 —— 模板常量位于 [`scenario_data.py`](src/client/scenario_data.py)，schema 位于
-[`src/common/task_schema.py`](src/common/task_schema.py)。真实部署中，双方约定共同使用的模板与
-schema，两端使用约定后的版本。服务端 `TaskExecutionService` 接入点之后的业务执行属于 server agent
-（见[部署清单](#5-部署清单)）。
+（`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`，位于
+[`scenario_data.py`](src/client/scenario_data.py)）与 schema（位于
+[`src/common/task_schema.py`](src/common/task_schema.py)）都是样例特有的。真实部署中，双方约定
+模板与 schema，两端使用约定后的版本。
+
+#### 3.4.3 服务端执行
+
+服务端 `TaskExecutionService` 接入点之后的业务执行属于 server agent。客户端只发送请求并消费进度
+更新与报告，不实现任何执行逻辑。见[部署清单](#5-部署清单)。
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 

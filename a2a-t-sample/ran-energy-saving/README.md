@@ -17,7 +17,10 @@ unspecified reader.
   - [3.1 The four steps](#31-the-four-steps)
   - [3.2 Client side](#32-client-side)
   - [3.3 Server side](#33-server-side)
-  - [3.4 What the client replaces](#34-what-the-client-replaces)
+  - [3.4 Notes for custom client agent development](#34-notes-for-custom-client-agent-development)
+    - [3.4.1 Client input](#341-client-input)
+    - [3.4.2 Template and parameter schema](#342-template-and-parameter-schema)
+    - [3.4.3 Server-side execution](#343-server-side-execution)
 - [4. Using the A2A-T SDK to implement the Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-the-negotiation-t-interaction)
   - [4.1 Negotiation scenarios](#41-negotiation-scenarios)
   - [4.2 How the demo selects the negotiation kind](#42-how-the-demo-selects-the-negotiation-kind)
@@ -139,17 +142,32 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 `TASK_STATE_REJECTED` instead of crashing the server; the validated parameters are passed to the
 execution integration point (`TaskExecutionService`).
 
-### 3.4 What the client replaces
+### 3.4 Notes for custom client agent development
+
+The sample ships demo values. A client implementation replaces the client-side values with its own
+business content, and uses the agreed versions of the values shared with the server.
+
+#### 3.4.1 Client input
+
+The natural-language task request is the client's own input: `scenario_data.py` holds the demo
+wording, which a client implementation replaces with the intent it needs to send. The task prompt
+is rendered from this input by `generate_task_prompt_from_text` (§3.1).
+
+#### 3.4.2 Template and parameter schema
 
 The template and the parameter schema are the contract between the two agents: the client renders
 its task request from them, and the server validates against them. This sample's template
-(`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`) and schema are
-sample-specific — the template constant lives in
-[`scenario_data.py`](src/client/scenario_data.py), the schema in
-[`src/common/task_schema.py`](src/common/task_schema.py). In a real deployment the two parties agree
-on their own template and schema, and each side uses the agreed versions. The business execution
-behind the server's `TaskExecutionService` integration point belongs to the server agent (see the
-[deployment checklist](#5-deployment-checklist)).
+(`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`, in
+[`scenario_data.py`](src/client/scenario_data.py)) and schema (in
+[`src/common/task_schema.py`](src/common/task_schema.py)) are sample-specific. In a real deployment
+the two parties agree on the template and the schema, and each side uses the agreed versions.
+
+#### 3.4.3 Server-side execution
+
+The business execution behind the server's `TaskExecutionService` integration point belongs to the
+server agent. The client sends the request and consumes the progress updates and the report; it
+implements no part of the execution. See the
+[deployment checklist](#5-deployment-checklist).
 
 ## 4. Using the A2A-T SDK to implement the Negotiation-T interaction
 
