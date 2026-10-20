@@ -61,37 +61,48 @@ Key workflows:
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the message handling (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see [§5](#5-notes-for-custom-agent-development)); not removable until both sides are replaced. |
-| [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see [§5](#5-notes-for-custom-agent-development)). |
+| [`src/server/server_main.py`](src/server/server_main.py) | The A2A SDK app assembly includes the push-notification module by default. For server-side integration, see the `INTEGRATION POINT` comment in `build_server_runtime`. |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | The server flow: validate → negotiate-or-execute → stream progress and the report. |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution integration point plus the demo use-case (UC1) service. |
+| [`src/server/task_execution.py`](src/server/task_execution.py) | Integrates `TaskExecutionService` as the execution entry point, along with a demo execution service that simulates task progress and generates intent reports. |
 | [`src/common/`](src/common) | Shared adapters, the schema-routed mock LLM, the `WebhookReceiver`, and the shared `TASK_PARAM_SCHEMA`. |
 | [`src/registry/`](src/registry) | Mock registry center (AgentCard register/query, port 5001). |
 | [`resources/mock_llm/`](resources/mock_llm) | Scripted slot-extraction and content-validation replies. |
-| [`run_demo.py`](run_demo.py) | Cross-platform, non-blocking launcher. |
+| [`run_demo.py`](run_demo.py) | Non-blocking launcher: starts the registry and the server in the background and runs the client in the foreground. |
 
 ## 2. Quickstart
 
-Prerequisites: Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/). Step 1 creates the
-repository `.venv`.
+Prerequisites: Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/).
+
+**Step 1 — create the repository `.venv` and install the SDK.** Run this from the repository root.
 
 ```bash
-# 1) repository root: create .venv and install the SDK
 uv sync --dev
+```
 
-# 2) a2a-t-sample/ — the directory that holds .env
+**Step 2 — configure the sample.** `a2a-t-sample/` holds the `.env` the sample reads.
+
+```bash
 cd a2a-t-sample
 cp env.example .env
 uv pip install -r requirements.txt
-
-# 3) run the sample (registry + server as background subprocesses, client in the foreground)
-cd ran-energy-saving
-python run_demo.py           # English (default); add --language zh-CN for the Chinese run
 ```
 
-Run `run_demo.py` with the interpreter from the repository `.venv` (activate it, or call it
-directly, e.g. `..\..\.venv\Scripts\python.exe run_demo.py` on Windows). Both sides' output streams
-to the terminal live and interleaved; when the client exits, the background processes are stopped.
+**Step 3 — run the sample.** The launcher starts the registry and the server as background
+subprocesses and runs the client in the foreground. Add `--language zh-CN` for the Chinese run.
+
+```bash
+cd ran-energy-saving
+python run_demo.py
+```
+
+Use the interpreter from the repository `.venv` (activate it or call it directly).
+
+> **Windows tip:** call the interpreter explicitly, e.g.
+> `..\..\.venv\Scripts\python.exe run_demo.py`.
+
+Both client and server logs stream to the terminal live and interleaved, with background processes
+automatically terminating when the client exits.
 
 Add `--scenario negotiation` to run the information negotiation (missing region), or
 `--negotiation target` / `--negotiation feasibility` to run the other two kinds. If the client
@@ -416,7 +427,7 @@ marked `server`.
 | --- | --- | --- | --- |
 | task template and parameter schema — `ENERGY_SAVING_TEMPLATE_URI` ([`scenario_data.py`](src/client/scenario_data.py)), [`src/common/task_schema.py`](src/common/task_schema.py) | both | the contract the client renders its request from and the server validates against | **REPLACE** with the template and schema agreed by both parties |
 | mock LLM — [`resources/mock_llm/`](resources/mock_llm) + the schema-routed mock in `src/common/` | both | scripted slot-extraction and content-validation replies, selected when `A2AT_LLM_API_KEY` is empty | **KEEP** for CI / offline runs. In a real deployment, each side replaces it with a real OpenAI-compatible endpoint |
-| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | server | the use-case (UC1) progress steps and intent report the demo execution streams | **REPLACE** by the server agent via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once its service is assembled, the demo service and data can be deleted |
+| scripted execution data — [`src/server/constants_data.py`](src/server/constants_data.py) | server | the scripted progress steps and intent report the demo execution streams | **REPLACE** by the server agent via the `TaskExecutionService` integration point ([`src/server/task_execution.py`](src/server/task_execution.py)); once its service is assembled, the demo service and data can be deleted |
 | sample input and scripted answers — [`src/client/scenario_data.py`](src/client/scenario_data.py) | both (see below) | the Task-T natural-language input, the negotiation answers, and the canned propose texts | **REPLACE** on both sides: the client supplies its own task intent and answers through its own `NegotiationResponseProvider`; the server replaces the canned propose texts in `server_flow._negotiation_propose_text` with its own business wording |
 | mock registry — [`src/registry/`](src/registry) (port 5001) | both | AgentCard registration (server) and query for discovery (client) | **REPLACE** with the deployment's registry center, or bypass discovery and construct the `a2a-sdk` client from a known AgentCard |
 | static webhook token — `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) | both | shared static token in the `X-A2A-Notification-Token` header | **REPLACE** with production auth (per-client secrets, rotation, TLS); treat the receiver as an exposed HTTP endpoint |

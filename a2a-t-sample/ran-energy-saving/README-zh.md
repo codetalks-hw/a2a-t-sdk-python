@@ -58,37 +58,47 @@
 | [`src/client/client_main.py`](src/client/client_main.py) | 装配根：读取 `.env`、构建运行时（`build_client_runtime`）、从注册中心发现服务端 AgentCard、启动/停止 webhook 接收器、装配 demo 的 `ScriptedNegotiationResponseProvider`。客户端侧 `INTEGRATION POINT` 标注位于 `main()`。 |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | 编排：消息序列（生成 → 发送 → 消费）、报文机制（metadata 键、`A2A-Extensions` 头）、事件管线，以及两种传输驱动（SSE 流式 / webhook 队列）。它调用协商决策接入点，但不持有任何决策。 |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | 协商决策接入点：`NegotiationProposeView`、`NegotiationDecision`、`NegotiationResponseProvider` Protocol，以及 demo 实现 `ScriptedNegotiationResponseProvider`。 |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见 [§5](#5-自定义-agent-开发说明)），在两侧都完成替换前不能删除。 |
-| [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk 应用装配，推送通知机制无条件装配。服务端侧 `INTEGRATION POINT` 标注位于 `build_server_runtime`。 |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见 [§5](#5-自定义-agent-开发说明)）。 |
+| [`src/server/server_main.py`](src/server/server_main.py) | A2A SDK 应用装配默认包含推送通知模块。服务端集成时请查看 `build_server_runtime` 中的 `INTEGRATION POINT` 注释。 |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | 服务端流程：校验 → 协商或执行 → 流式推送进度与报告。 |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | `TaskExecutionService` 执行接入点，以及 demo 的用例（UC1）服务。 |
+| [`src/server/task_execution.py`](src/server/task_execution.py) | 集成 `TaskExecutionService` 作为执行入口，并包含一个模拟任务进度、生成意图报告的 demo 执行服务。 |
 | [`src/common/`](src/common) | 共享适配器、按 schema 路由的 mock LLM、`WebhookReceiver`，以及双端共享的 `TASK_PARAM_SCHEMA`。 |
 | [`src/registry/`](src/registry) | mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
 | [`resources/mock_llm/`](resources/mock_llm) | 脚本化的槽位抽取与内容校验应答。 |
-| [`run_demo.py`](run_demo.py) | 跨平台、非阻塞的启动器。 |
+| [`run_demo.py`](run_demo.py) | 非阻塞启动器：后台启动注册中心与服务端，前台运行客户端。 |
 
 ## 2. 快速开始
 
-前置条件：Python 3.12 或更高版本与 [`uv`](https://docs.astral.sh/uv/)。第 1 步会创建仓库的
-`.venv`。
+前置条件：Python 3.12 或更高版本与 [`uv`](https://docs.astral.sh/uv/)。
+
+**Step 1 —— 创建仓库 `.venv` 并安装 SDK。** 在仓库根目录执行。
 
 ```bash
-# 1) 仓库根目录：创建 .venv 并安装 SDK
 uv sync --dev
+```
 
-# 2) a2a-t-sample/ —— 存放 .env 的目录
+**Step 2 —— 配置样例。** `a2a-t-sample/` 存放样例读取的 `.env`。
+
+```bash
 cd a2a-t-sample
 cp env.example .env
 uv pip install -r requirements.txt
-
-# 3) 运行样例（注册中心与服务端作为后台子进程启动，客户端在前台运行）
-cd ran-energy-saving
-python run_demo.py           # 默认英文；加 --language zh-CN 运行中文
 ```
 
-请用仓库 `.venv` 中的解释器运行 `run_demo.py`（激活该环境，或直接调用，例如 Windows 下
-`..\..\.venv\Scripts\python.exe run_demo.py`）。两端输出会实时交错打印到终端；客户端退出后，后台
-进程被停止。
+**Step 3 —— 运行样例。** 启动器在后台启动注册中心与服务端，并在前台运行客户端。加
+`--language zh-CN` 运行中文。
+
+```bash
+cd ran-energy-saving
+python run_demo.py
+```
+
+请使用仓库 `.venv` 中的解释器（激活该环境，或直接调用）。
+
+> **Windows 提示：** 直接指定解释器，例如
+> `..\..\.venv\Scripts\python.exe run_demo.py`。
+
+客户端与服务端的日志会实时交错输出到终端；客户端退出后，后台进程自动终止。
 
 加 `--scenario negotiation` 运行信息协商（缺失 region），或加 `--negotiation target` /
 `--negotiation feasibility` 运行另外两类。若客户端无法保持流式连接，加 `--transport webhook` ——
@@ -377,7 +387,7 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 | --- | --- | --- | --- |
 | 任务模板与参数 schema —— `ENERGY_SAVING_TEMPLATE_URI`（[`scenario_data.py`](src/client/scenario_data.py)）、[`src/common/task_schema.py`](src/common/task_schema.py) | 两端 | 客户端据此渲染请求、服务端据此校验的契约 | **替换**为双方约定的模板与 schema |
 | mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 两端 | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；真实部署中两端各自替换为真实的 OpenAI 兼容端点 |
-| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的用例（UC1）进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
+| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的脚本化进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
 | 样例输入与脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | Task-T 自然语言输入、协商应答与预制 propose 文案 | 两侧都要**替换**：client 提供自己的任务意图，并经自己的 `NegotiationResponseProvider` 应答；server 把 `server_flow._negotiation_propose_text` 中的预制 propose 文案改为自己的业务措辞 |
 | mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | 两端 | AgentCard 注册（server）与查询发现（client） | **替换**为部署环境的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
 | 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | 两端 | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐客户端密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
