@@ -181,7 +181,7 @@ async def run_main(
     Transport (plan v3): ``sse`` (default) consumes the streaming response unchanged; ``webhook``
     starts the embedded ``WebhookReceiver`` on THIS asyncio loop before the flow runs (lifecycle:
     stopped in the ``finally`` after the flow ends or Ctrl+C unwinds), feeds its events through an
-    ``asyncio.Queue`` into the flow, and builds the a2a client with ``ClientConfig(streaming=False)``
+    ``asyncio.Queue`` into the flow, and builds the a2a-sdk client with ``ClientConfig(streaming=False)``
     (R2 — required to select non-blocking ``message:send``). The receiver's port/token/idle-timeout
     resolve from the run ``.env`` unless explicitly supplied.
     """

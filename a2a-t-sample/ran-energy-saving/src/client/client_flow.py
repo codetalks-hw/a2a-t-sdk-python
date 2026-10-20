@@ -58,7 +58,7 @@ def _require_prompt_text(prompt_content: object) -> tuple[str, str]:
     raise ValueError("prompt generation did not produce text")
 
 
-def _build_request_metadata(initial_input: dict[str, object]) -> str:
+def _build_request_text(initial_input: dict[str, object]) -> str:
     return str(initial_input.get("scenario", ""))
 
 
@@ -368,7 +368,7 @@ async def _send_webhook_message(
     *,
     # Any (not object): the fake-friendly client of the SSE helpers is `object`, but the SSE path
     # tolerates the resulting baseline diagnostics while this new code must add none (plan: ty
-    # total stays at the 52 baseline) — Any keeps attribute access on the a2a client clean.
+    # total stays at the 52 baseline) — Any keeps attribute access on the a2a-sdk client clean.
     a2a_client: Any,
     request: SendMessageRequest,
     call_context: ClientCallContext,
@@ -439,7 +439,7 @@ async def _run_webhook_flow(
                 role="client",
                 stage="a2a-send-message",
                 detail=(
-                    f"phase=initial webhook text_part={_build_request_metadata(initial_input)} "
+                    f"phase=initial webhook text_part={_build_request_text(initial_input)} "
                     f"metadata_keys=[{TASK_T_EXTENSION_URI}, templateUri] "
                     f"return_immediately=true push_registration=inline"
                 ),
@@ -531,7 +531,7 @@ async def _run_webhook_flow(
                 role="client",
                 stage="a2a-send-message",
                 detail=(
-                    f"phase=continuation webhook text_part={_build_request_metadata(initial_input)} "
+                    f"phase=continuation webhook text_part={_build_request_text(initial_input)} "
                     f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
                     f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
                     f"header[A2A-Extensions]={','.join(sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI}))} "
@@ -675,7 +675,7 @@ def _build_negotiation_accept_request(
     accept_request.message.role = Role.ROLE_USER
     # task_id / context_id are filled by the caller from the initial-phase events (the builder sees
     # no events); the message shape is identical for both drivers once set.
-    accept_request.message.parts.add().text = _build_request_metadata(initial_input)
+    accept_request.message.parts.add().text = _build_request_text(initial_input)
     accept_request.message.metadata[TASK_T_EXTENSION_URI] = filled_text
     accept_request.message.metadata[NEGOTIATION_T_EXTENSION_URI] = accept_text
     accept_request.message.metadata[TEMPLATE_URI_METADATA_KEY] = accept_template_uri
@@ -856,7 +856,7 @@ async def _run_negotiation_accept(
         request=accept_request,
         call_context=accept_call_context,
         send_log_detail=(
-            f"phase=continuation streaming text_part={_build_request_metadata(initial_input)} "
+            f"phase=continuation streaming text_part={_build_request_text(initial_input)} "
             f"metadata_keys=[{TASK_T_EXTENSION_URI}, {NEGOTIATION_T_EXTENSION_URI}, "
             f"{TEMPLATE_URI_METADATA_KEY}, {NEGOTIATION_CONTEXT_METADATA_KEY}] "
             f"header[A2A-Extensions]={','.join(extension_uris)}"
@@ -990,7 +990,7 @@ async def run_client_flow(
     request = SendMessageRequest()
     request.message.message_id = str(uuid.uuid4())
     request.message.role = Role.ROLE_USER
-    request.message.parts.add().text = _build_request_metadata(initial_input)
+    request.message.parts.add().text = _build_request_text(initial_input)
     request.message.metadata[extension_uri] = prompt_text
     request.message.metadata["templateUri"] = (
         getattr(prompt_content, "template_uri", None) or ENERGY_SAVING_TEMPLATE_URI
@@ -1033,7 +1033,7 @@ async def run_client_flow(
             request=request,
             call_context=call_context,
             send_log_detail=(
-                f"streaming text_part={_build_request_metadata(initial_input)} "
+                f"streaming text_part={_build_request_text(initial_input)} "
                 f"metadata_keys=[{extension_uri}, templateUri] "
                 f"header[A2A-Extensions]={extension_uri}"
             ),
