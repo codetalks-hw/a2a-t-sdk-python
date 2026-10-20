@@ -50,19 +50,19 @@ a2a-t-corpus/
     │           ├── input_case_from_text.json
     │           └── input_case_from_data.json
     ├── negotiation/
-        ├── test_negotiation_t_from_text_workflow.py   自然语言用例套件（propose / accept / reject / abort）
-        ├── test_negotiation_t_from_data_workflow.py   结构化输入用例套件
-        ├── test_negotiation_self_guard.py             结构自检（不调 LLM，进 CI）
-        └── resources/
-            ├── ran-energy-saving-target-negotiation/      目标协商
-            │   ├── input_case_from_text.json
-            │   └── input_case_from_data.json
-            ├── ran-energy-saving-information-negotiation/ 信息协商
-            │   ├── input_case_from_text.json
-            │   └── input_case_from_data.json
-            └── ran-energy-saving-feasibility-negotiation/ 可行性协商
-                ├── input_case_from_text.json
-                └── input_case_from_data.json
+    │   ├── test_negotiation_t_from_text_workflow.py   自然语言用例套件（propose / accept / reject / abort）
+    │   ├── test_negotiation_t_from_data_workflow.py   结构化输入用例套件
+    │   ├── test_negotiation_self_guard.py             结构自检（不调 LLM，进 CI）
+    │   └── resources/
+    │       ├── ran-energy-saving-target-negotiation/      目标协商
+    │       │   ├── input_case_from_text.json
+    │       │   └── input_case_from_data.json
+    │       ├── ran-energy-saving-information-negotiation/ 信息协商
+    │       │   ├── input_case_from_text.json
+    │       │   └── input_case_from_data.json
+    │       └── ran-energy-saving-feasibility-negotiation/ 可行性协商
+    │           ├── input_case_from_text.json
+    │           └── input_case_from_data.json
     └── notification/
         ├── test_notification_t_from_text_workflow.py   自然语言用例套件
         ├── test_notification_t_from_data_workflow.py   结构化输入用例套件
@@ -278,10 +278,10 @@ uv run pytest a2a-t-corpus/suites/task/test_task_t_from_text_workflow.py -m live
 uv run pytest a2a-t-corpus/suites/task/test_task_t_from_data_workflow.py -m live --corpus-scenario=ran-energy-saving-create
 ```
 
-**执行指定场景下指定用例编号的用例**（`--case-filter` 为用例编号，支持通配符 `*`）：
+**执行指定场景下 text 中指定用例编号的用例**（`--case-filter` 为用例编号，支持通配符 `*`）：
 
 ```
-uv run pytest a2a-t-corpus/suites/task -m live --corpus-scenario=ran-energy-saving-create --case-filter=TC00000001
+uv run pytest a2a-t-corpus/suites/task/test_task_t_from_text_workflow.py -m live --corpus-scenario=ran-energy-saving-create --case-filter=TC00000001
 ```
 
 - 用例的测试编号形如 `<场景名>/<用例编号>`，也可以用 `-k` 直接定位单条用例。
