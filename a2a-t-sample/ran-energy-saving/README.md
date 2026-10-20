@@ -106,9 +106,9 @@ cannot keep a stream open, add `--transport webhook` — see [§6.1](#61-webhook
 2. **Send** — the prompt travels to the server in the message `metadata`.
 3. **Validate** — the server reads the prompt from the metadata and calls the A2A-T server SDK's
    `validate_task_prompt_and_data_filling`, which validates it and extracts the parameters
-   (`operationType`, `region`, `energySavingGoal`, `guaranteedThroughputTarget`). The caller schema
-   `TASK_PARAM_SCHEMA`, shared by both sides, lives in
-   [`src/common/task_schema.py`](src/common/task_schema.py).
+   (`operationType`, `region`, `energySavingGoal`, `guaranteedThroughputTarget`, plus the optional
+   site-level `siteList` and `backgroundEvent`). The caller schema `TASK_PARAM_SCHEMA`, shared by
+   both sides, lives in [`src/common/task_schema.py`](src/common/task_schema.py).
 4. **Execute and report** — the extracted parameters feed the business execution; progress comes
    back as status updates and the result as a report artifact, which the client presents.
 
@@ -224,6 +224,12 @@ need the equivalent decision on the server side.
 
 The session (`id` / `round` / `maxRounds` / performative) travels with every negotiation message in
 the `negotiationContext` metadata map, so the A2A-T SDK itself stays stateless.
+
+**The negotiation runs before the task is created.** The propose in message 2 is a standalone A2A
+`Message` (role `ROLE_AGENT`, same context id), not a Task status event. The server creates the task
+(`SUBMITTED`, then `WORKING`) only when the accept's Task-T prompt validates; the interaction then
+continues as ordinary Task-T. The energy-saving task is a long-running duty task: it stays `WORKING`
+after the report and has no `COMPLETED` state — it ends only if the task is cancelled.
 
 **Where the client's decision plugs in.** When message 2 arrives, the client flow builds a lightweight
 `NegotiationProposeView` (kind, `templateUri`, rendered text) and calls the provider
@@ -438,8 +444,9 @@ event arrives as a webhook POST on a receiver embedded in the client process (`W
 [`src/common/webhook_receiver.py`](src/common/webhook_receiver.py)), which binds one extra
 listening port (`--webhook-port`, default 9000). The server's pushes carry
 `A2AT_SAMPLE_WEBHOOK_TOKEN` (default `demo-webhook-token`) in the `X-A2A-Notification-Token`
-header. The flow ends on any SDK terminal state, with a 30 s idle backstop. The negotiation round
-trip behaves identically on both transports.
+header. The flow ends on the report artifact, with a 30 s idle backstop. The negotiation round
+trip behaves identically on both transports; a pre-task propose Message is not a task event, so the
+client reads it from the non-blocking RPC reply.
 
 - **Two registration paths.** The initial request registers the push config inline
   (`SendMessageConfiguration.task_push_notification_config`, a flat
@@ -458,12 +465,12 @@ trip behaves identically on both transports.
 - **Token auth.** The receiver validates `X-A2A-Notification-Token` on every POST: a mismatch
   answers `401` (the event is dropped), a malformed or unrecognized body answers `400`. The demo's
   static shared token is demo-grade — for production use per-client secrets with rotation over TLS.
-- **End signals.** Any SDK terminal state (`TASK_STATE_COMPLETED` / `FAILED` / `CANCELED` /
-  `REJECTED`) ends the phase that is consuming events: a negotiation scenario normally ends on
-  `COMPLETED`; a failed validation or a stream error ends on `REJECTED` / `FAILED`, and the summary
-  records it as `end=<state>`. The default scenario (no negotiation) ends on the report artifact.
-  `INPUT_REQUIRED` (a negotiation propose) is an initial-phase interruption, not a flow end: when
-  the negotiation is engaged, the flow proceeds to the continuation phase. The idle backstop
+- **End signals.** Every scenario ends on the report artifact: the energy-saving task is a
+  long-running duty task and stays `WORKING`, so the server emits no terminal state after the
+  report. A failed validation (a `REJECTED` task) or a stream error (`FAILED` / `CANCELED`) still
+  ends the flow immediately, and the summary records it as `end=<state>`. A pre-task propose is a
+  Message, never a pushed task event: in webhook mode the client answers it from the non-blocking
+  RPC reply and registers its own inline push config on the accept. The idle backstop
   (`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`, default 30 s, reset per received event) logs
   `webhook-idle-timeout` and ends the flow with what was collected. `A2AT_SAMPLE_MAX_ARTIFACTS`
   does not apply in webhook mode. Each phase's single RPC reply is logged once as

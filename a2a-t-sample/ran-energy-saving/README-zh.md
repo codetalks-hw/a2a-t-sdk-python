@@ -103,8 +103,9 @@ python run_demo.py           # 默认英文；加 --language zh-CN 运行中文
 2. **发送** —— 提示词放在消息 `metadata` 中发给服务端。
 3. **校验** —— 服务端从 metadata 中取出提示词，调用 A2A-T 服务端 SDK 的
    `validate_task_prompt_and_data_filling` 校验并抽取参数（`operationType`、`region`、
-   `energySavingGoal`、`guaranteedThroughputTarget`）。双端共享的调用方 schema `TASK_PARAM_SCHEMA`
-   位于 [`src/common/task_schema.py`](src/common/task_schema.py)。
+   `energySavingGoal`、`guaranteedThroughputTarget`，以及可选的站点级 `siteList` 与
+   `backgroundEvent`）。双端共享的调用方 schema `TASK_PARAM_SCHEMA` 位于
+   [`src/common/task_schema.py`](src/common/task_schema.py)。
 4. **执行并报告** —— 抽取出的参数交给业务执行；进度以状态更新返回、结果以报告 artifact 返回，
    由客户端呈现。
 
@@ -201,6 +202,11 @@ Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propos
 
 会话（`id` / `round` / `maxRounds` / performative）随每条协商消息放在 `negotiationContext` metadata
 中，因此 A2A-T SDK 本身无状态。
+
+**协商发生在任务创建之前。** 第 2 条报文中的 propose 是一条独立的 A2A `Message`（角色为
+`ROLE_AGENT`，context id 与请求相同），不是 Task 状态事件。只有 accept 携带的 Task-T 提示词校验
+通过后，服务端才创建任务（先 `SUBMITTED`，再 `WORKING`），此后按普通 Task-T 交互继续。节能任务是
+值守类长时任务：报告发出后仍保持 `WORKING`，没有 `COMPLETED` 状态 —— 只有任务被取消才会结束。
 
 **client 侧要接的地方。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
 `templateUri`、渲染文本）并调用（[`negotiation_response.py`](src/client/negotiation_response.py)）：
@@ -394,7 +400,8 @@ webhook 模式下的变化：客户端非阻塞发送（`return_immediately`）�
 送达客户端进程内嵌的接收器（[`src/common/webhook_receiver.py`](src/common/webhook_receiver.py) 的
 `WebhookReceiver`），它额外绑定一个监听端口（`--webhook-port`，默认 9000）。服务端推送在
 `X-A2A-Notification-Token` 头中携带 `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`）。
-流程在任一 SDK 终态结束，另有 30 秒空闲兜底。协商往返在两种传输上的行为一致。
+流程以报告 artifact 结束，另有 30 秒空闲兜底。协商往返在两种传输上的行为一致；任务创建前的
+propose 是 Message 而非任务事件，因此客户端从非阻塞 RPC 应答中读取它。
 
 - **两条注册路径。** 初始请求在请求上内联注册推送配置
   （`SendMessageConfiguration.task_push_notification_config`，即扁平的
@@ -411,15 +418,14 @@ webhook 模式下的变化：客户端非阻塞发送（`return_immediately`）�
 - **Token 鉴权。** 接收器对每个 POST 校验 `X-A2A-Notification-Token`：不匹配回 `401`（事件被丢弃），
   畸形或无法识别的报文回 `400`。demo 的静态共享 token 是 demo 级的 —— 生产请使用 TLS 之上可轮换的
   逐客户端密钥。
-- **结束信号。** 任一 SDK 终态（`TASK_STATE_COMPLETED` / `FAILED` / `CANCELED` / `REJECTED`）都会结束
-  当前正在消费事件的阶段：协商场景正常以 `COMPLETED` 结束；校验失败或流异常以 `REJECTED` /
-  `FAILED` 结束，summary 行以 `end=<state>` 记录。默认场景（无协商）以报告 artifact 结束。
-  `INPUT_REQUIRED`（协商 propose）是初始阶段的中断点，不是流程结束：协商已接入时，flow 会进入续传
-  阶段。空闲兜底
-  （`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）打印 `webhook-idle-timeout`
-  行后带着已收集的事件正常结束。`A2AT_SAMPLE_MAX_ARTIFACTS` 在 webhook 模式下不生效。每个阶段的唯一
-  RPC 应答以 `webhook-rpc-reply` 记录一次，不重复计数。`stream-completed` 汇总统计经 webhook 收到
-  的事件并追加 `transport=webhook`。
+- **结束信号。** 所有场景都以报告 artifact 结束：节能任务是值守类长时任务，报告发出后保持
+  `WORKING`，服务端不会再发终态。校验失败（`REJECTED` 任务）或流异常（`FAILED` / `CANCELED`）仍会
+  立即结束流程，summary 行以 `end=<state>` 记录。任务创建前的 propose 是 Message，不是推送的任务
+  事件：webhook 模式下客户端从非阻塞 RPC 应答中读取它，并在 accept 上注册自己的内联推送配置。空闲
+  兜底（`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）打印
+  `webhook-idle-timeout` 行后带着已收集的事件正常结束。`A2AT_SAMPLE_MAX_ARTIFACTS` 在 webhook
+  模式下不生效。每个阶段的唯一 RPC 应答以 `webhook-rpc-reply` 记录一次，不重复计数。
+  `stream-completed` 汇总统计经 webhook 收到的事件并追加 `transport=webhook`。
 
 ### 6.2 配置（a2a-t-sample/.env）
 
