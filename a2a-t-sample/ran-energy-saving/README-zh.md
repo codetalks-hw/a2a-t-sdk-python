@@ -61,7 +61,7 @@
 | [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见 [§5](#5-自定义-agent-开发说明)），在两侧都完成替换前不能删除。 |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk 应用装配，推送通知机制无条件装配。服务端侧 `INTEGRATION POINT` 标注位于 `build_server_runtime`。 |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | 服务端流程：校验 → 协商或执行 → 流式推送进度与报告。 |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | `TaskExecutionService` 执行接入点，以及 demo 的用例（UC1）服务。 |
+| [`src/server/task_execution.py`](src/server/task_execution.py) | `TaskExecutionService` 执行接入点，以及 demo 的执行服务（脚本化进度步骤与意图报告）。 |
 | [`src/common/`](src/common) | 共享适配器、按 schema 路由的 mock LLM、`WebhookReceiver`，以及双端共享的 `TASK_PARAM_SCHEMA`。 |
 | [`src/registry/`](src/registry) | mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
 | [`resources/mock_llm/`](resources/mock_llm) | 脚本化的槽位抽取与内容校验应答。 |
@@ -377,7 +377,7 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 | --- | --- | --- | --- |
 | 任务模板与参数 schema —— `ENERGY_SAVING_TEMPLATE_URI`（[`scenario_data.py`](src/client/scenario_data.py)）、[`src/common/task_schema.py`](src/common/task_schema.py) | 两端 | 客户端据此渲染请求、服务端据此校验的契约 | **替换**为双方约定的模板与 schema |
 | mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 两端 | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；真实部署中两端各自替换为真实的 OpenAI 兼容端点 |
-| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的用例（UC1）进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
+| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的脚本化进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
 | 样例输入与脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | Task-T 自然语言输入、协商应答与预制 propose 文案 | 两侧都要**替换**：client 提供自己的任务意图，并经自己的 `NegotiationResponseProvider` 应答；server 把 `server_flow._negotiation_propose_text` 中的预制 propose 文案改为自己的业务措辞 |
 | mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | 两端 | AgentCard 注册（server）与查询发现（client） | **替换**为部署环境的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
 | 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | 两端 | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐客户端密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
