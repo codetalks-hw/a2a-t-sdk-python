@@ -17,14 +17,14 @@
   - [3.3 服务端侧](#33-服务端侧)
   - [3.4 client 侧要替换什么](#34-client-侧要替换什么)
 - [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
-  - [4.1 什么时候会发生协商](#41-什么时候会发生协商)
-  - [4.2 样例如何判断属于哪一种](#42-样例如何判断属于哪一种)
-  - [4.3 共享机制](#43-共享机制)
+  - [4.1 协商场景](#41-协商场景)
+  - [4.2 样例如何选择协商类型](#42-样例如何选择协商类型)
+  - [4.3 通用机制](#43-通用机制)
   - [4.4 信息协商（information）](#44-信息协商information)
   - [4.5 目标协商（target）](#45-目标协商target)
   - [4.6 可行性协商（feasibility）](#46-可行性协商feasibility)
   - [4.7 reject 与 abort](#47-reject-与-abort)
-- [5. 替换清单（demo 到生产）](#5-替换清单demo-到生产)
+- [5. 部署清单](#5-部署清单)
 - [6. 附录](#6-附录)
   - [6.1 Webhook 传输](#61-webhook-传输)
   - [6.2 配置（a2a-t-sample/.env）](#62-配置a2a-t-sampleenv)
@@ -34,22 +34,21 @@
 
 ## 1. 本样例演示了什么
 
-一个客户端 Agent 通过 A2A 委托一个 RAN 域 Agent 执行节能任务。在这一个场景上，样例按顺序覆盖客户
-需要集成的两项 A2A-T 能力：
+一个客户端 Agent 通过 A2A 协议委托一个 RAN 域 Agent 执行节能任务。在这一个场景上，样例按顺序覆盖
+客户需要集成的两项 A2A-T 能力：
 
 ```text
 Task-T          自然语言 ──> 任务提示词 ──> 校验 ──> 执行 ──> 报告
 
-Negotiation-T   请求不能直接执行时（信息缺失 / 目标不清晰 / 可行性不确定）
-                  ──> 双方 Agent 协商 ──> 达成一致 ──> 任务随后按 Task-T 执行
+Negotiation-T   请求需要补全或修正后才能执行时（信息缺失 / 目标不明确 / 目标不可行）
+                  ──> 双方协商 ──> 达成一致 ──> 任务执行
 ```
 
-按三种阅读路径之一阅读：
+本文后续内容按三种使用路径组织：
 
-- **"先跑起来"** —— [§2 快速开始](#2-快速开始)。
-- **"我要集成一次性任务"** —— [§3 Task-T 交互](#3-使用-a2a-t-sdk-实现-task-t-交互)加上
-  [替换清单](#5-替换清单demo-到生产)。
-- **"我要集成协商"** —— [§4 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)。
+- **运行样例** —— [§2 快速开始](#2-快速开始)。
+- **实现 Task-T 交互** —— [§3](#3-使用-a2a-t-sdk-实现-task-t-交互)与[部署清单](#5-部署清单)。
+- **实现 Negotiation-T 交互** —— [§4](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)。
 
 ### 1.1 目录结构
 
@@ -58,7 +57,7 @@ Negotiation-T   请求不能直接执行时（信息缺失 / 目标不清晰 / �
 | [`src/client/client_main.py`](src/client/client_main.py) | 装配根：读取 `.env`、构建运行时（`build_client_runtime`）、从注册中心发现服务端 AgentCard、启动/停止 webhook 接收器、装配 demo 的 `ScriptedNegotiationResponseProvider`。客户端侧 `INTEGRATION POINT` 标注位于 `main()`。 |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | 编排：消息序列（生成 → 发送 → 消费）、报文机制（metadata 键、`A2A-Extensions` 头）、事件管线，以及两种传输驱动（SSE 流式 / webhook 队列）。它调用协商决策接入点，但不持有任何决策。 |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | 协商决策接入点：`NegotiationProposeView`、`NegotiationDecision`、`NegotiationResponseProvider` Protocol，以及 demo 实现 `ScriptedNegotiationResponseProvider`。 |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见[替换清单](#5-替换清单demo-到生产)），不能原样删除。 |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见[部署清单](#5-部署清单)），不能原样删除。 |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk 应用装配，推送通知机制无条件装配。服务端侧 `INTEGRATION POINT` 标注位于 `build_server_runtime`。 |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | 服务端流程：校验 → 协商或执行 → 流式推送进度与报告。 |
 | [`src/server/task_execution.py`](src/server/task_execution.py) | `TaskExecutionService` 执行接入点，以及 demo 的 UC1 服务。 |
@@ -134,7 +133,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 （`ENERGY_SAVING_TEMPLATE_URI` = `Task-T/network-layer/ran-energy-saving/v1`）与 schema 都是样例
 特有的，因此 client 实现要换成自己的（[`scenario_data.py`](src/client/scenario_data.py)）；服务端
 `TaskExecutionService` 接入点之后的业务执行属于 server agent（见
-[替换清单](#5-替换清单demo-到生产)）。
+[部署清单](#5-部署清单)）。
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
@@ -143,10 +142,10 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 业务由两端各自负责：server agent 决定请求何时无法按原样执行、值得先谈一谈；client agent 决定如何
 应答收到的 propose。
 
-### 4.1 什么时候会发生协商
+### 4.1 协商场景
 
-服务端无法按请求原样执行，但这个差距又是双方**谈一谈就能补齐**、而不是只能拒绝的时候。样例覆盖三种
-情况：
+服务端无法按收到的请求执行，且该差距可以通过协商解决而不必直接拒绝请求时，由服务端开启协商。样例
+覆盖三种情况：
 
 **信息不完整。** 客户端要求执行节能，给了目标、时段和吞吐目标，却没说在哪个区域。服务端缺这一项
 无法开工，于是告诉客户端缺什么；客户端补上，任务继续。
@@ -160,7 +159,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 速率执行，电池撑不到停电结束。服务端给出不可行的结论和提案（把 06:00~18:00 的保障速率从 10Mbps 下调
 到 2Mbps）；客户端接受调整后的目标。
 
-### 4.2 样例如何判断属于哪一种
+### 4.2 样例如何选择协商类型
 
 判断属于哪种情况、以及到底要不要协商，是**server agent 的业务决策，两个 SDK 都不持立场** —— client
 只对收到的 propose 作出反应。本样例是数据驱动的：首个内容校验错误的错误码通过
@@ -173,13 +172,13 @@ Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propos
 客户端收到的是哪一类协商，因此客户端按收到的消息决定应答 —— accept、reject 或 abort —— 而不是按
 错误码。
 
-### 4.3 共享机制
+### 4.3 通用机制
 
-以下对三类协商通用，各类型小节不再重复。
+以下机制对三类协商均适用，各类型小节不再重复。
 
-**一轮 = 一次 propose 加上对它的应答。** 会话上下文携带 1 起始的 `round`；应答沿用 propose 的轮次，
-只有**新的** propose 才会推进轮次。客户端最初那条请求不算协商轮 —— 协商从服务端的 propose 才开始。
-`maxRounds`（默认 5）限制会话轮次。
+**轮次。** 一轮由一次 propose 和针对该 propose 的应答（accept 或 reject）构成。会话上下文携带从 1
+开始的 `round`：应答沿用其所回应的 propose 的轮次，只有**新的** propose 才推进轮次。客户端最初的
+请求不计入协商轮次 —— 第一轮从服务端的 propose 开始。`maxRounds`（默认 5）限制会话轮数。
 
 **双方都可以发起 propose。** 协商是对称的：客户端与服务端 SDK 都提供同样的四个生成方法
 （propose / accept / reject / abort）和同样的校验方法，任何一方都能发起协商，任何一方也都能应答。
@@ -221,10 +220,10 @@ flow 根据 client 侧的决策重新生成 Task-T 提示词、构建带同轮 `
 
 ### 4.4 信息协商（information）
 
-**① 服务端何时开启。** 请求不完整 —— 缺少服务端必需的参数（样例中为区域）。样例的触发条件是
+**① 触发条件。** 请求不完整 —— 缺少服务端必需的参数（样例中为区域）。样例的触发条件是
 `content.param_missing` 校验错误，但这个错误码是样例的判断方式，不属于协议本身。
 
-**② 参考代码做了什么。**
+**② 参考实现。**
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
@@ -254,10 +253,10 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 
 propose 列出缺失的参数；accept 文本列出补全后的取值。
 
-**③ client 侧可以原样复用的部分。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
+**③ 可复用的客户端代码。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
 会话处理与传输 —— `client_flow.py` 中除决策本身以外的全部内容。
 
-**④ client 侧必须自己实现的部分。** provider 接入点背后的应答来源。
+**④ 客户端自行实现的代码。** provider 接入点背后的应答来源。
 
 ```python
 class MyProvider:
@@ -268,10 +267,10 @@ class MyProvider:
 
 ### 4.5 目标协商（target）
 
-**① 服务端何时开启。** 请求自相矛盾：分时段保障速率目标里有两个时段重叠，重叠时段的保障速率无法
+**① 触发条件。** 请求自相矛盾：分时段保障速率目标里有两个时段重叠，重叠时段的保障速率无法
 唯一确定。样例的触发条件是 `content.value_not_allowed` 校验错误。
 
-**② 参考代码做了什么。**
+**② 参考实现。**
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
@@ -302,17 +301,17 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 样例用的是**澄清**形态：服务端复述它理解的意图（`intent_understanding`），并请求调整时间
 （`request_for_clarification`）。accept 把修正后的目标放进 `confirmed_intent`。
 
-**③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
+**③ 可复用的客户端代码。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ client 侧必须自己实现的部分。** 如何得出 `confirmed_intent` —— 样例从 `scenario_data`
-读取；真实 client 的值来自把歧义解决掉的那一方。
+**④ 客户端自行实现的代码。** 如何得出 `confirmed_intent`：样例从 `scenario_data` 读取，客户端
+实现则从消解歧义的组件获取。
 
 ### 4.6 可行性协商（feasibility）
 
-**① 服务端何时开启。** 请求在当前条件下可能做不到：保障速率无法支撑所声明站点的停电时长。样例的
+**① 触发条件。** 请求在当前条件下可能做不到：保障速率无法支撑所声明站点的停电时长。样例的
 触发条件是 `content.rule_violation` 校验错误。
 
-**② 参考代码做了什么。**
+**② 参考实现。**
 
 | 步骤 | SDK 调用 | 参考代码 |
 | --- | --- | --- |
@@ -344,10 +343,9 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 （`action=PROPOSE_ALTERNATIVE_ON_FAILURE` 加 `infeasibility_details_and_proposal`）；accept 说明
 它同意的调整。
 
-**③ client 侧可以原样复用的部分。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
+**③ 可复用的客户端代码。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
 
-**④ client 侧必须自己实现的部分。** 应答内容 `feasibility_summary` —— 即 client 对服务端
-提案的答复。
+**④ 客户端自行实现的代码。** `feasibility_summary` 中的应答内容，即客户端对服务端提案的答复。
 
 ### 4.7 reject 与 abort
 
@@ -356,10 +354,10 @@ reject/abort 决策只会打日志并结束流程，不发送报文。需要发�
 （`generate_negotiation_reject_prompt_from_data` / `..._from_text`，以及
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`）。
 
-## 5. 替换清单（demo 到生产）
+## 5. 部署清单
 
-**归属**列标明该项由哪一端负责。client 团队只需处理标注为 client 的行；server 行说明对端换成真实系统
-时要替换什么。
+**归属**列标明各组件由哪一端负责。client 团队处理标注为 client 的行；server 行说明对端为真实系统时
+需要替换的内容。
 
 | demo 组成 | 归属 | demo 中的作用 | 保留还是替换 |
 | --- | --- | --- | --- |

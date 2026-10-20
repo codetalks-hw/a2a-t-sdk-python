@@ -19,14 +19,14 @@ unspecified reader.
   - [3.3 Server side](#33-server-side)
   - [3.4 What the client replaces](#34-what-the-client-replaces)
 - [4. Using the A2A-T SDK to implement Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-negotiation-t-interaction)
-  - [4.1 When a negotiation happens](#41-when-a-negotiation-happens)
-  - [4.2 How the demo decides which one applies](#42-how-the-demo-decides-which-one-applies)
-  - [4.3 Shared mechanics](#43-shared-mechanics)
+  - [4.1 Negotiation scenarios](#41-negotiation-scenarios)
+  - [4.2 How the demo selects the negotiation kind](#42-how-the-demo-selects-the-negotiation-kind)
+  - [4.3 Mechanics common to all kinds](#43-mechanics-common-to-all-kinds)
   - [4.4 Information negotiation](#44-information-negotiation)
   - [4.5 Target negotiation](#45-target-negotiation)
   - [4.6 Feasibility negotiation](#46-feasibility-negotiation)
   - [4.7 Reject and abort](#47-reject-and-abort)
-- [5. Replace checklist (demo → production)](#5-replace-checklist-demo--production)
+- [5. Deployment checklist](#5-deployment-checklist)
 - [6. Appendix](#6-appendix)
   - [6.1 Webhook transport](#61-webhook-transport)
   - [6.2 Configuration (a2a-t-sample/.env)](#62-configuration-a2a-t-sampleenv)
@@ -36,23 +36,25 @@ unspecified reader.
 
 ## 1. What this sample demonstrates
 
-A client agent commissions a RAN domain agent to run an energy-saving task over A2A. On this one
-scenario the sample covers the two A2A-T capabilities a customer integrates, in order:
+A client agent commissions a RAN domain agent to run an energy-saving task over the A2A protocol.
+On this single scenario the sample covers the two A2A-T capabilities a customer integrates, in
+order:
 
 ```text
-Task-T          natural language ──> task prompt ──> validated ──> executed ──> reported
+Task-T          natural language ──> task prompt ──> validation ──> execution ──> report
 
-Negotiation-T   when the request is not executable as-is
-                (information missing / target unclear / feasibility uncertain)
-                  ──> the two agents negotiate ──> agreed ──> the task then runs as Task-T
+Negotiation-T   when the request needs completion or correction before it can be executed
+                (information missing / target ambiguous / target infeasible)
+                  ──> negotiation ──> agreement ──> task execution
 ```
 
-Read it one of three ways:
+The remaining sections follow three usage paths:
 
-- **"Just run it"** — [§2 Quickstart](#2-quickstart).
-- **"I integrate the one-shot task"** — [§3 Task-T interaction](#3-using-the-a2a-t-sdk-to-implement-task-t-interaction)
-  plus the [replace checklist](#5-replace-checklist-demo--production).
-- **"I integrate negotiation"** — [§4 Negotiation-T interaction](#4-using-the-a2a-t-sdk-to-implement-negotiation-t-interaction).
+- **Run the sample** — [§2 Quickstart](#2-quickstart).
+- **Implement the Task-T interaction** — [§3](#3-using-the-a2a-t-sdk-to-implement-task-t-interaction)
+  together with the [deployment checklist](#5-deployment-checklist).
+- **Implement the Negotiation-T interaction** —
+  [§4](#4-using-the-a2a-t-sdk-to-implement-negotiation-t-interaction).
 
 ### 1.1 Project layout
 
@@ -61,7 +63,7 @@ Read it one of three ways:
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the message handling (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see the [replace checklist](#5-replace-checklist-demo--production)); not removable as-is. |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see the [deployment checklist](#5-deployment-checklist)); not removable as-is. |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | The server flow: validate → negotiate-or-execute → stream progress and the report. |
 | [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution integration point plus the demo UC1 service. |
@@ -142,7 +144,7 @@ its task request from them, and the server validates against them. This sample's
 sample-specific, so a client implementation brings its own
 ([`scenario_data.py`](src/client/scenario_data.py)). The business execution behind the server's
 `TaskExecutionService` integration point belongs to the server agent (see the
-[replace checklist](#5-replace-checklist-demo--production)).
+[deployment checklist](#5-deployment-checklist)).
 
 ## 4. Using the A2A-T SDK to implement Negotiation-T interaction
 
@@ -153,11 +155,11 @@ pairs the two. The two agents own the business, each on its own side: the server
 a request cannot be carried out as-is and a conversation would settle it; the client agent decides
 how to answer the propose.
 
-### 4.1 When a negotiation happens
+### 4.1 Negotiation scenarios
 
-A negotiation opens when the server cannot carry out the request as it stands, but the gap is
-something the two agents can settle by talking rather than by refusing to act. The demo covers
-three such situations:
+The server opens a negotiation when it cannot execute the request as received, and the gap can be
+resolved through negotiation rather than by rejecting the request. The sample covers three such
+situations:
 
 **Information — the request is incomplete.** The client asks to run energy saving and names a goal,
 a time window and a throughput target, but never says which region. The server cannot start without
@@ -176,7 +178,7 @@ that rate would drain the batteries faster than the outage lasts. The server rep
 is infeasible and proposes an alternative (lower the 06:00~18:00 rate from 10 Mbps to 2 Mbps); the
 client accepts the adjusted target.
 
-### 4.2 How the demo decides which one applies
+### 4.2 How the demo selects the negotiation kind
 
 Which situation applies — and whether to negotiate at all — is **the server agent's business
 decision; the SDKs have no opinion** — and the client only reacts to the propose it receives. In this
@@ -191,14 +193,14 @@ template its message text was rendered from, such as
 propose it received, so the client picks its answer — accept, reject or abort — from the message it
 got, not from any error code.
 
-### 4.3 Shared mechanics
+### 4.3 Mechanics common to all kinds
 
 These apply to all three kinds; the per-kind sections below do not repeat them.
 
-**A round is one propose plus the answer to it.** The session context carries a 1-based `round`;
-the answer keeps the propose's round, and only a *new* propose advances it. The client's opening
-request is not a negotiation round — the negotiation starts with the server's propose.
-`maxRounds` (default 5) bounds the session.
+**Round.** A round consists of one propose and the response to that propose (accept or reject). The
+session context carries a 1-based `round`: a response keeps the round of the propose it answers, and
+only a *new* propose advances the round. The client's opening request is not a negotiation round —
+the first round begins with the server's propose. `maxRounds` (default 5) bounds the session.
 
 **Either side can propose.** Negotiation is symmetric: the client and the server SDK expose the same
 four generation methods (propose / accept / reject / abort) and the same validation methods, so
@@ -248,11 +250,11 @@ that internally.
 
 ### 4.4 Information negotiation
 
-**① When the server opens it.** The request is incomplete — it lacks a parameter the server needs
+**① Trigger condition.** The request is incomplete — it lacks a parameter the server needs
 (in the demo, the region). The demo's trigger is a `content.param_missing` validation error, but
 that code is the sample's choice, not part of the protocol.
 
-**② What the reference code does.**
+**② Reference implementation.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
@@ -282,11 +284,11 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 
 The propose lists the missing parameters; the accept text lists the filled values.
 
-**③ What the client implementation can copy as-is.** The prompt rendering, the `templateUri`/`negotiationContext`
+**③ Reusable client code.** The prompt rendering, the `templateUri`/`negotiationContext`
 metadata assembly, the session handling, and the transport — everything in `client_flow.py` except
 the decision itself.
 
-**④ What the client implementation must provide.** The answer source behind the provider
+**④ Client-specific code.** The answer source behind the provider
 integration point.
 
 ```python
@@ -298,11 +300,11 @@ class MyProvider:
 
 ### 4.5 Target negotiation
 
-**① When the server opens it.** The request contradicts itself: two time windows of the segmented
+**① Trigger condition.** The request contradicts itself: two time windows of the segmented
 guaranteed throughput target overlap, so the guaranteed rate for the overlapping period is
 ambiguous. The demo's trigger is a `content.value_not_allowed` validation error.
 
-**② What the reference code does.**
+**② Reference implementation.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
@@ -334,20 +336,20 @@ The demo proposes the *clarification* form: the server restates the intent it un
 (`intent_understanding`) and asks for the time adjustment (`request_for_clarification`). The accept
 carries the corrected target as `confirmed_intent`.
 
-**③ What the client implementation can copy as-is.** The same as information: rendering, metadata assembly, session
+**③ Reusable client code.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What the client implementation must provide.** How the client derives `confirmed_intent` —
-the demo reads it from `scenario_data`; a real client gets it from whatever resolves the
+**④ Client-specific code.** How the client derives `confirmed_intent`: the demo reads it from
+`scenario_data`, while a client implementation obtains it from the component that resolves the
 ambiguity.
 
 ### 4.6 Feasibility negotiation
 
-**① When the server opens it.** The request may be impossible under current conditions: the
+**① Trigger condition.** The request may be impossible under current conditions: the
 guaranteed rate cannot sustain the declared outage duration for the listed stations. The demo's
 trigger is a `content.rule_violation` validation error.
 
-**② What the reference code does.**
+**② Reference implementation.**
 
 | Step | SDK call | Reference code |
 | --- | --- | --- |
@@ -379,11 +381,11 @@ The demo reports the completed assessment as infeasible and attaches an alternat
 (`action=PROPOSE_ALTERNATIVE_ON_FAILURE` with `infeasibility_details_and_proposal`); the accept
 states the adjustment it agrees to.
 
-**③ What the client implementation can copy as-is.** The same as information: rendering, metadata assembly, session
+**③ Reusable client code.** The same as information: rendering, metadata assembly, session
 handling, transport.
 
-**④ What the client implementation must provide.** The answer — `feasibility_summary`, i.e. how
-the client responds to the server's proposal.
+**④ Client-specific code.** The answer carried in `feasibility_summary`, i.e. the client's response
+to the server's proposal.
 
 ### 4.7 Reject and abort
 
@@ -393,10 +395,11 @@ message. The SDK provides the matching generation methods
 (`generate_negotiation_reject_prompt_from_data` / `..._from_text`, and
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`) when a client needs to send one.
 
-## 5. Replace checklist (demo → production)
+## 5. Deployment checklist
 
-The **Side** column says which agent owns the piece. The client team's rows are the ones to act on;
-the server rows show what the counterpart replaces when the server is a real system.
+The **Side** column identifies the agent responsible for each component. The client team acts on
+the rows marked `client`; the `server` rows describe what the counterpart replaces when it is a real
+system.
 
 | Demo piece | Side | What it does in the demo | Keep or replace |
 | --- | --- | --- | --- |
