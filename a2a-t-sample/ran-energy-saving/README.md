@@ -61,14 +61,14 @@ Key workflows:
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the message handling (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see [§5](#5-notes-for-custom-agent-development)); not removable until both sides are replaced. |
-| [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see [§5](#5-notes-for-custom-agent-development)). |
+| [`src/server/server_main.py`](src/server/server_main.py) | The A2A SDK app assembly includes the push-notification module by default. For server-side integration, see the `INTEGRATION POINT` comment in `build_server_runtime`. |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | The server flow: validate → negotiate-or-execute → stream progress and the report. |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution integration point plus the demo execution service (scripted progress steps and intent report). |
+| [`src/server/task_execution.py`](src/server/task_execution.py) | Integrates `TaskExecutionService` as the execution entry point, along with a demo execution service that simulates task progress and generates intent reports. |
 | [`src/common/`](src/common) | Shared adapters, the schema-routed mock LLM, the `WebhookReceiver`, and the shared `TASK_PARAM_SCHEMA`. |
 | [`src/registry/`](src/registry) | Mock registry center (AgentCard register/query, port 5001). |
 | [`resources/mock_llm/`](resources/mock_llm) | Scripted slot-extraction and content-validation replies. |
-| [`run_demo.py`](run_demo.py) | Cross-platform, non-blocking launcher. |
+| [`run_demo.py`](run_demo.py) | Non-blocking launcher: starts the registry and the server in the background and runs the client in the foreground. |
 
 ## 2. Quickstart
 
@@ -77,31 +77,32 @@ Prerequisites: Python 3.12 or newer and [`uv`](https://docs.astral.sh/uv/).
 **Step 1 — create the repository `.venv` and install the SDK.** Run this from the repository root.
 
 ```bash
-# Step 1: create the repository .venv and install the SDK
 uv sync --dev
 ```
 
 **Step 2 — configure the sample.** `a2a-t-sample/` holds the `.env` the sample reads.
 
 ```bash
-# Step 2: create the sample .env and install its requirements
 cd a2a-t-sample
 cp env.example .env
 uv pip install -r requirements.txt
 ```
 
 **Step 3 — run the sample.** The launcher starts the registry and the server as background
-subprocesses and runs the client in the foreground.
+subprocesses and runs the client in the foreground. Add `--language zh-CN` for the Chinese run.
 
 ```bash
-# Step 3: run the sample
 cd ran-energy-saving
-python run_demo.py           # English (default); add --language zh-CN for the Chinese run
+python run_demo.py
 ```
 
-Run `run_demo.py` with the interpreter from the repository `.venv` (activate it, or call it
-directly, e.g. `..\..\.venv\Scripts\python.exe run_demo.py` on Windows). Both sides' output streams
-to the terminal live and interleaved; when the client exits, the background processes are stopped.
+Use the interpreter from the repository `.venv` (activate it or call it directly).
+
+> **Windows tip:** call the interpreter explicitly, e.g.
+> `..\..\.venv\Scripts\python.exe run_demo.py`.
+
+Both client and server logs stream to the terminal live and interleaved, with background processes
+automatically terminating when the client exits.
 
 Add `--scenario negotiation` to run the information negotiation (missing region), or
 `--negotiation target` / `--negotiation feasibility` to run the other two kinds. If the client
