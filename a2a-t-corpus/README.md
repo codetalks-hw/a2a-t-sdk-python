@@ -278,10 +278,10 @@ uv run pytest a2a-t-corpus/suites/task/test_task_t_from_text_workflow.py -m live
 uv run pytest a2a-t-corpus/suites/task/test_task_t_from_data_workflow.py -m live --corpus-scenario=ran-energy-saving-create
 ```
 
-**Run a given case id of a given scenario** (`--case-filter` is a case id, supports the `*` wildcard):
+**Run a given text case id of a given scenario** (`--case-filter` is a case id, supports the `*` wildcard):
 
 ```
-uv run pytest a2a-t-corpus/suites/task -m live --corpus-scenario=ran-energy-saving-create --case-filter=TC00000001
+uv run pytest a2a-t-corpus/suites/task/test_task_t_from_text_workflow.py -m live --corpus-scenario=ran-energy-saving-create --case-filter=TC00000001
 ```
 
 - A case's test id is `<scenario>/<case id>`; `-k` also reaches a single case directly.
