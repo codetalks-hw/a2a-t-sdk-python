@@ -23,7 +23,7 @@
   - [4.5 目标协商（target）](#45-目标协商target)
   - [4.6 可行性协商（feasibility）](#46-可行性协商feasibility)
   - [4.7 reject 与 abort](#47-reject-与-abort)
-- [5. 部署清单](#5-部署清单)
+- [5. 自定义 Agent 开发说明](#5-自定义-agent-开发说明)
 - [6. 附录](#6-附录)
   - [6.1 Webhook 传输](#61-webhook-传输)
   - [6.2 配置（a2a-t-sample/.env）](#62-配置a2a-t-sampleenv)
@@ -58,7 +58,7 @@
 | [`src/client/client_main.py`](src/client/client_main.py) | 装配根：读取 `.env`、构建运行时（`build_client_runtime`）、从注册中心发现服务端 AgentCard、启动/停止 webhook 接收器、装配 demo 的 `ScriptedNegotiationResponseProvider`。客户端侧 `INTEGRATION POINT` 标注位于 `main()`。 |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | 编排：消息序列（生成 → 发送 → 消费）、报文机制（metadata 键、`A2A-Extensions` 头）、事件管线，以及两种传输驱动（SSE 流式 / webhook 队列）。它调用协商决策接入点，但不持有任何决策。 |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | 协商决策接入点：`NegotiationProposeView`、`NegotiationDecision`、`NegotiationResponseProvider` Protocol，以及 demo 实现 `ScriptedNegotiationResponseProvider`。 |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见[部署清单](#5-部署清单)），在两侧都完成替换前不能删除。 |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见 [§5](#5-自定义-agent-开发说明)），在两侧都完成替换前不能删除。 |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk 应用装配，推送通知机制无条件装配。服务端侧 `INTEGRATION POINT` 标注位于 `build_server_runtime`。 |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | 服务端流程：校验 → 协商或执行 → 流式推送进度与报告。 |
 | [`src/server/task_execution.py`](src/server/task_execution.py) | `TaskExecutionService` 执行接入点，以及 demo 的用例（UC1）服务。 |
@@ -133,7 +133,7 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 （`TaskExecutionService`）。
 
 模板、参数 schema 与自然语言输入都是样例特有的；各端需要替换的内容见
-[部署清单](#5-部署清单)。
+[§5](#5-自定义-agent-开发说明)。
 
 ## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
 
@@ -362,7 +362,7 @@ accept = client.generate_negotiation_accept_prompt_from_text(
 方法（`generate_negotiation_reject_prompt_from_data` / `..._from_text`，以及
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`）。
 
-## 5. 部署清单
+## 5. 自定义 Agent 开发说明
 
 **归属**列标明各组件由哪一端负责。client 团队负责标注为 client 与 both 的行；标注为 server 的行
 说明对端为真实系统时需要替换的内容。

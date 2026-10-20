@@ -25,7 +25,7 @@ unspecified reader.
   - [4.5 Target negotiation](#45-target-negotiation)
   - [4.6 Feasibility negotiation](#46-feasibility-negotiation)
   - [4.7 Reject and abort](#47-reject-and-abort)
-- [5. Deployment checklist](#5-deployment-checklist)
+- [5. Notes for Custom Agent Development](#5-notes-for-custom-agent-development)
 - [6. Appendix](#6-appendix)
   - [6.1 Webhook transport](#61-webhook-transport)
   - [6.2 Configuration (a2a-t-sample/.env)](#62-configuration-a2a-t-sampleenv)
@@ -61,7 +61,7 @@ Key workflows:
 | [`src/client/client_main.py`](src/client/client_main.py) | Assembly root: reads `.env`, builds the runtime (`build_client_runtime`), discovers the server's AgentCard from the registry, starts/stops the webhook receiver, and assembles the demo `ScriptedNegotiationResponseProvider`. The client-side `INTEGRATION POINT` comment sits in `main()`. |
 | [`src/client/client_flow.py`](src/client/client_flow.py) | Orchestration: the message sequence (generate → send → consume), the message handling (metadata keys, `A2A-Extensions` header), the event pipeline, and the two transport drivers (SSE streaming / webhook queue). It calls the negotiation decision integration point but owns no decision. |
 | [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | The negotiation decision integration point: `NegotiationProposeView`, `NegotiationDecision`, the `NegotiationResponseProvider` Protocol, and the demo `ScriptedNegotiationResponseProvider`. |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see the [deployment checklist](#5-deployment-checklist)); not removable until both sides are replaced. |
+| [`src/client/scenario_data.py`](src/client/scenario_data.py) | The sample's inputs and scripted answers — it feeds **both** sides (see [§5](#5-notes-for-custom-agent-development)); not removable until both sides are replaced. |
 | [`src/server/server_main.py`](src/server/server_main.py) | a2a-sdk app assembly, with the push-notification machinery assembled unconditionally. The server-side `INTEGRATION POINT` comment sits in `build_server_runtime`. |
 | [`src/server/server_flow.py`](src/server/server_flow.py) | The server flow: validate → negotiate-or-execute → stream progress and the report. |
 | [`src/server/task_execution.py`](src/server/task_execution.py) | The `TaskExecutionService` execution integration point plus the demo use-case (UC1) service. |
@@ -138,8 +138,8 @@ async for stream_response in a2a_client.send_message(request, context=call_conte
 `TASK_STATE_REJECTED` instead of crashing the server; the validated parameters are passed to the
 execution integration point (`TaskExecutionService`).
 
-The template, the parameter schema and the natural-language input are sample-specific; the
-[deployment checklist](#5-deployment-checklist) lists what each side replaces.
+The template, the parameter schema and the natural-language input are sample-specific;
+[§5](#5-notes-for-custom-agent-development) lists what each side replaces.
 
 ## 4. Using the A2A-T SDK to implement the Negotiation-T interaction
 
@@ -400,7 +400,7 @@ message; the SDK provides the matching generation methods
 (`generate_negotiation_reject_prompt_from_data` / `..._from_text`, and
 `generate_negotiation_abort_prompt_from_data` / `..._from_text`).
 
-## 5. Deployment checklist
+## 5. Notes for Custom Agent Development
 
 The **Side** column identifies the agent responsible for each component. The client team is
 responsible for the rows marked `client` and `both`; the rows marked `server` describe what the
