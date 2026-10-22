@@ -16,9 +16,9 @@ Tool arguments may echo a value returned by an earlier tool call with the
 of the report call, so the script always targets the plan the apply tool actually created.
 
 A script's progress is normally derived from the function responses of the request (an agent with
-tools). The tool-less client decision agent instead advances on the model turns already present in
-its session, which is what :func:`build_client_script` uses so a scenario can return one decision
-per inbound proposal.
+tools). The client decision script's turns issue no tool calls, so :func:`build_client_script`
+advances on the model turns already present in its session instead; a scenario can then return one
+decision per inbound proposal.
 
 Tests and later tasks can inject their own scripts with :func:`build_fake_model`; the offline
 scenarios build their client script with :func:`build_client_script`.
@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Literal
 
 from google.adk.models._capabilities import LlmCapabilities
 from google.adk.models.base_llm import BaseLlm
@@ -118,13 +118,14 @@ class FakeScript:
         turns: Turns served in order.
         default_text: Text served once ``turns`` is exhausted.
         progress: Turn progress source: ``function_responses`` (agents with tools) or
-            ``model_turns`` (the tool-less client decision agent).
+            ``model_turns`` (scripts whose turns issue no tool calls, such as the client decision
+            script).
     """
 
     marker: str
     turns: tuple[FakeTurn, ...]
     default_text: str = DEFAULT_FINAL_TEXT
-    progress: str = PROGRESS_FUNCTION_RESPONSES
+    progress: Literal["function_responses", "model_turns"] = PROGRESS_FUNCTION_RESPONSES
 
 
 #: Server agent script: read profile -> evaluate -> apply -> report -> final answer.
@@ -310,8 +311,9 @@ def build_client_script(decisions: Sequence[NegotiationDecision]) -> FakeScript:
     """Build the client decision script returning one structured decision per turn.
 
     The script uses the same marker as :data:`DEFAULT_CLIENT_SCRIPT`, so it matches the
-    ``ran_energy_request_agent`` instruction, and advances on the model turns of the ADK session:
-    one offline negotiation round asks the tool-less client agent for exactly one decision.
+    ``ran_energy_request_agent`` instruction. Its turns issue no tool calls, so it advances on the
+    model turns of the ADK session: one offline negotiation round asks the client agent for exactly
+    one decision.
 
     Args:
         decisions: Decisions returned in order; each becomes one JSON-text model turn.

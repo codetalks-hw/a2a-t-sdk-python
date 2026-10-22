@@ -26,6 +26,7 @@ from shared.models import NegotiationDecision, NegotiationProposeView
 
 from protocol.client_flow import ClientFlowResult
 from protocol.messages import parse_negotiation_context
+from protocol.negotiation_policy import negotiation_kind_for_template_uri
 
 #: Direction of an inbound event (server to client).
 DIRECTION_SERVER_TO_CLIENT: Final[str] = "server->client"
@@ -73,6 +74,14 @@ def _event_kind(kind: str, performative: str | None) -> str:
     if kind:
         return kind
     return "unknown"
+
+
+def _negotiation_type(template_uri: object) -> str | None:
+    """Return the negotiation type (``information``/``target``/``feasibility``) of a template URI."""
+    if not isinstance(template_uri, str):
+        return None
+    kind = negotiation_kind_for_template_uri(template_uri)
+    return kind.value if kind is not None else None
 
 
 def _event_summary(
@@ -172,6 +181,7 @@ class NegotiationTranscript:
             "maxRounds": session.max_rounds if session is not None else None,
             "contextId": _text(event.get("context_id")) or (session.id if session is not None else None) or None,
             "templateUri": template_uri if isinstance(template_uri, str) else None,
+            "negotiationType": _negotiation_type(template_uri),
             "performative": performative,
             "summary": _event_summary(event, performative, negotiation_text),
             "rationale": None,
@@ -203,6 +213,7 @@ class NegotiationTranscript:
             "maxRounds": propose.max_rounds if propose is not None else None,
             "contextId": propose.context_id if propose is not None else self.context_id,
             "templateUri": propose.template_uri if propose is not None else None,
+            "negotiationType": propose.kind if propose is not None else None,
             "performative": PERFORMATIVE_BY_ACTION.get(decision.action, decision.action.upper()),
             "summary": summarize_text(decision.rationale, max_length=_SUMMARY_LENGTH),
             "rationale": decision.rationale,
@@ -293,7 +304,7 @@ class NegotiationTranscript:
                 ]
             )
             for index, entry in enumerate(self.decisions, start=1):
-                lines.append(_markdown_row(index, entry))
+                lines.append(_markdown_decision_row(index, entry))
         lines.extend(["", "## Final report", "", "```json"])
         lines.append(json.dumps(self.report, ensure_ascii=False, indent=2) if self.report else "null")
         lines.extend(["```", ""])
@@ -324,7 +335,7 @@ def _markdown_cell(value: object) -> str:
 
 
 def _markdown_row(index: int, entry: Mapping[str, object]) -> str:
-    """Render one transcript entry as a Markdown table row."""
+    """Render one event entry as a Markdown table row of the timeline table."""
     return "| {index} | {round} | {direction} | {kind} | {performative} | {summary} | {rationale} |".format(
         index=index,
         round=_markdown_cell(entry.get("round")),
@@ -332,5 +343,20 @@ def _markdown_row(index: int, entry: Mapping[str, object]) -> str:
         kind=_markdown_cell(entry.get("kind")),
         performative=_markdown_cell(entry.get("performative")),
         summary=_markdown_cell(entry.get("summary")),
+        rationale=_markdown_cell(entry.get("rationale")),
+    )
+
+
+def _markdown_decision_row(index: int, entry: Mapping[str, object]) -> str:
+    """Render one decision entry as a Markdown table row of the decisions table.
+
+    The decisions table has five columns (``#``, round, action, performative, rationale); the
+    timeline renderer's seven cells would spill two extra columns into it.
+    """
+    return "| {index} | {round} | {action} | {performative} | {rationale} |".format(
+        index=index,
+        round=_markdown_cell(entry.get("round")),
+        action=_markdown_cell(entry.get("action") or entry.get("kind")),
+        performative=_markdown_cell(entry.get("performative")),
         rationale=_markdown_cell(entry.get("rationale")),
     )

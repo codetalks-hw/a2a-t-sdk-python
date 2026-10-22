@@ -13,4 +13,4 @@
 | 目录 | 说明 |
 | --- | --- |
 | [fault-management/](fault-management/) | 事件订阅样例——流式推送 Incident 通知 |
-| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——运行 RAN 节能任务，并包含三类 Negotiation-T 协商（信息 / 目标 / 可行性） |
+| [ran-energy-saving/](ran-energy-saving/) | 无线网络节能样例——基于 A2A-T Task-T + Negotiation-T 的 ADK 客户端与服务端智能体，包含五类协商场景（信息 / 目标 / 可行性 / 拒绝 / 中止）、离线与在线模式、CLI 与 Web UI |

@@ -59,7 +59,7 @@ DEFAULT_WEBHOOK_PORT = 9000
 DEFAULT_WEBHOOK_TOKEN = "demo-webhook-token"
 DEFAULT_WEBHOOK_IDLE_TIMEOUT = 30
 DEFAULT_ADK_MODEL_PROVIDER = "litellm"
-DEFAULT_ADK_MODEL_NAME = "openai/volcengine/deepseek-v4.1-flash"
+DEFAULT_ADK_MODEL_NAME = "openai/mass/volcengine/deepseek-v4.1-flash"
 DEFAULT_ADK_MODEL_API_BASE = "http://127.0.0.1:31943/v1"
 DEFAULT_ADK_MODEL_API_KEY = "not-needed"
 

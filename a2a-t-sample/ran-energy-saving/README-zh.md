@@ -1,514 +1,515 @@
-# RAN 节能样例
+# RAN 节能样例（A2A + A2A-T + ADK）
 
-一个 A2A-T 样例：包含一个客户端 Agent、一个 RAN 域服务端 Agent，以及用于发现 AgentCard 的 mock
-注册中心。
+一个可运行的智能体协作参考实现：客户端智能体与 RAN（Radio Access Network，无线接入网）域服务端智能体通过 A2A-T 的 `Negotiation-T` 达成节能任务，再通过标准 A2A Task 和 Google ADK（Agent Development Kit）执行任务。
 
-**读者定位。** 本文档面向实现 **client agent** 的团队；**server agent** 是可运行的参考实现。
-生产中两端通常归属不同厂商，因此下文统一按角色说明各自负责什么，不使用含混的第二人称。
+本样例面向两类读者：**客户端智能体**开发团队与**服务端智能体**开发团队。当组件只属于一侧时，本文直接写明责任方，不使用未区分的“你”。
 
-## 目录
+**术语表**
 
-- [1. 本样例演示了什么](#1-本样例演示了什么)
-  - [1.1 目录结构](#11-目录结构)
-- [2. 快速开始](#2-快速开始)
-- [3. 使用 A2A-T SDK 实现 Task-T 交互](#3-使用-a2a-t-sdk-实现-task-t-交互)
-  - [3.1 四个步骤](#31-四个步骤)
-  - [3.2 客户端侧](#32-客户端侧)
-  - [3.3 服务端侧](#33-服务端侧)
-- [4. 使用 A2A-T SDK 实现 Negotiation-T 交互](#4-使用-a2a-t-sdk-实现-negotiation-t-交互)
-  - [4.1 协商场景](#41-协商场景)
-  - [4.2 样例如何选择协商类型](#42-样例如何选择协商类型)
-  - [4.3 通用机制](#43-通用机制)
-  - [4.4 信息协商（information）](#44-信息协商information)
-  - [4.5 目标协商（target）](#45-目标协商target)
-  - [4.6 可行性协商（feasibility）](#46-可行性协商feasibility)
-  - [4.7 reject 与 abort](#47-reject-与-abort)
-- [5. 自定义 Agent 开发说明](#5-自定义-agent-开发说明)
-- [6. 附录](#6-附录)
-  - [6.1 Webhook 传输](#61-webhook-传输)
-  - [6.2 配置（a2a-t-sample/.env）](#62-配置a2a-t-sampleenv)
-  - [6.3 分别启动两端](#63-分别启动两端)
-  - [6.4 mock LLM 机制](#64-mock-llm-机制)
-  - [6.5 支持的参数（`run_demo.py`）](#65-支持的参数run_demopy)
-
-## 1. 本样例演示了什么
-
-本样例演示 A2A-T Agent 协作：客户端 Agent 与 RAN（Radio Access Network，无线接入网）节能 Agent
-交互，执行节能任务。样例同时使用 Task-T 与 Negotiation-T。
-
-关键工作流：
-
-- **Task-T（不含协商）：**
-
-  ```text
-  自然语言 ──> 任务提示词 ──> 校验 ──> 任务执行
-  ```
-
-- **Task-T + Negotiation-T（含协商）：**
-
-  ```text
-  自然语言（不完整 / 存在歧义 / 不可行）
-    ──> 任务提示词 ──> 校验 ──> 协商 ──> 达成一致 ──> 任务执行
-  ```
-
-### 1.1 目录结构
-
-| 路径 | 核心职责 |
+| 术语 | 含义 |
 | --- | --- |
-| [`src/client/client_main.py`](src/client/client_main.py) | 装配根：读取 `.env`、构建运行时（`build_client_runtime`）、从注册中心发现服务端 AgentCard、启动/停止 webhook 接收器、装配 demo 的 `ScriptedNegotiationResponseProvider`。客户端侧 `INTEGRATION POINT` 标注位于 `main()`。 |
-| [`src/client/client_flow.py`](src/client/client_flow.py) | 编排：消息序列（生成 → 发送 → 消费）、报文机制（metadata 键、`A2A-Extensions` 头）、事件管线，以及两种传输驱动（SSE 流式 / webhook 队列）。它调用协商决策接入点，但不持有任何决策。 |
-| [`src/client/negotiation_response.py`](src/client/negotiation_response.py) | 协商决策接入点：`NegotiationProposeView`、`NegotiationDecision`、`NegotiationResponseProvider` Protocol，以及 demo 实现 `ScriptedNegotiationResponseProvider`。 |
-| [`src/client/scenario_data.py`](src/client/scenario_data.py) | 样例输入与脚本化应答 —— 它**同时喂两侧**（见 [§5](#5-自定义-agent-开发说明)）。 |
-| [`src/server/server_main.py`](src/server/server_main.py) | A2A SDK 应用装配默认包含推送通知模块。服务端集成时请查看 `build_server_runtime` 中的 `INTEGRATION POINT` 注释。 |
-| [`src/server/server_flow.py`](src/server/server_flow.py) | 服务端流程：校验 → 协商或执行 → 流式推送进度与报告。 |
-| [`src/server/task_execution.py`](src/server/task_execution.py) | 集成 `TaskExecutionService` 作为执行入口，并包含一个模拟任务进度、生成意图报告的 demo 执行服务。 |
-| [`src/common/`](src/common) | 共享适配器、按 schema 路由的 mock LLM、`WebhookReceiver`，以及双端共享的 `TASK_PARAM_SCHEMA`。 |
-| [`src/registry/`](src/registry) | mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
-| [`resources/mock_llm/`](resources/mock_llm) | 脚本化的槽位抽取与内容校验应答。 |
-| [`run_demo.py`](run_demo.py) | 非阻塞启动器：后台启动注册中心与服务端，前台运行客户端。 |
+| A2A | Agent2Agent 协议：在智能体之间传输消息与 Task。 |
+| A2A-T | 本样例使用的 A2A-T SDK 扩展：`Task-T`（结构化任务提示词）与 `Negotiation-T`（任务创建前的协商消息）。 |
+| ADK | Google Agent Development Kit：本样例用它构建两侧的 `LlmAgent`、工具、`Runner` 与会话。 |
+| RAN | Radio Access Network，无线接入网：本样例中的小区及其负载/能耗行为。 |
+| SLA | Service Level Agreement，服务等级协议：小区必须保障的吞吐下限。 |
+| OSS / BSS | 运营支撑系统 / 业务支撑系统：生产环境的集成目标，不属于本样例。 |
+| OCS | Online Charging System，在线计费系统：生产环境的计费集成目标，不属于本样例。 |
 
-## 2. 快速开始
+## 1. 样例解决什么问题
 
-前置条件：Python 3.12 或更高版本与 [`uv`](https://docs.astral.sh/uv/)。
+客户端请求 RAN 节能，例如“在满足分时段保障速率目标的前提下最大化节能”。该请求经常无法按原样执行：
 
-**Step 1 —— 创建仓库 `.venv` 并安装 SDK。** 在仓库根目录执行。
+- 缺少必需参数（哪个区域？）；
+- 目标存在歧义（两个吞吐时段重叠）；
+- 在当前条件下不可行（长时间停电期间仍要求保障速率）。
 
-```bash
-uv sync --dev
+服务端不会立即拒绝，而是开启 **Negotiation-T** 会话。双方在**任何 Task 创建之前**交换独立的 A2A `Message`：`Propose`、`Accept`、`Reject`、`Abort`。客户端接受后，协商确定的 `Task-T` 提示词被交给 ADK 服务端智能体，由它创建 Task 并执行四个确定性工具：读取小区画像、评估方案、下发方案、生成报告。
+
+样例演示了：
+
+- 真实 A2A HTTP+JSON 链路上的四类 A2A-T performative；
+- 真正的多轮协商（`maxRounds = 3`），包含反提议；
+- 客户端 ADK `LlmAgent` 使用工具与结构化 `output_schema`，服务端 ADK `LlmAgent` 使用工具；
+- 任务前协商网关与 ADK `A2aAgentExecutor` 之间的显式集成缝；
+- 确定性离线运行（脚本化 SDK LLM + ADK fake model）与面向 OpenAI-compatible 端点的在线模式；
+- CLI 与轻量 Web UI。
+
+## 2. 架构与目录
+
+```mermaid
+flowchart LR
+    subgraph Client process
+        UI[Web UI :8080<br/>可选 --ui]
+        CF[客户端流程<br/>SSE / webhook]
+        CA[ADK 客户端决策智能体<br/>LlmAgent + output_schema]
+        DP[决策 Provider<br/>ADK / manual / scripted]
+        UI --> CF
+        CF --> DP
+        DP --> CA
+    end
+
+    subgraph Server process
+        G[协商网关<br/>Task-T + Negotiation-T]
+        P[确定性策略<br/>propose / abort / execute / end]
+        EX[NegotiationAgentExecutor]
+        ADK[ADK A2aAgentExecutor<br/>+ Runner + session]
+        SA[ADK 服务智能体<br/>4 个工具]
+        G --> P
+        G --> EX
+        EX --> ADK
+        ADK --> SA
+    end
+
+    REG[(Mock 注册中心<br/>:5001)]
+    CF -- A2A / SSE 或 webhook --> G
+    EX -- Message / Task 事件 --> CF
+    SA -- AgentCard 注册 --> REG
+    CF -- AgentCard 发现 --> REG
 ```
 
-**Step 2 —— 配置样例。** `a2a-t-sample/` 存放样例读取的 `.env`。
+所有协商都发生在**Task 创建之前**：`Propose` / `Accept` / `Reject` / `Abort` 都是独立的 `Message`，不是 Task 事件。只有协商被接受后才会创建 Task，并由内层 ADK `A2aAgentExecutor` 推进到 `COMPLETED`。
+
+### 目录说明
+
+| 路径 | 职责 |
+| --- | --- |
+| [`run_demo.py`](run_demo.py) | 三进程启动器：后台启动注册中心与服务端，前台运行 CLI 客户端（`--ui` 时改为 Web UI），结束后停止子进程。 |
+| [`env.example`](env.example) | 统一的、可直接离线运行的配置模板。 |
+| [`agents/server_agent/`](agents/server_agent) | 服务端 ADK 智能体：`agent.py` 导出 `root_agent`；`tools.py` 为四个工具；`prompts/service_instruction.md` 为 instruction。 |
+| [`agents/client_agent/`](agents/client_agent) | 客户端 ADK 决策智能体：`agent.py` 导出 `root_agent`；`tools.py` 为 SLA 与影响评估工具；`prompts/request_instruction.md` 为 instruction。 |
+| [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | 服务端唯一协议入口：识别任务前请求、校验 Task-T / Negotiation-T 消息，并转发被接受的请求。 |
+| [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | 纯确定性服务端策略：`propose`、`abort`、`execute`、`end`，不调用 LLM。 |
+| [`protocol/server_executor.py`](protocol/server_executor.py) | 包裹 ADK `A2aAgentExecutor` 的外层 `AgentExecutor`，以及自定义 request converter 与 artifact interceptor。 |
+| [`protocol/server_app.py`](protocol/server_app.py) | 服务端装配：AgentCard（声明 `Task-T/v1` 与 `Negotiation-T/v1`）、请求处理器、Starlette 应用、注册中心注册。 |
+| [`protocol/client_flow.py`](protocol/client_flow.py) | 客户端协议流程：初始 Task-T、多轮协商、accept 重填、SSE/webhook 终态处理。 |
+| [`protocol/client_runtime.py`](protocol/client_runtime.py) | 客户端装配：每次运行的 SDK `.env`、服务发现、SDK 客户端、传输、决策 Provider。 |
+| [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted 三种实现。 |
+| [`protocol/discovery.py`](protocol/discovery.py) | 通过注册中心或 `/.well-known/agent-card.json` 发现 AgentCard。 |
+| [`protocol/messages.py`](protocol/messages.py) | A2A-T 元数据助手：扩展 URI、`templateUri`、`negotiationContext`、结束消息、样例专用元数据。 |
+| [`protocol/transcript.py`](protocol/transcript.py) | 结构化运行记录，写入 `runs/<timestamp>-<scenario>.json` 与 `.md`。 |
+| [`shared/config.py`](shared/config.py) | 读取 `.env` 并构建 ADK 模型（离线 fake model，在线 `LiteLlm`）。 |
+| [`shared/models.py`](shared/models.py) | `NegotiationDecision`（客户端 `output_schema`）与 Provider 视角的提议视图。 |
+| [`shared/scenario.py`](shared/scenario.py) | 五个场景定义：请求、期望 performative/round 序列、终态、离线决策。 |
+| [`shared/task_schema.py`](shared/task_schema.py) | 服务端校验与客户端 accept 重填共用的调用方参数 schema。 |
+| [`shared/ran_data.py`](shared/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | 进程内 RAN 数据集、方案评估与进程内方案存储。 |
+| [`shared/scripted_llm.py`](shared/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | 通过官方工厂注册的脚本化 SDK `LLMClient`；按 schema 路由的预置响应。 |
+| [`shared/adk_fake_model.py`](shared/adk_fake_model.py) | 离线与测试使用的确定性 ADK `BaseLlm`。 |
+| [`shared/registry_client.py`](shared/registry_client.py) | 注册中心注册/查询 HTTP 调用。 |
+| [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | 内置 webhook 推送接收器，校验 token。 |
+| [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | 将 A2A 流事件归一化为统一事件结构。 |
+| [`registry/`](registry) | Mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
+| [`web/`](web) | Starlette Web UI（`app.py`）与单页前端（`static/index.html`）。 |
+| [`tests/`](tests) | 单元、集成、传输、Web UI 与五场景离线验收测试。 |
+
+## 3. 快速开始
+
+前置条件：Python 3.12+，以及 [`a2a-t-sample/requirements.txt`](../requirements.txt) 中的样例依赖。下文命令假定 `python` 就是已安装这些依赖的解释器，请先激活虚拟环境（本仓库检出中使用 `.venv-adk`）：
 
 ```bash
+# 在仓库根目录
 cd a2a-t-sample
-cp env.example .env
 uv pip install -r requirements.txt
+
+# 激活该环境（按你的 shell 选择）
+source ../.venv-adk/Scripts/activate        # Git Bash / Windows（在 a2a-t-sample/ 下）
+# source ../.venv/bin/activate              # Linux / macOS
+# ../.venv-adk/Scripts/Activate.ps1         # PowerShell
 ```
 
-**Step 3 —— 运行样例。** 启动器在后台启动注册中心与服务端，并在前台运行客户端。加
-`--language zh-CN` 运行中文。
+`run_demo.py` 会回退到 `env.example`，因此**离线运行不需要 `.env` 文件，也不需要 API key**。如需自定义，复制模板：
 
 ```bash
-cd ran-energy-saving
-python run_demo.py
+cd a2a-t-sample
+cp env.example .env              # 共享样例配置
+# 或：cp ran-energy-saving/env.example ran-energy-saving/.env
 ```
 
-请使用仓库 `.venv` 中的解释器（激活该环境，或直接调用）。
+### 离线 CLI（无需 key，确定性）
 
-> **Windows 提示：** 直接指定解释器，例如
-> `..\..\.venv\Scripts\python.exe run_demo.py`。
-
-客户端与服务端的日志会实时交错输出到终端；客户端退出后，后台进程自动终止。
-
-加 `--scenario negotiation` 运行信息协商（缺失 region），或加 `--negotiation target` /
-`--negotiation feasibility` 运行另外两类。若客户端无法保持流式连接，加 `--transport webhook` ——
-见 [§6.1](#61-webhook-传输)。
-
-## 3. 使用 A2A-T SDK 实现 Task-T 交互
-
-### 3.1 四个步骤
-
-1. **生成** —— 客户端用 A2A-T 客户端 SDK 的 `generate_task_prompt_from_text`，把自然语言输入转换为
-   Task-T 任务请求（渲染好的提示词）。
-2. **发送** —— 提示词放在消息 `metadata` 中发给服务端。
-3. **校验** —— 服务端从 metadata 中取出提示词，调用 A2A-T 服务端 SDK 的
-   `validate_task_prompt_and_data_filling` 校验并抽取参数（`operationType`、`region`、
-   `energySavingGoal`、`guaranteedThroughputTarget`，以及可选的站点级 `siteList` 与
-   `backgroundEvent`）。双端共享的调用方 schema `TASK_PARAM_SCHEMA` 位于
-   [`src/common/task_schema.py`](src/common/task_schema.py)。
-4. **执行并报告** —— 抽取出的参数交给业务执行；进度以状态更新返回、结果以报告 artifact 返回，
-   由客户端呈现。
-
-### 3.2 客户端侧
-
-交互的核心步骤如下（摘自 [`client_flow.py`](src/client/client_flow.py)，有简化）：
-
-```python
-prompt_content = prompt_client.generate_task_prompt_from_text(input_text, ENERGY_SAVING_TEMPLATE_URI)
-prompt_text, extension_uri = _require_prompt_text(prompt_content)
-request = SendMessageRequest()
-...  # 此处省略 message_id / role
-request.message.parts.add().text = _build_request_text(initial_input)   # 承载场景文本的 text 部分
-request.message.metadata[extension_uri] = prompt_text   # 提示词放在 metadata 中传输
-request.message.metadata["templateUri"] = getattr(prompt_content, "template_uri", None) or ENERGY_SAVING_TEMPLATE_URI
-call_context = ClientCallContext(service_parameters={"A2A-Extensions": extension_uri})
-async for stream_response in a2a_client.send_message(request, context=call_context):
-    ...  # 消费状态更新与报告 artifact
+```bash
+cd a2a-t-sample/ran-energy-saving
+python run_demo.py --scenario information --mode auto --model-mode offline
+python run_demo.py --scenario target --mode auto --model-mode offline
 ```
 
-### 3.3 服务端侧
+Windows 下把 `python` 替换为仓库解释器：`../../.venv-adk/Scripts/python.exe`。
 
-`_extract_prompt_text` 从 metadata 读取提示词，`execute_server_flow` 调用
-`validate_task_prompt_and_data_filling` 完成校验与抽取（[`server_flow.py`](src/server/server_flow.py)）。
-被拒绝的提示词映射为 `TASK_STATE_REJECTED`，而不是让服务崩溃；校验通过的参数会传给执行接入点
-（`TaskExecutionService`）。
+`information` 的预期输出（路径与 id 会变化）：
 
-模板、参数 schema 与自然语言输入都是样例特有的；各端需要替换的内容见
-[§5](#5-自定义-agent-开发说明)。
-
-## 4. 使用 A2A-T SDK 实现 Negotiation-T 交互
-
-两个 SDK 负责协议细节，业务决策由两端 Agent 各自负责。
-
-- **A2A-T SDK** 负责生成与校验协商消息（propose、accept、reject、abort）：渲染提示词文本，并把
-  调用方传入的 `negotiationContext` 带入生成的消息。它不保存会话状态，也不含传输层。
-- **A2A SDK** 负责传输这些消息，因此部署时总是两者配合使用。
-- 在本样例中，server agent 决定请求何时无法按收到的内容执行、且值得通过协商解决；client agent
-  决定如何应答收到的 propose。协议本身允许任何一方发起 propose（见
-  [§4.3](#43-通用机制)）。
-
-### 4.1 协商场景
-
-在本样例中，服务端无法按收到的请求执行、且该问题可以通过协商解决而不必直接拒绝时，由服务端开启
-协商。样例覆盖三种情况：
-
-**信息不完整。** 客户端要求执行节能，给了目标、时段和吞吐目标，却没说在哪个区域。服务端缺这一项
-无法开工，于是告诉客户端缺什么；客户端补上，任务继续。
-
-**目标存在歧义。** 客户端给出的分时段保障速率目标里，两个时段重叠：
-`{17:30~23:00,20Mbps}` 与 `{20:00~00:00,10Mbps}`。请求本身格式没问题，但重叠时段的保障速率无法
-唯一确定。服务端复述它理解的意图，请客户端调整时间；客户端带着修正后的时段回应。
-
-**目标在当前条件下无法满足。** 客户端要求两个站点在 00:00~18:00 停电期间保障
-`{00:00~06:00,2Mbps}、{06:00~18:00,10Mbps}`，而站点既有的备电要求是至少支撑 18 小时。按这个
-速率执行，电池撑不到停电结束。服务端给出不可行的结论和提案（把 06:00~18:00 的保障速率从 10Mbps 下调
-到 2Mbps）；客户端接受调整后的目标。
-
-### 4.2 样例如何选择协商类型
-
-是否需要协商、以及属于哪种类型，是**server agent 的业务决策，两个 SDK 都不作规定** —— client
-只对收到的 propose 作出反应。本样例是数据驱动的：首个内容校验错误的错误码通过
-`_NEGOTIATION_TYPE_BY_ERROR_CODE` 表（[`server_flow.py`](src/server/server_flow.py)）选出类型。
-这张表是**样例约定，不是 SDK 契约**。
-
-报文并不依赖这张表。每个 propose 都记录自己的 `templateUri` —— 即 metadata 中这段报文由哪个
-Prompt 模板渲染而来，例如 `Negotiation-T/information-negotiation/propose/v1`。这个 URI 同时告诉
-客户端收到的是哪一类协商，因此客户端按收到的消息决定应答 —— accept、reject 或 abort —— 而不是按
-错误码。
-
-### 4.3 通用机制
-
-以下机制对三类协商均适用，各类型小节不再重复。
-
-**轮次。** 一轮由一次 propose 和针对该 propose 的应答（accept、reject 或 abort）构成。会话上下文
-携带从 1 开始的 `round`：应答沿用其所回应的 propose 的轮次，只有**新的** propose 才推进轮次。
-客户端最初的请求不计入协商轮次 —— 第一轮从服务端的 propose 开始。`maxRounds`（默认 5）限制会话
-轮数。
-
-**双方都可以发起 propose。** 协商是对称的：A2A-T 客户端 SDK 与 A2A-T 服务端 SDK 都提供同样的四个
-生成方法（propose / accept / reject / abort）和同样的校验方法，任何一方都能发起协商，任何一方也都
-能应答。区别只在于谁发送 propose；报文形态、会话处理与传输完全一致。本样例由**服务端**发起，因为
-发现"请求无法按收到的内容执行"的是服务端。客户端同样可以发起协商，例如它无法满足服务端公布的某项
-约束时，由服务端来 accept / reject / abort。本样例只在客户端侧实现了决策（provider 接入点）；如果
-由客户端发起协商，对等的决策逻辑需要放在服务端侧。
-
-**四条报文的闭环：**
-
-1. 客户端 → 服务端：节能请求。样例中它故意在以下三处之一存在缺陷：缺少区域、目标中时段重叠、或
-   保障速率无法支撑停电时长。
-2. 服务端 → 客户端：propose —— 缺什么、需要澄清什么、或哪个目标不可行以及提供了什么替代方案。
-3. 客户端 → 服务端：一条消息，同时承载 accept 和补全/修正后重新发送的请求。
-4. 服务端 → 客户端：结果 —— 先进度更新，后报告。
-
-会话（`id` / `round` / `maxRounds` / performative）随每条协商消息放在 `negotiationContext` metadata
-中，因此 A2A-T SDK 本身无状态。
-
-**协商发生在任务创建之前。** 第 2 条报文中的 propose 是一条独立的 A2A `Message`（角色为
-`ROLE_AGENT`，context id 与请求相同），不是 Task 状态事件。只有 accept 携带的 Task-T 提示词校验
-通过后，服务端才创建任务（先 `SUBMITTED`，再 `WORKING`），此后按普通 Task-T 交互继续。节能任务是
-值守类长时任务：报告发出后仍保持 `WORKING`，没有 `COMPLETED` 状态 —— 只有任务被取消才会结束。
-
-**client 侧要接的地方。** 收到第 2 条报文时，客户端 flow 构建一个轻量的 `NegotiationProposeView`（kind、
-`templateUri`、渲染文本）并调用（[`negotiation_response.py`](src/client/negotiation_response.py)）：
-
-```python
-@runtime_checkable
-class NegotiationResponseProvider(Protocol):
-    def respond(
-        self, propose: NegotiationProposeView, session: NegotiationContext
-    ) -> NegotiationDecision: ...
+```text
+[run_demo] running client (scenario=information, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
+[client] event kind=propose performative=PROPOSE summary=## Information Negotiation Please supplement ...
+[client] decision-requested round=1
+[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] final_state=task_completed task_id=<uuid>
+[client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[client] transcript: .../runs/<timestamp>-information.json
+[client] transcript: .../runs/<timestamp>-information.md
+[run_demo] stopped 2 background process(es)
 ```
 
-`NegotiationDecision` 携带 `conclusion`（`accept` / `reject` / `abort`）以及对应的载荷：`accept`
-时是 `filled_params`（信息协商，name → value）、`confirmed_intent`（目标协商）或
-`feasibility_summary`（可行性协商）；`reject` / `abort` 时是 `reason`。**`accept` 已端到端实现**：
-flow 根据 client 侧的决策重新生成 Task-T 提示词、构建 accept 消息（同轮、performative 为
-`ACCEPT`），并经所选传输发送。`respond` 是同步的，会阻塞 flow 直到返回；需要等待的实现（人工确认、
-上游系统调用）在 `respond` 内部自行处理。
+`target` 的预期输出（两轮；客户端在第 1 轮反提议，在第 2 轮接受）：
 
-> Provider 只替换对 propose 的脚本化**应答** —— 信息协商中就是 `filled_params` 返回的取值。
-> Task-T 补全参数（`negotiation_params`）仍由调用方传入：flow 用它们重新生成 accept 消息中的
-> Task-T 提示词，缺少它们时 flow 不会应答该 propose。样例中两者都来自 `scenario_data`，因此保持
-> 一致。
-
-### 4.4 信息协商（information）
-
-**① 触发条件。** 请求不完整 —— 缺少服务端必需的参数（样例中为区域）。样例的触发条件是
-`content.param_missing` 校验错误，但这个错误码是样例的判断方式，不属于协议本身。
-
-**② 参考实现。**
-
-| 步骤 | SDK 调用 | 参考代码 |
-| --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py`](src/server/server_flow.py)（`_emit_negotiation_propose`） |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py`](src/client/client_flow.py)（`_plan_negotiation_accept`） |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py`](src/client/client_flow.py)（`_build_negotiation_accept_request`） |
-
-```python
-# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
-propose = server.generate_negotiation_propose_prompt_from_text(
-    propose_text,   # 缺失的参数，写成编号列表
-    context,
-    INFORMATION_NEGOTIATION_PROPOSE_URI,
-)
-
-# 客户端决策：询问 provider 如何应答 propose
-decision = provider.respond(propose_view, session)   # filled_params = 要补的取值
-
-# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
-accept_text = f"Accept. {_numbered_items(decision.filled_params.items())}"
-accept = client.generate_negotiation_accept_prompt_from_text(
-    accept_text,
-    context,
-    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
-)
+```text
+[run_demo] running client (scenario=target, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] decision-requested round=1
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] decision-requested round=2
+[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] final_state=task_completed task_id=<uuid>
+[client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[run_demo] stopped 2 background process(es)
 ```
 
-propose 列出缺失的参数；accept 文本列出补全后的取值。
+两条 `propose` 分别是服务端第 1 轮提议与第 2 轮修订提议。客户端自己的反提议不会出现在它收到的事件日志中；完整双向序列见运行记录（§9）。
 
-**③ 可复用的客户端代码。** 提示词渲染、`templateUri`/`negotiationContext` 的 metadata 组装、
-会话处理与传输 —— `client_flow.py` 中除决策本身以外的全部内容。
+### 在线 CLI（OpenAI-compatible 端点）
 
-**④ 客户端自行实现的代码。** provider 接入点背后的应答来源。
-
-```python
-class MyProvider:
-    def respond(self, propose: NegotiationProposeView, session: NegotiationContext) -> NegotiationDecision:
-        values = my_system.look_up(propose.kind, propose.prompt_text)   # client 侧的查询
-        return NegotiationDecision(conclusion="accept", filled_params=values)
+```bash
+python run_demo.py --scenario target --mode auto --model-mode live
 ```
 
-### 4.5 目标协商（target）
+在线模式下，两个 ADK 智能体使用 `ADK_MODEL_*`，A2A-T SDK 使用 `A2AT_LLM_*`，两者必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
 
-**① 触发条件。** 目标存在歧义：分时段保障速率目标里有两个时段重叠，重叠时段的保障速率无法
-唯一确定。样例的触发条件是 `content.value_not_allowed` 校验错误。
+### Web UI
 
-**② 参考实现。**
-
-| 步骤 | SDK 调用 | 参考代码 |
-| --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py`](src/server/server_flow.py)（`_emit_negotiation_propose`） |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py`](src/client/client_flow.py)（`_plan_negotiation_accept`） |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py`](src/client/client_flow.py)（`_build_negotiation_accept_request`） |
-
-```python
-# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
-propose = server.generate_negotiation_propose_prompt_from_text(
-    propose_text,   # 意图复述 + 待澄清请求
-    context,
-    TARGET_NEGOTIATION_PROPOSE_URI,
-)
-
-# 客户端决策：询问 provider 如何应答 propose
-decision = provider.respond(propose_view, session)   # confirmed_intent = 修正后的目标
-
-# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
-accept_text = f"Accept. {decision.confirmed_intent}"
-accept = client.generate_negotiation_accept_prompt_from_text(
-    accept_text,
-    context,
-    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
-)
+```bash
+python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
 ```
 
-样例的 propose 请求澄清：服务端复述它理解的意图（`intent_understanding`），并询问需要调整哪个
-时段（`request_for_clarification`）。accept 把修正后的目标放进 `confirmed_intent`。
+打开 <http://127.0.0.1:8080>。页面可选择场景、`auto`/`manual` 模式与 SSE/webhook；展示实时时间线、最终报告，并提供 JSON/Markdown 运行记录下载。语言与模型模式是进程级、只读的（见 `GET /api/meta`）。
 
-**③ 可复用的客户端代码。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
-
-**④ 客户端自行实现的代码。** 如何得出 `confirmed_intent`：样例从 `scenario_data` 读取，客户端
-实现则从消解歧义的组件获取。
-
-### 4.6 可行性协商（feasibility）
-
-**① 触发条件。** 请求在当前条件下无法满足：保障速率无法支撑请求中所列站点的停电时长。样例的
-触发条件是 `content.rule_violation` 校验错误。
-
-**② 参考实现。**
-
-| 步骤 | SDK 调用 | 参考代码 |
-| --- | --- | --- |
-| 服务端 propose | `generate_negotiation_propose_prompt_from_text` | [`server_flow.py`](src/server/server_flow.py)（`_emit_negotiation_propose`） |
-| 客户端决策 | `NegotiationResponseProvider.respond` | [`negotiation_response.py`](src/client/negotiation_response.py)、[`client_flow.py`](src/client/client_flow.py)（`_plan_negotiation_accept`） |
-| 客户端 accept | `generate_negotiation_accept_prompt_from_text` | [`client_flow.py`](src/client/client_flow.py)（`_build_negotiation_accept_request`） |
-
-```python
-# 服务端 propose：把业务报文写成文本，再经 from-text API 渲染
-propose = server.generate_negotiation_propose_prompt_from_text(
-    propose_text,   # 不可行结论 + 替代提案
-    context,
-    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
-)
-
-# 客户端决策：询问 provider 如何应答 propose
-decision = provider.respond(propose_view, session)   # feasibility_summary = 应答内容
-
-# 客户端 accept：把应答写成业务报文，再经 from-text API 渲染
-accept_text = f"Accept. {decision.feasibility_summary}"
-accept = client.generate_negotiation_accept_prompt_from_text(
-    accept_text,
-    context,
-    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
-)
+```bash
+curl http://127.0.0.1:8080/api/meta
+{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse"}
 ```
 
-样例的 propose 说明评估结论为该目标不可行，并附上替代方案
-（`action=PROPOSE_ALTERNATIVE_ON_FAILURE` 加 `infeasibility_details_and_proposal`）；accept 说明
-客户端同意的调整。
+### 人工决策模式
 
-**③ 可复用的客户端代码。** 与信息协商相同：渲染、metadata 组装、会话处理、传输。
+```bash
+python run_demo.py --ui --mode manual --scenario target --ui-port 8080
+```
 
-**④ 客户端自行实现的代码。** `feasibility_summary` 中的应答内容，即客户端对服务端提案的答复。
+`--mode manual` 必须配合 `--ui`（决策表单位于 Web UI）。服务端每次 `Propose` 后，客户端流程等待通过 `POST /api/runs/{id}/decisions` 提交的决策；默认超时 300 秒，超时后转为 `Abort` 决策。
 
-### 4.7 reject 与 abort
+## 4. 五个场景
 
-客户端可以用 `reject`（拒绝该 propose）或 `abort`（终止协商）回应 propose，而不只是 `accept`；
-两者在协议中都是终态。本样例只实现了 accept 路径：reject/abort 决策只记录日志并结束客户端流程，
-不发送报文，因此服务端不会收到通知。生产环境的客户端应发送对应的报文；A2A-T SDK 提供相应的生成
-方法（`generate_negotiation_reject_prompt_from_data` / `..._from_text`，以及
-`generate_negotiation_abort_prompt_from_data` / `..._from_text`）。
+所有序列都由服务端发起。`S` = 服务端，`C` = 客户端；括号内为 round。期望序列由 `tests/test_scenarios.py` 与 `tests/test_client_flow.py` 断言。
 
-## 5. 自定义 Agent 开发说明
-
-**归属**列标明各组件由哪一端负责。client 团队负责标注为 client 与 both 的行；server agent 负责
-标注为 server 的行。
-
-| demo 组成 | 归属 | demo 中的作用 | 保留还是替换 |
+| 场景 | 触发 | 协商序列 | 最终状态 |
 | --- | --- | --- | --- |
-| 任务模板与参数 schema —— `ENERGY_SAVING_TEMPLATE_URI`（[`scenario_data.py`](src/client/scenario_data.py)）、[`src/common/task_schema.py`](src/common/task_schema.py) | 两端 | 客户端据此渲染请求、服务端据此校验的契约 | **替换**为双方约定的模板与 schema |
-| mock LLM —— [`resources/mock_llm/`](resources/mock_llm) + `src/common/` 中按 schema 路由的 mock | 两端 | 脚本化的槽位抽取与内容校验应答，`A2AT_LLM_API_KEY` 为空时启用 | CI/离线运行**保留**；真实部署中两端各自替换为真实的 OpenAI 兼容端点 |
-| 脚本化执行数据 —— [`src/server/constants_data.py`](src/server/constants_data.py) | server | demo 执行流式推送的脚本化进度步骤与意图报告 | server agent 经 `TaskExecutionService` 接入点**替换**（[`src/server/task_execution.py`](src/server/task_execution.py)）；它的服务装配后，demo 服务与数据即可删除 |
-| 样例输入与脚本化应答 —— [`src/client/scenario_data.py`](src/client/scenario_data.py) | 两端（见下） | Task-T 自然语言输入、协商应答与预制 propose 文案 | 两侧都要**替换**：client 提供自己的任务意图，并经自己的 `NegotiationResponseProvider` 应答；server 把 `server_flow._negotiation_propose_text` 中的预制 propose 文案改为自己的业务措辞 |
-| mock 注册中心 —— [`src/registry/`](src/registry)（端口 5001） | 两端 | AgentCard 注册（server）与查询发现（client） | **替换**为部署环境的注册中心，或绕过发现、直接从已知 AgentCard 构造 `a2a-sdk` 客户端 |
-| 静态 webhook token —— `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`） | 两端 | `X-A2A-Notification-Token` 头中的共享静态 token | **替换**为生产鉴权（逐客户端密钥、轮换、TLS）；把接收器当作暴露在外的 HTTP 端点对待 |
+| `information` | Task-T 请求缺少区域（`content.param_missing`）。 | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
+| `target` | 保障吞吐目标的时间段重叠（`content.value_not_allowed`）。 | `S:Propose(1)` → `C:Propose(1)`（反提议） → `S:Propose(2)`（修订） → `C:Accept(2)` | Task `COMPLETED` + 报告（`task_completed`） |
+| `feasibility` | 保障速率与 18 小时停电冲突（`content.rule_violation`）。 | `S:Propose(1)`（替代方案） → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
+| `reject` | 客户端无法提供缺失内容。 | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | 无 Task（`no_task_negotiation_ended`） |
+| `abort` | 客户端反复反提议策略始终无法接受的方案。 | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | 无 Task（`no_task_negotiation_aborted`） |
 
-> **`scenario_data` 同时喂两侧** —— 客户端的 Task-T 输入与脚本化协商应答（补全参数、确认意图、
-> 可行性摘要）经 provider 接入点使用；服务端的 propose 文本也由同一模块构建：`_negotiation_propose_text`
-> ([`server_flow.py`](src/server/server_flow.py)) 用其访问器填充 target/feasibility 的 propose
-> 文案。只替换 provider 与执行服务，服务端仍会用 demo 的预制文案发起 propose —— 因此两侧都完成
-> 替换前，`scenario_data.py` 不能删除。
+说明：
 
-## 6. 附录
+- `target` 中客户端反提议保持第 1 轮；只有服务端修订方案进入第 2 轮，客户端 `Accept` 也保持第 2 轮。
+- `reject` 与 `abort` 都不创建 Task。`reject` 以一条不含 Negotiation-T 元数据的普通 A2A `Message` 结束；`abort` 使用通用 abort 模板，在 `round = maxRounds = 3` 发出。
+- 首个 Task-T 校验错误码到协商类型的映射（`content.param_missing` → information、`content.value_not_allowed` → target、`content.rule_violation` → feasibility）是**样例约定**，不是 A2A-T 契约。实现位于 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 的 `NEGOTIATION_KIND_BY_ERROR_CODE`。
 
-### 6.1 Webhook 传输
+## 5. ADK 智能体开发
 
-两种传输投递相同的任务事件，区别在于客户端如何接收。默认是 SSE 流式：客户端保持流式
-`message:stream` 调用，事件到达即消费。Webhook 推送通知面向无法保持流式连接的客户端（长时任务、间歇
-在线的客户端），通过 `--transport webhook` 或 `A2AT_SAMPLE_TRANSPORT=webhook` 启用。
+### 服务端智能体
 
-webhook 模式下的变化：客户端非阻塞发送（`return_immediately`），每个任务事件以 webhook POST 形式
-送达客户端进程内嵌的接收器（[`src/common/webhook_receiver.py`](src/common/webhook_receiver.py) 的
-`WebhookReceiver`），它额外绑定一个监听端口（`--webhook-port`，默认 9000）。服务端推送在
-`X-A2A-Notification-Token` 头中携带 `A2AT_SAMPLE_WEBHOOK_TOKEN`（默认 `demo-webhook-token`）。
-流程以报告 artifact 结束，另有 30 秒空闲兜底。协商往返在两种传输上的行为一致；任务创建前的
-propose 是 Message 而非任务事件，因此客户端从非阻塞 RPC 应答中读取它。
+[`agents/server_agent/agent.py`](agents/server_agent/agent.py) 导出 `root_agent`，可被 `adk run` / `adk web` 直接加载：
 
-- **两条注册路径。** 初始请求在请求上内联注册推送配置
-  （`SendMessageConfiguration.task_push_notification_config`，即扁平的
-  `TaskPushNotificationConfig(url, token)`），因为此时 task id 尚不存在。发送 accept 前，客户端流程
-  经 `POST /tasks/{id}/pushNotificationConfigs`（a2a-sdk
-  `BaseClient.create_task_push_notification_config`）重注册同一 URL/token —— 该端点路径在 task id
-  已知后才可用。
-- **没有服务端模式开关。** 服务端无条件装配推送机制（a2a-sdk `DefaultRequestHandler` 携带
-  `InMemoryPushNotificationConfigStore` + `BasePushNotificationSender`，
-  [`server_main.py`](src/server/server_main.py)）；SSE 模式下它只是闲置。
-- **非阻塞路径。** a2a-sdk 客户端以 `ClientConfig(streaming=False)` 构建 —— 这是选择非阻塞
-  `message:send` 路径的必要条件（仅设置 `return_immediately` 不会切换路径）。推送报文是与 SSE 事件
-  同构的 StreamResponse JSON —— 因此协商检测、artifact 计数与展示逻辑与 SSE 共享。
-- **Token 鉴权。** 接收器对每个 POST 校验 `X-A2A-Notification-Token`：不匹配回 `401`（事件被丢弃），
-  畸形或无法识别的报文回 `400`。demo 的静态共享 token 是 demo 级的 —— 生产请使用 TLS 之上可轮换的
-  逐客户端密钥。
-- **结束信号。** 所有场景都以报告 artifact 结束：节能任务是值守类长时任务，报告发出后保持
-  `WORKING`，服务端不会再发终态。校验失败（`REJECTED` 任务）或流异常（`FAILED` / `CANCELED`）仍会
-  立即结束流程，summary 行以 `end=<state>` 记录。任务创建前的 propose 是 Message，不是推送的任务
-  事件：webhook 模式下客户端从非阻塞 RPC 应答中读取它，并在 accept 上注册自己的内联推送配置。空闲
-  兜底（`A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT`，默认 30 秒，每收到一个事件重置）打印
-  `webhook-idle-timeout` 行后带着已收集的事件正常结束。`A2AT_SAMPLE_MAX_ARTIFACTS` 在 webhook
-  模式下不生效。每个阶段的唯一 RPC 应答以 `webhook-rpc-reply` 记录一次，不重复计数。
-  `stream-completed` 汇总统计经 webhook 收到的事件并追加 `transport=webhook`。
+```python
+root_agent = LlmAgent(
+    name="ran_energy_service_agent",
+    model=build_adk_model(),           # 离线 fake model，在线 LiteLlm
+    instruction=SERVICE_INSTRUCTION,
+    tools=[
+        get_cell_energy_profile,
+        evaluate_energy_saving_plan,
+        apply_energy_saving_plan,
+        generate_energy_saving_report,
+    ],
+)
+```
 
-### 6.2 配置（a2a-t-sample/.env）
+| 工具 | 输入 | 作用 |
+| --- | --- | --- |
+| `get_cell_energy_profile` | `cell_id`、`date` | 返回 24 小时负载/能耗曲线、容量/SLA、可用节能窗口。 |
+| `evaluate_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 校验窗口、节能率上限与 SLA；估算节能与 KPI 影响。 |
+| `apply_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 重新评估并写入进程内方案存储。 |
+| `generate_energy_saving_report` | `plan_id` | 根据已存方案生成结构化最终报告。 |
 
-| 键 | 含义 |
+工具都是基于 [`shared/ran_data.py`](shared/ran_data.py) 的确定性函数。可预期的失败（未知小区、参数格式错误、方案不可行）返回结构化的 `{"ok": false, "error_code": ...}` 字典而不是抛异常，便于模型解释并调整。instruction（`prompts/service_instruction.md`）要求先读数据、再评估、再下发、最后报告，不得跳过评估。
+
+ADK 运行时：[`protocol/server_executor.py`](protocol/server_executor.py) 使用 `InMemorySessionService` 构建 `Runner`，`session_id = context.context_id`，并通过 `force_new_version=True` 将智能体包进 ADK 的 `A2aAgentExecutor`。
+
+### 客户端决策智能体
+
+[`agents/client_agent/agent.py`](agents/client_agent/agent.py)：
+
+```python
+root_agent = LlmAgent(
+    name="ran_energy_request_agent",
+    model=build_adk_model(),
+    instruction=REQUEST_INSTRUCTION,
+    tools=[get_sla_policy, evaluate_proposal_impact],
+    output_schema=NegotiationDecision,
+)
+```
+
+`get_sla_policy(cell_id)` 返回小区的 SLA 下限、最大节能率与可用窗口。`evaluate_proposal_impact(proposal)` 从提议文本中解析小区 id、窗口与节能率，返回确定性可行性与影响视图。`output_schema=NegotiationDecision` 让 ADK 解析模型的结构化答案；客户端流程从不解析自由文本。
+
+[`protocol/decision_provider.py`](protocol/decision_provider.py) 通过 `InMemoryRunner` 运行智能体，每个协商 id 保留一个 ADK 会话（后续轮次可见之前的提议），仅在离线模式下回退到安全的 `accept` 决策。
+
+### Executor 与 interceptor 集成
+
+`NegotiationAgentExecutor` 先运行网关。短路结果只入队一条独立消息（协商 `Propose`/`Abort`，或普通结束消息），不创建 Task；否则委托给内层 ADK executor。两个集成缝被显式配置：
+
+- **`request_converter`** —— ADK 默认转换器只读请求级 metadata，而 A2A-T 载荷位于 `context.message.metadata`。自定义转换器从那里读取 Task-T 提示词，用协商后的提示词替换短文本标签，并把协商上下文镜像到 ADK 会话状态中供审计。
+- **`ExecuteInterceptor.after_event` / `after_agent`** —— interceptor 在报告 artifact 上打上 Task-T 扩展 URI 与模板 URI，在终态 status 上附加协商上下文，并释放按会话缓存的上下文。
+
+### 客户方需要替换什么
+
+四个工具与两份 instruction 是业务层。实现自有 RAN 服务的客户方应把工具实现替换为对自身 OSS/BSS/网管系统的调用，并重写 instruction；ADK 装配、网关、策略状态机与 executor 集成缝保持不变。
+
+## 6. A2A-T 协商集成
+
+### 消息结构
+
+每条协商消息都携带：
+
+- `A2A-Extensions: Task-T/v1,Negotiation-T/v1`；
+- Negotiation-T 扩展 URI 下的渲染文本；
+- `templateUri` —— 文本渲染自的模板；
+- `negotiationContext = {id, round, maxRounds, performative}`。
+
+`protocol/messages.py` 是唯一构建/读取这些键的地方。协商会话 id 被强制设为 A2A `contextId`（样例约定）。
+
+### 网关
+
+[`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) 是服务端唯一协议入口，只处理**任务前**请求（`context.current_task is None`；`context.task_id` 不是可靠信号，因为 `RequestContext` 构造时会生成一个）：
+
+1. 初始 Task-T 请求通过 `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` 校验。
+2. 校验失败且首个错误码可映射到协商类型时，生成初始 `Propose`；不可映射时返回带结构化错误的终态 `REJECTED` Task。
+3. `Accept` 通过 `validate_accept_prompt_and_data_filling` 校验；随后再次校验协商确定的 Task-T 提示词并交给 ADK executor。
+4. `Reject` 或 `Abort` 是终态：网关回一条普通消息，不创建 Task。
+5. 客户端反提议通过 `validate_propose_prompt_and_data_filling` 校验，再由策略引擎应答。
+
+所有 SDK 调用都是同步的，因此网关用 `asyncio.to_thread` 执行，避免阻塞服务端事件循环。
+
+### 策略引擎
+
+[`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 是纯函数：输入状态，输出 `PolicyDecision`。它不调用 LLM，也不发送任何消息。
+
+| 输入 | 决策 |
 | --- | --- |
-| `A2AT_LANGUAGE` | `zh-CN` / `en-US`；决定自然语言输入与 mock/模板语言树 |
-| `A2AT_SAMPLE_SCENARIO` | `default` / `negotiation`；样例场景变体（与 `--scenario` 语义相同） |
-| `A2AT_SAMPLE_NEGOTIATION_KIND` | `information` / `target` / `feasibility`（默认 `information`）；协商场景输入，与 `--negotiation` 语义相同 |
-| `A2AT_SAMPLE_TRANSPORT` | `sse` / `webhook`（默认 `sse`）；客户端事件传输方式，与 `--transport` 语义相同 |
-| `A2AT_SAMPLE_WEBHOOK_PORT` | 内嵌 webhook 接收器的绑定端口（默认 `9000`；`0` = 操作系统分配临时端口） |
-| `A2AT_SAMPLE_WEBHOOK_TOKEN` | 服务端在 `X-A2A-Notification-Token` 头中必须携带的推送 token（默认 `demo-webhook-token`）；不匹配回 `401` |
-| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 空闲兜底超时（秒）：webhook 流程超过该时长未收到推送即结束（默认 `30`） |
-| `A2AT_LLM_API_KEY` | 留空 ⇒ mock LLM；否则为 OpenAI 兼容的 key |
-| `A2AT_LLM_PROVIDER` / `A2AT_LLM_MODEL` / `A2AT_LLM_BASE_URL` | LLM 端点配置 |
-| `A2AT_LLM_TIMEOUT_SECONDS` | HTTP 客户端超时（秒，默认 60） |
-| `A2AT_SAMPLE_HOST` / `A2AT_SAMPLE_PORT` | 手动 `python -m` 路径的服务端绑定（默认 `127.0.0.1:8000`） |
-| `REGISTRY_CENTER_HOST` / `REGISTRY_CENTER_PORT` | 手动 `python -m` 路径的注册中心绑定（默认 `127.0.0.1:5001`） |
-| `A2AT_SAMPLE_DEBUG` | `true` 时打印完整的 LLM 请求/响应报文 |
-| `A2AT_SAMPLE_MAX_ARTIFACTS`（进程环境变量，非 `.env`） | 收到 N 个 artifact 后停止（默认 0 = 不限制） |
+| 初始校验失败 | `propose`（第 1 轮）；若已到轮次上限则 `abort`。 |
+| 客户端 `Accept` | `execute`。 |
+| 客户端 `Reject` / `Abort` | `end`。 |
+| 客户端在 `maxRounds` 之前反提议 | 在下一轮 `propose`：反提议方案可行则接受，否则修订。 |
+| 客户端在 `maxRounds` 反提议 | `abort`，保持当前 round。 |
 
-说明：`run_demo.py` 的就绪检查固定使用 `5001` / `8000`，不读取 `A2AT_SAMPLE_PORT` /
-`REGISTRY_CENTER_PORT` —— 这两对仅在手动 `python -m` 路径下设置。服务端的进度与报告文案始终是
-英文，与 `--language` 无关。该开关切换客户端输入、模板、mock 应答与协商消息文本。模板、参数
-schema、AgentCard 与自然语言输入都是本样例特有的；替换后的模板必须属于 `Task-T` 扩展且使用 `v1`
-版本。SDK 不负责加载远程 prompt 资源；本处的注册中心是样例专用的 mock，用于 AgentCard 发现，
-不是 SDK 能力。
+服务端从不发出 `Accept`：它通过发布一个客户端可接受的最终 `Propose` 来表达同意。若没有 `sampleProposal`（见下文），策略按预设修订序列推进。
 
-### 6.3 分别启动两端
+### 决策 Provider
 
-把 `PYTHONPATH` 指向样例的 `src/` 目录，在各自终端分别启动（`.env` 从当前目录读取；缺失 `.env` 对
-客户端与服务端而言会**直接报错**）。启动顺序为注册中心 → 服务端 → 客户端（客户端要从注册中心发现
-服务端的 AgentCard）。
+| Provider | 使用方 | 行为 |
+| --- | --- | --- |
+| `AdkDecisionProvider` | 默认 `--mode auto` | 运行客户端 ADK 智能体，返回结构化 `NegotiationDecision`。 |
+| `ManualDecisionProvider` | `--ui --mode manual` | 等待 Web UI 决策；300 秒超时后转为 `Abort`。 |
+| `ScriptedDecisionProvider` | 测试（`MODE_SCRIPTED`；`run_demo.py` 不暴露） | 按顺序回放场景决策。离线 `auto` 模式则让 ADK 智能体配合 fake model 留在决策回路中。 |
 
-以下命令在仓库根目录执行：
+所有 Provider 都实现 `respond(propose, session) -> NegotiationDecision`。Provider 只决定**意图**；流程层负责生成协议内容，且从不改变 round。
+
+### 四类 performative 与轮次归属
+
+| Performative | 生成方法 | 含义 |
+| --- | --- | --- |
+| `Propose` | `generate_negotiation_propose_prompt_from_text` | 缺失信息、歧义、替代方案或修订方案。 |
+| `Accept` | `generate_negotiation_accept_prompt_from_text` | 客户端接受；流程层用 `generate_task_prompt_from_data_with_schema` 重填 Task-T 提示词。 |
+| `Reject` | `generate_negotiation_reject_prompt_from_text` | 客户端拒绝；终态。 |
+| `Abort` | `generate_negotiation_abort_prompt_from_text` | 服务端（到达 `maxRounds`）或客户端结束会话；终态。 |
+
+轮次规则：
+
+- **服务端**发起协商，并且是唯一推进 round 的一侧（首个 `Propose` 为 `round = 1`，每次修订为 `round + 1`）。
+- **客户端**始终使用 `session.with_performative(...)` 保持入站 round，从不调用 `next_round()`。
+- `maxRounds = 3`。第 3 轮的反提议之后无法再跟服务端确认，因此服务端在第 3 轮直接 `abort`，不会越过轮次上限。
+
+协商内容**只使用 `fromText`**。（Negotiation-T 的 `fromData` 不在本样例范围内；Task-T 的 accept 重填使用独立的 `fromDataWithSchema` API。）
+
+### `sampleProposal`：仅样例约定
+
+客户端反提议可以携带：
+
+```json
+"metadata": {"sampleProposal": {"cellId": "cell-001", "window": "00:00~06:00", "targetRate": "30"}}
+```
+
+`sampleProposal` **不是 A2A-T 协议字段**。它让确定性策略可以用 `shared.ran_data.evaluate_plan` 评估反提议，从而保证离线演示可复现。若缺失，协议仍然工作：策略按预设修订序列推进。该键定义在 [`protocol/messages.py`](protocol/messages.py)，解析在 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py)。
+
+## 7. 替换清单
+
+`KEEP` 表示可直接复用的协议/管道代码；`REPLACE` 表示包含样例业务内容或仅演示用的机制。
+
+### 客户端
+
+| 文件 / 函数 | 结论 | 原因 |
+| --- | --- | --- |
+| `protocol/client_flow.py`（`run_client_flow`） | KEEP | 协议正确性：消息序列、元数据、传输、终态处理。 |
+| `protocol/decision_provider.py`（`NegotiationDecisionProvider`、`AdkDecisionProvider`） | KEEP | ADK 集成与决策契约。 |
+| `agents/client_agent/agent.py`（`build_client_agent`） | KEEP | ADK 装配；仅当你的 agent 图不同才替换。 |
+| `agents/client_agent/prompts/request_instruction.md` | **REPLACE** | 客户端策略与措辞。 |
+| `agents/client_agent/tools.py`（`get_sla_policy`、`evaluate_proposal_impact`） | **REPLACE** | 改为读取你的 SLA/目录系统，而不是进程内数据集。 |
+| `shared/scenario.py`（脚本化决策、用户请求） | **REPLACE** | 演示输入；仅离线演示/测试保留。 |
+| `protocol/client_runtime.py` | KEEP | 装配；通过配置调整 SDK 端点。 |
+| `shared/scripted_llm.py`、`shared/adk_fake_model.py`、`resources/mock_llm/` | KEEP（仅离线/测试） | 确定性测试；禁止用于生产。 |
+| `web/app.py`、`web/static/index.html` | KEEP 或 REPLACE | 开发者 UI；可替换为自有界面。 |
+| `shared/models.py`（`NegotiationDecision`） | KEEP | 只有决策需要更多载荷时才扩展字段。 |
+
+### 服务端
+
+| 文件 / 函数 | 结论 | 原因 |
+| --- | --- | --- |
+| `protocol/negotiation_gate.py`（`NegotiationGate`） | KEEP | 协议入口与校验/短路逻辑。 |
+| `protocol/server_executor.py`（`NegotiationAgentExecutor`、converter、interceptor） | KEEP | ADK 集成缝。 |
+| `protocol/server_app.py`（`build_agent_card`、`build_server_runtime`） | KEEP | 装配；替换卡片的元数据/Provider URL。 |
+| `protocol/negotiation_policy.py`（`decide` 及规则助手） | 替换规则，保留结构 | 状态机可复用；业务规则与提议文本属于样例。 |
+| `agents/server_agent/agent.py`（`build_server_agent`） | KEEP | ADK 装配。 |
+| `agents/server_agent/prompts/service_instruction.md` | **REPLACE** | 你的服务流程与措辞。 |
+| `agents/server_agent/tools.py`（四个工具） | **REPLACE** | 接入真实 RAN/OSS/BSS/网管操作。 |
+| `shared/ran_data.py`、`resources/ran_data/cells.json` | **REPLACE** | 进程内演示数据与方案存储。 |
+
+### 双侧
+
+| 文件 / 函数 | 结论 | 原因 |
+| --- | --- | --- |
+| `protocol/messages.py` | KEEP | A2A-T 元数据组装/解析。 |
+| `protocol/discovery.py` | KEEP | 注册中心/直连发现。 |
+| `shared/task_schema.py` + `TASK_TEMPLATE_URI` | 模板不同则 **REPLACE** | 调用方 schema 与模板是双方约定的契约。 |
+| `shared/config.py`、`env.example`、`.env` | **替换取值** | 端点、端口、语言、发现方式、传输。 |
+| `registry/` | **REPLACE** | 这是 mock 注册中心；使用部署环境注册中心或绕过发现。 |
+| `shared/webhook_receiver.py` + `A2AT_SAMPLE_WEBHOOK_TOKEN` | 替换鉴权，保留接收器 | 静态演示 token 不是生产鉴权。 |
+| `protocol/transcript.py` | KEEP | 运行记录；可按需调整输出目录。 |
+| `run_demo.py` | KEEP（仅开发） | 三进程启动器，不是部署工具。 |
+| `tests/` | KEEP / 调整 | 用你的验收用例替换场景断言。 |
+
+## 8. 配置参考
+
+所有样例键由 [`shared/config.py`](shared/config.py)、`run_demo.py` 或 A2A-T SDK 读取。完整模板：[`env.example`](env.example)（以及 [`../env.example`](../env.example)）。
+
+| 键 | 取值 | 作用 |
+| --- | --- | --- |
+| `A2AT_SAMPLE_MODEL_MODE` | `offline`（默认）、`live` | `offline` = 脚本化 SDK Provider + 确定性 ADK fake model；`live` = 两侧都使用 OpenAI-compatible 端点。 |
+| `A2AT_LANGUAGE` | `en-US`、`zh-CN`（未设置时默认 `zh-CN`；`run_demo.py` 默认 `en-US`） | 进程级语言，作用于模板、预置响应、注册中心/服务端/客户端。不能按运行切换；Web UI 只展示当前值。 |
+| `A2AT_SAMPLE_HOST` / `A2AT_SAMPLE_PORT` | 默认 `127.0.0.1` / `8000` | 服务端绑定与 AgentCard 对外接口。 |
+| `REGISTRY_CENTER_HOST` / `REGISTRY_CENTER_PORT` | 默认 `127.0.0.1` / `5001` | Mock 注册中心绑定与查询 URL。 |
+| `A2AT_SAMPLE_DISCOVERY` | `registry`（默认）、`direct` | 服务发现方式。 |
+| `A2AT_SAMPLE_DIRECT_SERVER_URL` | 默认 `http://127.0.0.1:8000` | `direct` 发现读取的基础 URL。 |
+| `A2AT_SAMPLE_TRANSPORT` | `sse`（默认）、`webhook` | 客户端事件传输。 |
+| `A2AT_SAMPLE_WEBHOOK_PORT` | 默认 `9000`（`0` = 临时端口） | 内置 webhook 接收器端口。 |
+| `A2AT_SAMPLE_WEBHOOK_TOKEN` | 默认 `demo-webhook-token` | 与 `X-A2A-Notification-Token` 比对的静态推送 token。 |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 默认 `30` | 无推送多少秒后结束 webhook 阶段。 |
+| `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | `run_demo.py --ui` 的 Web UI 绑定端口。 |
+| `ADK_MODEL_PROVIDER` | `litellm` | ADK 模型 Provider（本样例只实现 LiteLlm）。 |
+| `ADK_MODEL_NAME` | 默认 `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm 模型 id（需要 provider 前缀）。 |
+| `ADK_MODEL_API_BASE` | 默认 `http://127.0.0.1:31943/v1` | OpenAI-compatible 端点。 |
+| `ADK_MODEL_API_KEY` | 默认 `not-needed` | 端点 key。 |
+| `A2AT_LLM_PROVIDER` | 在线为 `openai`；离线被覆盖为 `scripted` | SDK Provider。 |
+| `A2AT_LLM_MODEL` | 默认 `mass/volcengine/deepseek-v4.1-flash` | SDK 模型 id（不带 LiteLlm 前缀）。 |
+| `A2AT_LLM_API_KEY` | 默认 `not-needed`；离线被覆盖 | SDK 端点 key。 |
+| `A2AT_LLM_BASE_URL` | 默认 `http://127.0.0.1:31943/v1` | SDK 端点基础 URL。 |
+| `A2AT_LLM_MAX_TOKENS`、`A2AT_LLM_TEMPERATURE`、`A2AT_LLM_TIMEOUT_SECONDS` | SDK 默认值 | 结构化调用限制。 |
+| `A2AT_LLM_DETAIL_LOG_ENABLED` | `false`（默认） | 打印完整 LLM 载荷（调试；可能暴露敏感内容）。 |
+| `A2AT_SAMPLE_DEBUG` | `false`（默认） | 额外样例调试日志。 |
+
+**离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册官方 `scripted` Provider，并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。ADK 侧使用 `shared/adk_fake_model.py`。日志与 Web UI 标注为 `offline (scripted)`。
+
+**在线模式。** SDK 与 ADK 都使用配置端点。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取与语义校验，见 §3。
+
+**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`。`run_demo.py` 会把这些值写入交给三个进程的每次运行 `.env`。
+
+## 9. 测试与验证
+
+在 `a2a-t-sample/ran-energy-saving` 下运行（已安装样例依赖）：
 
 ```bash
-# bash / zsh
-cd a2a-t-sample
-export PYTHONPATH="$PWD/ran-energy-saving/src"
-uv run --no-sync python -m registry.registry_main    # 终端一：注册中心（5001）
-uv run --no-sync python -m server.server_main         # 终端二：服务端（8000）
-uv run --no-sync python -m client.client_main         # 终端三：客户端
+PYTHONPATH=. python -m pytest tests -q
+python -m ruff check shared agents protocol web tests run_demo.py
 ```
 
-```powershell
-# PowerShell
-cd a2a-t-sample
-$env:PYTHONPATH = "$pwd\ran-energy-saving\src"
-uv run --no-sync python -m registry.registry_main
-uv run --no-sync python -m server.server_main
-uv run --no-sync python -m client.client_main
-```
+（本仓库检出中，把 `python` 替换为 `../../.venv-adk/Scripts/python.exe`。）
 
-运行语言取自 `a2a-t-sample/.env` 的 `A2AT_LANGUAGE`（`env.example` 默认是 `zh-CN`）；`run_demo.py`
-每次运行用 `--language` 覆盖（默认 `en-US`）。
+测试套件完全离线且确定性（216 个测试）。覆盖范围：
 
-### 6.4 mock LLM 机制
-
-`A2AT_LLM_API_KEY` 为空时，样例安装随包的 mock LLM
-([`src/common/mock_llm.py`](src/common/mock_llm.py))：它按**输出 schema 签名**
-（`route_structured_call`）路由每个结构化调用，回放
-[`resources/mock_llm/{zh-CN,en-US}/`](resources/mock_llm) 中脚本化的槽位抽取与内容校验应答。
-
-### 6.5 支持的参数（`run_demo.py`）
-
-| 参数 | 作用 |
+| 测试模块 | 覆盖内容 |
 | --- | --- |
-| `--language {en-US,zh-CN}` | 运行语言（默认 `en-US`） |
-| `--scenario {default,negotiation}` | 场景变体（默认：`default`；`negotiation` 运行缺失 region 的信息协商） |
-| `--negotiation {information,target,feasibility}` | 协商类型：`information`（默认；缺失 region）、`target`（分时段保障速率目标中两个时段重叠）或 `feasibility`（保障速率无法支撑 18 小时停电）。`target` 与 `feasibility` 可单独触发协商；`information` 还需配合 `--scenario negotiation`。该参数只选择客户端输入；服务端依据内容校验错误码决定类型 |
-| `--transport {sse,webhook}` | 客户端的事件传输方式（默认 `sse`）；见 [§6.1](#61-webhook-传输) |
-| `--webhook-port N` | `--transport webhook` 时内嵌 webhook 接收器的绑定端口（默认 9000；`0` 表示由操作系统分配临时端口） |
-| `--keep-alive` | 保留注册中心/服务端不停止；之后用 `--stop` 关闭 |
-| `--keep-logs` | 保留临时运行目录（日志 / `.env`），位于 `<temp>/a2at-ran-energy-saving/` |
-| `--stop` | 停止之前 `--keep-alive` 留下的后台进程并退出 |
-| `--timeout N` | 等待每个端口的秒数（默认 30） |
+| `test_policy.py` | 所有策略决策与轮次规则，包括 `maxRounds` 时的 abort 与错误码映射。 |
+| `test_negotiation_gate.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理，以及真实离线服务端。 |
+| `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
+| `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时。 |
+| `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + ADK fake model，断言精确 performative/round 序列与终态。 |
+| `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
+| `test_web_ui.py` | `/api/meta`、运行生命周期、SSE 事件、人工决策、下载、错误状态码。 |
+| `test_server_executor.py` | request converter、artifact interceptor、executor 委托、AgentCard 扩展、注册载荷。 |
+| `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
+| `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性 ADK 模型。 |
+| `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置、场景定义、运行记录、运行时装配。 |
+
+### 五场景离线 smoke
+
+```bash
+for s in information target feasibility reject abort; do
+  python run_demo.py --scenario "$s" --mode auto --model-mode offline
+done
+```
+
+预期 `[client] final_state`：
+
+| 场景 | `final_state` |
+| --- | --- |
+| `information` | `task_completed` |
+| `target` | `task_completed` |
+| `feasibility` | `task_completed` |
+| `reject` | `no_task_negotiation_ended` |
+| `abort` | `no_task_negotiation_aborted` |
+
+### 传输与 UI smoke
+
+```bash
+python run_demo.py --scenario information --mode auto --model-mode offline --transport webhook
+python run_demo.py --scenario target --mode auto --model-mode offline --transport webhook
+```
+
+两者都到达 `task_completed`；客户端日志出现 `[client] webhook-mode: push_url=http://127.0.0.1:9000/webhook`。
+
+```bash
+python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
+curl http://127.0.0.1:8080/api/meta
+```
+
+`/api/meta` 返回 §3 所示的语言、模型模式、场景、模式、传输与默认值，即视为 UI smoke 通过。
+
+### 在线 smoke
+
+```bash
+python run_demo.py --scenario target --mode auto --model-mode live
+```
+
+需要可访问的 OpenAI-compatible 端点。该命令仅手工执行，不进入自动套件，因为输出依赖模型。使用本样例开发期间的本地代理时，运行可以端到端完成，但 SDK 的语义校验拒绝了 target 请求（`task_rejected`），没有进入设计的协商序列；离线模式才是权威、可复现的演示。
+
+每次运行写入 `runs/<timestamp>-<scenario>.json` 与 `.md`（已 gitignore）。Markdown 文件包含双向时间线与决策表。
+
+## 10. 生产化注意事项
+
+本样例刻意保持原型性质。生产化之前：
+
+- **持久化。** 方案保存在进程内存储（`shared/ran_data._PLANS`），Task 使用 `InMemoryTaskStore`，push 配置使用 `InMemoryPushNotificationConfigStore`，ADK 会话使用 `InMemorySessionService`。四者都需要替换为持久化实现；多实例部署还要求持久化 ADK 会话服务。
+- **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
+- **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
+- **鉴权与 TLS。** 本样例的 A2A 服务端与注册中心没有鉴权。应在网关或 A2A 层终止 TLS 并增加认证/授权。
+- **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
+- **协议正确性由确定性代码掌握。** round、performative、终态与 Task 生命周期必须留在确定性代码中；LLM 只负责意图、文本与工具调用。
+- **离线机制仅供测试。** `shared/scripted_llm.py`、`shared/adk_fake_model.py`、`resources/mock_llm/` 与 `shared/scenario.py` 用于可复现的演示与测试，不要作为生产路径发布。
+- **单运行 Web UI。** Web UI 每个应用实例只允许一个并发运行，是开发者工具，不是多租户控制台。
+- **SDK 范围。** 本样例不修改 `src/a2a_t/`。SDK 缺陷应作为独立 SDK 变更处理，不要在样例内打补丁。

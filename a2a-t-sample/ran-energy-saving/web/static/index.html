@@ -236,7 +236,9 @@
       performative.textContent = entry.performative || "-";
       const kind = document.createElement("span");
       kind.className = "badge";
-      kind.textContent = entry.kind || entry.eventKind || "event";
+      // Show the negotiation type (information / target / feasibility); the performative badge
+      // already carries propose/accept/reject/abort.
+      kind.textContent = entry.negotiationType || entry.eventKind || entry.kind || "event";
       const direction = document.createElement("span");
       direction.className = "meta";
       direction.textContent = entry.direction || "";

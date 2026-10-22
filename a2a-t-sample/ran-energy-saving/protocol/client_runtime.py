@@ -31,7 +31,7 @@ from a2a.utils.constants import TransportProtocol
 from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.metadata import NegotiationContext
 from dotenv import dotenv_values
-from shared.adk_fake_model import DEFAULT_SERVER_SCRIPT, build_client_script, build_fake_model
+from shared.adk_fake_model import build_client_script, build_fake_model
 from shared.config import (
     MODEL_MODE_OFFLINE,
     SUPPORTED_TRANSPORTS,
@@ -180,9 +180,9 @@ def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> N
         return ScriptedDecisionProvider.from_scenario(scenario)
     if mode == MODE_AUTO:
         if config.is_offline:
-            model = build_fake_model(
-                (DEFAULT_SERVER_SCRIPT, build_client_script(scenario.scripted_client_decisions))
-            )
+            # The client Runner only runs the request agent, so the fake model carries just the
+            # client decision script; no server script can match this agent's marker.
+            model = build_fake_model((build_client_script(scenario.scripted_client_decisions),))
         else:
             model = build_adk_model(config)
         return AdkDecisionProvider(model=model, offline=config.is_offline)
