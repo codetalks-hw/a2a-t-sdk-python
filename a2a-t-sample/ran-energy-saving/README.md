@@ -121,21 +121,30 @@ Task, which the inner ADK `A2aAgentExecutor` creates and drives to `COMPLETED`.
 
 ## 3. Quickstart
 
-Prerequisites: Python 3.12+ and the sample dependencies from
-[`a2a-t-sample/requirements.txt`](../requirements.txt). The commands below assume `python` is the
-interpreter that has them installed, so activate the virtual environment first (in this repository
-checkout the ADK environment is `.venv-adk`):
+Prerequisites: Python 3.12+ and [`uv`](https://docs.astral.sh/uv/). From a fresh checkout, install
+the A2A-T SDK and its dev dependencies at the repository root, then add the sample dependencies to
+the same `.venv`:
 
 ```bash
-# From the repository root
+# 1. Repository root: install the SDK and its dev dependencies into .venv
+uv sync --dev
+
+# 2. a2a-t-sample: install the sample dependencies into the same .venv
 cd a2a-t-sample
 uv pip install -r requirements.txt
-
-# Activate that environment (choose the form for your shell)
-source ../.venv-adk/Scripts/activate        # Git Bash / Windows (from a2a-t-sample/)
-# source ../.venv/bin/activate              # Linux / macOS
-# ../.venv-adk/Scripts/Activate.ps1         # PowerShell
 ```
+
+`uv sync` re-syncs the SDK environment exactly, so re-run step 2 after any later `uv sync --dev`.
+
+Activate that environment before running any sample command (choose the form for your shell):
+
+```bash
+source ../.venv/Scripts/activate        # Git Bash / Windows (from a2a-t-sample/)
+# source ../.venv/bin/activate          # Linux / macOS
+# ../.venv/Scripts/Activate.ps1         # Windows PowerShell
+```
+
+Every later `python` is that activated interpreter.
 
 `run_demo.py` falls back to `env.example`, so **offline runs need no `.env` file and no API key**.
 To customize, copy the template:
@@ -154,8 +163,8 @@ python run_demo.py --scenario information --mode auto --model-mode offline
 python run_demo.py --scenario target --mode auto --model-mode offline
 ```
 
-Replacing `python` with the repository interpreter on Windows:
-`../../.venv-adk/Scripts/python.exe`.
+If you skipped activation, use `../../.venv/Scripts/python.exe` (Windows) or
+`../../.venv/bin/python` (Linux/macOS) instead of `python`.
 
 Expected output for `information` (paths and ids vary):
 
@@ -481,7 +490,9 @@ sample business content or demo-only machinery.
 ## 8. Configuration reference
 
 All sample keys are read by [`shared/config.py`](shared/config.py), `run_demo.py`, or the A2A-T
-SDK. Full template: [`env.example`](env.example) (also [`../env.example`](../env.example)).
+SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port`; passing
+`--ui-port` overrides it. Full template: [`env.example`](env.example) (also
+[`../env.example`](../env.example)).
 
 | Key | Values | Effect |
 | --- | --- | --- |
@@ -495,7 +506,7 @@ SDK. Full template: [`env.example`](env.example) (also [`../env.example`](../env
 | `A2AT_SAMPLE_WEBHOOK_PORT` | default `9000` (`0` = ephemeral) | Embedded webhook receiver port. |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | default `demo-webhook-token` | Static push token checked against `X-A2A-Notification-Token`. |
 | `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `30` | Seconds without a push before a webhook phase ends. |
-| `A2AT_SAMPLE_UI_PORT` | default `8080` | Web UI bind port used by `run_demo.py --ui`. |
+| `A2AT_SAMPLE_UI_PORT` | default `8080` | Default bind port of the Web UI; read by `run_demo.py` as the default of `--ui-port`. |
 | `ADK_MODEL_PROVIDER` | `litellm` | ADK model provider (only LiteLlm is implemented by this sample). |
 | `ADK_MODEL_NAME` | default `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm model id (provider prefix required). |
 | `ADK_MODEL_API_BASE` | default `http://127.0.0.1:31943/v1` | OpenAI-compatible endpoint. |
@@ -530,7 +541,8 @@ PYTHONPATH=. python -m pytest tests -q
 python -m ruff check shared agents protocol web tests run_demo.py
 ```
 
-(In this repository checkout, substitute `../../.venv-adk/Scripts/python.exe` for `python`.)
+(`python` must be the environment activated in §3; without activation use
+`../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
 The suite is fully offline and deterministic (216 tests). What it covers:
 

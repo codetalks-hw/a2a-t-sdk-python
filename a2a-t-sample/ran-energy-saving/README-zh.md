@@ -104,18 +104,28 @@ flowchart LR
 
 ## 3. 快速开始
 
-前置条件：Python 3.12+，以及 [`a2a-t-sample/requirements.txt`](../requirements.txt) 中的样例依赖。下文命令假定 `python` 就是已安装这些依赖的解释器，请先激活虚拟环境（本仓库检出中使用 `.venv-adk`）：
+前置条件：Python 3.12+ 与 [`uv`](https://docs.astral.sh/uv/)。从全新检出开始时，先在仓库根目录安装 A2A-T SDK 及其开发依赖，再把样例依赖安装到同一个 `.venv`：
 
 ```bash
-# 在仓库根目录
+# 1. 仓库根目录：把 SDK 与开发依赖安装到 .venv
+uv sync --dev
+
+# 2. a2a-t-sample：把样例依赖安装到同一个 .venv
 cd a2a-t-sample
 uv pip install -r requirements.txt
-
-# 激活该环境（按你的 shell 选择）
-source ../.venv-adk/Scripts/activate        # Git Bash / Windows（在 a2a-t-sample/ 下）
-# source ../.venv/bin/activate              # Linux / macOS
-# ../.venv-adk/Scripts/Activate.ps1         # PowerShell
 ```
+
+`uv sync` 会精确同步 SDK 环境，因此之后每次执行 `uv sync --dev` 都需要重新执行第 2 步。
+
+运行任何样例命令前先激活该环境（按你的 shell 选择）：
+
+```bash
+source ../.venv/Scripts/activate        # Git Bash / Windows（在 a2a-t-sample/ 下）
+# source ../.venv/bin/activate          # Linux / macOS
+# ../.venv/Scripts/Activate.ps1         # Windows PowerShell
+```
+
+下文所有 `python` 都指这个已激活的解释器。
 
 `run_demo.py` 会回退到 `env.example`，因此**离线运行不需要 `.env` 文件，也不需要 API key**。如需自定义，复制模板：
 
@@ -133,7 +143,7 @@ python run_demo.py --scenario information --mode auto --model-mode offline
 python run_demo.py --scenario target --mode auto --model-mode offline
 ```
 
-Windows 下把 `python` 替换为仓库解释器：`../../.venv-adk/Scripts/python.exe`。
+若跳过激活，请把 `python` 替换为 `../../.venv/Scripts/python.exe`（Windows）或 `../../.venv/bin/python`（Linux/macOS）。
 
 `information` 的预期输出（路径与 id 会变化）：
 
@@ -396,7 +406,7 @@ root_agent = LlmAgent(
 
 ## 8. 配置参考
 
-所有样例键由 [`shared/config.py`](shared/config.py)、`run_demo.py` 或 A2A-T SDK 读取。完整模板：[`env.example`](env.example)（以及 [`../env.example`](../env.example)）。
+所有样例键由 [`shared/config.py`](shared/config.py)、`run_demo.py` 或 A2A-T SDK 读取。`run_demo.py` 只把 `A2AT_SAMPLE_UI_PORT` 作为 `--ui-port` 的默认值；显式传入 `--ui-port` 会覆盖它。完整模板：[`env.example`](env.example)（以及 [`../env.example`](../env.example)）。
 
 | 键 | 取值 | 作用 |
 | --- | --- | --- |
@@ -410,7 +420,7 @@ root_agent = LlmAgent(
 | `A2AT_SAMPLE_WEBHOOK_PORT` | 默认 `9000`（`0` = 临时端口） | 内置 webhook 接收器端口。 |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | 默认 `demo-webhook-token` | 与 `X-A2A-Notification-Token` 比对的静态推送 token。 |
 | `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 默认 `30` | 无推送多少秒后结束 webhook 阶段。 |
-| `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | `run_demo.py --ui` 的 Web UI 绑定端口。 |
+| `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | Web UI 的默认绑定端口；`run_demo.py` 将其作为 `--ui-port` 的默认值读取。 |
 | `ADK_MODEL_PROVIDER` | `litellm` | ADK 模型 Provider（本样例只实现 LiteLlm）。 |
 | `ADK_MODEL_NAME` | 默认 `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm 模型 id（需要 provider 前缀）。 |
 | `ADK_MODEL_API_BASE` | 默认 `http://127.0.0.1:31943/v1` | OpenAI-compatible 端点。 |
@@ -438,7 +448,7 @@ PYTHONPATH=. python -m pytest tests -q
 python -m ruff check shared agents protocol web tests run_demo.py
 ```
 
-（本仓库检出中，把 `python` 替换为 `../../.venv-adk/Scripts/python.exe`。）
+（`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
 测试套件完全离线且确定性（216 个测试）。覆盖范围：
 

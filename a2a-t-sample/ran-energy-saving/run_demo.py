@@ -107,6 +107,11 @@ def _env_int(values: dict[str, str], key: str, default: int) -> int:
         raise SystemExit(f"[run_demo] invalid integer for {key}: {raw}") from exc
 
 
+def _ui_port_default(values: dict[str, str]) -> int:
+    """Return the ``--ui-port`` default: ``A2AT_SAMPLE_UI_PORT``, else ``8080``."""
+    return _env_int(values, "A2AT_SAMPLE_UI_PORT", DEFAULT_UI_PORT)
+
+
 def _child_env(language: str) -> dict[str, str]:
     """Return the environment of the child processes (sample root on ``PYTHONPATH``)."""
     env = os.environ.copy()
@@ -385,8 +390,13 @@ def _run_ui(
     return 0
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser of the new launcher."""
+def _build_parser(default_ui_port: int = DEFAULT_UI_PORT) -> argparse.ArgumentParser:
+    """Build the CLI parser of the new launcher.
+
+    Args:
+        default_ui_port: default of ``--ui-port``, resolved from ``A2AT_SAMPLE_UI_PORT`` by the
+            caller (``8080`` when the key is absent).
+    """
     from protocol.client_runtime import SUPPORTED_MODES
     from shared.config import SUPPORTED_DISCOVERY_MODES, SUPPORTED_MODEL_MODES, SUPPORTED_TRANSPORTS
     from shared.scenario import SUPPORTED_LANGUAGES, SUPPORTED_SCENARIO_NAMES
@@ -433,8 +443,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ui-port",
         type=int,
-        default=DEFAULT_UI_PORT,
-        help=f"bind port of the Web UI (default: {DEFAULT_UI_PORT})",
+        default=default_ui_port,
+        help=f"bind port of the Web UI (default: {default_ui_port}; A2AT_SAMPLE_UI_PORT)",
     )
     parser.add_argument("--keep-alive", action="store_true", help="leave registry/server running afterwards")
     parser.add_argument("--keep-logs", action="store_true", help="keep the temporary run directory (logs/.env)")
@@ -450,7 +460,9 @@ def main() -> int:
     except (AttributeError, ValueError):
         pass
 
-    parser = _build_parser()
+    source_env = _source_env_path()
+    source_values = _read_env(source_env) if source_env is not None else {}
+    parser = _build_parser(default_ui_port=_ui_port_default(source_values))
     args = parser.parse_args()
 
     if args.stop:
@@ -467,14 +479,12 @@ def main() -> int:
         parser.error("--mode manual requires --ui (the decision form lives in the Web UI)")
 
     python = sys.executable
-    source_env = _source_env_path()
     if not _preflight(python, source_env):
         return 1
 
     os.environ["A2AT_LANGUAGE"] = args.language
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     existing = _load_pids()
-    source_values = _read_env(source_env) if source_env is not None else {}
     registry_host = source_values.get("REGISTRY_CENTER_HOST") or "127.0.0.1"
     registry_port = _env_int(source_values, "REGISTRY_CENTER_PORT", DEFAULT_REGISTRY_PORT)
     server_host = source_values.get("A2AT_SAMPLE_HOST") or "127.0.0.1"
