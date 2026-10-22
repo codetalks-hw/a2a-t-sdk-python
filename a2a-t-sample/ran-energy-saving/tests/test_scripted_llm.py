@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
+from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
 from a2a_t.core.standard_templates import (
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
@@ -19,7 +21,7 @@ from a2a_t.llm.models import LLMClientConfig
 from a2a_t.server.a2at_server import A2ATServer
 from protocol.server_app import prepare_sdk_env_path
 from shared.config import SampleConfig
-from shared.scenario import SCENARIOS, Scenario
+from shared.scenario import LANGUAGE_ZH, SCENARIOS, Scenario
 from shared.scripted_llm import (
     SCRIPTED_PROVIDER_NAME,
     STAGE_CONTENT_VALIDATION_FEASIBILITY,
@@ -343,3 +345,121 @@ def test_real_server_validates_abort_offline(real_negotiation_server: A2ATServer
     )
 
     assert isinstance(result, FilledParamData)
+
+
+# ----------------------------------------------------------------------
+# zh-CN (default language) validation and generation
+# ----------------------------------------------------------------------
+
+#: Real-server validation cases: performative -> (context performative, template URI, prompt).
+_ZH_VALIDATION_CASES: tuple[tuple[str, NegotiationPerformative, str, str], ...] = (
+    (
+        "accept",
+        NegotiationPerformative.ACCEPT,
+        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+        "Accept. region: 松山湖管委会。",
+    ),
+    (
+        "reject",
+        NegotiationPerformative.REJECT,
+        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+        "Reject. region: 客户端无法提供所请求的覆盖区域。",
+    ),
+    (
+        "propose",
+        NegotiationPerformative.PROPOSE,
+        TARGET_NEGOTIATION_PROPOSE_URI,
+        "Propose. 请接受修订后的方案。",
+    ),
+    (
+        "abort",
+        NegotiationPerformative.ABORT,
+        NEGOTIATION_ABORT_URI,
+        "Abort. 协商达到轮次上限。",
+    ),
+)
+
+
+def _zh_validation_prompt(*, phase: str, kind: str, template_uri: str) -> str:
+    return (
+        f"协商阶段：{phase}\n"
+        f"声明的协商类型：{kind}\n"
+        f"声明的模板标识：{template_uri}\n"
+        "模板正文：模板内容\n\n"
+        "参数 schema：{}\n\n"
+        "待校验的协商报文：\n协商报文\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase", "kind", "expected_kind", "template_uri"),
+    [
+        ("propose", "information", "information", INFORMATION_NEGOTIATION_PROPOSE_URI),
+        ("accept", "target", "target", "Negotiation-T/target-negotiation/accept-reject/v1"),
+        ("reject", "feasibility", "feasibility", "Negotiation-T/feasibility-negotiation/accept-reject/v1"),
+        ("abort", "common", None, NEGOTIATION_ABORT_URI),
+    ],
+)
+def test_negotiation_semantic_validation_routes_zh_cn(
+    phase: str,
+    kind: str,
+    expected_kind: str | None,
+    template_uri: str,
+    client: ScriptedLLMClient,
+) -> None:
+    prompt = _zh_validation_prompt(phase=phase, kind=kind, template_uri=template_uri)
+
+    response = client.structured(messages=_messages(prompt), json_schema=NEGOTIATION_VALIDATION_SCHEMA)
+
+    assert client.calls[-1] == STAGE_NEGOTIATION_SEMANTIC_VALIDATION
+    payload = json.loads(response.content)
+    assert payload["negotiation_type"] == expected_kind
+    assert payload["semantic_verdict"] is True
+
+
+@pytest.fixture
+def zh_real_server(offline_config: SampleConfig) -> A2ATServer:
+    """Build a real A2ATServer on the scripted provider in the default zh-CN language."""
+    register_scripted_provider()
+    return A2ATServer(env_path=prepare_sdk_env_path(replace(offline_config, language=LANGUAGE_ZH)))
+
+
+@pytest.mark.parametrize(("phase", "performative", "template_uri", "prompt"), _ZH_VALIDATION_CASES)
+def test_real_server_validates_negotiation_messages_offline_zh_cn(
+    zh_real_server: A2ATServer,
+    phase: str,
+    performative: NegotiationPerformative,
+    template_uri: str,
+    prompt: str,
+) -> None:
+    context = _negotiation_context(performative)
+    schema: dict[str, object] = {"type": "object", "properties": {}}
+    validators = {
+        "accept": zh_real_server.validate_accept_prompt_and_data_filling,
+        "reject": zh_real_server.validate_reject_prompt_and_data_filling,
+        "propose": zh_real_server.validate_propose_prompt_and_data_filling,
+        "abort": zh_real_server.validate_abort_prompt_and_data_filling,
+    }
+
+    result = validators[phase](prompt, context, schema, template_uri)
+
+    assert isinstance(result, FilledParamData)
+
+
+def test_real_client_generates_a_reject_offline_zh_cn(
+    offline_config: SampleConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    register_scripted_provider()
+    monkeypatch.setenv("A2AT_LANGUAGE", LANGUAGE_ZH)
+    client = A2ATClient(env_path=prepare_sdk_env_path(replace(offline_config, language=LANGUAGE_ZH)))
+    context = _negotiation_context(NegotiationPerformative.REJECT)
+
+    content = client.generate_negotiation_reject_prompt_from_text(
+        "Reject. region: 客户端无法提供所请求的覆盖区域。",
+        context,
+        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    )
+
+    assert content.prompt_text
+    assert "Reject" in content.prompt_text

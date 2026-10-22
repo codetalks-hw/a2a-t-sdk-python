@@ -478,6 +478,61 @@ async def test_webhook_transport_consumes_pushed_events_until_a_terminal_state()
     assert queue.qsize() == 1  # the terminal event after the report artifact is not consumed
 
 
+class _PerSendFakeA2AClient:
+    """Fake a2a client yielding one response turn per ``send_message`` call."""
+
+    def __init__(self, turns: list[list[StreamResponse]]) -> None:
+        self._turns = list(turns)
+
+    async def send_message(
+        self,
+        request: SendMessageRequest,
+        *,
+        context: ClientCallContext,
+    ) -> object:
+        del request, context
+        for response in self._turns.pop(0):
+            yield response
+
+
+async def test_webhook_mode_accept_reports_task_completed_after_the_artifact() -> None:
+    """The final state must come from the last phase, not from the earlier proposal message."""
+    proposal = Message(message_id="propose-1", role=Role.ROLE_AGENT, context_id=CONTEXT_ID)
+    proposal.parts.add(text="proposal")
+    proposal.metadata[NEGOTIATION_T_EXTENSION_URI] = "Please provide the region."
+    proposal.metadata[TEMPLATE_URI_METADATA_KEY] = INFORMATION_NEGOTIATION_PROPOSE_URI
+    proposal.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = {
+        "id": CONTEXT_ID,
+        "round": 1,
+        "maxRounds": 3,
+        "performative": "PROPOSE",
+    }
+    client = _PerSendFakeA2AClient([[StreamResponse(message=proposal)], []])
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    for event in (status_event("TASK_STATE_WORKING"), artifact_event()):
+        queue.put_nowait(_to_webhook_payload(event))
+    transport = WebhookClientTransport(
+        client,
+        queue=queue,
+        push_url="http://127.0.0.1:9000/webhook",
+        push_token="token",
+        idle_timeout=0.5,
+    )
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+    )
+
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    assert result.task_id == "task-1"
+    assert result.report is not None
+    assert result.report["text"] == "report"
+
+
 def _to_webhook_payload(event: dict[str, object]) -> dict[str, object]:
     """Convert one fake normalized event into a webhook JSON body via the protobuf types."""
     if event["kind"] == "status":

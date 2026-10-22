@@ -69,6 +69,7 @@ from shared.webhook_receiver import WebhookReceiver
 
 from protocol.decision_provider import NegotiationDecisionProvider
 from protocol.messages import (
+    END_MESSAGE_TEXT,
     SAMPLE_PROPOSAL_METADATA_KEY,
     TASK_TEMPLATE_URI,
     is_negotiation_message,
@@ -381,7 +382,9 @@ async def run_client_flow(
     while True:
         inbound = _find_negotiation_message(batch)
         if inbound is None:
-            result.final_state = _final_state(result.events)
+            # Only the last phase can terminate the flow: an earlier round's proposal must not be
+            # mistaken for the end message (webhook phases end at the report artifact).
+            result.final_state = _final_state(batch)
             _fill_result(result, context_id)
             return result
 
@@ -455,7 +458,7 @@ async def run_client_flow(
             _fill_result(result, context_id)
             return result
         if decision.action == "accept":
-            result.final_state = _final_state(result.events)
+            result.final_state = _final_state(batch)
             _fill_result(result, context_id)
             return result
 
@@ -722,16 +725,26 @@ def _reject_text(kind: NegotiationKind, propose_content: str, decision: Negotiat
     return "Reject. " + " ".join(f"{item}: {rationale}" for item in items)
 
 
-def _final_state(events: list[dict[str, object]]) -> str:
-    """Derive the terminal state from the collected events."""
+def _final_state(batch: list[dict[str, object]]) -> str:
+    """Derive the terminal state from one send phase's events.
+
+    Only the last send phase may terminate the flow: scanning every accumulated event would let a
+    prior round's ``Propose`` look like the end message after a webhook phase stops at the report
+    artifact. A plain non-negotiation message (or the explicit end text) is the negotiation-end
+    signal; a negotiation message is not.
+    """
     report_seen = False
-    for event in reversed(events):
+    for event in reversed(batch):
         if event.get("kind") == "artifact":
             report_seen = True
             continue
         if event.get("kind") == "message":
-            # A standalone plain message is the server's end-of-negotiation signal; an inbound
-            # Propose/Abort is handled by the negotiation loop before this fallback runs.
+            text = event.get("text")
+            metadata = event.get("metadata")
+            if text == END_MESSAGE_TEXT:
+                return FINAL_STATE_NEGOTIATION_ENDED
+            if isinstance(metadata, Mapping) and is_negotiation_message(metadata_to_dict(metadata)):
+                continue
             return FINAL_STATE_NEGOTIATION_ENDED
         if event.get("kind") != "status":
             continue

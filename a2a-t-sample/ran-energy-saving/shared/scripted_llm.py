@@ -161,9 +161,14 @@ _KIND_BY_TEMPLATE_SEGMENT: dict[str, str] = {
 }
 
 #: Labels of the negotiation semantic-validation user prompt fields the routing reads.
-_PHASE_LABEL = "Negotiation phase:"
-_DECLARED_TYPE_LABEL = "Declared negotiation type:"
-_TEMPLATE_URI_LABEL = "Declared template identifier:"
+#:
+#: The labels are localized by the SDK prompt resources, but the values stay English: the phase is
+#: a lower-case performative name and the declared type is the type name (``common`` for the abort
+#: template). Both label spellings must be parsed so the sample's default ``zh-CN`` offline mode
+#: routes exactly like ``en-US``.
+_PHASE_LABELS: tuple[str, ...] = ("Negotiation phase:", "协商阶段：")
+_DECLARED_TYPE_LABELS: tuple[str, ...] = ("Declared negotiation type:", "声明的协商类型：")
+_TEMPLATE_URI_LABELS: tuple[str, ...] = ("Declared template identifier:", "声明的模板标识：")
 
 #: Localized labels starting the template-content block of the content validation user prompt.
 _TEMPLATE_CONTENT_LABELS = ("Template Content:", "模板正文：")
@@ -222,11 +227,12 @@ def _first_user_content(messages: list[dict[str, str]]) -> str:
     return next(message["content"] for message in messages if message.get("role") == "user")
 
 
-def _prompt_field(user_content: str, label: str) -> str:
-    """Return the value of one ``Label: value`` line of a user prompt, or an empty string."""
+def _prompt_field(user_content: str, labels: tuple[str, ...]) -> str:
+    """Return the value of one localized ``Label: value`` line of a user prompt, or ``""``."""
     for line in user_content.splitlines():
-        if line.startswith(label):
-            return line[len(label) :].strip()
+        for label in labels:
+            if line.startswith(label):
+                return line[len(label) :].strip()
     return ""
 
 
@@ -238,13 +244,13 @@ def _declared_negotiation_kind(user_content: str) -> str | None:
     satisfies the abort contract; a typed template yields its kind, falling back to the template-URI
     segment when the declared type line is absent.
     """
-    phase = _prompt_field(user_content, _PHASE_LABEL).lower()
-    declared_type = _prompt_field(user_content, _DECLARED_TYPE_LABEL).lower()
+    phase = _prompt_field(user_content, _PHASE_LABELS).lower()
+    declared_type = _prompt_field(user_content, _DECLARED_TYPE_LABELS).lower()
     if phase == "abort" or declared_type == "common":
         return None
     if declared_type in _NEGOTIATION_KINDS:
         return declared_type
-    template_uri = _prompt_field(user_content, _TEMPLATE_URI_LABEL)
+    template_uri = _prompt_field(user_content, _TEMPLATE_URI_LABELS)
     segments = template_uri.split("/")
     if len(segments) >= 2:
         return _KIND_BY_TEMPLATE_SEGMENT.get(segments[1])
@@ -310,7 +316,7 @@ def route_structured_call(
     user_content = _first_user_content(messages)
     properties = json_schema.get("properties") if isinstance(json_schema, dict) else None
     property_names = set(properties) if isinstance(properties, dict) else set()
-    phase = _prompt_field(user_content, _PHASE_LABEL).lower()
+    phase = _prompt_field(user_content, _PHASE_LABELS).lower()
 
     if "semantic_verdict" in property_names and "negotiation_type" in property_names:
         return STAGE_NEGOTIATION_SEMANTIC_VALIDATION
