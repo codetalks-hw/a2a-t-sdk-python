@@ -600,3 +600,52 @@ async def test_real_sdk_client_runs_the_information_flow_offline(
     assert initial_metadata[TASK_T_EXTENSION_URI]
     accept_metadata = MessageToDict(transport.requests[1].message.metadata)
     assert accept_metadata[TASK_T_EXTENSION_URI]
+
+
+async def test_event_sink_sees_every_event_and_the_decision_hook_the_proposal() -> None:
+    seen: list[dict[str, object]] = []
+    requested: list[tuple[str, int]] = []
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()]),
+        user_request="request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        event_sink=seen.append,
+        on_decision_requested=lambda propose, session: requested.append((propose.kind, session.round)),
+    )
+
+    assert seen == result.events
+    assert requested == [("information", 1)]
+
+
+async def test_sse_transport_forwards_events_to_its_sink_as_they_arrive() -> None:
+    proposal = Message(message_id="propose-1", role=Role.ROLE_AGENT, context_id=CONTEXT_ID)
+    proposal.parts.add(text="proposal")
+    proposal.metadata[NEGOTIATION_T_EXTENSION_URI] = "Please provide the region."
+    proposal.metadata[TEMPLATE_URI_METADATA_KEY] = INFORMATION_NEGOTIATION_PROPOSE_URI
+    proposal.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = {
+        "id": CONTEXT_ID,
+        "round": 1,
+        "maxRounds": 3,
+        "performative": "PROPOSE",
+    }
+    end = Message(message_id="end", role=Role.ROLE_AGENT, context_id=CONTEXT_ID)
+    end.parts.add(text=END_MESSAGE_TEXT)
+    seen: list[dict[str, object]] = []
+    client = _PerSendFakeA2AClient([[StreamResponse(message=proposal)], [StreamResponse(message=end)]])
+    transport = SseClientTransport(client)
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request="request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        event_sink=seen.append,
+    )
+
+    assert seen == result.events
+    assert [event["kind"] for event in seen] == ["message", "message"]
+    assert result.final_state == FINAL_STATE_NEGOTIATION_ENDED

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAN energy saving negotiation</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --line: #d0d7de;
+      --muted: #57606a;
+      --accent: #0969da;
+      --ok: #1a7f37;
+      --warn: #9a6700;
+      --bad: #cf222e;
+      --bg-soft: #f6f8fa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg-soft);
+      color: #1f2328;
+    }
+    header, main { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+    header { padding-top: 24px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .subtitle { color: var(--muted); margin: 0 0 18px; }
+    .panel {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+    label { display: grid; gap: 4px; font-weight: 600; font-size: 13px; }
+    select, input, textarea, button {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #fff;
+      color: inherit;
+    }
+    textarea { width: 100%; min-height: 64px; resize: vertical; font-family: ui-monospace, Consolas, monospace; }
+    button {
+      cursor: pointer;
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      padding: 7px 16px;
+    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button.secondary { background: #fff; color: var(--accent); }
+    .badge {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      background: var(--bg-soft);
+      white-space: nowrap;
+    }
+    .badge.ok { color: var(--ok); border-color: var(--ok); }
+    .badge.warn { color: var(--warn); border-color: var(--warn); }
+    .badge.bad { color: var(--bad); border-color: var(--bad); }
+    #timeline { display: grid; gap: 8px; }
+    .event {
+      border-left: 4px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      padding: 8px 12px;
+    }
+    .event.decision { border-left-color: var(--accent); }
+    .event.status { border-left-color: var(--ok); }
+    .event.artifact { border-left-color: var(--warn); }
+    .event-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .summary { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+    .rationale { margin-top: 4px; color: var(--muted); font-style: italic; white-space: pre-wrap; }
+    #empty { color: var(--muted); }
+    #decision-panel { display: none; }
+    #decision-panel.visible { display: block; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .full { grid-column: 1 / -1; }
+    #finished { display: none; }
+    #finished.visible { display: block; }
+    pre {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      overflow: auto;
+      max-height: 360px;
+      margin: 0;
+    }
+    .downloads { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .downloads a { color: var(--accent); font-weight: 600; }
+    .error { color: var(--bad); }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>RAN energy saving negotiation</h1>
+  <p class="subtitle">Observe the A2A-T negotiation between the client and the RAN service agent.</p>
+</header>
+<main>
+  <section class="panel">
+    <div class="row">
+      <label>Scenario
+        <select id="scenario"></select>
+      </label>
+      <label>Decision mode
+        <select id="mode">
+          <option value="auto">auto</option>
+          <option value="manual">manual</option>
+        </select>
+      </label>
+      <label>Transport
+        <select id="transport">
+          <option value="sse">sse</option>
+          <option value="webhook">webhook</option>
+        </select>
+      </label>
+      <button id="run-button" type="button">Start run</button>
+      <span id="language-badge" class="badge">language: ...</span>
+      <span id="model-badge" class="badge">model: ...</span>
+      <span id="status-badge" class="badge">idle</span>
+    </div>
+    <p class="meta">The language is process-level and read-only; start another launcher to change it.</p>
+  </section>
+
+  <section class="panel">
+    <h2 style="font-size:15px;margin:0 0 10px;">Timeline</h2>
+    <div id="timeline"><p id="empty">No events yet.</p></div>
+  </section>
+
+  <section id="decision-panel" class="panel">
+    <h2 style="font-size:15px;margin:0 0 6px;">Manual decision</h2>
+    <p id="decision-context" class="meta"></p>
+    <div class="grid">
+      <label>Action
+        <select id="decision-action">
+          <option value="accept">accept</option>
+          <option value="reject">reject</option>
+          <option value="abort">abort</option>
+          <option value="counter">counter</option>
+        </select>
+      </label>
+      <label class="full">Rationale
+        <textarea id="decision-rationale" placeholder="Why this decision?"></textarea>
+      </label>
+      <label class="full">Counter proposal (counter only)
+        <textarea id="decision-counter" placeholder="Natural-language counter proposal"></textarea>
+      </label>
+      <label>Filled params (accept, JSON)
+        <textarea id="decision-filled" placeholder='{"region": "..."}'></textarea>
+      </label>
+      <label>Counter params (counter, JSON)
+        <textarea id="decision-counter-params" placeholder='{"cellId": "cell-001", "window": "00:00~06:00", "targetRate": "30"}'></textarea>
+      </label>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <button id="decision-submit" type="button">Submit decision</button>
+      <span id="decision-error" class="error"></span>
+    </div>
+  </section>
+
+  <section id="finished" class="panel">
+    <h2 style="font-size:15px;margin:0 0 6px;">Result</h2>
+    <p id="finished-summary" class="meta"></p>
+    <pre id="finished-report"></pre>
+    <div class="downloads">
+      <a id="download-json" href="#" download>Download transcript (JSON)</a>
+      <a id="download-md" href="#" download>Download transcript (Markdown)</a>
+    </div>
+  </section>
+</main>
+<script>
+  (function () {
+    "use strict";
+
+    const state = { runId: null, source: null, pendingDecision: false, meta: null };
+
+    const $ = (id) => document.getElementById(id);
+    const scenarioSelect = $("scenario");
+    const modeSelect = $("mode");
+    const transportSelect = $("transport");
+    const runButton = $("run-button");
+    const languageBadge = $("language-badge");
+    const modelBadge = $("model-badge");
+    const statusBadge = $("status-badge");
+    const timeline = $("timeline");
+    const empty = $("empty");
+    const decisionPanel = $("decision-panel");
+    const decisionContext = $("decision-context");
+    const decisionError = $("decision-error");
+    const finishedPanel = $("finished");
+    const finishedSummary = $("finished-summary");
+    const finishedReport = $("finished-report");
+
+    function setStatus(text, tone) {
+      statusBadge.textContent = text;
+      statusBadge.className = "badge" + (tone ? " " + tone : "");
+    }
+
+    function clearTimeline() {
+      timeline.innerHTML = "";
+      timeline.appendChild(empty);
+      empty.hidden = false;
+      finishedPanel.classList.remove("visible");
+      decisionPanel.classList.remove("visible");
+      decisionError.textContent = "";
+      state.pendingDecision = false;
+    }
+
+    function addEvent(entry) {
+      empty.hidden = true;
+      const card = document.createElement("article");
+      const tone = entry.eventKind === "decision" ? "decision"
+        : entry.eventKind === "status" ? "status"
+        : entry.eventKind === "artifact" ? "artifact" : "";
+      card.className = "event" + (tone ? " " + tone : "");
+
+      const head = document.createElement("div");
+      head.className = "event-head";
+      const round = document.createElement("span");
+      round.className = "badge";
+      round.textContent = entry.round ? "round " + entry.round : "no round";
+      const performative = document.createElement("span");
+      performative.className = "badge";
+      performative.textContent = entry.performative || "-";
+      const kind = document.createElement("span");
+      kind.className = "badge";
+      kind.textContent = entry.kind || entry.eventKind || "event";
+      const direction = document.createElement("span");
+      direction.className = "meta";
+      direction.textContent = entry.direction || "";
+      head.append(round, performative, kind, direction);
+      card.appendChild(head);
+
+      if (entry.summary) {
+        const summary = document.createElement("div");
+        summary.className = "summary";
+        summary.textContent = entry.summary;
+        card.appendChild(summary);
+      }
+      if (entry.rationale) {
+        const rationale = document.createElement("div");
+        rationale.className = "rationale";
+        rationale.textContent = "Decision rationale: " + entry.rationale;
+        card.appendChild(rationale);
+      }
+      timeline.appendChild(card);
+      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function showDecisionRequest(payload) {
+      state.pendingDecision = true;
+      decisionPanel.classList.add("visible");
+      const proposal = payload.proposal || {};
+      decisionContext.textContent = [
+        "type: " + (proposal.kind || "-"),
+        "round: " + payload.round + " / " + payload.maxRounds,
+        "performative: " + (payload.performative || "PROPOSE")
+      ].join("  |  ");
+      if (proposal.content) {
+        const content = document.createElement("div");
+        content.className = "meta";
+        content.style.marginTop = "4px";
+        content.style.whiteSpace = "pre-wrap";
+        content.textContent = proposal.content;
+        decisionContext.appendChild(content);
+      }
+      decisionError.textContent = "";
+    }
+
+    function parseJsonField(id) {
+      const raw = $(id).value.trim();
+      if (!raw) return null;
+      return JSON.parse(raw);
+    }
+
+    async function submitDecision() {
+      if (!state.runId || !state.pendingDecision) return;
+      let body;
+      try {
+        body = {
+          action: $("decision-action").value,
+          rationale: $("decision-rationale").value.trim(),
+          filled_params: parseJsonField("decision-filled"),
+          counter_proposal: $("decision-counter").value.trim() || null,
+          counter_params: parseJsonField("decision-counter-params")
+        };
+      } catch (error) {
+        decisionError.textContent = "Invalid JSON: " + error.message;
+        return;
+      }
+      $("decision-submit").disabled = true;
+      try {
+        const response = await fetch("/api/runs/" + state.runId + "/decisions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.error || ("HTTP " + response.status));
+        }
+        state.pendingDecision = false;
+        decisionPanel.classList.remove("visible");
+      } catch (error) {
+        decisionError.textContent = String(error.message || error);
+      } finally {
+        $("decision-submit").disabled = false;
+      }
+    }
+
+    function showFinished(payload) {
+      state.pendingDecision = false;
+      decisionPanel.classList.remove("visible");
+      finishedPanel.classList.add("visible");
+      setStatus(payload.status || "finished", payload.status === "failed" ? "bad" : "ok");
+      finishedSummary.textContent = "Final state: " + (payload.finalState || "n/a") +
+        (payload.error ? " | Error: " + payload.error : "");
+      finishedReport.textContent = JSON.stringify(payload.report, null, 2);
+      $("download-json").href = payload.transcriptJson || "#";
+      $("download-md").href = payload.transcriptMarkdown || "#";
+    }
+
+    function connect(runId) {
+      if (state.source) state.source.close();
+      const source = new EventSource("/api/runs/" + runId + "/events");
+      state.source = source;
+      source.onmessage = (event) => {
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (error) {
+          console.error("Invalid SSE payload", error);
+          return;
+        }
+        if (payload.type === "event") {
+          addEvent(payload.event);
+        } else if (payload.type === "decision_requested") {
+          showDecisionRequest(payload);
+        } else if (payload.type === "finished") {
+          showFinished(payload);
+          source.close();
+          state.source = null;
+          runButton.disabled = false;
+        }
+      };
+      source.onerror = () => {
+        if (state.source === source) {
+          setStatus("event stream closed", "warn");
+          runButton.disabled = false;
+        }
+      };
+    }
+
+    async function startRun() {
+      clearTimeline();
+      runButton.disabled = true;
+      setStatus("starting", "warn");
+      try {
+        const response = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scenario: scenarioSelect.value,
+            mode: modeSelect.value,
+            transport: transportSelect.value
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+        state.runId = payload.runId;
+        setStatus("running", "warn");
+        connect(payload.runId);
+      } catch (error) {
+        setStatus("failed", "bad");
+        runButton.disabled = false;
+        const note = document.createElement("p");
+        note.className = "error";
+        note.textContent = String(error.message || error);
+        timeline.appendChild(note);
+        empty.hidden = true;
+      }
+    }
+
+    async function loadMeta() {
+      try {
+        const response = await fetch("/api/meta");
+        const meta = await response.json();
+        state.meta = meta;
+        languageBadge.textContent = "language: " + meta.language + " (read-only)";
+        modelBadge.textContent = "model: " + (meta.modelLabel || meta.modelMode);
+        modelBadge.className = "badge " + (meta.modelMode === "offline" ? "warn" : "ok");
+        scenarioSelect.innerHTML = "";
+        for (const name of meta.scenarios || []) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          scenarioSelect.appendChild(option);
+        }
+        modeSelect.innerHTML = "";
+        for (const name of meta.modes || []) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          modeSelect.appendChild(option);
+        }
+        transportSelect.innerHTML = "";
+        for (const name of meta.transports || []) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          transportSelect.appendChild(option);
+        }
+      } catch (error) {
+        languageBadge.textContent = "language: unavailable";
+        modelBadge.textContent = "model: unavailable";
+      }
+    }
+
+    runButton.addEventListener("click", startRun);
+    $("decision-submit").addEventListener("click", submitDecision);
+    loadMeta();
+  })();
+</script>
+</body>
+</html>

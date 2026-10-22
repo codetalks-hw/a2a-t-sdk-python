@@ -219,12 +219,26 @@ def normalize_webhook_payload(payload: Mapping[str, object]) -> dict[str, object
 
 
 class SseClientTransport:
-    """SSE transport: stream one ``message:send`` and stop at the first message/terminal event."""
+    """SSE transport: stream one ``message:send`` and stop at the first message/terminal event.
+
+    The optional event sink is invoked for every normalized event as soon as the stream yields it,
+    which lets the Web UI show a round while the flow is still waiting for the next one.
+    """
 
     def __init__(self, client: object, *, log_sink: Callable[[str], None] | None = None) -> None:
         """Create one SSE transport over an a2a-sdk client."""
         self._client = client
         self._log_sink = log_sink
+        self._event_sink: Callable[[dict[str, object]], None] | None = None
+
+    def set_event_sink(self, event_sink: Callable[[dict[str, object]], None] | None) -> None:
+        """Attach the live event sink used by :func:`run_client_flow`."""
+        self._event_sink = event_sink
+
+    def _emit(self, event: dict[str, object]) -> None:
+        """Forward one normalized event to the attached sink, when any."""
+        if self._event_sink is not None:
+            self._event_sink(event)
 
     async def send(
         self,
@@ -236,6 +250,7 @@ class SseClientTransport:
         async for stream_response in self._client.send_message(request, context=call_context):  # type: ignore[attr-defined]
             event = normalize_event(stream_response)
             events.append(event)
+            self._emit(event)
             if is_stop_event(event):
                 break
         if self._log_sink is not None:
@@ -277,6 +292,16 @@ class WebhookClientTransport:
         self._push_token = push_token
         self._idle_timeout = idle_timeout
         self._log_sink = log_sink
+        self._event_sink: Callable[[dict[str, object]], None] | None = None
+
+    def set_event_sink(self, event_sink: Callable[[dict[str, object]], None] | None) -> None:
+        """Attach the live event sink used by :func:`run_client_flow`."""
+        self._event_sink = event_sink
+
+    def _emit(self, event: dict[str, object]) -> None:
+        """Forward one normalized event to the attached sink, when any."""
+        if self._event_sink is not None:
+            self._event_sink(event)
 
     async def send(
         self,
@@ -295,6 +320,7 @@ class WebhookClientTransport:
         if reply is not None:
             reply_event = normalize_event(reply)
             events.append(reply_event)
+            self._emit(reply_event)
             if is_stop_event(reply_event):
                 return events
         while True:
@@ -306,9 +332,12 @@ class WebhookClientTransport:
                 return events
             event = normalize_webhook_payload(payload)
             events.append(event)
+            self._emit(event)
             # The report artifact ends a webhook phase: the underlying energy-saving task is
-            # long-running and stays WORKING after it (design §7.1 / old webhook parity).
-            if is_stop_event(event) or event.get("kind") == "artifact":
+            # long-running and stays WORKING after it (design §7.1 / old webhook parity). The ADK
+            # executor also emits one artifact per tool call, so only the named/stamped report
+            # artifact ends the phase; stopping at the first tool artifact would lose the report.
+            if is_stop_event(event) or _is_report_artifact(event):
                 return events
 
 
@@ -340,6 +369,8 @@ async def run_client_flow(
     task_template_uri: str = TASK_TEMPLATE_URI,
     language: str = LANGUAGE_ZH,
     max_exchanges: int = DEFAULT_MAX_EXCHANGES,
+    event_sink: Callable[[dict[str, object]], None] | None = None,
+    on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -352,6 +383,13 @@ async def run_client_flow(
         task_template_uri: Task-T template the initial and accept prompts address.
         language: Process-level language of the refilled Task-T values.
         max_exchanges: Backstop on the number of client sends.
+        event_sink: Optional observer invoked for every normalized event. The SSE and webhook
+            transports forward each event as it arrives; a transport without a ``set_event_sink``
+            hook has its returned batch forwarded instead, so the observer sees every event exactly
+            once.
+        on_decision_requested: Optional observer invoked immediately before the provider is asked
+            for a decision, carrying the proposal view and its negotiation session (the Web UI
+            uses it to display the manual decision form).
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -360,6 +398,20 @@ async def run_client_flow(
         ClientFlowError: when the server sends an unanswerable negotiation message or the stream
             exceeds the exchange budget.
     """
+    transport_emits_events = False
+    if event_sink is not None:
+        set_event_sink = getattr(transport, "set_event_sink", None)
+        if callable(set_event_sink):
+            set_event_sink(event_sink)
+            transport_emits_events = True
+
+    def collect(batch: list[dict[str, object]]) -> None:
+        """Store one send phase's events and forward them when the transport does not."""
+        result.events.extend(batch)
+        if event_sink is not None and not transport_emits_events:
+            for event in batch:
+                event_sink(event)
+
     prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
     initial_request = _build_message_request(
@@ -376,7 +428,7 @@ async def run_client_flow(
     exchanges = 0
     batch = await transport.send(initial_request, initial_context)
     exchanges += 1
-    result.events.extend(batch)
+    collect(batch)
     context_id = context_id or _context_id_of(batch)
 
     while True:
@@ -407,6 +459,8 @@ async def run_client_flow(
         if kind is None:
             raise ClientFlowError(f"{_ERROR_UNKNOWN_KIND} templateUri={template_uri}")
         propose = _propose_view(event, metadata, session, kind, template_uri, context_id)
+        if on_decision_requested is not None:
+            on_decision_requested(propose, session)
         decision = await provider.respond(propose, session)
         result.decisions.append(decision)
 
@@ -452,7 +506,7 @@ async def run_client_flow(
 
         batch = await transport.send(request, call_context)
         exchanges += 1
-        result.events.extend(batch)
+        collect(batch)
         if decision.action in ("reject", "abort"):
             result.final_state = FINAL_STATE_NEGOTIATION_ENDED
             _fill_result(result, context_id)
@@ -636,6 +690,17 @@ def _string_field(event: Mapping[str, object], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _is_report_artifact(event: Mapping[str, object]) -> bool:
+    """Report whether one artifact event is the Task-T report (not a tool-call artifact)."""
+    if event.get("kind") != "artifact":
+        return False
+    name = _string_field(event, "name") or ""
+    if "report" in name.lower():
+        return True
+    metadata = event.get("metadata")
+    return isinstance(metadata, Mapping) and TASK_T_EXTENSION_URI in metadata
+
+
 def _context_id_of(events: list[dict[str, object]]) -> str | None:
     """Return the first context id carried by a batch of normalized events."""
     for event in events:
@@ -759,17 +824,29 @@ def _final_state(batch: list[dict[str, object]]) -> str:
 
 
 def _fill_result(result: ClientFlowResult, context_id: str | None) -> None:
-    """Fill the context id, task id and report payload of one result."""
+    """Fill the context id, task id and report payload of one result.
+
+    The ADK executor emits one artifact per tool call and a final artifact named after the report;
+    the report artifact wins, the first artifact is only the fallback so a Task that produced no
+    named report still exposes something useful.
+    """
     result.context_id = result.context_id or context_id
+    report_event: dict[str, object] | None = None
+    fallback_event: dict[str, object] | None = None
     for event in result.events:
         task_id = _string_field(event, "task_id")
         if task_id:
             result.task_id = task_id
-        if event.get("kind") == "artifact" and result.report is None:
-            data = event.get("data")
-            if isinstance(data, Mapping):
-                result.report = dict(data)
-            else:
-                result.report = {
-                    key: value for key, value in event.items() if key in ("text", "name", "artifact_id")
-                }
+        if event.get("kind") == "artifact":
+            fallback_event = fallback_event or event
+            if report_event is None and "report" in (_string_field(event, "name") or "").lower():
+                report_event = event
+    selected = report_event or fallback_event
+    if selected is not None and result.report is None:
+        data = selected.get("data")
+        if isinstance(data, Mapping):
+            result.report = dict(data)
+        else:
+            result.report = {
+                key: value for key, value in selected.items() if key in ("text", "name", "artifact_id")
+            }
