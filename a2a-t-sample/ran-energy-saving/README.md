@@ -234,6 +234,11 @@ point at the same OpenAI-compatible endpoint; `env.example` defaults to the loca
 the server. Offline mode is the reproducible reference used by the tests and by §4. A live run
 should be treated as an integration smoke, not as an acceptance test.
 
+**Live mode is best-effort.** In the `information` scenario the server-side semantic validation and
+the client decision agent are model-driven: with the flash model the server may accept the
+incomplete prompt (so no negotiation opens), or the client may return a decision that cannot be
+parsed. Offline mode is deterministic and is the acceptance path.
+
 ### Web UI
 
 ```bash

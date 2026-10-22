@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from a2a_t.client.a2at_client import A2ATClient
@@ -318,6 +318,7 @@ def test_information_client_extraction_succeeds_and_server_maps_to_information(
     (the template's optional ``task_context``) must then make the server report
     ``content.param_missing`` and map to the information negotiation.
     """
+    assert "guaranteedThroughputTarget" in cast(list[str], TASK_PARAM_SCHEMA["required"])
     register_scripted_provider()
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
     env_path = prepare_sdk_env_path(offline_config)
@@ -357,7 +358,7 @@ def test_real_server_validates_accept_offline(real_negotiation_server: A2ATServe
 
 def test_real_server_validates_reject_offline(real_negotiation_server: A2ATServer) -> None:
     result = real_negotiation_server.validate_reject_prompt_and_data_filling(
-        "Reject. region: The requested coverage region is not available from the client side.",
+        "Reject. guaranteedThroughputTarget: The client cannot provide the missing throughput target.",
         _negotiation_context(NegotiationPerformative.REJECT),
         {"type": "object", "properties": {}},
         INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
@@ -404,7 +405,7 @@ _ZH_VALIDATION_CASES: tuple[tuple[str, NegotiationPerformative, str, str], ...] 
         "reject",
         NegotiationPerformative.REJECT,
         INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
-        "Reject. region: 客户端无法提供所请求的覆盖区域。",
+        "Reject. guaranteedThroughputTarget: 客户端无法提供缺失的保障速率目标。",
     ),
     (
         "propose",
@@ -497,7 +498,7 @@ def test_real_client_generates_a_reject_offline_zh_cn(
     context = _negotiation_context(NegotiationPerformative.REJECT)
 
     content = client.generate_negotiation_reject_prompt_from_text(
-        "Reject. region: 客户端无法提供所请求的覆盖区域。",
+        "Reject. guaranteedThroughputTarget: 客户端无法提供缺失的保障速率目标。",
         context,
         INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
     )

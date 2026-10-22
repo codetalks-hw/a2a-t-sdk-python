@@ -206,6 +206,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 在线模式下，两个 ADK 智能体使用 `ADK_MODEL_*`，A2A-T SDK 使用 `A2AT_LLM_*`，两者必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
 
+**在线模式为尽力而为。** 在 `information` 场景中，服务端语义校验与客户端决策智能体均由模型驱动：使用 flash 模型时，服务端可能接受不完整的提示词（从而不触发协商），或客户端返回无法解析的决策。离线模式是确定性的，也是验收路径。
+
 ### Web UI
 
 ```bash
