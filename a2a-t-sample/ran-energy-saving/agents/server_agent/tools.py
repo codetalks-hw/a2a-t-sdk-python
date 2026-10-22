@@ -42,6 +42,36 @@ def _error(code: str, message: str, **details: object) -> dict[str, object]:
     }
 
 
+def _as_text_argument(value: object, *, allow_number: bool = False) -> str | None:
+    """Coerce a tool argument at the ADK boundary, or return ``None`` for an unusable type.
+
+    ADK does not validate tool argument types by default, so an LLM may pass a number where the
+    tool expects text. Numbers are accepted only for ``target_rate`` (``allow_number=True``).
+    """
+    if isinstance(value, str):
+        return value
+    if allow_number and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _argument_type_error(
+    name: str,
+    value: object,
+    *,
+    allow_number: bool = False,
+    **details: object,
+) -> dict[str, object]:
+    """Build the structured result of a tool argument with an unusable type."""
+    expected = "a string or a number" if allow_number else "a string"
+    return _error(
+        ERROR_INVALID_REQUEST,
+        f"Tool argument '{name}' must be {expected}, got {type(value).__name__}.",
+        argument=name,
+        **details,
+    )
+
+
 def _capacity_dict(capacity: CellCapacity) -> dict[str, object]:
     """Return the capacity block of a profile."""
     return capacity.to_dict()
@@ -112,21 +142,28 @@ def get_cell_energy_profile(cell_id: str, date: str) -> dict[str, object]:
         "capacity", "max_saving_rate", "available_windows", "hourly_profile", "energy_summary"}``.
         On failure ``{"ok": False, "error_code", "error_message", ...}``.
     """
+    cell_id_text = _as_text_argument(cell_id)
+    if cell_id_text is None:
+        return _argument_type_error("cell_id", cell_id)
+    date_text = _as_text_argument(date)
+    if date_text is None:
+        return _argument_type_error("date", date, cell_id=cell_id_text)
+
     try:
-        ran_data.validate_date(date)
+        ran_data.validate_date(date_text)
     except ran_data.InvalidPlanError as exc:
-        return _error(ERROR_INVALID_DATE, str(exc), cell_id=cell_id, date=date)
+        return _error(ERROR_INVALID_DATE, str(exc), cell_id=cell_id_text, date=date_text)
     try:
-        cell = ran_data.get_cell_or_raise(cell_id)
+        cell = ran_data.get_cell_or_raise(cell_id_text)
     except ran_data.UnknownCellError as exc:
-        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id, known_cells=_known_cells())
+        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id_text, known_cells=_known_cells())
 
     return {
         "ok": True,
         "cell_id": cell.cell_id,
         "cell_name": cell.name,
         "region": cell.region,
-        "date": date,
+        "date": date_text,
         "curve_date": ran_data.dataset_date(),
         "capacity": _capacity_dict(cell.capacity),
         "max_saving_rate": cell.max_saving_rate,
@@ -156,17 +193,29 @@ def evaluate_energy_saving_plan(cell_id: str, window: str, target_rate: str) -> 
         recommendation. An unknown cell or malformed request returns the corresponding structured
         error.
     """
+    cell_id_text = _as_text_argument(cell_id)
+    if cell_id_text is None:
+        return _argument_type_error("cell_id", cell_id)
+    window_text = _as_text_argument(window)
+    if window_text is None:
+        return _argument_type_error("window", window, cell_id=cell_id_text)
+    target_rate_text = _as_text_argument(target_rate, allow_number=True)
+    if target_rate_text is None:
+        return _argument_type_error(
+            "target_rate", target_rate, allow_number=True, cell_id=cell_id_text
+        )
+
     try:
-        evaluation = ran_data.evaluate_plan(cell_id, window, target_rate)
+        evaluation = ran_data.evaluate_plan(cell_id_text, window_text, target_rate_text)
     except ran_data.UnknownCellError as exc:
-        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id, known_cells=_known_cells())
+        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id_text, known_cells=_known_cells())
     except ran_data.InvalidPlanError as exc:
         return _error(
             ERROR_INVALID_REQUEST,
             str(exc),
-            cell_id=cell_id,
-            window=window,
-            target_rate=target_rate,
+            cell_id=cell_id_text,
+            window=window_text,
+            target_rate=target_rate_text,
         )
 
     if not evaluation.feasible:
@@ -191,19 +240,31 @@ def apply_energy_saving_plan(cell_id: str, window: str, target_rate: str) -> dic
         "remaining_energy_kwh", "kpi_impact", "message"}``. Unknown cells, malformed requests, and
         infeasible plans return structured errors and write nothing.
     """
+    cell_id_text = _as_text_argument(cell_id)
+    if cell_id_text is None:
+        return _argument_type_error("cell_id", cell_id)
+    window_text = _as_text_argument(window)
+    if window_text is None:
+        return _argument_type_error("window", window, cell_id=cell_id_text)
+    target_rate_text = _as_text_argument(target_rate, allow_number=True)
+    if target_rate_text is None:
+        return _argument_type_error(
+            "target_rate", target_rate, allow_number=True, cell_id=cell_id_text
+        )
+
     try:
-        plan = ran_data.apply_plan(cell_id, window, target_rate)
+        plan = ran_data.apply_plan(cell_id_text, window_text, target_rate_text)
     except ran_data.UnknownCellError as exc:
-        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id, known_cells=_known_cells())
+        return _error(ERROR_UNKNOWN_CELL, str(exc), cell_id=cell_id_text, known_cells=_known_cells())
     except ran_data.PlanInfeasibleError as exc:
         return _infeasible_result(exc.evaluation)
     except ran_data.InvalidPlanError as exc:
         return _error(
             ERROR_INVALID_REQUEST,
             str(exc),
-            cell_id=cell_id,
-            window=window,
-            target_rate=target_rate,
+            cell_id=cell_id_text,
+            window=window_text,
+            target_rate=target_rate_text,
         )
     return _plan_confirmation(plan)
 
@@ -224,12 +285,16 @@ def generate_energy_saving_report(plan_id: str) -> dict[str, object]:
         plan returns ``{"ok": False, "error_code": "unknown_plan", "error_message", "plan_id",
         "known_plans"}``.
     """
-    plan = ran_data.get_plan(plan_id)
+    plan_id_text = _as_text_argument(plan_id)
+    if plan_id_text is None:
+        return _argument_type_error("plan_id", plan_id)
+
+    plan = ran_data.get_plan(plan_id_text)
     if plan is None:
         return _error(
             ERROR_UNKNOWN_PLAN,
-            f"Unknown plan '{plan_id}'; apply a plan first and use the returned plan_id.",
-            plan_id=plan_id,
+            f"Unknown plan '{plan_id_text}'; apply a plan first and use the returned plan_id.",
+            plan_id=plan_id_text,
             known_plans=list(ran_data.list_plan_ids()),
         )
 

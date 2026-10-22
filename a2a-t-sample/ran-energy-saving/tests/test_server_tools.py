@@ -86,6 +86,22 @@ def test_profile_reports_an_invalid_date() -> None:
     assert result["error_code"] == ERROR_INVALID_DATE
 
 
+def test_profile_reports_a_non_string_cell_id() -> None:
+    result = get_cell_energy_profile(123, "2026-10-22")  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_INVALID_REQUEST
+    assert result["argument"] == "cell_id"
+
+
+def test_profile_reports_a_non_string_date() -> None:
+    result = get_cell_energy_profile("cell-001", 20261022)  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_INVALID_REQUEST
+    assert result["argument"] == "date"
+
+
 def test_evaluate_returns_a_feasible_evaluation() -> None:
     result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", "30")
 
@@ -110,6 +126,30 @@ def test_evaluate_reports_a_malformed_window() -> None:
     assert result["error_code"] == ERROR_INVALID_REQUEST
 
 
+def test_evaluate_accepts_a_numeric_target_rate() -> None:
+    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", 30)  # type: ignore[arg-type]
+
+    assert result["ok"] is True
+    assert result["feasible"] is True
+    assert result["target_rate"] == 30.0
+
+
+def test_evaluate_reports_a_non_string_window() -> None:
+    result = evaluate_energy_saving_plan("cell-001", 900, "30")  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_INVALID_REQUEST
+    assert result["argument"] == "window"
+
+
+def test_evaluate_reports_an_unsupported_target_rate_type() -> None:
+    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", True)  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_INVALID_REQUEST
+    assert result["argument"] == "target_rate"
+
+
 def test_evaluate_reports_an_infeasible_plan() -> None:
     result = evaluate_energy_saving_plan("cell-001", "12:00~14:00", "30")
 
@@ -130,6 +170,15 @@ def test_apply_writes_a_plan_and_rejects_infeasible_plans() -> None:
     assert rejected["ok"] is False
     assert rejected["error_code"] == ERROR_PLAN_INFEASIBLE
     assert ran_data.list_plan_ids() == ("plan-cell-001-001",)
+
+
+def test_apply_reports_non_string_arguments_and_writes_nothing() -> None:
+    result = apply_energy_saving_plan("cell-001", ["00:00~06:00"], "30")  # type: ignore[arg-type]
+
+    assert result["ok"] is False
+    assert result["error_code"] == ERROR_INVALID_REQUEST
+    assert result["argument"] == "window"
+    assert ran_data.list_plans() == ()
 
 
 def test_report_has_the_expected_structure() -> None:
@@ -160,6 +209,14 @@ def test_report_reports_an_unknown_plan() -> None:
     assert report["ok"] is False
     assert report["error_code"] == ERROR_UNKNOWN_PLAN
     assert report["known_plans"] == []
+
+
+def test_report_reports_a_non_string_plan_id() -> None:
+    report = generate_energy_saving_report(123)  # type: ignore[arg-type]
+
+    assert report["ok"] is False
+    assert report["error_code"] == ERROR_INVALID_REQUEST
+    assert report["argument"] == "plan_id"
 
 
 def test_built_server_agent_uses_the_injected_fake_model() -> None:
