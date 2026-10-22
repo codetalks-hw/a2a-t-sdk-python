@@ -25,6 +25,17 @@ from shared.scenario import LANGUAGE_EN  # noqa: E402
 
 
 @pytest.fixture
+def english_language(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the process language to ``en-US`` for the scripted SDK provider.
+
+    ``ScriptedLLMClient`` resolves the language from the process environment (then ``$CWD/.env``);
+    the in-process integration tests pass the language to the sample code through ``SampleConfig``,
+    so the environment has to agree or the canned responses would not match the schemas.
+    """
+    monkeypatch.setenv("A2AT_LANGUAGE", LANGUAGE_EN)
+
+
+@pytest.fixture
 def offline_config() -> SampleConfig:
     """Return a fully offline sample configuration (scripted LLM + fake ADK model)."""
     return SampleConfig(

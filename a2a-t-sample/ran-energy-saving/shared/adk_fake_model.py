@@ -15,7 +15,13 @@ Tool arguments may echo a value returned by an earlier tool call with the
 ``${last_tool_response.<key>}`` placeholder; the built-in server script uses it for the ``plan_id``
 of the report call, so the script always targets the plan the apply tool actually created.
 
-Tests and later tasks can inject their own scripts with :func:`build_fake_model`.
+A script's progress is normally derived from the function responses of the request (an agent with
+tools). The tool-less client decision agent instead advances on the model turns already present in
+its session, which is what :func:`build_client_script` uses so a scenario can return one decision
+per inbound proposal.
+
+Tests and later tasks can inject their own scripts with :func:`build_fake_model`; the offline
+scenarios build their client script with :func:`build_client_script`.
 """
 
 from __future__ import annotations
@@ -30,6 +36,8 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import types
 
+from shared.models import NegotiationDecision
+
 #: Model name reported by the fake model.
 DEFAULT_MODEL_NAME = "fake-ran-energy-saving"
 
@@ -42,6 +50,12 @@ DEFAULT_FINAL_TEXT = "RAN energy-saving task completed."
 
 #: Prefix of a tool argument resolved from the most recent tool response.
 LAST_RESPONSE_PLACEHOLDER_PREFIX = "${last_tool_response."
+
+#: Progress source of a script: advance on the function responses of the request.
+PROGRESS_FUNCTION_RESPONSES = "function_responses"
+
+#: Progress source of a script: advance on the model turns already present in the session.
+PROGRESS_MODEL_TURNS = "model_turns"
 
 
 @dataclass(frozen=True)
@@ -103,11 +117,14 @@ class FakeScript:
         marker: Substring identifying the script (usually the ADK agent name).
         turns: Turns served in order.
         default_text: Text served once ``turns`` is exhausted.
+        progress: Turn progress source: ``function_responses`` (agents with tools) or
+            ``model_turns`` (the tool-less client decision agent).
     """
 
     marker: str
     turns: tuple[FakeTurn, ...]
     default_text: str = DEFAULT_FINAL_TEXT
+    progress: str = PROGRESS_FUNCTION_RESPONSES
 
 
 #: Server agent script: read profile -> evaluate -> apply -> report -> final answer.
@@ -191,6 +208,18 @@ def _function_response_count(llm_request: LlmRequest) -> int:
     )
 
 
+def _model_turn_count(llm_request: LlmRequest) -> int:
+    """Return how many model turns the session already carries."""
+    return sum(1 for content in llm_request.contents if content.role == "model")
+
+
+def _turn_index(llm_request: LlmRequest, script: FakeScript) -> int:
+    """Return the next turn's index according to the script's progress source."""
+    if script.progress == PROGRESS_MODEL_TURNS:
+        return _model_turn_count(llm_request)
+    return _function_response_count(llm_request)
+
+
 def _last_function_response(llm_request: LlmRequest) -> dict[str, object]:
     """Return the payload of the most recent tool response in the request."""
     latest: dict[str, object] = {}
@@ -267,7 +296,7 @@ class FakeLlm(BaseLlm):
                 partial=False,
             )
             return
-        index = _function_response_count(llm_request)
+        index = _turn_index(llm_request, script)
         if index < len(script.turns):
             yield script.turns[index].to_response(_last_function_response(llm_request))
             return
@@ -275,6 +304,25 @@ class FakeLlm(BaseLlm):
             content=types.Content(role="model", parts=[types.Part(text=script.default_text)]),
             partial=False,
         )
+
+
+def build_client_script(decisions: Sequence[NegotiationDecision]) -> FakeScript:
+    """Build the client decision script returning one structured decision per turn.
+
+    The script uses the same marker as :data:`DEFAULT_CLIENT_SCRIPT`, so it matches the
+    ``ran_energy_request_agent`` instruction, and advances on the model turns of the ADK session:
+    one offline negotiation round asks the tool-less client agent for exactly one decision.
+
+    Args:
+        decisions: Decisions returned in order; each becomes one JSON-text model turn.
+    """
+    return FakeScript(
+        marker=CLIENT_AGENT_NAME,
+        turns=tuple(
+            FakeTurn(text=decision.model_dump_json(exclude_none=True)) for decision in decisions
+        ),
+        progress=PROGRESS_MODEL_TURNS,
+    )
 
 
 def build_fake_model(

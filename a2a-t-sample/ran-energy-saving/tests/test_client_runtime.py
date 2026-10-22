@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,11 +13,16 @@ from protocol.client_runtime import (
     build_client_runtime,
     prepare_client_sdk_env,
 )
-from protocol.decision_provider import ManualDecisionProvider, ScriptedDecisionProvider
+from protocol.decision_provider import (
+    AdkDecisionProvider,
+    ManualDecisionProvider,
+    ScriptedDecisionProvider,
+)
 from protocol.discovery import DiscoveredAgent
 from protocol.server_app import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION, build_agent_card
+from shared.adk_fake_model import CLIENT_AGENT_NAME, FakeLlm
 from shared.config import MODEL_MODE_LIVE, SampleConfig
-from shared.scenario import SCENARIO_TARGET
+from shared.scenario import SCENARIO_ABORT, SCENARIO_TARGET, get_scenario
 
 
 class _FakeA2AClient:
@@ -121,6 +127,53 @@ async def test_scripted_mode_uses_the_scenario_decisions(
     assert isinstance(runtime.provider, ScriptedDecisionProvider)
     assert runtime.provider.remaining == 2
     await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_actions"),
+    [
+        (SCENARIO_TARGET, ["counter", "accept"]),
+        (SCENARIO_ABORT, ["counter", "counter", "counter"]),
+    ],
+)
+async def test_auto_offline_mode_scripts_the_scenario_decisions(
+    offline_config: SampleConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    scenario_name: str,
+    expected_actions: list[str],
+) -> None:
+    import protocol.client_runtime as client_runtime
+
+    async def fake_discover(**kwargs: object) -> DiscoveredAgent:
+        del kwargs
+        return _card()
+
+    async def fake_create(agent: object, client_config: ClientConfig | None = None) -> _FakeA2AClient:
+        del agent, client_config
+        return _FakeA2AClient()
+
+    monkeypatch.setattr(client_runtime, "discover_agent", fake_discover)
+    monkeypatch.setattr(client_runtime, "create_client", fake_create)
+    monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
+
+    runtime = await build_client_runtime(
+        offline_config,
+        scenario_name,
+        "auto",
+        "sse",
+        env_path=tmp_path / "missing.env",
+    )
+    try:
+        assert isinstance(runtime.provider, AdkDecisionProvider)
+        model = runtime.provider.runner.agent.model
+        assert isinstance(model, FakeLlm)
+        client_script = next(script for script in model.scripts if script.marker == CLIENT_AGENT_NAME)
+        actions = [json.loads(turn.text or "")["action"] for turn in client_script.turns]
+        assert actions == expected_actions
+        assert len(actions) == len(get_scenario(scenario_name).scripted_client_decisions)
+    finally:
+        await runtime.aclose()
 
 
 def test_prepare_client_sdk_env_does_not_mutate_the_source(

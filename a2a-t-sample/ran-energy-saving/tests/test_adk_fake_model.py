@@ -11,13 +11,16 @@ from google.genai import types
 from shared.adk_fake_model import (
     CLIENT_AGENT_NAME,
     DEFAULT_FINAL_TEXT,
+    PROGRESS_MODEL_TURNS,
     SERVER_AGENT_NAME,
     FakeLlm,
     FakeScript,
     FakeToolCall,
     FakeTurn,
+    build_client_script,
     build_fake_model,
 )
+from shared.models import NegotiationDecision
 
 
 def _request(agent_name: str, user_text: str = "run the task") -> LlmRequest:
@@ -86,6 +89,47 @@ async def test_client_script_returns_a_negotiation_decision() -> None:
     decision = json.loads((content.parts or [])[0].text or "")
     assert decision["action"] == "accept"
     assert decision["rationale"]
+
+
+def test_build_client_script_returns_the_decisions_in_order() -> None:
+    decisions = (
+        NegotiationDecision(
+            action="counter",
+            rationale="The first revision still overlaps.",
+            counter_proposal="Keep the extra capacity in a free window.",
+        ),
+        NegotiationDecision(action="accept", rationale="The revision is acceptable."),
+    )
+
+    script = build_client_script(decisions)
+
+    assert script.marker == CLIENT_AGENT_NAME
+    assert script.progress == PROGRESS_MODEL_TURNS
+    parsed = [json.loads(turn.text or "") for turn in script.turns]
+    assert [item["action"] for item in parsed] == ["counter", "accept"]
+    assert parsed[0]["counter_proposal"] == "Keep the extra capacity in a free window."
+    assert "filled_params" not in parsed[1]
+
+
+@pytest.mark.asyncio
+async def test_client_script_advances_on_model_turns() -> None:
+    script = build_client_script(
+        [
+            NegotiationDecision(action="counter", rationale="counter once"),
+            NegotiationDecision(action="accept", rationale="accept after the revision"),
+        ]
+    )
+    model = build_fake_model([script])
+    request = _request(CLIENT_AGENT_NAME)
+
+    first = (await _collect(model, request))[0]
+    first_text = (first.content.parts or [])[0].text if first.content is not None else None
+    assert json.loads(first_text or "")["action"] == "counter"
+
+    request.contents.append(types.Content(role="model", parts=[types.Part(text=first_text or "")]))
+    second = (await _collect(model, request))[0]
+    second_text = (second.content.parts or [])[0].text if second.content is not None else None
+    assert json.loads(second_text or "")["action"] == "accept"
 
 
 @pytest.mark.asyncio
