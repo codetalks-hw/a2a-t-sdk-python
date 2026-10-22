@@ -146,6 +146,9 @@ def evaluate_proposal_impact(proposal: str) -> dict[str, object]:
             expected="cell-001 00:00~06:00 30%",
         )
 
+    assert cell_match is not None
+    assert window_match is not None
+    assert rate_match is not None
     cell_id = cell_match.group(0)
     window = window_match.group(0)
     target_rate = rate_match.group(1)

@@ -51,6 +51,7 @@ async def test_server_script_runs_the_tool_sequence_then_reports() -> None:
         parts = response.content.parts or []
         function_call = parts[0].function_call
         if function_call is not None:
+            assert function_call.name is not None
             tool_names.append(function_call.name)
             request.contents.append(
                 types.Content(
@@ -156,6 +157,7 @@ async def test_custom_script_can_be_injected() -> None:
 
     responses = await _collect(model, request)
 
+    assert responses[0].content is not None
     function_call = (responses[0].content.parts or [])[0].function_call
     assert function_call is not None
     assert function_call.name == "custom_tool"

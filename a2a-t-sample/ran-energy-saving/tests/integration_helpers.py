@@ -16,7 +16,7 @@ import socket
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,7 +91,7 @@ def _server_env_dirs() -> set[Path]:
 
 
 @contextmanager
-def running_server(config: SampleConfig) -> Iterator[ServerRuntime]:
+def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]:
     """Run one real server in a background thread and stop it afterwards.
 
     The server keeps its own event loop; teardown flips ``should_exit`` and joins the thread. The

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from dotenv import dotenv_values
 from google.adk.models.base_llm import BaseLlm
@@ -158,7 +158,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
     registry_port = _env_int(values, REGISTRY_PORT_ENV_KEY, DEFAULT_REGISTRY_PORT)
 
     return SampleConfig(
-        model_mode=cast(ModelMode, model_mode),
+        model_mode=model_mode,
         language=language,
         host=_env_value(values, HOST_ENV_KEY, DEFAULT_HOST),
         port=_env_int(values, PORT_ENV_KEY, DEFAULT_PORT),

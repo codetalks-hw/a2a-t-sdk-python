@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from a2a.client import ClientConfig
 from dotenv import dotenv_values
+from google.adk.agents.llm_agent import LlmAgent
 from protocol.client_runtime import (
     build_client_runtime,
     prepare_client_sdk_env,
@@ -166,7 +167,9 @@ async def test_auto_offline_mode_scripts_the_scenario_decisions(
     )
     try:
         assert isinstance(runtime.provider, AdkDecisionProvider)
-        model = runtime.provider.runner.agent.model
+        agent = runtime.provider.runner.agent
+        assert isinstance(agent, LlmAgent)
+        model = agent.model
         assert isinstance(model, FakeLlm)
         client_script = next(script for script in model.scripts if script.marker == CLIENT_AGENT_NAME)
         actions = [json.loads(turn.text or "")["action"] for turn in client_script.turns]

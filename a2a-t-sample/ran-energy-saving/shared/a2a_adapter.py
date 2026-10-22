@@ -42,7 +42,8 @@ def build_status(
     )
     if metadata:
         for key, value in metadata.items():
-            status.message.metadata[key] = value
+            # The bundled protobuf stubs do not model the dynamic Struct mapping.
+            status.message.metadata[key] = value  # ty: ignore[invalid-assignment]
     return status
 
 

@@ -154,9 +154,11 @@ def build_registration_payload(agent_card: AgentCard) -> dict[str, Any]:
 def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> Path:
     """Return the ``.env`` file the A2A-T SDK should read.
 
-    In live mode the caller-provided file (defaults to ``$CWD/.env``) is returned unchanged and must
-    exist. In offline mode a temporary copy is written with the scripted provider keys overridden;
-    the original file is never modified.
+    The caller-provided file (defaults to ``$CWD/.env``) is never modified: both modes write a
+    temporary copy. In live mode the copy keeps the SDK endpoint values of the source file and
+    normalizes empty or missing ``A2AT_LLM_*`` keys from :class:`SampleConfig`, so an empty
+    ``A2AT_LLM_API_KEY`` becomes the local-proxy placeholder instead of failing the SDK's eager
+    configuration validation. In offline mode the copy pins the scripted provider keys.
 
     Args:
         config: resolved sample configuration.
@@ -169,7 +171,10 @@ def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> 
     if not config.is_offline:
         if not base_path.exists():
             raise FileNotFoundError(f"Live mode requires an SDK .env file at {base_path}")
-        return base_path
+        # Deferred import: ``protocol.client_runtime`` imports this module at load time.
+        from protocol.client_runtime import prepare_client_sdk_env
+
+        return prepare_client_sdk_env(config, base_path).path
 
     values: dict[str, str] = {}
     if base_path.exists():

@@ -150,7 +150,6 @@ Every later `python` is that activated interpreter.
 To customize, copy the template:
 
 ```bash
-cd a2a-t-sample
 cp env.example .env              # shared sample configuration
 # or: cp ran-energy-saving/env.example ran-energy-saving/.env
 ```
@@ -158,7 +157,7 @@ cp env.example .env              # shared sample configuration
 ### Offline CLI (no key, deterministic)
 
 ```bash
-cd a2a-t-sample/ran-energy-saving
+cd ran-energy-saving
 python run_demo.py --scenario information --mode auto --model-mode offline
 python run_demo.py --scenario target --mode auto --model-mode offline
 ```
@@ -544,7 +543,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (216 tests). What it covers:
+The suite is fully offline and deterministic (221 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -559,6 +558,7 @@ The suite is fully offline and deterministic (216 tests). What it covers:
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
 | `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic ADK model. |
 | `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration, scenario definitions, transcripts, runtime assembly. |
+| `test_run_demo.py` | Launcher defaults: `--ui-port` resolution from `A2AT_SAMPLE_UI_PORT` and explicit overrides. |
 
 ### Five-scenario offline smoke
 

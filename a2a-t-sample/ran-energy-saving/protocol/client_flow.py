@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
@@ -162,6 +162,17 @@ class PromptClient(Protocol):
     ) -> MetadataContent: ...
 
 
+class SendMessageClient(Protocol):
+    """Minimal a2a-sdk client surface: one async-iterator ``send_message`` call per exchange."""
+
+    def send_message(
+        self,
+        request: SendMessageRequest,
+        *,
+        context: ClientCallContext,
+    ) -> AsyncIterator[StreamResponse]: ...
+
+
 class ClientTransport(Protocol):
     """Send one request and return its normalized events up to the first stop point."""
 
@@ -225,7 +236,9 @@ class SseClientTransport:
     which lets the Web UI show a round while the flow is still waiting for the next one.
     """
 
-    def __init__(self, client: object, *, log_sink: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self, client: SendMessageClient, *, log_sink: Callable[[str], None] | None = None
+    ) -> None:
         """Create one SSE transport over an a2a-sdk client."""
         self._client = client
         self._log_sink = log_sink
@@ -247,7 +260,7 @@ class SseClientTransport:
     ) -> list[dict[str, object]]:
         """Send one message and consume its stream until a stop point."""
         events: list[dict[str, object]] = []
-        async for stream_response in self._client.send_message(request, context=call_context):  # type: ignore[attr-defined]
+        async for stream_response in self._client.send_message(request, context=call_context):
             event = normalize_event(stream_response)
             events.append(event)
             self._emit(event)
@@ -268,7 +281,7 @@ class WebhookClientTransport:
 
     def __init__(
         self,
-        client: object,
+        client: SendMessageClient,
         *,
         queue: asyncio.Queue[dict[str, object]],
         push_url: str,
@@ -315,7 +328,7 @@ class WebhookClientTransport:
         )
         events: list[dict[str, object]] = []
         reply: StreamResponse | None = None
-        async for stream_response in self._client.send_message(request, context=call_context):  # type: ignore[attr-defined]
+        async for stream_response in self._client.send_message(request, context=call_context):
             reply = stream_response
         if reply is not None:
             reply_event = normalize_event(reply)
@@ -537,7 +550,8 @@ def _build_message_request(
         request.message.context_id = context_id
     for key, value in metadata.items():
         if value is not None:
-            request.message.metadata[key] = value
+            # The bundled protobuf stubs do not model the dynamic Struct mapping.
+            request.message.metadata[key] = value  # ty: ignore[invalid-assignment]
     return request
 
 

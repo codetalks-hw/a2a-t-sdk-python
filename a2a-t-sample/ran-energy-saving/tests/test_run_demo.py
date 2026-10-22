@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
 import run_demo
 
 
-def test_ui_port_default_reads_the_env_key() -> None:
+def test_ui_port_default_reads_the_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """``A2AT_SAMPLE_UI_PORT`` is the default of ``--ui-port``; absent means 8080."""
+    monkeypatch.delenv("A2AT_SAMPLE_UI_PORT", raising=False)
     assert run_demo._ui_port_default({}) == run_demo.DEFAULT_UI_PORT
     assert run_demo._ui_port_default({"A2AT_SAMPLE_UI_PORT": "18080"}) == 18080
 

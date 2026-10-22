@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 from a2a.server.agent_execution.context import RequestContext
@@ -30,6 +31,7 @@ from a2a_t.core.standard_templates import (
 )
 from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.server.a2at_server import A2ATServer
+from google.protobuf.json_format import MessageToDict
 from protocol.messages import (
     END_MESSAGE_TEXT,
     SAMPLE_PROPOSAL_METADATA_KEY,
@@ -47,6 +49,11 @@ from shared.scripted_llm import register_scripted_provider
 
 CONTEXT_ID = "ctx-negotiation"
 TASK_PROMPT = "Create a RAN energy saving task in the Songshanhu area."
+
+
+def _metadata(message: Message) -> dict[str, Any]:
+    """Decode message metadata into a plain dict (the protobuf stubs model no dynamic keys)."""
+    return MessageToDict(message.metadata)
 
 
 class FakePromptServer:
@@ -201,7 +208,7 @@ def _negotiation_message(
         "performative": performative.value,
     }
     if sample is not None:
-        message.metadata[SAMPLE_PROPOSAL_METADATA_KEY] = dict(sample)
+        message.metadata[SAMPLE_PROPOSAL_METADATA_KEY] = dict(sample)  # ty: ignore[invalid-assignment]
     return message
 
 
@@ -249,7 +256,7 @@ async def test_initial_validation_failure_emits_a_propose_without_a_task(
 
     message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
 
-    metadata = message.metadata
+    metadata = _metadata(message)
     session = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
     assert metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
     assert session["id"] == CONTEXT_ID
@@ -277,7 +284,7 @@ async def test_unmapped_validation_failure_returns_a_rejected_task() -> None:
     assert task.id == context.task_id
     assert task.context_id == CONTEXT_ID
     assert task.status.message.parts[0].text
-    structured = task.status.message.metadata[STRUCTURED_ERRORS_METADATA_KEY]
+    structured = _metadata(task.status.message)[STRUCTURED_ERRORS_METADATA_KEY]
     assert structured["code"]
     assert structured["errors"][0]["slotName"] == "region"
     assert structured["errors"][0]["code"] == "content.format_error"
@@ -311,7 +318,9 @@ async def test_accept_validates_and_hands_the_agreed_task_prompt_to_the_executor
     assert outcome.short_circuit is False
     assert outcome.task_request is context
     assert len(server.accept_calls) == 1
-    assert server.accept_calls[0][1].round == 2
+    accepted_context = server.accept_calls[0][1]
+    assert accepted_context is not None
+    assert accepted_context.round == 2
     assert len(server.task_calls) == 1
     assert context.message is not None
     assert context.message.parts[0].text == TASK_PROMPT
@@ -377,7 +386,7 @@ async def test_counter_propose_round_one_emits_a_round_two_propose_without_a_tas
 
     result = _assert_no_task(await gate.handle(_make_context(message)))
 
-    session = result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    session = _metadata(result)[NEGOTIATION_CONTEXT_METADATA_KEY]
     assert session["id"] == CONTEXT_ID
     assert session["round"] == 2
     assert session["maxRounds"] == 3
@@ -398,10 +407,10 @@ async def test_counter_propose_at_max_rounds_emits_an_abort_without_a_task() -> 
 
     result = _assert_no_task(await gate.handle(_make_context(message)))
 
-    session = result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    session = _metadata(result)[NEGOTIATION_CONTEXT_METADATA_KEY]
     assert session["round"] == 3
     assert session["performative"] == NegotiationPerformative.ABORT.value
-    assert result.metadata[TEMPLATE_URI_METADATA_KEY] == NEGOTIATION_ABORT_URI
+    assert _metadata(result)[TEMPLATE_URI_METADATA_KEY] == NEGOTIATION_ABORT_URI
     assert len(server.abort_generations) == 1
     assert server.abort_generations[0][1].round == 3
 
@@ -416,7 +425,7 @@ async def test_counter_propose_without_a_sample_advances_the_preset_sequence() -
 
     result = _assert_no_task(await gate.handle(_make_context(message)))
 
-    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 3
+    assert _metadata(result)[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 3
     assert server.propose_generations[0][1].round == 3
 
 
@@ -484,7 +493,8 @@ async def test_real_server_opens_the_matching_negotiation(
     )
 
     assert result.context_id == context_id
-    assert result.metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
-    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"] == context_id
-    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
-    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["maxRounds"] == 3
+    result_metadata = _metadata(result)
+    assert result_metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
+    assert result_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"] == context_id
+    assert result_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
+    assert result_metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["maxRounds"] == 3

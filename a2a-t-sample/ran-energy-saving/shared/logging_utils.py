@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dotenv import dotenv_values
 from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import Message
 
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _SECRET_KEYWORDS = ("api_key", "authorization", "token", "secret", "password")
@@ -75,7 +76,10 @@ def _normalize_payload(value: object, *, key_name: str | None = None) -> object:
         return value
 
     if hasattr(value, "DESCRIPTOR"):
-        return _normalize_payload(MessageToDict(value, preserving_proto_field_name=True))
+        # ``hasattr(value, "DESCRIPTOR")`` is the dynamic protobuf-message discriminator.
+        return _normalize_payload(
+            MessageToDict(cast(Message, value), preserving_proto_field_name=True)
+        )
 
     if isinstance(value, dict):
         return {str(key): _normalize_payload(item, key_name=str(key)) for key, item in value.items()}

@@ -455,10 +455,12 @@ def _build_parser(default_ui_port: int = DEFAULT_UI_PORT) -> argparse.ArgumentPa
 
 def main() -> int:
     """Assemble the run directory, start the background processes and run the client."""
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except (AttributeError, ValueError):
-        pass
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(line_buffering=True)
+        except ValueError:
+            pass
 
     source_env = _source_env_path()
     source_values = _read_env(source_env) if source_env is not None else {}

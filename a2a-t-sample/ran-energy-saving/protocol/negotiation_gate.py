@@ -413,7 +413,7 @@ class NegotiationGate:
             context_id=context_id,
             text=_validation_error_text(error),
         )
-        status_message.metadata[STRUCTURED_ERRORS_METADATA_KEY] = {
+        status_message.metadata[STRUCTURED_ERRORS_METADATA_KEY] = {  # ty: ignore[invalid-assignment]
             "code": error.code_str,
             "errors": _structured_errors(error.errors),
         }

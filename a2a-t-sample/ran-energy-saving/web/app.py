@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,10 +44,10 @@ from starlette.staticfiles import StaticFiles
 STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
 
 #: Run statuses.
-STATUS_RUNNING: Final[str] = "running"
-STATUS_FINISHED: Final[str] = "finished"
-STATUS_FAILED: Final[str] = "failed"
 RunStatus = Literal["running", "finished", "failed"]
+STATUS_RUNNING: Final[RunStatus] = "running"
+STATUS_FINISHED: Final[RunStatus] = "finished"
+STATUS_FAILED: Final[RunStatus] = "failed"
 
 #: Modes the Web UI may start; the scripted mode is a CLI/test seam only.
 UI_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL)
@@ -359,7 +359,7 @@ def create_app(
     )
 
     @asynccontextmanager
-    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+    async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         del app
         yield
         await manager.shutdown()

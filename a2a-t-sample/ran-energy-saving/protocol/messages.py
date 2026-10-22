@@ -213,7 +213,8 @@ def build_agent_message(
     message.parts.add(text=text)
     for key, value in (metadata or {}).items():
         if value is not None:
-            message.metadata[key] = value
+            # The bundled protobuf stubs do not model the dynamic Struct mapping.
+            message.metadata[key] = value  # ty: ignore[invalid-assignment]
     return message
 
 

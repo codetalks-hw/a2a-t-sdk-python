@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import cast
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from a2a.server.agent_execution.agent_executor import AgentExecutor
@@ -30,14 +32,22 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
+from dotenv import dotenv_values
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
 from google.adk.a2a.executor.executor_context import ExecutorContext
 from google.adk.events.event import Event as AdkEvent
 from google.adk.runners import Runner
 from google.genai import types
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.struct_pb2 import Struct
 from protocol.messages import SAMPLE_PROPOSAL_METADATA_KEY, TASK_TEMPLATE_URI
 from protocol.negotiation_gate import GateOutcome, NegotiationContentServer, NegotiationGate
-from protocol.server_app import build_agent_card, build_registration_payload
+from protocol.server_app import (
+    build_agent_card,
+    build_registration_payload,
+    build_server_runtime,
+    prepare_sdk_env_path,
+)
 from protocol.server_executor import (
     STATE_NEGOTIATION_CONTEXT,
     STATE_SAMPLE_PROPOSAL,
@@ -50,10 +60,15 @@ from protocol.server_executor import (
 )
 from shared import ran_data
 from shared.adk_fake_model import build_fake_model
-from shared.config import SampleConfig
+from shared.config import MODEL_MODE_LIVE, SampleConfig
 
 CONTEXT_ID = "ctx-executor"
 TASK_PROMPT = "Create a RAN energy saving task in the Songshanhu area."
+
+
+def _metadata(metadata: Struct) -> dict[str, Any]:
+    """Decode a protobuf Struct into a plain dict (the stubs model no dynamic keys)."""
+    return MessageToDict(metadata)
 
 
 class RecordingEventQueue(EventQueue):
@@ -122,9 +137,9 @@ def _make_context(
     message.metadata[TASK_T_EXTENSION_URI] = task_prompt
     message.metadata[TEMPLATE_URI_METADATA_KEY] = TASK_TEMPLATE_URI
     if negotiation is not None:
-        message.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation
+        message.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation  # ty: ignore[invalid-assignment]
     if sample is not None:
-        message.metadata[SAMPLE_PROPOSAL_METADATA_KEY] = sample
+        message.metadata[SAMPLE_PROPOSAL_METADATA_KEY] = sample  # ty: ignore[invalid-assignment]
     request = SendMessageRequest(message=message)
     call_context = ServerCallContext(
         state={},
@@ -161,11 +176,16 @@ def _adk_text_event() -> AdkEvent:
 
 
 def test_request_converter_reads_message_metadata_and_builds_the_agent_prompt() -> None:
-    negotiation = {"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
+    negotiation: dict[str, object] = {
+        "id": CONTEXT_ID,
+        "round": 2,
+        "maxRounds": 3,
+        "performative": "ACCEPT",
+    }
     context = _make_context(negotiation=negotiation, sample={"cellId": "cell-001"})
     converter = build_request_converter(task_template_uri=TASK_TEMPLATE_URI)
 
-    run_request = converter(context, cast(object, None))  # part converter is unused
+    run_request = converter(context, cast(Any, None))  # part converter is unused
 
     assert run_request.session_id == CONTEXT_ID
     assert run_request.user_id == f"A2A_USER_{CONTEXT_ID}"
@@ -184,7 +204,7 @@ def test_request_converter_rejects_a_request_without_a_prompt() -> None:
     converter = build_request_converter()
 
     with pytest.raises(ValueError, match="Task-T prompt"):
-        converter(context, cast(object, None))
+        converter(context, cast(Any, None))
 
 
 async def test_interceptor_stamps_task_t_metadata_on_the_report_artifact() -> None:
@@ -202,8 +222,8 @@ async def test_interceptor_stamps_task_t_metadata_on_the_report_artifact() -> No
     assert returned is event
     assert event.artifact.metadata[TASK_T_EXTENSION_URI] == "energy saving report"
     assert event.artifact.metadata[TEMPLATE_URI_METADATA_KEY] == TASK_TEMPLATE_URI
-    assert event.artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"] == CONTEXT_ID
-    assert event.artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
+    assert _metadata(event.artifact.metadata)[NEGOTIATION_CONTEXT_METADATA_KEY]["id"] == CONTEXT_ID
+    assert _metadata(event.artifact.metadata)[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
     assert event.artifact.name == "energy saving intent report"
 
 
@@ -240,7 +260,7 @@ async def test_interceptor_attaches_the_negotiation_context_to_the_terminal_stat
     returned = await interceptor.after_agent(_executor_context(context), final_event)
 
     assert returned is final_event
-    assert final_event.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 2
+    assert _metadata(final_event.metadata)[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 2
     assert interceptor._audit == {}
 
 
@@ -358,7 +378,7 @@ async def test_full_executor_runs_the_agent_and_stamps_the_report_artifact(
     report = reports[0]
     assert report.artifact.name == "energy saving intent report"
     assert report.artifact.metadata[TEMPLATE_URI_METADATA_KEY] == TASK_TEMPLATE_URI
-    assert report.artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
+    assert _metadata(report.artifact.metadata)[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
     assert report.artifact.metadata[TASK_T_EXTENSION_URI]
     assert ran_data.list_plan_ids() == ("plan-cell-001-001",)
     ran_data.reset()
@@ -382,3 +402,59 @@ def test_registration_payload_is_a_registry_card_list() -> None:
     assert len(cards) == 1
     assert cards[0]["name"] == "RAN Domain Agent"
     assert "supportedInterfaces" in cards[0]
+
+
+def test_live_sdk_env_fills_empty_values_without_mutating_the_source(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    config = replace(offline_config, model_mode=MODEL_MODE_LIVE)
+    source = tmp_path / ".env"
+    source_text = (
+        "A2AT_LLM_PROVIDER=\n"
+        "A2AT_LLM_MODEL=\n"
+        "A2AT_LLM_API_KEY=\n"
+        "A2AT_LLM_BASE_URL=\n"
+        "A2AT_LANGUAGE=en-US\n"
+    )
+    source.write_text(source_text, encoding="utf-8")
+
+    sdk_env_path = prepare_sdk_env_path(config, source)
+
+    values = dotenv_values(sdk_env_path)
+    assert sdk_env_path != source
+    assert values["A2AT_LLM_PROVIDER"] == "openai"
+    assert values["A2AT_LLM_MODEL"] == "mass/volcengine/deepseek-v4.1-flash"
+    assert values["A2AT_LLM_API_KEY"] == "not-needed"
+    assert values["A2AT_LLM_BASE_URL"] == "http://127.0.0.1:31943/v1"
+    assert source.read_text(encoding="utf-8") == source_text
+
+
+def test_live_sdk_env_preserves_an_explicit_api_key(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    config = replace(offline_config, model_mode=MODEL_MODE_LIVE)
+    source = tmp_path / ".env"
+    source.write_text("A2AT_LLM_API_KEY=explicit-key\n", encoding="utf-8")
+
+    values = dotenv_values(prepare_sdk_env_path(config, source))
+
+    assert values["A2AT_LLM_API_KEY"] == "explicit-key"
+    assert source.read_text(encoding="utf-8") == "A2AT_LLM_API_KEY=explicit-key\n"
+
+
+def test_live_server_constructs_from_the_example_env_with_an_empty_key(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    source = Path(__file__).resolve().parents[1] / "env.example"
+    # Reproduce the reported startup failure: the example profile with the proxy key blanked out.
+    live_source = tmp_path / ".env"
+    live_source.write_text(
+        source.read_text(encoding="utf-8").replace("A2AT_LLM_API_KEY=not-needed", "A2AT_LLM_API_KEY="),
+        encoding="utf-8",
+    )
+    config = replace(offline_config, model_mode=MODEL_MODE_LIVE)
+
+    runtime = build_server_runtime(config=config, env_path=live_source, model=build_fake_model())
+
+    assert runtime.prompt_server is not None
+    assert runtime.config.is_offline is False

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -47,6 +47,7 @@ from shared.scenario import (
     SCENARIO_INFORMATION_SPEC,
     SCENARIO_REJECT_SPEC,
     SCENARIO_TARGET_SPEC,
+    Scenario,
 )
 
 CONTEXT_ID = "ctx-client-flow"
@@ -62,20 +63,12 @@ _PROPOSE_URIS: dict[str, str] = {
 class FakePromptClient:
     """Deterministic SDK client double recording every generation call."""
 
-    task_prompts: list[str] = None  # type: ignore[assignment]
-    accept_texts: list[str] = None  # type: ignore[assignment]
-    reject_texts: list[str] = None  # type: ignore[assignment]
-    abort_texts: list[str] = None  # type: ignore[assignment]
-    propose_texts: list[str] = None  # type: ignore[assignment]
-    refill_data: list[dict[str, object]] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "task_prompts", [])
-        object.__setattr__(self, "accept_texts", [])
-        object.__setattr__(self, "reject_texts", [])
-        object.__setattr__(self, "abort_texts", [])
-        object.__setattr__(self, "propose_texts", [])
-        object.__setattr__(self, "refill_data", [])
+    task_prompts: list[str] = field(default_factory=list)
+    accept_texts: list[str] = field(default_factory=list)
+    reject_texts: list[str] = field(default_factory=list)
+    abort_texts: list[str] = field(default_factory=list)
+    propose_texts: list[str] = field(default_factory=list)
+    refill_data: list[dict[str, object]] = field(default_factory=list)
 
     def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent:
         self.task_prompts.append(text)
@@ -250,13 +243,13 @@ def _client_negotiation_steps(requests: list[SendMessageRequest]) -> list[tuple[
 
 
 async def _run(
-    scenario_spec: object,
+    scenario_spec: Scenario,
     batches: list[list[dict[str, object]]],
     decisions: tuple[NegotiationDecision, ...],
 ) -> tuple[ClientFlowResult, ScriptedTransport, FakePromptClient]:
     prompt_client = FakePromptClient()
     transport = ScriptedTransport(batches)
-    user_request = scenario_spec.user_request["en-US"]  # type: ignore[attr-defined]
+    user_request = scenario_spec.user_request["en-US"]
     result = await run_client_flow(
         prompt_client=prompt_client,
         transport=transport,
@@ -394,7 +387,9 @@ async def test_initial_request_matches_the_old_message_shape() -> None:
     assert request.message.parts[0].text == TASK_REQUEST_LABEL
     assert metadata[TASK_T_EXTENSION_URI].startswith("Task-T prompt for:")
     assert metadata[TEMPLATE_URI_METADATA_KEY] == "Task-T/network-layer/ran-energy-saving/v1"
-    assert transport.call_contexts[0].service_parameters["A2A-Extensions"] == TASK_T_EXTENSION_URI
+    service_parameters = transport.call_contexts[0].service_parameters
+    assert service_parameters is not None
+    assert service_parameters["A2A-Extensions"] == TASK_T_EXTENSION_URI
 
 
 def test_webhook_payload_normalization_matches_sse_shape() -> None:
@@ -425,7 +420,7 @@ class _FakeA2AClient:
         request: SendMessageRequest,
         *,
         context: ClientCallContext,
-    ) -> object:
+    ) -> AsyncIterator[StreamResponse]:
         del request, context
         for response in self._responses:
             yield response
@@ -489,7 +484,7 @@ class _PerSendFakeA2AClient:
         request: SendMessageRequest,
         *,
         context: ClientCallContext,
-    ) -> object:
+    ) -> AsyncIterator[StreamResponse]:
         del request, context
         for response in self._turns.pop(0):
             yield response
@@ -536,14 +531,14 @@ async def test_webhook_mode_accept_reports_task_completed_after_the_artifact() -
 def _to_webhook_payload(event: dict[str, object]) -> dict[str, object]:
     """Convert one fake normalized event into a webhook JSON body via the protobuf types."""
     if event["kind"] == "status":
-        from a2a.types import TaskState, TaskStatus, TaskStatusUpdateEvent
+        from a2a.types import TaskStatus, TaskStatusUpdateEvent
 
         return MessageToDict(
             StreamResponse(
                 status_update=TaskStatusUpdateEvent(
                     task_id=str(event["task_id"]),
                     context_id=str(event["context_id"]),
-                    status=TaskStatus(state=TaskState.Value(str(event["state"]))),
+                    status=TaskStatus(state=str(event["state"])),
                 )
             )
         )

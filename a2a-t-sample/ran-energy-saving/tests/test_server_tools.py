@@ -33,6 +33,19 @@ from shared.adk_fake_model import (
     build_fake_model,
 )
 
+
+def _as_mapping(value: object) -> dict[str, object]:
+    """Narrow one nested JSON object of a tool result."""
+    assert isinstance(value, dict)
+    return value
+
+
+def _as_list(value: object) -> list[object]:
+    """Narrow one nested JSON array of a tool result."""
+    assert isinstance(value, list)
+    return value
+
+
 #: Tool lookup used to replay the fake model's scripted calls.
 TOOLS: dict[str, Callable[..., dict[str, object]]] = {
     "get_cell_energy_profile": get_cell_energy_profile,
@@ -64,10 +77,12 @@ def test_profile_returns_the_full_curve() -> None:
     assert result["ok"] is True
     assert result["cell_id"] == "cell-001"
     assert result["cell_name"] == "Songshanhu-North"
-    assert len(result["hourly_profile"]) == 24
+    assert len(_as_list(result["hourly_profile"])) == 24
     assert result["available_windows"] == ["00:00~06:00", "23:00~24:00"]
-    assert result["capacity"]["max_throughput_mbps"] == 400
-    assert result["energy_summary"]["total_kwh"] > 0
+    assert _as_mapping(result["capacity"])["max_throughput_mbps"] == 400
+    total_kwh = _as_mapping(result["energy_summary"])["total_kwh"]
+    assert isinstance(total_kwh, (int, float))
+    assert total_kwh > 0
     json.dumps(result)
 
 
@@ -76,7 +91,7 @@ def test_profile_reports_an_unknown_cell_without_raising() -> None:
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_UNKNOWN_CELL
-    assert "cell-001" in result["known_cells"]
+    assert "cell-001" in _as_list(result["known_cells"])
 
 
 def test_profile_reports_an_invalid_date() -> None:
@@ -87,7 +102,7 @@ def test_profile_reports_an_invalid_date() -> None:
 
 
 def test_profile_reports_a_non_string_cell_id() -> None:
-    result = get_cell_energy_profile(123, "2026-10-22")  # type: ignore[arg-type]
+    result = get_cell_energy_profile(123, "2026-10-22")  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_INVALID_REQUEST
@@ -95,7 +110,7 @@ def test_profile_reports_a_non_string_cell_id() -> None:
 
 
 def test_profile_reports_a_non_string_date() -> None:
-    result = get_cell_energy_profile("cell-001", 20261022)  # type: ignore[arg-type]
+    result = get_cell_energy_profile("cell-001", 20261022)  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_INVALID_REQUEST
@@ -108,7 +123,7 @@ def test_evaluate_returns_a_feasible_evaluation() -> None:
     assert result["ok"] is True
     assert result["feasible"] is True
     assert result["estimated_saving_kwh"] == pytest.approx(32.49)
-    assert result["kpi_impact"]["meets_sla"] is True
+    assert _as_mapping(result["kpi_impact"])["meets_sla"] is True
     json.dumps(result)
 
 
@@ -127,7 +142,7 @@ def test_evaluate_reports_a_malformed_window() -> None:
 
 
 def test_evaluate_accepts_a_numeric_target_rate() -> None:
-    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", 30)  # type: ignore[arg-type]
+    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", 30)  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is True
     assert result["feasible"] is True
@@ -135,7 +150,7 @@ def test_evaluate_accepts_a_numeric_target_rate() -> None:
 
 
 def test_evaluate_reports_a_non_string_window() -> None:
-    result = evaluate_energy_saving_plan("cell-001", 900, "30")  # type: ignore[arg-type]
+    result = evaluate_energy_saving_plan("cell-001", 900, "30")  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_INVALID_REQUEST
@@ -143,7 +158,7 @@ def test_evaluate_reports_a_non_string_window() -> None:
 
 
 def test_evaluate_reports_an_unsupported_target_rate_type() -> None:
-    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", True)  # type: ignore[arg-type]
+    result = evaluate_energy_saving_plan("cell-001", "00:00~06:00", True)  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_INVALID_REQUEST
@@ -173,7 +188,7 @@ def test_apply_writes_a_plan_and_rejects_infeasible_plans() -> None:
 
 
 def test_apply_reports_non_string_arguments_and_writes_nothing() -> None:
-    result = apply_energy_saving_plan("cell-001", ["00:00~06:00"], "30")  # type: ignore[arg-type]
+    result = apply_energy_saving_plan("cell-001", ["00:00~06:00"], "30")  # ty: ignore[invalid-argument-type]
 
     assert result["ok"] is False
     assert result["error_code"] == ERROR_INVALID_REQUEST
@@ -197,8 +212,8 @@ def test_report_has_the_expected_structure() -> None:
         "remaining_kwh": pytest.approx(75.81),
         "saving_percent": pytest.approx(30.0),
     }
-    assert report["kpi_impact"]["affected_hours"] == 6
-    assert str(plan_id) in report["summary"]
+    assert _as_mapping(report["kpi_impact"])["affected_hours"] == 6
+    assert str(plan_id) in str(report["summary"])
     assert report["highlights"]
     json.dumps(report)
 
@@ -212,7 +227,7 @@ def test_report_reports_an_unknown_plan() -> None:
 
 
 def test_report_reports_a_non_string_plan_id() -> None:
-    report = generate_energy_saving_report(123)  # type: ignore[arg-type]
+    report = generate_energy_saving_report(123)  # ty: ignore[invalid-argument-type]
 
     assert report["ok"] is False
     assert report["error_code"] == ERROR_INVALID_REQUEST
@@ -265,6 +280,7 @@ async def test_fake_model_sequence_is_accepted_by_the_real_tools() -> None:
         assert response.content is not None
         call = (response.content.parts or [])[0].function_call
         assert call is not None
+        assert call.name is not None
         tool = TOOLS[call.name]
         result = tool(**dict(call.args or {}))
         tool_names.append(call.name)

@@ -194,7 +194,7 @@ class NegotiationArtifactInterceptor:
             audit.task_template_uri if audit is not None else self._task_template_uri
         )
         if audit is not None and audit.negotiation_context is not None:
-            artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context
+            artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context  # ty: ignore[invalid-assignment]
         if not artifact.name:
             artifact.name = REPORT_ARTIFACT_NAME
         return a2a_event
@@ -207,7 +207,7 @@ class NegotiationArtifactInterceptor:
         """Attach the negotiation context to the terminal status and release the cache."""
         audit = self._audit.pop(executor_context.session_id, None)
         if audit is not None and audit.negotiation_context is not None:
-            final_event.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context
+            final_event.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context  # ty: ignore[invalid-assignment]
         return final_event
 
 

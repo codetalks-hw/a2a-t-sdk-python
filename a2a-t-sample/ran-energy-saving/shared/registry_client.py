@@ -12,8 +12,13 @@ from dotenv import dotenv_values
 
 
 class _ResponseLike(Protocol):
-    status_code: int
-    text: str
+    """Read-only response surface shared by ``httpx.Response`` and the test doubles."""
+
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def text(self) -> str: ...
 
     def json(self) -> Any: ...
 

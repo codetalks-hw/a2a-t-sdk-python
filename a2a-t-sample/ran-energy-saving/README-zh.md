@@ -130,7 +130,6 @@ source ../.venv/Scripts/activate        # Git Bash / Windows（在 a2a-t-sample/
 `run_demo.py` 会回退到 `env.example`，因此**离线运行不需要 `.env` 文件，也不需要 API key**。如需自定义，复制模板：
 
 ```bash
-cd a2a-t-sample
 cp env.example .env              # 共享样例配置
 # 或：cp ran-energy-saving/env.example ran-energy-saving/.env
 ```
@@ -138,7 +137,7 @@ cp env.example .env              # 共享样例配置
 ### 离线 CLI（无需 key，确定性）
 
 ```bash
-cd a2a-t-sample/ran-energy-saving
+cd ran-energy-saving
 python run_demo.py --scenario information --mode auto --model-mode offline
 python run_demo.py --scenario target --mode auto --model-mode offline
 ```
@@ -450,7 +449,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（216 个测试）。覆盖范围：
+测试套件完全离线且确定性（221 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -465,6 +464,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
 | `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性 ADK 模型。 |
 | `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置、场景定义、运行记录、运行时装配。 |
+| `test_run_demo.py` | 启动器默认值：`--ui-port` 从 `A2AT_SAMPLE_UI_PORT` 解析以及显式覆盖。 |
 
 ### 五场景离线 smoke
 
