@@ -1,0 +1,470 @@
+"""Tests for the pre-task A2A-T negotiation gate."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Mapping
+
+import pytest
+from a2a.server.agent_execution.context import RequestContext
+from a2a.server.context import ServerCallContext, UnauthenticatedUser
+from a2a.types import Message, Role, SendMessageRequest, Task
+from a2a_t.core.errors.catalog import ErrorCatalog
+from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
+from a2a_t.core.metadata import (
+    NEGOTIATION_CONTEXT_METADATA_KEY,
+    NEGOTIATION_T_EXTENSION_URI,
+    TASK_T_EXTENSION_URI,
+    TEMPLATE_URI_METADATA_KEY,
+    MetadataContent,
+    NegotiationContext,
+    NegotiationPerformative,
+)
+from a2a_t.core.standard_templates import (
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+    NEGOTIATION_ABORT_URI,
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
+from a2a_t.core.validation_pipeline import FilledParamData
+from a2a_t.server.a2at_server import A2ATServer
+from protocol.messages import END_MESSAGE_TEXT, SAMPLE_PROPOSAL_METADATA_KEY
+from protocol.negotiation_gate import GateOutcome, NegotiationGate
+from protocol.server_app import prepare_sdk_env_path
+from shared.config import SampleConfig
+from shared.scenario import (
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
+)
+from shared.scripted_llm import register_scripted_provider
+
+CONTEXT_ID = "ctx-negotiation"
+TASK_PROMPT = "Create a RAN energy saving task in the Songshanhu area."
+
+
+class FakePromptServer:
+    """Recording test double of the A2ATServer negotiation surface."""
+
+    def __init__(self) -> None:
+        self.task_error: Exception | None = None
+        self.accept_error: Exception | None = None
+        self.propose_error: Exception | None = None
+        self.reject_error: Exception | None = None
+        self.abort_error: Exception | None = None
+        self.task_calls: list[tuple[str, Mapping[str, object], str]] = []
+        self.accept_calls: list[tuple[str | None, NegotiationContext | None, str]] = []
+        self.propose_calls: list[tuple[str | None, NegotiationContext | None, str]] = []
+        self.reject_calls: list[tuple[str | None, NegotiationContext | None, str]] = []
+        self.abort_calls: list[tuple[str | None, NegotiationContext | None, str]] = []
+        self.propose_generations: list[tuple[str | None, NegotiationContext, str]] = []
+        self.abort_generations: list[tuple[str | None, NegotiationContext, str]] = []
+
+    def validate_task_prompt_and_data_filling(
+        self, prompt: str, schema: Mapping[str, object], template_uri: str
+    ) -> FilledParamData:
+        self.task_calls.append((prompt, schema, template_uri))
+        if self.task_error is not None:
+            raise self.task_error
+        return FilledParamData({"region": "Songshanhu"})
+
+    def validate_accept_prompt_and_data_filling(
+        self,
+        prompt: str | None,
+        context: NegotiationContext | None,
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> FilledParamData:
+        del schema
+        self.accept_calls.append((prompt, context, template_uri))
+        if self.accept_error is not None:
+            raise self.accept_error
+        return FilledParamData({"round": context.round if context else 0})
+
+    def validate_propose_prompt_and_data_filling(
+        self,
+        prompt: str | None,
+        context: NegotiationContext | None,
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> FilledParamData:
+        del schema
+        self.propose_calls.append((prompt, context, template_uri))
+        if self.propose_error is not None:
+            raise self.propose_error
+        return FilledParamData({"round": context.round if context else 0})
+
+    def validate_reject_prompt_and_data_filling(
+        self,
+        prompt: str | None,
+        context: NegotiationContext | None,
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> FilledParamData:
+        del schema
+        self.reject_calls.append((prompt, context, template_uri))
+        if self.reject_error is not None:
+            raise self.reject_error
+        return FilledParamData({})
+
+    def validate_abort_prompt_and_data_filling(
+        self,
+        prompt: str | None,
+        context: NegotiationContext | None,
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> FilledParamData:
+        del schema
+        self.abort_calls.append((prompt, context, template_uri))
+        if self.abort_error is not None:
+            raise self.abort_error
+        return FilledParamData({})
+
+    def generate_negotiation_propose_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent:
+        self.propose_generations.append((text, context, template_uri))
+        return MetadataContent(
+            template_uri=template_uri,
+            prompt_text=f"Generated propose for round {context.round}",
+            extension_uri=NEGOTIATION_T_EXTENSION_URI,
+            negotiation_context=context,
+        )
+
+    def generate_negotiation_abort_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent:
+        self.abort_generations.append((text, context, template_uri))
+        return MetadataContent(
+            template_uri=template_uri,
+            prompt_text=f"Generated abort for round {context.round}",
+            extension_uri=NEGOTIATION_T_EXTENSION_URI,
+            negotiation_context=context,
+        )
+
+
+def _content_error(code: str, slot_name: str = "region") -> ContentValidationError:
+    return ContentValidationError(
+        ErrorCatalog.CONTENT_SEMANTIC_CONFLICT,
+        {"section_label": "task_context", "reason": "rejected"},
+        errors=[SlotValidationError(slot_name=slot_name, code=code, message="rejected")],
+    )
+
+
+def _make_context(
+    message: Message,
+    *,
+    extensions: tuple[str, ...] = (TASK_T_EXTENSION_URI,),
+    current_task: Task | None = None,
+) -> RequestContext:
+    request = SendMessageRequest(message=message)
+    call_context = ServerCallContext(
+        state={},
+        user=UnauthenticatedUser(),
+        requested_extensions=set(extensions),
+    )
+    return RequestContext(call_context=call_context, request=request, task=current_task)
+
+
+def _initial_message(prompt: str = TASK_PROMPT, context_id: str = CONTEXT_ID) -> Message:
+    message = Message(message_id="initial", role=Role.ROLE_USER, context_id=context_id)
+    message.parts.add(text="create the task")
+    message.metadata[TASK_T_EXTENSION_URI] = prompt
+    return message
+
+
+def _negotiation_message(
+    performative: NegotiationPerformative,
+    *,
+    round_number: int,
+    template_uri: str,
+    prompt: str = "negotiation content",
+    task_prompt: str | None = None,
+    sample: Mapping[str, object] | None = None,
+) -> Message:
+    message = Message(message_id=f"negotiation-{performative.value}", role=Role.ROLE_USER, context_id=CONTEXT_ID)
+    message.parts.add(text="negotiation")
+    if task_prompt is not None:
+        message.metadata[TASK_T_EXTENSION_URI] = task_prompt
+    message.metadata[NEGOTIATION_T_EXTENSION_URI] = prompt
+    message.metadata[TEMPLATE_URI_METADATA_KEY] = template_uri
+    message.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = {
+        "id": CONTEXT_ID,
+        "round": round_number,
+        "maxRounds": 3,
+        "performative": performative.value,
+    }
+    if sample is not None:
+        message.metadata[SAMPLE_PROPOSAL_METADATA_KEY] = dict(sample)
+    return message
+
+
+def _gate(server: FakePromptServer | None = None) -> tuple[NegotiationGate, FakePromptServer]:
+    resolved = server or FakePromptServer()
+    return NegotiationGate(resolved), resolved
+
+
+def _assert_no_task(outcome: GateOutcome) -> Message:
+    assert outcome.short_circuit is True
+    assert outcome.task_request is None
+    assert outcome.message is not None
+    assert outcome.message.task_id == ""
+    return outcome.message
+
+
+async def test_initial_task_success_hands_the_request_to_the_executor() -> None:
+    gate, server = _gate()
+    context = _make_context(_initial_message())
+
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
+    assert len(server.task_calls) == 1
+    assert server.task_calls[0][0] == TASK_PROMPT
+    assert context.message is not None
+    assert context.message.parts[0].text == TASK_PROMPT
+
+
+@pytest.mark.parametrize(
+    ("code", "expected_uri", "missing_slot"),
+    [
+        ("content.param_missing", INFORMATION_NEGOTIATION_PROPOSE_URI, "region"),
+        ("content.value_not_allowed", TARGET_NEGOTIATION_PROPOSE_URI, "guaranteedThroughputTarget"),
+        ("content.rule_violation", FEASIBILITY_NEGOTIATION_PROPOSE_URI, "guaranteedThroughputTarget"),
+    ],
+)
+async def test_initial_validation_failure_emits_a_propose_without_a_task(
+    code: str, expected_uri: str, missing_slot: str
+) -> None:
+    gate, server = _gate()
+    server.task_error = _content_error(code, missing_slot)
+
+    message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
+
+    metadata = message.metadata
+    session = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
+    assert session["id"] == CONTEXT_ID
+    assert session["round"] == 1
+    assert session["maxRounds"] == 3
+    assert session["performative"] == NegotiationPerformative.PROPOSE.value
+    assert len(server.propose_generations) == 1
+    assert server.propose_generations[0][1].round == 1
+    assert server.propose_generations[0][2] == expected_uri
+
+
+async def test_unmapped_validation_failure_returns_a_plain_error_without_a_task() -> None:
+    gate, server = _gate()
+    server.task_error = _content_error("content.format_error")
+
+    message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
+
+    assert NEGOTIATION_T_EXTENSION_URI not in message.metadata
+    assert NEGOTIATION_CONTEXT_METADATA_KEY not in message.metadata
+
+
+async def test_missing_task_extension_returns_an_error_without_a_task() -> None:
+    gate, server = _gate()
+    context = _make_context(_initial_message(), extensions=())
+
+    message = _assert_no_task(await gate.handle(context))
+
+    assert TASK_T_EXTENSION_URI in message.parts[0].text
+    assert server.task_calls == []
+
+
+async def test_accept_validates_and_hands_the_agreed_task_prompt_to_the_executor() -> None:
+    gate, server = _gate()
+    message = _negotiation_message(
+        NegotiationPerformative.ACCEPT,
+        round_number=2,
+        template_uri=TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+        task_prompt=TASK_PROMPT,
+    )
+    context = _make_context(message)
+
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
+    assert len(server.accept_calls) == 1
+    assert server.accept_calls[0][1].round == 2
+    assert len(server.task_calls) == 1
+    assert context.message is not None
+    assert context.message.parts[0].text == TASK_PROMPT
+
+
+async def test_accept_validation_failure_returns_an_error_without_a_task() -> None:
+    gate, server = _gate()
+    server.accept_error = ValueError("bad accept")
+    message = _negotiation_message(
+        NegotiationPerformative.ACCEPT,
+        round_number=1,
+        template_uri=INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+        task_prompt=TASK_PROMPT,
+    )
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    assert NEGOTIATION_CONTEXT_METADATA_KEY not in result.metadata
+
+
+async def test_accept_without_a_task_prompt_returns_an_error_without_a_task() -> None:
+    gate, server = _gate()
+    message = _negotiation_message(
+        NegotiationPerformative.ACCEPT,
+        round_number=1,
+        template_uri=INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    )
+
+    _assert_no_task(await gate.handle(_make_context(message)))
+
+    assert server.task_calls == []
+
+
+@pytest.mark.parametrize(
+    ("performative", "template_uri"),
+    [
+        (NegotiationPerformative.REJECT, INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI),
+        (NegotiationPerformative.ABORT, NEGOTIATION_ABORT_URI),
+    ],
+)
+async def test_terminal_client_performative_returns_the_plain_end_message(
+    performative: NegotiationPerformative, template_uri: str
+) -> None:
+    gate, server = _gate()
+    message = _negotiation_message(performative, round_number=2, template_uri=template_uri)
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    assert result.parts[0].text == END_MESSAGE_TEXT
+    assert NEGOTIATION_T_EXTENSION_URI not in result.metadata
+    assert NEGOTIATION_CONTEXT_METADATA_KEY not in result.metadata
+    assert len(server.reject_calls) + len(server.abort_calls) == 1
+
+
+async def test_counter_propose_round_one_emits_a_round_two_propose_without_a_task() -> None:
+    gate, server = _gate()
+    message = _negotiation_message(
+        NegotiationPerformative.PROPOSE,
+        round_number=1,
+        template_uri=TARGET_NEGOTIATION_PROPOSE_URI,
+        sample={"cellId": "cell-001", "window": "17:30~23:00", "targetRate": 20},
+    )
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    session = result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    assert session["id"] == CONTEXT_ID
+    assert session["round"] == 2
+    assert session["maxRounds"] == 3
+    assert session["performative"] == NegotiationPerformative.PROPOSE.value
+    assert len(server.propose_calls) == 1
+    assert len(server.propose_generations) == 1
+    assert server.propose_generations[0][1].round == 2
+
+
+async def test_counter_propose_at_max_rounds_emits_an_abort_without_a_task() -> None:
+    gate, server = _gate()
+    message = _negotiation_message(
+        NegotiationPerformative.PROPOSE,
+        round_number=3,
+        template_uri=TARGET_NEGOTIATION_PROPOSE_URI,
+        sample={"cellId": "cell-001", "window": "17:30~23:00", "targetRate": 20},
+    )
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    session = result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    assert session["round"] == 3
+    assert session["performative"] == NegotiationPerformative.ABORT.value
+    assert result.metadata[TEMPLATE_URI_METADATA_KEY] == NEGOTIATION_ABORT_URI
+    assert len(server.abort_generations) == 1
+    assert server.abort_generations[0][1].round == 3
+
+
+async def test_counter_propose_without_a_sample_advances_the_preset_sequence() -> None:
+    gate, server = _gate()
+    message = _negotiation_message(
+        NegotiationPerformative.PROPOSE,
+        round_number=2,
+        template_uri=TARGET_NEGOTIATION_PROPOSE_URI,
+    )
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 3
+    assert server.propose_generations[0][1].round == 3
+
+
+async def test_counter_propose_validation_failure_returns_an_error_without_a_task() -> None:
+    gate, server = _gate()
+    server.propose_error = ValueError("bad counter proposal")
+    message = _negotiation_message(
+        NegotiationPerformative.PROPOSE,
+        round_number=1,
+        template_uri=TARGET_NEGOTIATION_PROPOSE_URI,
+    )
+
+    result = _assert_no_task(await gate.handle(_make_context(message)))
+
+    assert NEGOTIATION_CONTEXT_METADATA_KEY not in result.metadata
+    assert server.propose_generations == []
+
+
+async def test_pre_task_detection_uses_current_task_not_the_generated_task_id() -> None:
+    gate, server = _gate()
+    context = _make_context(_initial_message())
+
+    assert context.task_id  # RequestContext generates one, but no Task exists yet
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert len(server.task_calls) == 1
+
+
+async def test_existing_task_bypasses_the_negotiation_gate() -> None:
+    gate, server = _gate()
+    task = Task(id="task-1", context_id=CONTEXT_ID)
+    context = _make_context(_initial_message(), current_task=task)
+
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
+    assert server.task_calls == []
+
+
+@pytest.fixture
+def real_server(offline_config: SampleConfig) -> A2ATServer:
+    """Build a real A2ATServer on the scripted SDK provider (no network)."""
+    register_scripted_provider()
+    return A2ATServer(env_path=prepare_sdk_env_path(offline_config))
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_uri"),
+    [
+        (NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN, INFORMATION_NEGOTIATION_PROPOSE_URI),
+        (NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, TARGET_NEGOTIATION_PROPOSE_URI),
+        (NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN, FEASIBILITY_NEGOTIATION_PROPOSE_URI),
+    ],
+)
+async def test_real_server_opens_the_matching_negotiation(
+    real_server: A2ATServer, prompt: str, expected_uri: str
+) -> None:
+    gate = NegotiationGate(real_server)
+    context_id = str(uuid.uuid4())
+
+    result = _assert_no_task(
+        await gate.handle(_make_context(_initial_message(prompt, context_id=context_id)))
+    )
+
+    assert result.context_id == context_id
+    assert result.metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
+    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["id"] == context_id
+    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
+    assert result.metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["maxRounds"] == 3
