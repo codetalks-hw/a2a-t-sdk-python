@@ -11,12 +11,16 @@ Built-in scripts cover the two agent roles:
 * the server agent reads the cell profile, evaluates the plan, applies it, and writes the report;
 * the client agent returns a structured ``NegotiationDecision``.
 
+Tool arguments may echo a value returned by an earlier tool call with the
+``${last_tool_response.<key>}`` placeholder; the built-in server script uses it for the ``plan_id``
+of the report call, so the script always targets the plan the apply tool actually created.
+
 Tests and later tasks can inject their own scripts with :func:`build_fake_model`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import AsyncGenerator
 
@@ -35,6 +39,9 @@ CLIENT_AGENT_NAME = "ran_energy_request_agent"
 
 #: Final text served when a script runs out of turns.
 DEFAULT_FINAL_TEXT = "RAN energy-saving task completed."
+
+#: Prefix of a tool argument resolved from the most recent tool response.
+LAST_RESPONSE_PLACEHOLDER_PREFIX = "${last_tool_response."
 
 
 @dataclass(frozen=True)
@@ -62,15 +69,24 @@ class FakeTurn:
     text: str | None = None
     tool_calls: tuple[FakeToolCall, ...] = ()
 
-    def to_response(self) -> LlmResponse:
-        """Build the ADK response of this turn."""
+    def to_response(self, last_tool_response: Mapping[str, object] | None = None) -> LlmResponse:
+        """Build the ADK response of this turn.
+
+        Args:
+            last_tool_response: Payload of the most recent tool response; ``${last_tool_response.<key>}``
+                argument placeholders are resolved from it.
+        """
+        context = last_tool_response or {}
         parts: list[types.Part] = []
         if self.text is not None:
             parts.append(types.Part(text=self.text))
         for call in self.tool_calls:
             parts.append(
                 types.Part(
-                    function_call=types.FunctionCall(name=call.name, args=dict(call.args)),
+                    function_call=types.FunctionCall(
+                        name=call.name,
+                        args={key: _resolve_arg(value, context) for key, value in call.args.items()},
+                    ),
                 )
             )
         return LlmResponse(
@@ -126,7 +142,7 @@ DEFAULT_SERVER_SCRIPT = FakeScript(
             tool_calls=(
                 FakeToolCall(
                     name="generate_energy_saving_report",
-                    args={"plan_id": "plan-cell-001-001"},
+                    args={"plan_id": LAST_RESPONSE_PLACEHOLDER_PREFIX + "plan_id}"},
                 ),
             )
         ),
@@ -173,6 +189,31 @@ def _function_response_count(llm_request: LlmRequest) -> int:
         for part in content.parts or []
         if part.function_response is not None
     )
+
+
+def _last_function_response(llm_request: LlmRequest) -> dict[str, object]:
+    """Return the payload of the most recent tool response in the request."""
+    latest: dict[str, object] = {}
+    for content in llm_request.contents:
+        for part in content.parts or []:
+            if part.function_response is None:
+                continue
+            response = part.function_response.response
+            if isinstance(response, dict):
+                latest = {str(key): value for key, value in response.items()}
+    return latest
+
+
+def _resolve_arg(value: object, tool_response: Mapping[str, object]) -> object:
+    """Resolve a ``${last_tool_response.<key>}`` placeholder, leaving other values untouched."""
+    if (
+        isinstance(value, str)
+        and value.startswith(LAST_RESPONSE_PLACEHOLDER_PREFIX)
+        and value.endswith("}")
+    ):
+        key = value[len(LAST_RESPONSE_PLACEHOLDER_PREFIX) : -1]
+        return tool_response.get(key, value)
+    return value
 
 
 def _select_script(llm_request: LlmRequest, scripts: Sequence[FakeScript]) -> FakeScript | None:
@@ -228,7 +269,7 @@ class FakeLlm(BaseLlm):
             return
         index = _function_response_count(llm_request)
         if index < len(script.turns):
-            yield script.turns[index].to_response()
+            yield script.turns[index].to_response(_last_function_response(llm_request))
             return
         yield LlmResponse(
             content=types.Content(role="model", parts=[types.Part(text=script.default_text)]),
