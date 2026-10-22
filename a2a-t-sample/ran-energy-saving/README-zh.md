@@ -20,7 +20,7 @@
 
 客户端请求 RAN 节能，例如“在满足分时段保障速率目标的前提下最大化节能”。该请求经常无法按原样执行：
 
-- 缺少必需参数（哪个区域？）；
+- 缺少必需参数（哪个分时段保障速率目标？）；
 - 目标存在歧义（两个吞吐时段重叠）；
 - 在当前条件下不可行（长时间停电期间仍要求保障速率）。
 
@@ -233,10 +233,10 @@ python run_demo.py --ui --mode manual --scenario target --ui-port 8080
 
 | 场景 | 触发 | 协商序列 | 最终状态 |
 | --- | --- | --- | --- |
-| `information` | Task-T 请求缺少区域（`content.param_missing`）。 | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
+| `information` | Task-T 请求缺少分时段保障速率目标（`content.param_missing`）。 | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
 | `target` | 保障吞吐目标的时间段重叠（`content.value_not_allowed`）。 | `S:Propose(1)` → `C:Propose(1)`（反提议） → `S:Propose(2)`（修订） → `C:Accept(2)` | Task `COMPLETED` + 报告（`task_completed`） |
 | `feasibility` | 保障速率与 18 小时停电冲突（`content.rule_violation`）。 | `S:Propose(1)`（替代方案） → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
-| `reject` | 客户端无法提供缺失内容。 | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | 无 Task（`no_task_negotiation_ended`） |
+| `reject` | 客户端无法提供缺失的保障速率目标。 | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | 无 Task（`no_task_negotiation_ended`） |
 | `abort` | 客户端反复反提议策略始终无法接受的方案。 | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | 无 Task（`no_task_negotiation_aborted`） |
 
 说明：

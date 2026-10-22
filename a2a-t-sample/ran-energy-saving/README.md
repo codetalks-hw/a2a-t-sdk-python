@@ -27,7 +27,7 @@ A client asks for RAN energy saving, for example "maximize energy saving while k
 time-segmented guaranteed throughput target". The request often cannot be executed exactly as
 received:
 
-- a required parameter is missing (which region?);
+- a required parameter is missing (which time-segmented throughput target?);
 - a target is ambiguous (two throughput windows overlap);
 - the request is infeasible under current conditions (a guaranteed rate during a long power
   outage).
@@ -267,10 +267,10 @@ The expected sequences are asserted by `tests/test_scenarios.py` and `tests/test
 
 | Scenario | Trigger | Negotiation sequence | Final state |
 | --- | --- | --- | --- |
-| `information` | The Task-T request omits the region (`content.param_missing`). | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
+| `information` | The Task-T request omits the time-segmented guaranteed throughput target (`content.param_missing`). | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
 | `target` | The guaranteed-throughput target has overlapping time segments (`content.value_not_allowed`). | `S:Propose(1)` → `C:Propose(1)` (counter) → `S:Propose(2)` (revision) → `C:Accept(2)` | Task `COMPLETED` + report (`task_completed`) |
 | `feasibility` | A guaranteed rate conflicts with an 18-hour power outage (`content.rule_violation`). | `S:Propose(1)` (alternative plan) → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
-| `reject` | The client cannot provide the missing content. | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | No Task (`no_task_negotiation_ended`) |
+| `reject` | The client cannot provide the missing throughput target. | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | No Task (`no_task_negotiation_ended`) |
 | `abort` | The client keeps counter-proposing a plan the policy cannot accept. | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | No Task (`no_task_negotiation_aborted`) |
 
 Notes:

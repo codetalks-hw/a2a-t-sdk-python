@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from a2a_t.client.a2at_client import A2ATClient
+from a2a_t.core.errors.exceptions import ContentValidationError
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
 from a2a_t.core.standard_templates import (
     INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
@@ -19,6 +20,8 @@ from a2a_t.core.standard_templates import (
 from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.llm.models import LLMClientConfig
 from a2a_t.server.a2at_server import A2ATServer
+from protocol.messages import TASK_TEMPLATE_URI
+from protocol.negotiation_policy import NegotiationKind, negotiation_kind_for_errors
 from protocol.server_app import prepare_sdk_env_path
 from shared.config import SampleConfig
 from shared.scenario import LANGUAGE_ZH, SCENARIOS, Scenario
@@ -46,6 +49,7 @@ from shared.scripted_llm import (
     register_scripted_provider,
     route_structured_call,
 )
+from shared.task_schema import TASK_PARAM_SCHEMA
 
 SLOT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -301,6 +305,43 @@ def _negotiation_context(performative: NegotiationPerformative) -> NegotiationCo
         max_rounds=3,
         performative=performative,
     )
+
+
+def test_information_client_extraction_succeeds_and_server_maps_to_information(
+    offline_config: SampleConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The missing throughput target is optional to the client but required by the server.
+
+    The region stays in the request (the Task-T template marks ``task_object`` required), so the
+    client's ``fromText`` extraction must render a prompt; the omitted ``guaranteedThroughputTarget``
+    (the template's optional ``task_context``) must then make the server report
+    ``content.param_missing`` and map to the information negotiation.
+    """
+    register_scripted_provider()
+    monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
+    env_path = prepare_sdk_env_path(offline_config)
+    client = A2ATClient(env_path=env_path)
+    server = A2ATServer(env_path=env_path)
+    request = SCENARIOS["information"].user_request["en-US"]
+
+    content = client.generate_task_prompt_from_text(request, TASK_TEMPLATE_URI)
+    prompt_text = content.prompt_text
+    assert prompt_text is not None
+
+    assert "Songshanhu Administration Committee" in prompt_text
+    assert "07:00~17:30,10Mbps" not in prompt_text
+    with pytest.raises(ContentValidationError) as excinfo:
+        server.validate_task_prompt_and_data_filling(
+            prompt_text,
+            TASK_PARAM_SCHEMA,
+            TASK_TEMPLATE_URI,
+        )
+
+    errors = excinfo.value.errors
+    assert [error.slot_name for error in errors] == ["guaranteedThroughputTarget"]
+    assert errors[0].code == "content.param_missing"
+    assert negotiation_kind_for_errors(errors) is NegotiationKind.INFORMATION
 
 
 def test_real_server_validates_accept_offline(real_negotiation_server: A2ATServer) -> None:

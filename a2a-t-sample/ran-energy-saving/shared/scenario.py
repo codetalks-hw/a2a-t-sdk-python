@@ -5,10 +5,16 @@ negotiation kind, the exact performative/round sequence from the design, the exp
 and the decisions a scripted (offline) client returns. Tests assert the sequence and the rounds
 instead of log text.
 
-The ``reject`` scenario reuses the missing-region request: the server opens an ``information``
+The ``reject`` scenario reuses the missing-throughput request: the server opens an ``information``
 negotiation and the client rejects because it cannot provide the missing content. The ``abort``
 scenario reuses the overlapping-throughput ``target`` request and counter-proposes an
 unacceptable schedule until the server aborts at ``maxRounds``.
+
+The information request deliberately omits the time-segmented guaranteed throughput target
+(``task_context``): the Task-T template marks that slot optional, so the client can still render
+the prompt, while the server's caller schema marks it required and opens the information
+negotiation. Omitting the region would instead fail the client's required-slot validation before
+any A2A message is sent, because the template marks ``task_object`` required.
 """
 
 from __future__ import annotations
@@ -64,19 +70,25 @@ NATURAL_LANGUAGE_PROMPT_INPUT_EN = (
     "{07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}."
 )
 
-#: Chinese natural-language task request of the information negotiation: the region is omitted, so
-#: the Task-T validation reports the missing-parameter content error.
+#: Chinese natural-language task request of the information negotiation: the region is present but
+#: the time-segmented guaranteed throughput target is omitted. The Task-T template's
+#: ``task_context`` slot is optional, so the client renders the prompt; the server's caller schema
+#: requires ``guaranteedThroughputTarget`` and reports the missing-parameter content error.
 NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH = (
-    "创建无线网络节能任务：在满足任务上下文的前提下最大化节能；"
-    "分时段保障速率目标为 {00:00~07:00,2Mbps}、{07:00~17:30,10Mbps}、"
-    "{17:30~23:00,20Mbps}、{23:00~24:00,2Mbps}。"
+    "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
+    "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
+    "在满足任务上下文的前提下最大化节能。"
 )
 
-#: English natural-language task request of the information negotiation (region omitted).
+#: English natural-language task request of the information negotiation (throughput target
+#: omitted, region present). The explicit task-description clause keeps the request rich enough for
+#: a live model to fill the template's required ``task_description`` slot; the omitted slot remains
+#: only the time-segmented guaranteed throughput target.
 NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN = (
-    "Create a RAN energy saving task to maximize energy saving. The time-segment-based "
-    "guaranteed throughput target is {00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, "
-    "{17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}."
+    "Create a RAN energy saving task in the Songshanhu Administration Committee area. Based on the "
+    "task object and task context, output a wireless network energy saving plan that achieves the "
+    "energy saving goal defined in the task target and returns the energy saving result in the "
+    "format defined in the expected output; maximize energy saving under the task context."
 )
 
 #: Chinese natural-language task request of the target negotiation: the guaranteed throughput
@@ -120,8 +132,9 @@ REGION_STRINGS: dict[str, str] = {
 }
 
 #: Task-T parameters the client refills on accept, per language. The base set is the complete,
-#: non-overlapping request; the target and feasibility kinds override the guaranteed-throughput
-#: target with the value their negotiation agrees on.
+#: non-overlapping request; the information kind uses it to supply the throughput target it omitted
+#: on purpose, while the target and feasibility kinds override the guaranteed-throughput target with
+#: the value their negotiation agrees on.
 _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
     LANGUAGE_EN: {
         "operationType": "create",
@@ -206,8 +219,8 @@ def accept_filled_params(kind: str, language: str = LANGUAGE_ZH) -> dict[str, ob
         language: Process-level language selecting the localized values.
 
     Returns:
-        A fresh parameter map with the kind's agreed guaranteed-throughput target (and the
-        feasibility site context when applicable).
+        A fresh parameter map with the kind's agreed guaranteed-throughput target (the information
+        kind uses the base complete target) and the feasibility site context when applicable.
     """
     params = dict(_ACCEPT_BASE_PARAMS.get(language, _ACCEPT_BASE_PARAMS[LANGUAGE_ZH]))
     override = _ACCEPT_TARGET_OVERRIDES.get(kind)
@@ -293,10 +306,16 @@ SCENARIO_INFORMATION_SPEC = Scenario(
     scripted_client_decisions=(
         NegotiationDecision(
             action="accept",
-            rationale="The missing coverage region is supplied, so the energy-saving task can run.",
+            rationale=(
+                "The missing time-segmented guaranteed throughput target is supplied, so the "
+                "energy-saving task can run."
+            ),
         ),
     ),
-    description="Task-T misses the region; the client accepts the server's missing-parameter proposal.",
+    description=(
+        "Task-T misses the guaranteed throughput target; the client accepts the server's "
+        "missing-parameter proposal."
+    ),
 )
 
 SCENARIO_TARGET_SPEC = Scenario(
@@ -367,10 +386,13 @@ SCENARIO_REJECT_SPEC = Scenario(
     scripted_client_decisions=(
         NegotiationDecision(
             action="reject",
-            rationale="The requested coverage region is not available from the client side.",
+            rationale="The requested guaranteed throughput target is not available from the client side.",
         ),
     ),
-    description="The client cannot provide the missing content; the negotiation ends without a task.",
+    description=(
+        "The client cannot provide the missing throughput target; the negotiation ends without a "
+        "task."
+    ),
 )
 
 SCENARIO_ABORT_SPEC = Scenario(

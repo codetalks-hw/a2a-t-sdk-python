@@ -100,22 +100,24 @@ _STAGE_FILES: dict[str, str] = {
     STAGE_NEGOTIATION_ABORT_EXTRACTION: "negotiation_abort_extraction.json",
 }
 
-#: Missing-region scenario inputs that flip the slot-extraction routing to the missing variant.
-_MISSING_SCENARIO_INPUTS = (
-    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
-    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
-)
-
-#: Complete scenario inputs; checked before the missing ones because the missing zh input is a
-#: substring of the complete zh input.
+#: Complete scenario inputs; checked before every other variant so a complete request never falls
+#: through to a negotiation variant.
 _COMPLETE_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_EN, NATURAL_LANGUAGE_PROMPT_INPUT_ZH)
 
 #: Target / feasibility negotiation inputs: complete inputs served by their own slot-extraction
-#: variants, whose canned slots preserve the distinguishing values the rendered prompt needs.
+#: variants, whose canned slots preserve the distinguishing values the rendered prompt needs. They
+#: are checked before the missing inputs so the shared region/goal wording of an ambiguous or
+#: infeasible request is never mistaken for the intentionally incomplete information request.
 _TARGET_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN, NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH)
 _FEASIBILITY_SCENARIO_INPUTS = (
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
+)
+
+#: Missing-throughput scenario inputs that flip the slot-extraction routing to the missing variant.
+_MISSING_SCENARIO_INPUTS = (
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
 )
 
 #: Distinguishing values the target/feasibility rendered prompts carry, so the content-validation
@@ -123,6 +125,11 @@ _FEASIBILITY_SCENARIO_INPUTS = (
 #: inputs. Each marker is a value the failing input carries and the negotiated refill does not.
 _TARGET_VALIDATION_MARKER = "20:00~00:00,10Mbps"
 _FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
+
+#: Throughput segment of the complete (information-accept) target. A rendered Task-T prompt that
+#: carries the region but none of this marker omits the time-segmented guaranteed throughput
+#: target, i.e. it is the information scenario's intentionally incomplete prompt.
+_COMPLETE_THROUGHPUT_MARKER = "07:00~17:30,10Mbps"
 
 #: From-data Task-T refill markers (the accepted values are the only distinguishing text).
 _TARGET_REFILL_MARKERS = ("23:00~00:00,10Mbps",)
@@ -450,8 +457,6 @@ def route_structured_call(
     if "slots" in property_names and "slot_errors" in property_names:
         if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION
-        if any(scenario_input in user_content for scenario_input in _MISSING_SCENARIO_INPUTS):
-            return STAGE_SLOT_EXTRACTION_MISSING
         if any(scenario_input in user_content for scenario_input in _TARGET_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION_TARGET
         if any(scenario_input in user_content for scenario_input in _FEASIBILITY_SCENARIO_INPUTS):
@@ -460,6 +465,8 @@ def route_structured_call(
             return STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL
         if any(marker in user_content for marker in _TARGET_REFILL_MARKERS):
             return STAGE_SLOT_EXTRACTION_TARGET_REFILL
+        if any(scenario_input in user_content for scenario_input in _MISSING_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION_MISSING
         return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
         head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
@@ -477,6 +484,12 @@ def route_structured_call(
             return STAGE_CONTENT_VALIDATION_MISSING
         region_string = REGION_STRINGS.get(language or "", "")
         if region_string and region_string not in head:
+            return STAGE_CONTENT_VALIDATION_MISSING
+        # A rendered Task-T prompt is not the raw scenario request: the information scenario's
+        # prompt carries the region but no time-segmented throughput target. Complete, target and
+        # feasibility refills are matched above, so an absent complete-throughput marker is the
+        # intentionally incomplete information prompt.
+        if _COMPLETE_THROUGHPUT_MARKER not in head:
             return STAGE_CONTENT_VALIDATION_MISSING
         return STAGE_CONTENT_VALIDATION
     for signature, stage in _NEGOTIATION_EXTRACTION_SIGNATURES:

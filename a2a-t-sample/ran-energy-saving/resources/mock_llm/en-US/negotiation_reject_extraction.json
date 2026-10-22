@@ -2,8 +2,8 @@
   "conclusion": "Reject",
   "items": [
     {
-      "name": "region",
-      "value": "The requested coverage region is not available from the client side."
+      "name": "guaranteedThroughputTarget",
+      "value": "The requested guaranteed throughput target is not available from the client side."
     }
   ]
 }

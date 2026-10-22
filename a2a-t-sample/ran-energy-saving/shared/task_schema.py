@@ -45,5 +45,5 @@ TASK_PARAM_SCHEMA: dict[str, object] = {
             "description": "Optional background event and its period of a site-level task.",
         },
     },
-    "required": ["operationType", "region"],
+    "required": ["operationType", "region", "guaranteedThroughputTarget"],
 }

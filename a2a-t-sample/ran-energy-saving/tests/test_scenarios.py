@@ -142,6 +142,21 @@ async def test_no_task_scenarios_end_with_the_plain_end_or_abort(
     assert exchange.events[-1].get("kind") == "message"
 
 
+async def test_information_propose_names_the_missing_throughput_target(
+    english_language: None,
+) -> None:
+    """The information propose itemizes the server-required throughput target, not the region."""
+    config = offline_direct_config(free_tcp_port())
+
+    with running_server(config):
+        result, _ = await run_scenario_flow(config, "information", "sse")
+
+    proposals = _negotiation_contents(result.events, "PROPOSE")
+    assert len(proposals) == 1
+    assert "guaranteedThroughputTarget" in proposals[0][1]
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+
+
 async def test_target_round_two_content_is_revised(english_language: None) -> None:
     """The offline scripted extraction must render a different proposal in round 2 than round 1."""
     config = offline_direct_config(free_tcp_port())

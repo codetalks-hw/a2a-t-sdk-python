@@ -272,6 +272,10 @@ async def test_information_scenario_accepts_and_completes_a_task() -> None:
     assert result.report == {"summary": "Plan applied", "estimated_saving_kwh": 12.5}
     assert _client_negotiation_steps(transport.requests) == [("ACCEPT", 1)]
     assert prompt_client.refill_data[0]["region"] == "Songshanhu Administration Committee"
+    assert prompt_client.refill_data[0]["guaranteedThroughputTarget"] == (
+        "{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
+        "{23:00~24:00,2Mbps}"
+    )
     accept_metadata = MessageToDict(transport.requests[1].message.metadata)
     assert accept_metadata[TASK_T_EXTENSION_URI].startswith("Refilled Task-T prompt:")
     assert accept_metadata[TEMPLATE_URI_METADATA_KEY] == "Negotiation-T/information-negotiation/accept-reject/v1"
@@ -310,7 +314,10 @@ async def test_reject_scenario_ends_without_a_task() -> None:
                 propose_event(
                     "information",
                     1,
-                    content="Please provide the following missing items: region.",
+                    content=(
+                        "Please provide the following missing items: "
+                        "guaranteedThroughputTarget."
+                    ),
                 )
             ],
             [end_event()],
@@ -321,7 +328,7 @@ async def test_reject_scenario_ends_without_a_task() -> None:
     assert result.final_state == FINAL_STATE_NEGOTIATION_ENDED
     assert result.task_id is None
     assert _client_negotiation_steps(transport.requests) == [("REJECT", 1)]
-    assert "region:" in prompt_client.reject_texts[0]
+    assert "guaranteedThroughputTarget:" in prompt_client.reject_texts[0]
     assert prompt_client.refill_data == []
 
 
