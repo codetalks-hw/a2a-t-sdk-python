@@ -43,6 +43,13 @@ NEGOTIATION_EXTENSION_URIS: Final[tuple[str, str]] = (TASK_T_EXTENSION_URI, NEGO
 #: when it is absent (the policy then advances through its preset revision sequence).
 SAMPLE_PROPOSAL_METADATA_KEY: Final[str] = "sampleProposal"
 
+#: Metadata key of the machine-readable structured errors on a REJECTED Task status message.
+#:
+#: Sample convention, not an A2A-T protocol field: the underlying ``ContentValidationError`` carries
+#: ``SlotValidationError`` entries, and flattening them into prose would lose the codes clients need
+#: for programmatic handling. The value is ``{"code": <overall code>, "errors": [<slot errors>]}``.
+STRUCTURED_ERRORS_METADATA_KEY: Final[str] = "structuredErrors"
+
 #: Text part of the standalone Negotiation-T propose message (the content itself lives in metadata).
 PROPOSE_MESSAGE_TEXT: Final[str] = "Negotiation proposal from the RAN energy saving service"
 

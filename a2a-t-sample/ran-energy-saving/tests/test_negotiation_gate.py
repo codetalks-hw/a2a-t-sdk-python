@@ -8,7 +8,7 @@ from collections.abc import Mapping
 import pytest
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext, UnauthenticatedUser
-from a2a.types import Message, Role, SendMessageRequest, Task
+from a2a.types import Message, Role, SendMessageRequest, Task, TaskState
 from a2a_t.core.errors.catalog import ErrorCatalog
 from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import (
@@ -30,7 +30,11 @@ from a2a_t.core.standard_templates import (
 )
 from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.server.a2at_server import A2ATServer
-from protocol.messages import END_MESSAGE_TEXT, SAMPLE_PROPOSAL_METADATA_KEY
+from protocol.messages import (
+    END_MESSAGE_TEXT,
+    SAMPLE_PROPOSAL_METADATA_KEY,
+    STRUCTURED_ERRORS_METADATA_KEY,
+)
 from protocol.negotiation_gate import GateOutcome, NegotiationGate
 from protocol.server_app import prepare_sdk_env_path
 from shared.config import SampleConfig
@@ -209,6 +213,7 @@ def _gate(server: FakePromptServer | None = None) -> tuple[NegotiationGate, Fake
 def _assert_no_task(outcome: GateOutcome) -> Message:
     assert outcome.short_circuit is True
     assert outcome.task_request is None
+    assert outcome.terminal_task is None
     assert outcome.message is not None
     assert outcome.message.task_id == ""
     return outcome.message
@@ -256,14 +261,29 @@ async def test_initial_validation_failure_emits_a_propose_without_a_task(
     assert server.propose_generations[0][2] == expected_uri
 
 
-async def test_unmapped_validation_failure_returns_a_plain_error_without_a_task() -> None:
+async def test_unmapped_validation_failure_returns_a_rejected_task() -> None:
     gate, server = _gate()
     server.task_error = _content_error("content.format_error")
+    context = _make_context(_initial_message())
 
-    message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
+    outcome = await gate.handle(context)
 
-    assert NEGOTIATION_T_EXTENSION_URI not in message.metadata
-    assert NEGOTIATION_CONTEXT_METADATA_KEY not in message.metadata
+    assert outcome.short_circuit is True
+    assert outcome.task_request is None
+    assert outcome.message is None
+    assert outcome.terminal_task is not None
+    task = outcome.terminal_task
+    assert task.status.state == TaskState.TASK_STATE_REJECTED
+    assert task.id == context.task_id
+    assert task.context_id == CONTEXT_ID
+    assert task.status.message.parts[0].text
+    structured = task.status.message.metadata[STRUCTURED_ERRORS_METADATA_KEY]
+    assert structured["code"]
+    assert structured["errors"][0]["slotName"] == "region"
+    assert structured["errors"][0]["code"] == "content.format_error"
+    assert structured["errors"][0]["message"]
+    assert len(task.history) == 1
+    assert server.task_calls  # validation ran, but the agent never executes
 
 
 async def test_missing_task_extension_returns_an_error_without_a_task() -> None:

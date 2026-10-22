@@ -22,6 +22,8 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from a2a_t.core.errors.catalog import ErrorCatalog
+from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
@@ -34,7 +36,7 @@ from google.adk.events.event import Event as AdkEvent
 from google.adk.runners import Runner
 from google.genai import types
 from protocol.messages import SAMPLE_PROPOSAL_METADATA_KEY, TASK_TEMPLATE_URI
-from protocol.negotiation_gate import GateOutcome, NegotiationGate
+from protocol.negotiation_gate import GateOutcome, NegotiationContentServer, NegotiationGate
 from protocol.server_app import build_agent_card, build_registration_payload
 from protocol.server_executor import (
     STATE_NEGOTIATION_CONTEXT,
@@ -90,6 +92,20 @@ class FixedGate:
     async def handle(self, context: RequestContext) -> GateOutcome:
         self.contexts.append(context)
         return self.outcome
+
+
+class RejectingPromptServer:
+    """Prompt-server double whose Task-T validation fails with an unmapped error code."""
+
+    def validate_task_prompt_and_data_filling(
+        self, prompt: str, schema: object, template_uri: str
+    ) -> object:
+        del prompt, schema, template_uri
+        raise ContentValidationError(
+            ErrorCatalog.CONTENT_SEMANTIC_CONFLICT,
+            {"section_label": "task_context", "reason": "rejected"},
+            errors=[SlotValidationError(slot_name="region", code="content.format_error", message="bad")],
+        )
 
 
 def _make_context(
@@ -257,6 +273,25 @@ async def test_executor_delegates_the_gate_approved_request() -> None:
 
     assert queue.events == []
     assert inner.contexts == [context]
+
+
+async def test_executor_enqueues_a_rejected_task_for_an_unmapped_validation_failure() -> None:
+    server = cast(NegotiationContentServer, RejectingPromptServer())
+    gate = NegotiationGate(server)
+    inner = RecordingExecutor()
+    executor = NegotiationAgentExecutor(gate=gate, inner=inner)
+    context = _make_context()
+    queue = RecordingEventQueue()
+
+    await executor.execute(context, queue)
+
+    assert len(queue.events) == 1
+    task = queue.events[0]
+    assert isinstance(task, Task)
+    assert task.status.state == TaskState.TASK_STATE_REJECTED
+    assert task.context_id == CONTEXT_ID
+    assert task.status.message.parts[0].text
+    assert inner.contexts == []
 
 
 async def test_executor_cancel_delegates_to_the_inner_executor() -> None:

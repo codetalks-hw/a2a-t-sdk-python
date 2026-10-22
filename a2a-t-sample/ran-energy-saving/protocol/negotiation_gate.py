@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
 
 from a2a.server.agent_execution.context import RequestContext
-from a2a.types import Message
+from a2a.types import Message, Task, TaskState, TaskStatus
 from a2a_t.core.errors.exceptions import A2ATError, ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
@@ -42,7 +42,9 @@ from protocol.messages import (
     ABORT_MESSAGE_TEXT,
     PROPOSE_MESSAGE_TEXT,
     SAMPLE_PROPOSAL_METADATA_KEY,
+    STRUCTURED_ERRORS_METADATA_KEY,
     TASK_TEMPLATE_URI,
+    build_agent_message,
     build_end_message,
     build_error_message,
     build_negotiation_message,
@@ -130,15 +132,19 @@ class GateOutcome:
     """Result of one gate invocation.
 
     Attributes:
-        short_circuit: ``True`` when the gate produced a standalone message that must be enqueued
-            without creating a Task.
-        message: short-circuit message; ``None`` when execution continues.
+        short_circuit: ``True`` when the gate produced a standalone response that must be enqueued
+            without running the agent.
+        message: short-circuit message (plain end/error or negotiation message); ``None`` when
+            execution continues or a terminal Task is returned.
         task_request: request context to hand to the inner ADK executor; ``None`` on short circuit.
+        terminal_task: terminal ``REJECTED`` Task for an unmapped Task-T validation failure; it is
+            enqueued as-is, so no agent runs and no Task lifecycle beyond REJECTED is produced.
     """
 
     short_circuit: bool
     message: Message | None = None
     task_request: RequestContext | None = None
+    terminal_task: Task | None = None
 
     @classmethod
     def execution(cls, context: RequestContext) -> GateOutcome:
@@ -149,6 +155,11 @@ class GateOutcome:
     def short(cls, message: Message) -> GateOutcome:
         """Return an outcome that only enqueues the given message."""
         return cls(short_circuit=True, message=message)
+
+    @classmethod
+    def rejected(cls, task: Task) -> GateOutcome:
+        """Return an outcome that enqueues a terminal ``REJECTED`` Task without running the agent."""
+        return cls(short_circuit=True, terminal_task=task)
 
 
 class NegotiationGate:
@@ -232,7 +243,7 @@ class NegotiationGate:
         except ContentValidationError as exc:
             kind = negotiation_kind_for_errors(exc.errors)
             if kind is None:
-                return GateOutcome.short(build_error_message(context_id, _validation_error_text(exc)))
+                return GateOutcome.rejected(self._build_rejected_task(context, exc))
             state = NegotiationState(
                 kind=kind,
                 round=1,
@@ -387,6 +398,36 @@ class NegotiationGate:
     # Shared helpers
     # ------------------------------------------------------------------
 
+    def _build_rejected_task(
+        self, context: RequestContext, error: ContentValidationError
+    ) -> Task:
+        """Build the terminal ``REJECTED`` Task of an unmapped Task-T validation failure.
+
+        The task is enqueued as-is: the agent never runs, so the pre-task negotiation model is kept.
+        The status message carries the readable error text plus the machine-readable structured
+        errors (the SDK's ``SlotValidationError`` entries) in its metadata.
+        """
+        context_id = context.context_id or ""
+        task_id = context.task_id or ""
+        status_message = build_agent_message(
+            context_id=context_id,
+            text=_validation_error_text(error),
+        )
+        status_message.metadata[STRUCTURED_ERRORS_METADATA_KEY] = {
+            "code": error.code_str,
+            "errors": _structured_errors(error.errors),
+        }
+        message = context.message
+        return Task(
+            id=task_id,
+            context_id=context_id,
+            status=TaskStatus(
+                state=TaskState.TASK_STATE_REJECTED,
+                message=status_message,
+            ),
+            history=[message] if message is not None else [],
+        )
+
     async def _emit_policy_decision(self, context_id: str | None, decision: PolicyDecision) -> GateOutcome:
         """Turn one policy decision into a standalone negotiation message or an execution request."""
         content = decision.content
@@ -484,6 +525,19 @@ def _missing_slot_names(errors: Sequence[SlotValidationError]) -> tuple[str, ...
         if slot_name.strip() and slot_name not in names:
             names.append(slot_name)
     return tuple(names)
+
+
+def _structured_errors(errors: Sequence[SlotValidationError]) -> list[dict[str, object]]:
+    """Render ``SlotValidationError`` entries as machine-readable mappings."""
+    return [
+        {
+            "slotName": item.slot_name,
+            "code": item.code,
+            "message": item.message,
+            "facts": dict(item.facts or {}),
+        }
+        for item in errors
+    ]
 
 
 def _validation_error_text(error: ContentValidationError) -> str:

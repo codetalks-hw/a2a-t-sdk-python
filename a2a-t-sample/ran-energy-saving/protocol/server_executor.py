@@ -238,8 +238,11 @@ class NegotiationAgentExecutor(AgentExecutor):
         """Run the gate, then short-circuit or delegate to the inner executor."""
         outcome = await self._gate.handle(context)
         if outcome.short_circuit:
+            if outcome.terminal_task is not None:
+                await event_queue.enqueue_event(outcome.terminal_task)
+                return
             if outcome.message is None:
-                raise ValueError("The gate short-circuited without a message")
+                raise ValueError("The gate short-circuited without a message or a terminal task")
             await event_queue.enqueue_event(outcome.message)
             return
         if outcome.task_request is None:
