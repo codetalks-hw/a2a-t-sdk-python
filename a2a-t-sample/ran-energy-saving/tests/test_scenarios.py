@@ -15,8 +15,11 @@ Asserted per scenario (design §8):
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import pytest
 from a2a.types import TaskState
+from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI
 from integration_helpers import (
     free_tcp_port,
     offline_direct_config,
@@ -24,6 +27,7 @@ from integration_helpers import (
     running_server,
 )
 from protocol.client_flow import ClientFlowResult
+from protocol.messages import metadata_to_dict, parse_negotiation_context
 from shared.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
@@ -48,6 +52,27 @@ def _expected_actions(scenario: Scenario) -> list[str]:
         for step in scenario.expected_sequence
         if step.actor == "client"
     ]
+
+
+def _negotiation_contents(
+    events: Sequence[Mapping[str, object]], performative: str
+) -> list[tuple[int, str]]:
+    """Return ``(round, Negotiation-T content)`` of every inbound message of one performative."""
+    contents: list[tuple[int, str]] = []
+    for event in events:
+        if event.get("kind") != "message":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        metadata_dict = metadata_to_dict(metadata)
+        session = parse_negotiation_context(metadata_dict)
+        if session is None or session.performative.value != performative:
+            continue
+        content = metadata_dict.get(NEGOTIATION_T_EXTENSION_URI)
+        if isinstance(content, str):
+            contents.append((session.round, content))
+    return contents
 
 
 def _completed_status_seen(result: ClientFlowResult) -> bool:
@@ -115,3 +140,37 @@ async def test_no_task_scenarios_end_with_the_plain_end_or_abort(
     assert result.task_id is None
     assert result.report is None
     assert exchange.events[-1].get("kind") == "message"
+
+
+async def test_target_round_two_content_is_revised(english_language: None) -> None:
+    """The offline scripted extraction must render a different proposal in round 2 than round 1."""
+    config = offline_direct_config(free_tcp_port())
+
+    with running_server(config):
+        result, _ = await run_scenario_flow(config, "target", "sse")
+
+    proposals = _negotiation_contents(result.events, "PROPOSE")
+    assert [round_number for round_number, _ in proposals] == [1, 2]
+    assert proposals[0][1] != proposals[1][1]
+    assert "Revised proposal for round 2" in proposals[1][1]
+
+
+async def test_server_abort_reason_names_the_server_and_the_round_limit(
+    english_language: None,
+) -> None:
+    """The abort scenario's server abort must not borrow the canned client-abort reason."""
+    config = offline_direct_config(free_tcp_port())
+
+    with running_server(config):
+        result, _ = await run_scenario_flow(config, "abort", "sse")
+
+    proposals = _negotiation_contents(result.events, "PROPOSE")
+    assert [round_number for round_number, _ in proposals] == [1, 2, 3]
+    assert len({content for _, content in proposals}) == 3
+
+    aborts = _negotiation_contents(result.events, "ABORT")
+    assert len(aborts) == 1
+    reason = aborts[0][1]
+    assert "The server ended the negotiation" in reason
+    assert "maximum number of rounds (3)" in reason
+    assert "client aborted" not in reason.lower()

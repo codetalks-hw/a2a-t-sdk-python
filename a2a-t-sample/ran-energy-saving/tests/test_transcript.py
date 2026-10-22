@@ -52,6 +52,7 @@ def _status_event() -> dict[str, object]:
 
 
 def _artifact_event() -> dict[str, object]:
+    """Return the final report artifact; it echoes the agreeing negotiation context (design §6.4)."""
     return {
         "kind": "artifact",
         "task_id": "task-1",
@@ -59,6 +60,15 @@ def _artifact_event() -> dict[str, object]:
         "artifact_id": "artifact-1",
         "name": "energy saving intent report",
         "data": {"estimated_saving_kwh": 12.5},
+        "metadata": {
+            NEGOTIATION_CONTEXT_METADATA_KEY: {
+                "id": CONTEXT_ID,
+                "round": 1,
+                "maxRounds": 3,
+                "performative": "ACCEPT",
+            },
+            TEMPLATE_URI_METADATA_KEY: "Task-T/network-layer/ran-energy-saving/v1",
+        },
     }
 
 
@@ -148,6 +158,8 @@ def test_record_final_and_write_json_and_markdown(tmp_path: Path) -> None:
     assert document["events"][0]["round"] == 1
     assert document["events"][1]["kind"] == "status"
     assert document["events"][2]["kind"] == "artifact"
+    assert document["events"][2]["performative"] is None
+    assert document["events"][2]["round"] == 1
     markdown = paths.markdown_path.read_text(encoding="utf-8")
     assert "# RAN energy-saving negotiation transcript" in markdown
     assert "| 1 | 1 | server->client | propose | PROPOSE |" in markdown

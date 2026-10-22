@@ -165,13 +165,23 @@ python run_demo.py --scenario target --mode auto --model-mode offline
 If you skipped activation, use `../../.venv/Scripts/python.exe` (Windows) or
 `../../.venv/bin/python` (Linux/macOS) instead of `python`.
 
-Expected output for `information` (paths and ids vary):
+Expected output for `information` (abridged: tool-artifact payload lines, ids and paths omitted):
 
 ```text
+[run_demo] starting registry on 5001 ...
+[run_demo] starting server on 8000 ...
 [run_demo] running client (scenario=information, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
+[client] agent-discovered: url=http://127.0.0.1:8000 discovery=registry
 [client] event kind=propose performative=PROPOSE summary=## Information Negotiation Please supplement ...
+[client] sse-received events=1
 [client] decision-requested round=1
-[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
+[client] event kind=status performative=status summary=TASK_STATE_WORKING
+[client] event kind=artifact performative=artifact summary=<id>: {"args": {"cell_id": "cell-001", "date": "<date>"}, "id": "<id>", "name": "get_cell_energy_profile"}
+...  # 7 more tool-call artifacts; ids and payloads omitted
+[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_COMPLETED
+[client] sse-received events=12
 [client] final_state=task_completed task_id=<uuid>
 [client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
 [client] transcript: .../runs/<timestamp>-information.json
@@ -179,23 +189,37 @@ Expected output for `information` (paths and ids vary):
 [run_demo] stopped 2 background process(es)
 ```
 
-Expected output for `target` (two rounds; the client counters in round 1, then accepts round 2):
+Expected output for `target` (two rounds; the client counters in round 1, then accepts round 2;
+abridged: tool-artifact payload lines, ids and paths omitted):
 
 ```text
+[run_demo] starting registry on 5001 ...
+[run_demo] starting server on 8000 ...
 [run_demo] running client (scenario=target, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
-[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] agent-discovered: url=http://127.0.0.1:8000 discovery=registry
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation Target negotiation for the RAN energy saving task: the guaranteed throughput target has two overlapping time segments, {17:30~23:00,20M...
+[client] sse-received events=1
 [client] decision-requested round=1
-[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation Revised proposal for round 2: cell cell-001, window 00:00~06:00, target rate 30%. Please accept this revised plan. ## Target Clarificat...
+[client] sse-received events=1
 [client] decision-requested round=2
-[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
+[client] event kind=status performative=status summary=TASK_STATE_WORKING
+...  # 8 tool-call artifacts; ids and payloads omitted
+[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_COMPLETED
+[client] sse-received events=12
 [client] final_state=task_completed task_id=<uuid>
 [client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[client] transcript: .../runs/<timestamp>-target.json
+[client] transcript: .../runs/<timestamp>-target.md
 [run_demo] stopped 2 background process(es)
 ```
 
-The two "propose" lines are the server's round-1 proposal and its revised round-2 proposal. The
-client's own counter-proposal does not appear in its received-event log; open the transcript to see
-the full two-way sequence (see §9).
+The two "propose" lines are the server's round-1 proposal and its revised round-2 proposal; the
+second one renders the revision (cell, window and target rate), not a copy of round 1. The client's
+own counter-proposal does not appear in its received-event log; open the transcript to see the full
+two-way sequence (see §9).
 
 ### Live CLI (OpenAI-compatible endpoint)
 

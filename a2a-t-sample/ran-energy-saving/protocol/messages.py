@@ -21,7 +21,6 @@ from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
     TASK_T_EXTENSION_URI,
-    TEMPLATE_URI_METADATA_KEY,
     MetadataContent,
     NegotiationContext,
     NegotiationPerformative,
@@ -32,9 +31,6 @@ from google.protobuf.struct_pb2 import Struct
 
 #: Task-T template addressed by the sample.
 TASK_TEMPLATE_URI: Final[str] = ENERGY_SAVING_URI
-
-#: Extensions every negotiation message declares on the wire.
-NEGOTIATION_EXTENSION_URIS: Final[tuple[str, str]] = (TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI)
 
 #: Metadata key carrying the sample-only counter proposal (``{cellId, window, targetRate}``).
 #:
@@ -151,13 +147,6 @@ def missing_extensions(requested_extensions: Sequence[str] | set[str], required:
     """
     requested = set(requested_extensions)
     return tuple(uri for uri in required if uri not in requested)
-
-
-def build_task_t_metadata(
-    prompt_text: str, template_uri: str = TASK_TEMPLATE_URI
-) -> dict[str, str]:
-    """Build the Task-T metadata entries of one generated task prompt."""
-    return {TASK_T_EXTENSION_URI: prompt_text, TEMPLATE_URI_METADATA_KEY: template_uri}
 
 
 def build_negotiation_metadata(

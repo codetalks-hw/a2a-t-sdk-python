@@ -68,8 +68,13 @@ def _text(value: object) -> str:
 
 
 def _event_kind(kind: str, performative: str | None) -> str:
-    """Return the semantic timeline kind (``propose``, ``status``, ``artifact``, ...)."""
-    if performative:
+    """Return the semantic timeline kind (``propose``, ``status``, ``artifact``, ...).
+
+    Only an A2A negotiation message takes its kind from the performative. Artifacts carry the
+    agreeing negotiation context as audit metadata (the final report echoes the Accept), so an
+    artifact stays an artifact instead of being mislabeled as an accept event.
+    """
+    if kind == "message" and performative:
         return performative.lower()
     if kind:
         return kind
@@ -169,7 +174,12 @@ class NegotiationTranscript:
         metadata = event.get("metadata")
         metadata_map = dict(metadata) if isinstance(metadata, Mapping) else {}
         session = parse_negotiation_context(metadata_map)
-        performative = session.performative.value if session is not None else None
+        # Only a negotiation message has a performative; artifacts and status updates carry the
+        # agreeing context as audit metadata but are not themselves messages of that performative.
+        is_negotiation_message = _text(event.get("kind")) == "message"
+        performative = (
+            session.performative.value if is_negotiation_message and session is not None else None
+        )
         template_uri = metadata_map.get(TEMPLATE_URI_METADATA_KEY)
         negotiation_text = _text(metadata_map.get(NEGOTIATION_T_EXTENSION_URI))
         entry: dict[str, object] = {

@@ -216,11 +216,16 @@ class RunManager:
             run.broadcast({"type": "event", "event": entry})
 
         def on_decision_requested(propose: NegotiationProposeView, session: NegotiationContext) -> None:
-            run.pending_decision = True
+            # The proposals are recorded in both modes because the finished run pairs them with the
+            # provider decisions; a manual decision panel only exists in manual mode.
             run.proposals.append(propose)
+            if run.mode != MODE_MANUAL:
+                return
+            run.pending_decision = True
             run.broadcast(
                 {
                     "type": "decision_requested",
+                    "mode": run.mode,
                     "proposal": propose.model_dump(),
                     "round": session.round,
                     "maxRounds": session.max_rounds,
@@ -515,15 +520,9 @@ def _sse_data(message: dict[str, object]) -> dict[str, str]:
     return {"data": json.dumps(message, ensure_ascii=False)}
 
 
-def supported_ui_modes() -> tuple[str, ...]:
-    """Return the decision modes the Web UI may start."""
-    return UI_MODES
-
-
 __all__ = [
     "RunConflictError",
     "RunManager",
     "RunState",
     "create_app",
-    "supported_ui_modes",
 ]

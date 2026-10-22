@@ -8,14 +8,17 @@ wrong response.
 
 The routing rules and the canned content are the ones of the legacy sample mock, adapted to run as
 a regular provider: no SDK method is monkey-patched and no module outside the sample root is
-imported. Use :func:`register_scripted_provider` before constructing ``A2ATClient`` /
-``A2ATServer``; the registration is idempotent.
+imported. The target-propose and abort extraction schemas are identical in every round, so those
+two stages additionally synthesize their extraction from the policy's round marker instead of
+replaying one canned response. Use :func:`register_scripted_provider` before constructing
+``A2ATClient`` / ``A2ATServer``; the registration is idempotent.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,7 @@ from dotenv import dotenv_values
 
 from shared.scenario import (
     LANGUAGE_ZH,
+    MAX_ROUNDS,
     NATURAL_LANGUAGE_PROMPT_INPUT_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
@@ -177,6 +181,45 @@ _TEMPLATE_CONTENT_LABELS = ("Template Content:", "模板正文：")
 #: propose-extraction response has no relationship by default, so the provider re-adds it.
 _PROPOSE_RELATIONSHIP_MARKER = "Multiple items must be provided together."
 
+#: Localized labels starting the free-text input block of an extraction user prompt.
+_INPUT_LABELS: tuple[str, ...] = ("Input text:", "输入文本：")
+
+#: Server revised-proposal marker the deterministic policy emits from round 2 on. A single canned
+#: extraction cannot serve every round: the policy's text is the only round-specific input the
+#: fromText call carries, so the provider synthesizes the extraction from it.
+_REVISED_PROPOSAL_MARKER = "Revised proposal for round "
+
+#: Initial target-proposal wording of the policy; its canned extraction is already faithful.
+_TARGET_INITIAL_MARKER = "target negotiation needs clarification"
+
+#: Server-abort wording of the policy. A client abort carries a different reason, so the canned
+#: client-abort extraction stays correct for that path.
+_SERVER_ABORT_MARKER = "maximum number of rounds"
+
+#: Round budget carried by the policy's server-abort reason.
+_ROUND_BUDGET_PATTERN = re.compile(r"\((?P<rounds>\d+)\)")
+
+#: Fixed confirmation request of a clarified target, per language (the prompt forbids rephrasing).
+_TARGET_CONFIRM_REQUESTS: dict[str, str] = {
+    "en-US": "The target has been clarified. Do you agree to proceed with this target?",
+    "zh-CN": "目标已经澄清，是否同意按照此目标继续执行？",
+}
+
+#: Label prefix and entry name of a client counter proposal, per language.
+_CLIENT_COUNTER_LABELS: dict[str, str] = {
+    "en-US": "Client counter proposal",
+    "zh-CN": "客户端反提议",
+}
+
+#: Server-abort termination reason templates; ``{rounds}`` is the round budget.
+_SERVER_ABORT_REASONS: dict[str, str] = {
+    "en-US": (
+        "The server ended the negotiation because the maximum number of rounds ({rounds}) was "
+        "reached without convergence; the RAN energy saving task cannot start."
+    ),
+    "zh-CN": "服务端因达到最大协商轮次（{rounds}）仍未收敛而终止本次协商；无线网络节能任务无法启动。",
+}
+
 #: Routed stage names of every served structured call (module-level test hook).
 llm_calls: list[str] = []
 
@@ -255,6 +298,90 @@ def _declared_negotiation_kind(user_content: str) -> str | None:
     if len(segments) >= 2:
         return _KIND_BY_TEMPLATE_SEGMENT.get(segments[1])
     return None
+
+
+def _localized(values: dict[str, str], language: str) -> str:
+    """Return one localized value, falling back to ``en-US``."""
+    return values.get(language, values["en-US"])
+
+
+def _extraction_input(user_content: str) -> str:
+    """Return the free-text input block of one negotiation extraction user prompt."""
+    for label in _INPUT_LABELS:
+        index = user_content.find(label)
+        if index < 0:
+            continue
+        block = user_content[index + len(label) :].lstrip("\r\n")
+        end = block.find("\n\n")
+        return (block[:end] if end >= 0 else block).strip()
+    return user_content.strip()
+
+
+def target_propose_extraction_response(user_content: str, language: str) -> str | None:
+    """Synthesize the target propose extraction of one round, or ``None`` to use the canned file.
+
+    The extraction schema is the same in every round, so a single canned response would render
+    round 1's clarification text again for the server's revisions and for the client's counter
+    proposals. The policy's revised-plan text (``Revised proposal for round N: ...``) is
+    round-specific and authoritative, so it is served verbatim as the description; a client
+    counter proposal is labeled as the initiating side's text. The policy's first-round text keeps
+    the canned extraction, which already reflects it.
+
+    Args:
+        user_content: User prompt of the structured extraction call.
+        language: Process-level language selecting the fixed confirmation request.
+
+    Returns:
+        Serialized JSON extraction, or ``None`` when the canned response is faithful.
+    """
+    text = _extraction_input(user_content)
+    if _REVISED_PROPOSAL_MARKER in text:
+        return json.dumps(
+            {
+                "target_negotiation_description": text,
+                "intent_understanding": None,
+                "alignment_and_clarification": None,
+                "request_for_clarification": None,
+                "target_confirm_request": _localized(_TARGET_CONFIRM_REQUESTS, language),
+            },
+            ensure_ascii=False,
+        )
+    if _TARGET_INITIAL_MARKER in text.lower() or not text:
+        return None
+    label = _localized(_CLIENT_COUNTER_LABELS, language)
+    return json.dumps(
+        {
+            "target_negotiation_description": f"{label}: {text}",
+            "intent_understanding": None,
+            "alignment_and_clarification": [{"name": label, "value": text}],
+            "request_for_clarification": None,
+            "target_confirm_request": None,
+        },
+        ensure_ascii=False,
+    )
+
+
+def abort_extraction_response(user_content: str, language: str) -> str | None:
+    """Synthesize the server abort extraction, or ``None`` for a client-initiated abort.
+
+    The canned abort extraction reports that the client aborted. That is correct for a client abort,
+    but the server aborts at the round limit; its reason must name the server and the round budget
+    (design §8: the abort is the initiator's terminal action at ``maxRounds``).
+
+    Args:
+        user_content: User prompt of the structured extraction call.
+        language: Process-level language of the synthesized reason.
+
+    Returns:
+        Serialized JSON extraction for a server abort, ``None`` otherwise.
+    """
+    text = _extraction_input(user_content)
+    if _SERVER_ABORT_MARKER not in text.lower():
+        return None
+    match = _ROUND_BUDGET_PATTERN.search(text)
+    rounds = match.group("rounds") if match is not None else str(MAX_ROUNDS)
+    reason = _localized(_SERVER_ABORT_REASONS, language).format(rounds=rounds)
+    return json.dumps({"termination_reason": reason}, ensure_ascii=False)
 
 
 def negotiation_validation_response(user_content: str) -> str:
@@ -392,20 +519,25 @@ class ScriptedLLMClient:
     ) -> LLMResponse:
         """Return the canned response routed by the output schema and scenario marker."""
         del temperature, max_tokens
+        user_content = _first_user_content(messages)
         stage = route_structured_call(messages, json_schema, language=self.language)
         self.calls.append(stage)
         llm_calls.append(stage)
         if stage == STAGE_NEGOTIATION_SEMANTIC_VALIDATION:
             return LLMResponse(
-                content=negotiation_validation_response(_first_user_content(messages)),
+                content=negotiation_validation_response(user_content),
                 model="scripted",
                 usage={"prompt_tokens": 0, "completion_tokens": 0},
                 metadata={"scripted_stage": stage, "language": self.language},
             )
-        content = self._script[stage]
-        if stage == STAGE_NEGOTIATION_PROPOSE_EXTRACTION and _PROPOSE_RELATIONSHIP_MARKER in _first_user_content(
-            messages
-        ):
+        content: str | None = None
+        if stage == STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION:
+            content = target_propose_extraction_response(user_content, self.language)
+        elif stage == STAGE_NEGOTIATION_ABORT_EXTRACTION:
+            content = abort_extraction_response(user_content, self.language)
+        if content is None:
+            content = self._script[stage]
+        if stage == STAGE_NEGOTIATION_PROPOSE_EXTRACTION and _PROPOSE_RELATIONSHIP_MARKER in user_content:
             extracted = json.loads(content)
             extracted["relationship"] = _PROPOSE_RELATIONSHIP_MARKER
             content = json.dumps(extracted, ensure_ascii=False)

@@ -144,13 +144,23 @@ python run_demo.py --scenario target --mode auto --model-mode offline
 
 若跳过激活，请把 `python` 替换为 `../../.venv/Scripts/python.exe`（Windows）或 `../../.venv/bin/python`（Linux/macOS）。
 
-`information` 的预期输出（路径与 id 会变化）：
+`information` 的预期输出（已节选：工具调用 artifact 的明细行、id 与路径省略）：
 
 ```text
+[run_demo] starting registry on 5001 ...
+[run_demo] starting server on 8000 ...
 [run_demo] running client (scenario=information, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
+[client] agent-discovered: url=http://127.0.0.1:8000 discovery=registry
 [client] event kind=propose performative=PROPOSE summary=## Information Negotiation Please supplement ...
+[client] sse-received events=1
 [client] decision-requested round=1
-[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
+[client] event kind=status performative=status summary=TASK_STATE_WORKING
+[client] event kind=artifact performative=artifact summary=<id>: {"args": {"cell_id": "cell-001", "date": "<date>"}, "id": "<id>", "name": "get_cell_energy_profile"}
+...  # 其余 7 条工具调用 artifact；id 与内容省略
+[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_COMPLETED
+[client] sse-received events=12
 [client] final_state=task_completed task_id=<uuid>
 [client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
 [client] transcript: .../runs/<timestamp>-information.json
@@ -158,21 +168,35 @@ python run_demo.py --scenario target --mode auto --model-mode offline
 [run_demo] stopped 2 background process(es)
 ```
 
-`target` 的预期输出（两轮；客户端在第 1 轮反提议，在第 2 轮接受）：
+`target` 的预期输出（两轮；客户端在第 1 轮反提议，在第 2 轮接受；已节选：工具调用
+artifact 的明细行、id 与路径省略）：
 
 ```text
+[run_demo] starting registry on 5001 ...
+[run_demo] starting server on 8000 ...
 [run_demo] running client (scenario=target, mode=auto, transport=sse, discovery=registry, language=en-US, model_mode=offline) ...
-[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] agent-discovered: url=http://127.0.0.1:8000 discovery=registry
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation Target negotiation for the RAN energy saving task: the guaranteed throughput target has two overlapping time segments, {17:30~23:00,20M...
+[client] sse-received events=1
 [client] decision-requested round=1
-[client] event kind=propose performative=PROPOSE summary=## Target Negotiation ...
+[client] event kind=propose performative=PROPOSE summary=## Target Negotiation Revised proposal for round 2: cell cell-001, window 00:00~06:00, target rate 30%. Please accept this revised plan. ## Target Clarificat...
+[client] sse-received events=1
 [client] decision-requested round=2
-[client] event kind=accept performative=ACCEPT summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
+[client] event kind=status performative=status summary=TASK_STATE_WORKING
+...  # 8 条工具调用 artifact；id 与内容省略
+[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+[client] event kind=status performative=status summary=TASK_STATE_COMPLETED
+[client] sse-received events=12
 [client] final_state=task_completed task_id=<uuid>
 [client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[client] transcript: .../runs/<timestamp>-target.json
+[client] transcript: .../runs/<timestamp>-target.md
 [run_demo] stopped 2 background process(es)
 ```
 
-两条 `propose` 分别是服务端第 1 轮提议与第 2 轮修订提议。客户端自己的反提议不会出现在它收到的事件日志中；完整双向序列见运行记录（§9）。
+两条 `propose` 分别是服务端第 1 轮提议与第 2 轮修订提议；第二条渲染的是修订后的方案
+（小区、时间窗与目标速率），不再是第 1 轮的重复内容。客户端自己的反提议不会出现在它收到的事件日志中；完整双向序列见运行记录（§9）。
 
 ### 在线 CLI（OpenAI-compatible 端点）
 

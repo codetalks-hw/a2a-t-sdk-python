@@ -238,7 +238,8 @@ async def test_run_lifecycle_streams_sse_events(client: httpx.AsyncClient, runti
     payloads = _sse_payloads(events.text)
     types = [payload["type"] for payload in payloads]
     assert "event" in types
-    assert "decision_requested" in types
+    # An auto run never exposes a pending manual decision.
+    assert "decision_requested" not in types
     assert types[-1] == "finished"
     assert payloads[-1]["finalState"] == FINAL_STATE_TASK_COMPLETED
 
@@ -276,6 +277,60 @@ async def test_manual_decision_submission_advances_the_run(
     assert finished["transcript"]["decisions"][0]["action"] == "accept"
     assert finished["transcript"]["decisions"][0]["rationale"] == decision["rationale"]
     assert runtimes[0].closed is True
+
+
+async def test_auto_run_does_not_expose_a_pending_manual_decision(
+    client: httpx.AsyncClient,
+    runtimes: list[FakeRuntime],
+) -> None:
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse"},
+    )
+    assert start.status_code == 202
+    run_id = start.json()["runId"]
+
+    events = await client.get(f"/api/runs/{run_id}/events")
+    payloads = _sse_payloads(events.text)
+    assert [payload["type"] for payload in payloads if payload["type"] == "decision_requested"] == []
+
+    status = await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+    assert status["mode"] == "auto"
+    assert status["pendingDecision"] is False
+    response = await client.post(
+        f"/api/runs/{run_id}/decisions",
+        json={"action": "accept", "rationale": "There is no manual decision to answer."},
+    )
+    assert response.status_code == 409
+
+
+async def test_manual_run_publishes_a_manual_decision_request(
+    client: httpx.AsyncClient,
+    runtimes: list[FakeRuntime],
+) -> None:
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "manual", "transport": "sse"},
+    )
+    assert start.status_code == 202
+    run_id = start.json()["runId"]
+    events_task = asyncio.create_task(client.get(f"/api/runs/{run_id}/events"))
+
+    pending = await _wait_status(client, run_id, lambda data: data["pendingDecision"] is True)
+    assert pending["mode"] == "manual"
+
+    response = await client.post(
+        f"/api/runs/{run_id}/decisions",
+        json={"action": "accept", "rationale": "The operator accepts the proposal."},
+    )
+    assert response.status_code == 200
+    events = await asyncio.wait_for(events_task, timeout=5)
+    requests = [
+        payload for payload in _sse_payloads(events.text) if payload["type"] == "decision_requested"
+    ]
+    assert len(requests) == 1
+    assert requests[0]["mode"] == "manual"
+    await _wait_status(client, run_id, lambda data: data["status"] != "running")
 
 
 async def test_second_start_is_rejected_while_a_run_is_active(

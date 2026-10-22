@@ -348,7 +348,9 @@
         }
         if (payload.type === "event") {
           addEvent(payload.event);
-        } else if (payload.type === "decision_requested") {
+        } else if (payload.type === "decision_requested" && payload.mode === "manual") {
+          // The server only emits this prompt for manual runs; the guard keeps an auto run's
+          // timeline from ever exposing a decision form that the API would reject with 409.
           showDecisionRequest(payload);
         } else if (payload.type === "finished") {
           showFinished(payload);
