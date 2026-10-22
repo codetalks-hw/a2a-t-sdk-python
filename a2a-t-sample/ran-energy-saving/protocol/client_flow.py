@@ -1,0 +1,762 @@
+"""A2A client flow of the RAN energy-saving sample (SSE and webhook, multi-round negotiation).
+
+The flow owns the protocol correctness of the client side:
+
+* it generates the initial Task-T prompt with the SDK ``fromText`` API and sends it as one A2A
+  ``Message`` (the text part is the short request label; the prompt travels under ``Task-T/v1``);
+* it consumes the response events — the SSE stream or the webhook pushes plus the non-blocking RPC
+  reply — through one normalized event shape;
+* whenever the server sends a pre-task ``Propose``, it asks the configured
+  :class:`~protocol.decision_provider.NegotiationDecisionProvider` for a decision and renders the
+  matching protocol message with the SDK ``fromText`` generators;
+* an ``accept`` refills the Task-T prompt with ``fromDataWithSchema``, a ``counter`` keeps the
+  inbound round and carries ``metadata["sampleProposal"]``, and ``reject`` / ``abort`` are terminal;
+* the server owns round counting: the client always uses ``session.with_performative(...)`` and
+  never calls ``next_round()``.
+
+A negotiation ends on a plain end ``Message`` ("协商已结束"), a server ``Abort`` message, or a
+terminal Task state. Reject and abort never create a Task.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Final, Protocol
+
+from a2a.client.client import ClientCallContext
+from a2a.types import (
+    Role,
+    SendMessageRequest,
+    StreamResponse,
+    TaskPushNotificationConfig,
+    TaskState,
+)
+from a2a_t.core.metadata import (
+    NEGOTIATION_CONTEXT_METADATA_KEY,
+    NEGOTIATION_T_EXTENSION_URI,
+    TASK_T_EXTENSION_URI,
+    TEMPLATE_URI_METADATA_KEY,
+    MetadataContent,
+    NegotiationContext,
+    NegotiationPerformative,
+)
+from a2a_t.core.standard_templates import (
+    FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+    FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+    NEGOTIATION_ABORT_URI,
+    TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
+from google.protobuf.json_format import ParseDict
+from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.scenario import (
+    FINAL_STATE_NEGOTIATION_ABORTED,
+    FINAL_STATE_NEGOTIATION_ENDED,
+    FINAL_STATE_TASK_COMPLETED,
+    LANGUAGE_ZH,
+    accept_confirmation_text,
+    accept_filled_params,
+)
+from shared.sse_event_consumer import normalize_event
+from shared.task_schema import TASK_PARAM_SCHEMA
+from shared.webhook_receiver import WebhookReceiver
+
+from protocol.decision_provider import NegotiationDecisionProvider
+from protocol.messages import (
+    SAMPLE_PROPOSAL_METADATA_KEY,
+    TASK_TEMPLATE_URI,
+    is_negotiation_message,
+    metadata_to_dict,
+    negotiation_context_metadata,
+    parse_negotiation_context,
+)
+from protocol.negotiation_policy import NegotiationKind, negotiation_kind_for_template_uri
+
+#: Short label carried in the text part of every message (the protocol content lives in metadata).
+TASK_REQUEST_LABEL: Final[str] = "create ran energy saving task"
+
+#: Final state when a terminal Task state other than COMPLETED is reached.
+FINAL_STATE_TASK_REJECTED: Final[str] = "task_rejected"
+FINAL_STATE_TASK_FAILED: Final[str] = "task_failed"
+
+#: Final state when the event stream ends without a terminal event.
+FINAL_STATE_INCOMPLETE: Final[str] = "incomplete"
+
+#: Terminal Task states of the A2A SDK request handler.
+_TERMINAL_STATE_NAMES: Final[frozenset[str]] = frozenset(
+    TaskState.Name(state)
+    for state in (
+        TaskState.TASK_STATE_COMPLETED,
+        TaskState.TASK_STATE_CANCELED,
+        TaskState.TASK_STATE_FAILED,
+        TaskState.TASK_STATE_REJECTED,
+    )
+)
+
+#: Default maximum number of client sends; a backstop against a server that never terminates.
+DEFAULT_MAX_EXCHANGES: Final[int] = 16
+
+#: Negotiation-T accept/reject template URI per kind.
+_ACCEPT_REJECT_TEMPLATE_URI_BY_KIND: Final[dict[str, str]] = {
+    NegotiationKind.INFORMATION.value: INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    NegotiationKind.TARGET.value: TARGET_NEGOTIATION_ACCEPT_REJECT_URI,
+    NegotiationKind.FEASIBILITY.value: FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
+}
+
+#: Negotiation-T propose template URI per kind.
+_PROPOSE_TEMPLATE_URI_BY_KIND: Final[dict[str, str]] = {
+    NegotiationKind.INFORMATION.value: INFORMATION_NEGOTIATION_PROPOSE_URI,
+    NegotiationKind.TARGET.value: TARGET_NEGOTIATION_PROPOSE_URI,
+    NegotiationKind.FEASIBILITY.value: FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+}
+
+#: Marker of the server's information-propose text that lists the missing parameter names.
+_MISSING_ITEMS_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:missing items?|provide the following items?)\s*:\s*([^.]+)\.", re.IGNORECASE
+)
+
+#: Client-side errors.
+_ERROR_NO_TEMPLATE_URI: Final[str] = "The negotiation propose carries no template URI."
+_ERROR_NO_SESSION: Final[str] = "The negotiation propose carries no valid negotiationContext."
+_ERROR_UNKNOWN_KIND: Final[str] = "The negotiation propose template is not a sample negotiation template."
+_ERROR_NO_PROPOSE: Final[str] = "The server sent a negotiation message that is not a Propose or Abort."
+
+
+class ClientFlowError(RuntimeError):
+    """Raised when the server sends content the client flow cannot handle."""
+
+
+class PromptClient(Protocol):
+    """The ``A2ATClient`` surface the flow uses (also implemented by test fakes)."""
+
+    def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent: ...
+
+    def generate_task_prompt_from_data_with_schema(
+        self,
+        data: Mapping[str, object],
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> MetadataContent: ...
+
+    def generate_negotiation_accept_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent: ...
+
+    def generate_negotiation_reject_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent: ...
+
+    def generate_negotiation_abort_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent: ...
+
+    def generate_negotiation_propose_prompt_from_text(
+        self, text: str | None, context: NegotiationContext, template_uri: str
+    ) -> MetadataContent: ...
+
+
+class ClientTransport(Protocol):
+    """Send one request and return its normalized events up to the first stop point."""
+
+    async def send(
+        self,
+        request: SendMessageRequest,
+        call_context: ClientCallContext,
+    ) -> list[dict[str, object]]: ...
+
+
+@dataclass
+class ClientFlowResult:
+    """Outcome of one client flow run.
+
+    Attributes:
+        events: Every normalized event received, in arrival order.
+        final_state: Terminal state name (``task_completed``, the two no-task states, a task
+            failure name, or ``incomplete``).
+        decisions: Decisions returned by the provider, in order.
+        context_id: A2A context id of the conversation, when observed.
+        task_id: Task id of the created task, when one was created.
+        report: Report artifact payload/text of a completed task, when observed.
+    """
+
+    events: list[dict[str, object]] = field(default_factory=list)
+    final_state: str = FINAL_STATE_INCOMPLETE
+    decisions: list[NegotiationDecision] = field(default_factory=list)
+    context_id: str | None = None
+    task_id: str | None = None
+    report: dict[str, object] | None = None
+
+
+def is_terminal_event(event: Mapping[str, object]) -> bool:
+    """Report whether one normalized event is a terminal Task state."""
+    return event.get("kind") == "status" and event.get("state") in _TERMINAL_STATE_NAMES
+
+
+def is_stop_event(event: Mapping[str, object]) -> bool:
+    """Report whether one normalized event ends a send phase (message or terminal state)."""
+    return event.get("kind") == "message" or is_terminal_event(event)
+
+
+def normalize_webhook_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Convert one webhook push JSON body into the normalized event shape.
+
+    The receiver hands over the ``MessageToDict`` of a ``StreamResponse``; parsing it back into the
+    protobuf type keeps the SSE and webhook paths on exactly one normalization implementation.
+    """
+    try:
+        stream_response = StreamResponse()
+        ParseDict(dict(payload), stream_response)
+        return normalize_event(stream_response)
+    except Exception as exc:
+        raise ClientFlowError(f"Unsupported webhook payload: {exc}") from exc
+
+
+class SseClientTransport:
+    """SSE transport: stream one ``message:send`` and stop at the first message/terminal event."""
+
+    def __init__(self, client: object, *, log_sink: Callable[[str], None] | None = None) -> None:
+        """Create one SSE transport over an a2a-sdk client."""
+        self._client = client
+        self._log_sink = log_sink
+
+    async def send(
+        self,
+        request: SendMessageRequest,
+        call_context: ClientCallContext,
+    ) -> list[dict[str, object]]:
+        """Send one message and consume its stream until a stop point."""
+        events: list[dict[str, object]] = []
+        async for stream_response in self._client.send_message(request, context=call_context):  # type: ignore[attr-defined]
+            event = normalize_event(stream_response)
+            events.append(event)
+            if is_stop_event(event):
+                break
+        if self._log_sink is not None:
+            self._log_sink(f"[client] sse-received events={len(events)}")
+        return events
+
+
+class WebhookClientTransport:
+    """Webhook transport: non-blocking send with inline push registration.
+
+    The RPC reply is inspected first because a pre-task negotiation message is never pushed; task
+    events then arrive on the embedded receiver's queue. The idle timeout is the backstop that ends
+    a phase when the server pushes nothing.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        *,
+        queue: asyncio.Queue[dict[str, object]],
+        push_url: str,
+        push_token: str,
+        idle_timeout: float = 30.0,
+        log_sink: Callable[[str], None] | None = None,
+    ) -> None:
+        """Create one webhook transport.
+
+        Args:
+            client: a2a-sdk client whose ``send_message`` is an async generator.
+            queue: Queue fed by the webhook receiver.
+            push_url: Receiver callback URL registered inline on every request.
+            push_token: Push token checked by the receiver.
+            idle_timeout: Backstop timeout waiting for pushed events.
+            log_sink: Optional log sink.
+        """
+        self._client = client
+        self._queue = queue
+        self._push_url = push_url
+        self._push_token = push_token
+        self._idle_timeout = idle_timeout
+        self._log_sink = log_sink
+
+    async def send(
+        self,
+        request: SendMessageRequest,
+        call_context: ClientCallContext,
+    ) -> list[dict[str, object]]:
+        """Send one non-blocking message, register push inline, and collect its events."""
+        request.configuration.return_immediately = True
+        request.configuration.task_push_notification_config.CopyFrom(
+            TaskPushNotificationConfig(url=self._push_url, token=self._push_token)
+        )
+        events: list[dict[str, object]] = []
+        reply: StreamResponse | None = None
+        async for stream_response in self._client.send_message(request, context=call_context):  # type: ignore[attr-defined]
+            reply = stream_response
+        if reply is not None:
+            reply_event = normalize_event(reply)
+            events.append(reply_event)
+            if is_stop_event(reply_event):
+                return events
+        while True:
+            try:
+                payload = await asyncio.wait_for(self._queue.get(), timeout=self._idle_timeout)
+            except TimeoutError:
+                if self._log_sink is not None:
+                    self._log_sink(f"[client] webhook-idle-timeout after {self._idle_timeout:g}s")
+                return events
+            event = normalize_webhook_payload(payload)
+            events.append(event)
+            # The report artifact ends a webhook phase: the underlying energy-saving task is
+            # long-running and stays WORKING after it (design §7.1 / old webhook parity).
+            if is_stop_event(event) or event.get("kind") == "artifact":
+                return events
+
+
+def build_webhook_receiver(
+    *,
+    token: str,
+    queue: asyncio.Queue[dict[str, object]],
+    host: str = "127.0.0.1",
+    port: int = 9000,
+    log_sink: Callable[[str], None] | None = None,
+) -> WebhookReceiver:
+    """Build the embedded receiver feeding one flow event queue."""
+    return WebhookReceiver(
+        token=token,
+        on_event=queue.put_nowait,
+        host=host,
+        port=port,
+        log_sink=log_sink,
+    )
+
+
+async def run_client_flow(
+    *,
+    prompt_client: PromptClient,
+    transport: ClientTransport,
+    user_request: str,
+    provider: NegotiationDecisionProvider,
+    label: str = TASK_REQUEST_LABEL,
+    task_template_uri: str = TASK_TEMPLATE_URI,
+    language: str = LANGUAGE_ZH,
+    max_exchanges: int = DEFAULT_MAX_EXCHANGES,
+) -> ClientFlowResult:
+    """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
+
+    Args:
+        prompt_client: A2A-T SDK client facade (or a test double).
+        transport: SSE or webhook transport.
+        user_request: Natural-language task request.
+        provider: Negotiation decision provider.
+        label: Short text part of every message.
+        task_template_uri: Task-T template the initial and accept prompts address.
+        language: Process-level language of the refilled Task-T values.
+        max_exchanges: Backstop on the number of client sends.
+
+    Returns:
+        The collected events, provider decisions and terminal state.
+
+    Raises:
+        ClientFlowError: when the server sends an unanswerable negotiation message or the stream
+            exceeds the exchange budget.
+    """
+    prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
+    prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
+    initial_request = _build_message_request(
+        metadata={
+            prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
+            TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
+        },
+        label=label,
+    )
+    initial_context = _call_context((TASK_T_EXTENSION_URI,))
+
+    result = ClientFlowResult()
+    context_id: str | None = None
+    exchanges = 0
+    batch = await transport.send(initial_request, initial_context)
+    exchanges += 1
+    result.events.extend(batch)
+    context_id = context_id or _context_id_of(batch)
+
+    while True:
+        inbound = _find_negotiation_message(batch)
+        if inbound is None:
+            result.final_state = _final_state(result.events)
+            _fill_result(result, context_id)
+            return result
+
+        event, metadata = inbound
+        context_id = context_id or _string_field(event, "context_id")
+        session = parse_negotiation_context(metadata)
+        if session is None:
+            raise ClientFlowError(_ERROR_NO_SESSION)
+        context_id = context_id or session.id
+
+        if session.performative is NegotiationPerformative.ABORT:
+            result.final_state = FINAL_STATE_NEGOTIATION_ABORTED
+            _fill_result(result, context_id)
+            return result
+        if session.performative is not NegotiationPerformative.PROPOSE:
+            raise ClientFlowError(_ERROR_NO_PROPOSE)
+
+        template_uri = _template_uri(metadata)
+        kind = negotiation_kind_for_template_uri(template_uri)
+        if kind is None:
+            raise ClientFlowError(f"{_ERROR_UNKNOWN_KIND} templateUri={template_uri}")
+        propose = _propose_view(event, metadata, session, kind, template_uri, context_id)
+        decision = await provider.respond(propose, session)
+        result.decisions.append(decision)
+
+        if exchanges >= max_exchanges:
+            raise ClientFlowError(f"The client flow exceeded {max_exchanges} exchanges.")
+
+        if decision.action == "accept":
+            request, call_context = _build_accept_request(
+                prompt_client=prompt_client,
+                decision=decision,
+                kind=kind,
+                session=session,
+                context_id=context_id,
+                label=label,
+                task_template_uri=task_template_uri,
+                language=language,
+            )
+        elif decision.action == "counter":
+            request, call_context = _build_counter_request(
+                prompt_client=prompt_client,
+                decision=decision,
+                kind=kind,
+                session=session,
+                context_id=context_id,
+                label=label,
+            )
+        else:
+            performative = (
+                NegotiationPerformative.REJECT
+                if decision.action == "reject"
+                else NegotiationPerformative.ABORT
+            )
+            request, call_context = _build_terminal_request(
+                prompt_client=prompt_client,
+                decision=decision,
+                kind=kind,
+                session=session,
+                context_id=context_id,
+                label=label,
+                propose_content=propose.content,
+                performative=performative,
+            )
+
+        batch = await transport.send(request, call_context)
+        exchanges += 1
+        result.events.extend(batch)
+        if decision.action in ("reject", "abort"):
+            result.final_state = FINAL_STATE_NEGOTIATION_ENDED
+            _fill_result(result, context_id)
+            return result
+        if decision.action == "accept":
+            result.final_state = _final_state(result.events)
+            _fill_result(result, context_id)
+            return result
+
+
+# ----------------------------------------------------------------------
+# Request construction
+# ----------------------------------------------------------------------
+
+
+def _build_message_request(
+    *,
+    metadata: Mapping[str, object],
+    label: str,
+    context_id: str | None = None,
+) -> SendMessageRequest:
+    """Build one user-role A2A message request with an optional metadata map."""
+    request = SendMessageRequest()
+    request.message.message_id = str(uuid.uuid4())
+    request.message.role = Role.ROLE_USER
+    request.message.parts.add().text = label
+    if context_id:
+        request.message.context_id = context_id
+    for key, value in metadata.items():
+        if value is not None:
+            request.message.metadata[key] = value
+    return request
+
+
+def _call_context(extension_uris: tuple[str, ...]) -> ClientCallContext:
+    """Build the call context carrying the ``A2A-Extensions`` header."""
+    return ClientCallContext(service_parameters={"A2A-Extensions": ",".join(sorted(set(extension_uris)))})
+
+
+def _negotiation_request(
+    *,
+    prompt_client: PromptClient,
+    content: MetadataContent,
+    label: str,
+    context_id: str,
+    session: NegotiationContext,
+    extra_metadata: Mapping[str, object] | None = None,
+) -> tuple[SendMessageRequest, ClientCallContext]:
+    """Build one negotiation response request from generated protocol content."""
+    metadata = {
+        key: value for key, value in content.build_metadata_content().items() if value is not None
+    }
+    metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation_context_metadata(
+        NegotiationContext(
+            id=context_id,
+            round=session.round,
+            max_rounds=session.max_rounds,
+            performative=session.performative,
+        )
+    )
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    request = _build_message_request(metadata=metadata, label=label, context_id=context_id)
+    return request, _call_context((TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI))
+
+
+def _build_accept_request(
+    *,
+    prompt_client: PromptClient,
+    decision: NegotiationDecision,
+    kind: NegotiationKind,
+    session: NegotiationContext,
+    context_id: str,
+    label: str,
+    task_template_uri: str,
+    language: str,
+) -> tuple[SendMessageRequest, ClientCallContext]:
+    """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type."""
+    filled = accept_filled_params(kind.value, language)
+    if decision.filled_params:
+        filled.update(decision.filled_params)
+    task_content = prompt_client.generate_task_prompt_from_data_with_schema(
+        filled, TASK_PARAM_SCHEMA, task_template_uri
+    )
+    task_text = _require_prompt_text(task_content, "the refilled Task-T prompt")
+
+    accept_text = _accept_text(kind, filled, decision, language)
+    accept_context = session.with_performative(NegotiationPerformative.ACCEPT)
+    content = prompt_client.generate_negotiation_accept_prompt_from_text(
+        accept_text, accept_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
+    )
+    metadata = {task_content.extension_uri or TASK_T_EXTENSION_URI: task_text}
+    return _negotiation_request(
+        prompt_client=prompt_client,
+        content=content,
+        label=label,
+        context_id=context_id,
+        session=accept_context,
+        extra_metadata=metadata,
+    )
+
+
+def _build_counter_request(
+    *,
+    prompt_client: PromptClient,
+    decision: NegotiationDecision,
+    kind: NegotiationKind,
+    session: NegotiationContext,
+    context_id: str,
+    label: str,
+) -> tuple[SendMessageRequest, ClientCallContext]:
+    """Generate a counter proposal that keeps the inbound round (same-round ``Propose``)."""
+    text = decision.counter_proposal or decision.rationale
+    if not text.strip():
+        raise ClientFlowError("A counter decision carries neither a counter proposal nor a rationale.")
+    propose_context = session.with_performative(NegotiationPerformative.PROPOSE)
+    content = prompt_client.generate_negotiation_propose_prompt_from_text(
+        text, propose_context, _PROPOSE_TEMPLATE_URI_BY_KIND[kind.value]
+    )
+    extra: dict[str, object] = {}
+    if decision.counter_params:
+        extra[SAMPLE_PROPOSAL_METADATA_KEY] = dict(decision.counter_params)
+    return _negotiation_request(
+        prompt_client=prompt_client,
+        content=content,
+        label=label,
+        context_id=context_id,
+        session=propose_context,
+        extra_metadata=extra or None,
+    )
+
+
+def _build_terminal_request(
+    *,
+    prompt_client: PromptClient,
+    decision: NegotiationDecision,
+    kind: NegotiationKind,
+    session: NegotiationContext,
+    context_id: str,
+    label: str,
+    propose_content: str,
+    performative: NegotiationPerformative,
+) -> tuple[SendMessageRequest, ClientCallContext]:
+    """Generate a terminal reject or abort message (no Task is created)."""
+    terminal_context = session.with_performative(performative)
+    if performative is NegotiationPerformative.REJECT:
+        text = _reject_text(kind, propose_content, decision)
+        content = prompt_client.generate_negotiation_reject_prompt_from_text(
+            text, terminal_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
+        )
+    else:
+        text = decision.rationale or "The client aborted the negotiation."
+        content = prompt_client.generate_negotiation_abort_prompt_from_text(
+            text, terminal_context, NEGOTIATION_ABORT_URI
+        )
+    return _negotiation_request(
+        prompt_client=prompt_client,
+        content=content,
+        label=label,
+        context_id=context_id,
+        session=terminal_context,
+    )
+
+
+# ----------------------------------------------------------------------
+# Event helpers
+# ----------------------------------------------------------------------
+
+
+def _require_prompt_text(content: MetadataContent, what: str) -> str:
+    """Return the rendered prompt text of generated content, raising when it is missing."""
+    text = content.prompt_text
+    if not isinstance(text, str) or not text.strip():
+        raise ClientFlowError(f"The SDK did not generate {what}.")
+    return text
+
+
+def _string_field(event: Mapping[str, object], key: str) -> str | None:
+    """Return one string field of a normalized event, ``None`` when absent or not a string."""
+    value = event.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _context_id_of(events: list[dict[str, object]]) -> str | None:
+    """Return the first context id carried by a batch of normalized events."""
+    for event in events:
+        context_id = _string_field(event, "context_id")
+        if context_id:
+            return context_id
+        metadata = event.get("metadata")
+        if isinstance(metadata, Mapping):
+            session = parse_negotiation_context(metadata)
+            if session is not None:
+                return session.id
+    return None
+
+
+def _find_negotiation_message(
+    events: list[dict[str, object]],
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Return the last standalone Negotiation-T message of a batch and its metadata."""
+    for event in reversed(events):
+        if event.get("kind") != "message":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        metadata_dict = metadata_to_dict(metadata)
+        if is_negotiation_message(metadata_dict):
+            return event, metadata_dict
+    return None
+
+
+def _template_uri(metadata: Mapping[str, object]) -> str:
+    """Return the ``templateUri`` of one negotiation metadata map."""
+    value = metadata.get(TEMPLATE_URI_METADATA_KEY)
+    if not isinstance(value, str) or not value.strip():
+        raise ClientFlowError(_ERROR_NO_TEMPLATE_URI)
+    return value
+
+
+def _propose_view(
+    event: Mapping[str, object],
+    metadata: Mapping[str, object],
+    session: NegotiationContext,
+    kind: NegotiationKind,
+    template_uri: str,
+    context_id: str,
+) -> NegotiationProposeView:
+    """Build the provider-facing view of one inbound server proposal."""
+    content = metadata.get(NEGOTIATION_T_EXTENSION_URI)
+    return NegotiationProposeView(
+        negotiation_id=session.id,
+        kind=kind.value,
+        round=session.round,
+        max_rounds=session.max_rounds,
+        content=content if isinstance(content, str) else "",
+        performative=session.performative.value,
+        template_uri=template_uri,
+        context_id=_string_field(event, "context_id") or context_id,
+    )
+
+
+def _accept_text(
+    kind: NegotiationKind,
+    filled: Mapping[str, object],
+    decision: NegotiationDecision,
+    language: str,
+) -> str:
+    """Render the natural-language input of an accept for the proposal type."""
+    if kind is NegotiationKind.INFORMATION:
+        items = " ".join(f"{name}: {value}." for name, value in filled.items())
+        return f"Accept. {items}"
+    confirmation = (
+        decision.confirmed_intent
+        if kind is NegotiationKind.TARGET
+        else decision.feasibility_summary
+    )
+    return f"Accept. {confirmation or accept_confirmation_text(kind.value, language) or decision.rationale}"
+
+
+def _reject_text(kind: NegotiationKind, propose_content: str, decision: NegotiationDecision) -> str:
+    """Render the natural-language input of a reject; information rejects itemize every item."""
+    rationale = decision.rationale or "The requested information cannot be provided."
+    if kind is not NegotiationKind.INFORMATION:
+        return f"Reject. {rationale}"
+    match = _MISSING_ITEMS_PATTERN.search(propose_content)
+    items = [item.strip() for item in match.group(1).split(",")] if match else []
+    items = [item for item in items if item] or ["requested information"]
+    return "Reject. " + " ".join(f"{item}: {rationale}" for item in items)
+
+
+def _final_state(events: list[dict[str, object]]) -> str:
+    """Derive the terminal state from the collected events."""
+    report_seen = False
+    for event in reversed(events):
+        if event.get("kind") == "artifact":
+            report_seen = True
+            continue
+        if event.get("kind") == "message":
+            # A standalone plain message is the server's end-of-negotiation signal; an inbound
+            # Propose/Abort is handled by the negotiation loop before this fallback runs.
+            return FINAL_STATE_NEGOTIATION_ENDED
+        if event.get("kind") != "status":
+            continue
+        state = event.get("state")
+        if state == TaskState.Name(TaskState.TASK_STATE_COMPLETED):
+            return FINAL_STATE_TASK_COMPLETED
+        if state == TaskState.Name(TaskState.TASK_STATE_REJECTED):
+            return FINAL_STATE_TASK_REJECTED
+        if state in _TERMINAL_STATE_NAMES:
+            return FINAL_STATE_TASK_FAILED
+    return FINAL_STATE_INCOMPLETE if not report_seen else FINAL_STATE_TASK_COMPLETED
+
+
+def _fill_result(result: ClientFlowResult, context_id: str | None) -> None:
+    """Fill the context id, task id and report payload of one result."""
+    result.context_id = result.context_id or context_id
+    for event in result.events:
+        task_id = _string_field(event, "task_id")
+        if task_id:
+            result.task_id = task_id
+        if event.get("kind") == "artifact" and result.report is None:
+            data = event.get("data")
+            if isinstance(data, Mapping):
+                result.report = dict(data)
+            else:
+                result.report = {
+                    key: value for key, value in event.items() if key in ("text", "name", "artifact_id")
+                }

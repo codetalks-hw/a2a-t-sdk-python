@@ -1,0 +1,9 @@
+{
+  "conclusion": "Reject",
+  "items": [
+    {
+      "name": "region",
+      "value": "The requested coverage region is not available from the client side."
+    }
+  ]
+}

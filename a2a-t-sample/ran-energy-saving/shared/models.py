@@ -25,6 +25,9 @@ class NegotiationDecision(BaseModel):
         filled_params: Task-T parameters to fill on ``accept`` (missing-information negotiation).
         counter_proposal: Natural-language counter proposal on ``counter``; the flow layer turns it
             into protocol content with the SDK ``fromText`` generator.
+        counter_params: On ``counter``, the sample-only ``{cellId, window, targetRate}`` plan the
+            flow attaches as ``metadata["sampleProposal"]`` so the server policy can evaluate the
+            counter proposal deterministically.
         confirmed_intent: On ``accept``, the task intent the client confirms, when the negotiation
             type requires one.
         feasibility_summary: On ``accept``, the client's feasibility summary, when the negotiation
@@ -35,6 +38,7 @@ class NegotiationDecision(BaseModel):
     rationale: str
     filled_params: dict[str, object] | None = None
     counter_proposal: str | None = None
+    counter_params: dict[str, object] | None = None
     confirmed_intent: str | None = None
     feasibility_summary: str | None = None
 

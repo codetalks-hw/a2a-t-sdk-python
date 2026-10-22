@@ -119,6 +119,122 @@ REGION_STRINGS: dict[str, str] = {
     LANGUAGE_ZH: "松山湖管委会",
 }
 
+#: Task-T parameters the client refills on accept, per language. The base set is the complete,
+#: non-overlapping request; the target and feasibility kinds override the guaranteed-throughput
+#: target with the value their negotiation agrees on.
+_ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
+    LANGUAGE_EN: {
+        "operationType": "create",
+        "region": REGION_STRINGS[LANGUAGE_EN],
+        "energySavingGoal": "Maximize energy saving under the condition that the task context is met.",
+        "guaranteedThroughputTarget": (
+            "{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}"
+        ),
+    },
+    LANGUAGE_ZH: {
+        "operationType": "create",
+        "region": REGION_STRINGS[LANGUAGE_ZH],
+        "energySavingGoal": "在满足任务上下文的前提下最大化节能。",
+        "guaranteedThroughputTarget": (
+            "{00:00~07:00,2Mbps}、{07:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~24:00,2Mbps}"
+        ),
+    },
+}
+
+#: Corrected guaranteed-throughput targets agreed by each negotiation kind, per language.
+_ACCEPT_TARGET_OVERRIDES: dict[str, dict[str, str]] = {
+    KIND_TARGET: {
+        LANGUAGE_EN: (
+            "{00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, "
+            "{17:30~23:00,20Mbps}, {23:00~00:00,10Mbps}"
+        ),
+        LANGUAGE_ZH: (
+            "{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+            "{17:30~23:00,20Mbps}、{23:00~00:00,10Mbps}"
+        ),
+    },
+    KIND_FEASIBILITY: {
+        LANGUAGE_EN: "{00:00~06:00,2Mbps}, {06:00~18:00,2Mbps}",
+        LANGUAGE_ZH: "{00:00~06:00,2Mbps}、{06:00~18:00,2Mbps}",
+    },
+}
+
+#: Site-level context the feasibility accept carries in addition to the base parameters.
+_ACCEPT_FEASIBILITY_CONTEXT: dict[str, dict[str, str]] = {
+    LANGUAGE_EN: {
+        "siteList": "Station 1,Station 2",
+        "backgroundEvent": "power outage from 00:00 to 18:00",
+    },
+    LANGUAGE_ZH: {
+        "siteList": "站点名称1,站点名称2",
+        "backgroundEvent": "00:00~18:00 停电",
+    },
+}
+
+#: Confirmed intent of the target negotiation accept, per language.
+TARGET_ACCEPT_CONFIRMATIONS: dict[str, str] = {
+    LANGUAGE_EN: (
+        "The energy saving target is corrected to {00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, "
+        "{09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~00:00,10Mbps}."
+    ),
+    LANGUAGE_ZH: (
+        "节能目标修正为{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
+        "{17:30~23:00,20Mbps}、{23:00~00:00,10Mbps}。"
+    ),
+}
+
+#: Feasibility summary of the feasibility negotiation accept, per language.
+FEASIBILITY_ACCEPT_SUMMARIES: dict[str, str] = {
+    LANGUAGE_EN: (
+        "Agreed to lower the guaranteed throughput target for 06:00~18:00 from 10Mbps to 2Mbps; "
+        "the negotiation is confirmed as complete."
+    ),
+    LANGUAGE_ZH: "同意将06:00~18:00时段的速率保障目标由10Mbps下调至2Mbps，本次协商确认结束。",
+}
+
+
+def _localized(values: dict[str, str], language: str) -> str:
+    """Return the value of one language, falling back to ``zh-CN``."""
+    return values.get(language, values[LANGUAGE_ZH])
+
+
+def accept_filled_params(kind: str, language: str = LANGUAGE_ZH) -> dict[str, object]:
+    """Return the Task-T parameters the client refills when it accepts one proposal.
+
+    Args:
+        kind: Negotiation kind (``information`` / ``target`` / ``feasibility``).
+        language: Process-level language selecting the localized values.
+
+    Returns:
+        A fresh parameter map with the kind's agreed guaranteed-throughput target (and the
+        feasibility site context when applicable).
+    """
+    params = dict(_ACCEPT_BASE_PARAMS.get(language, _ACCEPT_BASE_PARAMS[LANGUAGE_ZH]))
+    override = _ACCEPT_TARGET_OVERRIDES.get(kind)
+    if override is not None:
+        params["guaranteedThroughputTarget"] = _localized(override, language)
+    if kind == KIND_FEASIBILITY:
+        params.update(_ACCEPT_FEASIBILITY_CONTEXT.get(language, _ACCEPT_FEASIBILITY_CONTEXT[LANGUAGE_ZH]))
+    return params
+
+
+def accept_confirmation_text(kind: str, language: str = LANGUAGE_ZH) -> str | None:
+    """Return the natural-language confirmation an accept of ``kind`` carries, when it has one.
+
+    Args:
+        kind: Negotiation kind (``information`` / ``target`` / ``feasibility``).
+        language: Process-level language selecting the localized text.
+
+    Returns:
+        The corrected target (``target``) or the agreed feasibility summary (``feasibility``);
+        ``None`` for the information kind, whose accept lists the filled parameters instead.
+    """
+    if kind == KIND_TARGET:
+        return _localized(TARGET_ACCEPT_CONFIRMATIONS, language)
+    if kind == KIND_FEASIBILITY:
+        return _localized(FEASIBILITY_ACCEPT_SUMMARIES, language)
+    return None
+
 
 @dataclass(frozen=True)
 class ExpectedStep:

@@ -57,10 +57,18 @@ STAGE_CONTENT_VALIDATION_TARGET_REFILL = "content_validation_target_refill"
 STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL = "content_validation_feasibility_refill"
 STAGE_NEGOTIATION_PROPOSE_EXTRACTION = "negotiation_propose_extraction"
 STAGE_NEGOTIATION_ACCEPT_EXTRACTION = "negotiation_accept_extraction"
+STAGE_NEGOTIATION_REJECT_EXTRACTION = "negotiation_reject_extraction"
 STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION = "negotiation_target_propose_extraction"
 STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION = "negotiation_target_accept_extraction"
+STAGE_NEGOTIATION_TARGET_REJECT_EXTRACTION = "negotiation_target_reject_extraction"
 STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION = "negotiation_feasibility_propose_extraction"
 STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION = "negotiation_feasibility_accept_extraction"
+STAGE_NEGOTIATION_FEASIBILITY_REJECT_EXTRACTION = "negotiation_feasibility_reject_extraction"
+STAGE_NEGOTIATION_ABORT_EXTRACTION = "negotiation_abort_extraction"
+#: Synthetic stage of the negotiation semantic-validation call; no canned file is loaded because the
+#: response is derived from the declared template of the user prompt (see
+#: :func:`negotiation_validation_response`).
+STAGE_NEGOTIATION_SEMANTIC_VALIDATION = "negotiation_semantic_validation"
 
 #: Stage name -> response file name.
 _STAGE_FILES: dict[str, str] = {
@@ -78,10 +86,14 @@ _STAGE_FILES: dict[str, str] = {
     STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL: "content_validation_feasibility_refill.json",
     STAGE_NEGOTIATION_PROPOSE_EXTRACTION: "negotiation_propose_extraction.json",
     STAGE_NEGOTIATION_ACCEPT_EXTRACTION: "negotiation_accept_extraction.json",
+    STAGE_NEGOTIATION_REJECT_EXTRACTION: "negotiation_reject_extraction.json",
     STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION: "negotiation_target_propose_extraction.json",
     STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION: "negotiation_target_accept_extraction.json",
+    STAGE_NEGOTIATION_TARGET_REJECT_EXTRACTION: "negotiation_target_reject_extraction.json",
     STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION: "negotiation_feasibility_propose_extraction.json",
     STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION: "negotiation_feasibility_accept_extraction.json",
+    STAGE_NEGOTIATION_FEASIBILITY_REJECT_EXTRACTION: "negotiation_feasibility_reject_extraction.json",
+    STAGE_NEGOTIATION_ABORT_EXTRACTION: "negotiation_abort_extraction.json",
 }
 
 #: Missing-region scenario inputs that flip the slot-extraction routing to the missing variant.
@@ -114,6 +126,10 @@ _FEASIBILITY_REFILL_MARKERS = ("power outage from 00:00 to 18:00", "00:00~18:00 
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
 #: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
+#:
+#: Accept and reject share the terminal schema of a negotiation type, so the accept stage is the
+#: default and :data:`_NEGOTIATION_REJECT_STAGES` overrides it when the user prompt declares the
+#: reject phase.
 _NEGOTIATION_EXTRACTION_SIGNATURES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"conclusion", "feasibility_summary"}), STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION),
     (frozenset({"conclusion", "confirmed_intent", "failure_reason"}), STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION),
@@ -124,7 +140,30 @@ _NEGOTIATION_EXTRACTION_SIGNATURES: tuple[tuple[frozenset[str], str], ...] = (
     ),
     (frozenset({"target_negotiation_description"}), STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION),
     (frozenset({"items", "relationship"}), STAGE_NEGOTIATION_PROPOSE_EXTRACTION),
+    (frozenset({"termination_reason"}), STAGE_NEGOTIATION_ABORT_EXTRACTION),
 )
+
+#: Reject-phase extraction stage per shared terminal signature.
+_NEGOTIATION_REJECT_STAGES: dict[frozenset[str], str] = {
+    frozenset({"conclusion", "feasibility_summary"}): STAGE_NEGOTIATION_FEASIBILITY_REJECT_EXTRACTION,
+    frozenset({"conclusion", "confirmed_intent", "failure_reason"}): STAGE_NEGOTIATION_TARGET_REJECT_EXTRACTION,
+    frozenset({"conclusion", "items"}): STAGE_NEGOTIATION_REJECT_EXTRACTION,
+}
+
+#: Negotiation kinds the semantic-validation response may declare.
+_NEGOTIATION_KINDS: tuple[str, ...] = ("information", "target", "feasibility")
+
+#: Template-URI segment identifying one negotiation kind.
+_KIND_BY_TEMPLATE_SEGMENT: dict[str, str] = {
+    "information-negotiation": "information",
+    "target-negotiation": "target",
+    "feasibility-negotiation": "feasibility",
+}
+
+#: Labels of the negotiation semantic-validation user prompt fields the routing reads.
+_PHASE_LABEL = "Negotiation phase:"
+_DECLARED_TYPE_LABEL = "Declared negotiation type:"
+_TEMPLATE_URI_LABEL = "Declared template identifier:"
 
 #: Localized labels starting the template-content block of the content validation user prompt.
 _TEMPLATE_CONTENT_LABELS = ("Template Content:", "模板正文：")
@@ -183,6 +222,61 @@ def _first_user_content(messages: list[dict[str, str]]) -> str:
     return next(message["content"] for message in messages if message.get("role") == "user")
 
 
+def _prompt_field(user_content: str, label: str) -> str:
+    """Return the value of one ``Label: value`` line of a user prompt, or an empty string."""
+    for line in user_content.splitlines():
+        if line.startswith(label):
+            return line[len(label) :].strip()
+    return ""
+
+
+def _declared_negotiation_kind(user_content: str) -> str | None:
+    """Return the negotiation kind declared by one semantic-validation user prompt.
+
+    The prompt carries the declared type (``common`` for the type-independent abort template), the
+    declared template URI and the phase. The common abort template yields ``None`` so the response
+    satisfies the abort contract; a typed template yields its kind, falling back to the template-URI
+    segment when the declared type line is absent.
+    """
+    phase = _prompt_field(user_content, _PHASE_LABEL).lower()
+    declared_type = _prompt_field(user_content, _DECLARED_TYPE_LABEL).lower()
+    if phase == "abort" or declared_type == "common":
+        return None
+    if declared_type in _NEGOTIATION_KINDS:
+        return declared_type
+    template_uri = _prompt_field(user_content, _TEMPLATE_URI_LABEL)
+    segments = template_uri.split("/")
+    if len(segments) >= 2:
+        return _KIND_BY_TEMPLATE_SEGMENT.get(segments[1])
+    return None
+
+
+def negotiation_validation_response(user_content: str) -> str:
+    """Build the canned semantic-validation response of one negotiation validation call.
+
+    Offline mode accepts every negotiation message the client and the server exchange. The
+    ``negotiation_type`` must match the declared template: the typed templates declare their kind
+    and the common abort template declares ``null``. The gate validates with an empty parameter
+    schema, so ``params`` is an empty object.
+
+    Args:
+        user_content: User prompt of the structured validation call.
+
+    Returns:
+        Serialized JSON response: ``semantic_verdict``, ``negotiation_type``, ``errors`` and
+        ``params``.
+    """
+    return json.dumps(
+        {
+            "semantic_verdict": True,
+            "negotiation_type": _declared_negotiation_kind(user_content),
+            "errors": [],
+            "params": {},
+        },
+        ensure_ascii=False,
+    )
+
+
 def _is_target_validation_head(head: str) -> bool:
     """Report whether one content-validation head carries the target negotiation input."""
     return _TARGET_VALIDATION_MARKER in head or any(
@@ -216,7 +310,10 @@ def route_structured_call(
     user_content = _first_user_content(messages)
     properties = json_schema.get("properties") if isinstance(json_schema, dict) else None
     property_names = set(properties) if isinstance(properties, dict) else set()
+    phase = _prompt_field(user_content, _PHASE_LABEL).lower()
 
+    if "semantic_verdict" in property_names and "negotiation_type" in property_names:
+        return STAGE_NEGOTIATION_SEMANTIC_VALIDATION
     if "slots" in property_names and "slot_errors" in property_names:
         if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION
@@ -251,6 +348,8 @@ def route_structured_call(
         return STAGE_CONTENT_VALIDATION
     for signature, stage in _NEGOTIATION_EXTRACTION_SIGNATURES:
         if signature <= property_names:
+            if phase == "reject":
+                return _NEGOTIATION_REJECT_STAGES.get(signature, stage)
             return stage
     raise ValueError(f"The scripted LLM cannot route this structured call: {sorted(property_names)}")
 
@@ -290,6 +389,13 @@ class ScriptedLLMClient:
         stage = route_structured_call(messages, json_schema, language=self.language)
         self.calls.append(stage)
         llm_calls.append(stage)
+        if stage == STAGE_NEGOTIATION_SEMANTIC_VALIDATION:
+            return LLMResponse(
+                content=negotiation_validation_response(_first_user_content(messages)),
+                model="scripted",
+                usage={"prompt_tokens": 0, "completion_tokens": 0},
+                metadata={"scripted_stage": stage, "language": self.language},
+            )
         content = self._script[stage]
         if stage == STAGE_NEGOTIATION_PROPOSE_EXTRACTION and _PROPOSE_RELATIONSHIP_MARKER in _first_user_content(
             messages

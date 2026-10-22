@@ -3,22 +3,39 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 import pytest
+from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from a2a_t.core.standard_templates import (
+    INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    INFORMATION_NEGOTIATION_PROPOSE_URI,
+    NEGOTIATION_ABORT_URI,
+    TARGET_NEGOTIATION_PROPOSE_URI,
+)
+from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.llm.models import LLMClientConfig
+from a2a_t.server.a2at_server import A2ATServer
+from protocol.server_app import prepare_sdk_env_path
+from shared.config import SampleConfig
 from shared.scenario import SCENARIOS, Scenario
 from shared.scripted_llm import (
     SCRIPTED_PROVIDER_NAME,
     STAGE_CONTENT_VALIDATION_FEASIBILITY,
     STAGE_CONTENT_VALIDATION_MISSING,
     STAGE_CONTENT_VALIDATION_TARGET,
+    STAGE_NEGOTIATION_ABORT_EXTRACTION,
     STAGE_NEGOTIATION_ACCEPT_EXTRACTION,
     STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION,
     STAGE_NEGOTIATION_FEASIBILITY_PROPOSE_EXTRACTION,
+    STAGE_NEGOTIATION_FEASIBILITY_REJECT_EXTRACTION,
     STAGE_NEGOTIATION_PROPOSE_EXTRACTION,
+    STAGE_NEGOTIATION_REJECT_EXTRACTION,
+    STAGE_NEGOTIATION_SEMANTIC_VALIDATION,
     STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION,
     STAGE_NEGOTIATION_TARGET_PROPOSE_EXTRACTION,
+    STAGE_NEGOTIATION_TARGET_REJECT_EXTRACTION,
     STAGE_SLOT_EXTRACTION,
     STAGE_SLOT_EXTRACTION_FEASIBILITY,
     STAGE_SLOT_EXTRACTION_MISSING,
@@ -161,3 +178,168 @@ def test_register_scripted_provider_is_idempotent() -> None:
     from a2a_t.llm.factory import LLMClientFactory
 
     assert SCRIPTED_PROVIDER_NAME in LLMClientFactory.available_providers()
+
+
+# ----------------------------------------------------------------------
+# Negotiation semantic validation routing (prerequisite of Task 4)
+# ----------------------------------------------------------------------
+
+#: Output schema of the SDK negotiation semantic validation (the caller schema is nested in params).
+NEGOTIATION_VALIDATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "semantic_verdict": {"type": "boolean"},
+        "negotiation_type": {"type": ["string", "null"]},
+        "errors": {"type": "array"},
+        "params": {"type": "object", "properties": {}},
+    },
+    "required": ["semantic_verdict", "negotiation_type", "errors", "params"],
+}
+
+
+def _validation_prompt(*, phase: str, kind: str, template_uri: str) -> str:
+    return (
+        f"Negotiation phase: {phase}\n"
+        f"Declared negotiation type: {kind}\n"
+        f"Declared template identifier: {template_uri}\n"
+        "Template content: template body\n\n"
+        "Parameter schema:\n{}\n\n"
+        "Negotiation message to validate:\nnegotiation message\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase", "kind", "expected_kind", "template_uri"),
+    [
+        ("propose", "information", "information", INFORMATION_NEGOTIATION_PROPOSE_URI),
+        ("accept", "information", "information", INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI),
+        ("reject", "target", "target", "Negotiation-T/target-negotiation/accept-reject/v1"),
+        ("abort", "common", None, NEGOTIATION_ABORT_URI),
+    ],
+)
+def test_negotiation_semantic_validation_routes_and_declares_the_type(
+    phase: str,
+    kind: str,
+    expected_kind: str | None,
+    template_uri: str,
+    client: ScriptedLLMClient,
+) -> None:
+    prompt = _validation_prompt(phase=phase, kind=kind, template_uri=template_uri)
+
+    response = client.structured(
+        messages=_messages(prompt),
+        json_schema=NEGOTIATION_VALIDATION_SCHEMA,
+    )
+
+    assert client.calls[-1] == STAGE_NEGOTIATION_SEMANTIC_VALIDATION
+    payload = json.loads(response.content)
+    assert payload == {
+        "semantic_verdict": True,
+        "negotiation_type": expected_kind,
+        "errors": [],
+        "params": {},
+    }
+
+
+@pytest.mark.parametrize(
+    ("phase", "properties", "expected_stage"),
+    [
+        ("accept", {"conclusion", "items"}, STAGE_NEGOTIATION_ACCEPT_EXTRACTION),
+        ("reject", {"conclusion", "items"}, STAGE_NEGOTIATION_REJECT_EXTRACTION),
+        ("accept", {"conclusion", "confirmed_intent", "failure_reason"}, STAGE_NEGOTIATION_TARGET_ACCEPT_EXTRACTION),
+        (
+            "reject",
+            {"conclusion", "confirmed_intent", "failure_reason"},
+            STAGE_NEGOTIATION_TARGET_REJECT_EXTRACTION,
+        ),
+        (
+            "accept",
+            {"conclusion", "feasibility_summary"},
+            STAGE_NEGOTIATION_FEASIBILITY_ACCEPT_EXTRACTION,
+        ),
+        (
+            "reject",
+            {"conclusion", "feasibility_summary"},
+            STAGE_NEGOTIATION_FEASIBILITY_REJECT_EXTRACTION,
+        ),
+        ("abort", {"termination_reason"}, STAGE_NEGOTIATION_ABORT_EXTRACTION),
+    ],
+)
+def test_terminal_extraction_routes_by_phase(
+    phase: str,
+    properties: set[str],
+    expected_stage: str,
+    client: ScriptedLLMClient,
+) -> None:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {name: {"type": "string"} for name in properties},
+    }
+
+    response = client.structured(
+        messages=_messages(f"Negotiation phase: {phase}\n\nInput text:\nnegotiation message"),
+        json_schema=schema,
+    )
+
+    assert client.calls[-1] == expected_stage
+    assert json.loads(response.content)
+
+
+@pytest.fixture
+def real_negotiation_server(offline_config: SampleConfig) -> A2ATServer:
+    """Build a real A2ATServer on the scripted SDK provider (no network)."""
+    register_scripted_provider()
+    return A2ATServer(env_path=prepare_sdk_env_path(offline_config))
+
+
+def _negotiation_context(performative: NegotiationPerformative) -> NegotiationContext:
+    return NegotiationContext(
+        id=str(uuid.uuid4()),
+        round=1,
+        max_rounds=3,
+        performative=performative,
+    )
+
+
+def test_real_server_validates_accept_offline(real_negotiation_server: A2ATServer) -> None:
+    result = real_negotiation_server.validate_accept_prompt_and_data_filling(
+        "Accept. region: Songshanhu Administration Committee.",
+        _negotiation_context(NegotiationPerformative.ACCEPT),
+        {"type": "object", "properties": {}},
+        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    )
+
+    assert isinstance(result, FilledParamData)
+
+
+def test_real_server_validates_reject_offline(real_negotiation_server: A2ATServer) -> None:
+    result = real_negotiation_server.validate_reject_prompt_and_data_filling(
+        "Reject. region: The requested coverage region is not available from the client side.",
+        _negotiation_context(NegotiationPerformative.REJECT),
+        {"type": "object", "properties": {}},
+        INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+    )
+
+    assert isinstance(result, FilledParamData)
+
+
+def test_real_server_validates_propose_offline(real_negotiation_server: A2ATServer) -> None:
+    result = real_negotiation_server.validate_propose_prompt_and_data_filling(
+        "Propose. Please accept the revised plan for cell-001.",
+        _negotiation_context(NegotiationPerformative.PROPOSE),
+        {"type": "object", "properties": {}},
+        TARGET_NEGOTIATION_PROPOSE_URI,
+    )
+
+    assert isinstance(result, FilledParamData)
+
+
+def test_real_server_validates_abort_offline(real_negotiation_server: A2ATServer) -> None:
+    result = real_negotiation_server.validate_abort_prompt_and_data_filling(
+        "Abort. The negotiation reached its round limit.",
+        _negotiation_context(NegotiationPerformative.ABORT),
+        {"type": "object", "properties": {}},
+        NEGOTIATION_ABORT_URI,
+    )
+
+    assert isinstance(result, FilledParamData)

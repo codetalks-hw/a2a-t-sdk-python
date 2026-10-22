@@ -1,0 +1,9 @@
+{
+  "conclusion": "Reject",
+  "items": [
+    {
+      "name": "region",
+      "value": "客户端无法提供所请求的覆盖区域。"
+    }
+  ]
+}
