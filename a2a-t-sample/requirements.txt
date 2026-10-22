@@ -1,4 +1,6 @@
 a2a-sdk==1.1.0
+google-adk[a2a]>=2.12
+litellm>=1.84
 httpx>=0.28.1
 protobuf>=6.30.2,<7
 python-dotenv>=1.1.0
