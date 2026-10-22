@@ -281,12 +281,33 @@ class RunManager:
             await active.task
 
 
+def _resolve_default(
+    value: str | None,
+    allowed: tuple[str, ...],
+    fallback: str,
+    label: str,
+) -> str:
+    """Resolve one Web-UI selection default, rejecting an invalid explicit value.
+
+    Raises:
+        ValueError: when an explicit default is not one of ``allowed``.
+    """
+    if value is None:
+        return fallback
+    if value not in allowed:
+        raise ValueError(f"Unsupported default {label}: {value}; expected one of {allowed}")
+    return value
+
+
 def create_app(
     config: SampleConfig,
     *,
     runs_dir: Path | None = None,
     runtime_factory: RuntimeFactory | None = None,
     env_path: Path | None = None,
+    default_scenario: str | None = None,
+    default_mode: str | None = None,
+    default_transport: str | None = None,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -295,10 +316,26 @@ def create_app(
         runs_dir: transcript directory; defaults to the sample ``runs/`` directory.
         runtime_factory: optional runtime builder (tests inject a deterministic double).
         env_path: source ``.env`` handed to the real client runtime.
+        default_scenario: scenario preselected by the page and used when a start body omits it;
+            defaults to the first supported scenario.
+        default_mode: decision mode preselected/used by default; defaults to ``auto``.
+        default_transport: transport preselected/used by default; defaults to the process-level
+            ``A2AT_SAMPLE_TRANSPORT`` value.
 
     Returns:
         The assembled Starlette application.
+
+    Raises:
+        ValueError: when an explicit default is not a supported value.
     """
+    resolved_default_scenario = _resolve_default(
+        default_scenario, SUPPORTED_SCENARIO_NAMES, SUPPORTED_SCENARIO_NAMES[0], "scenario"
+    )
+    resolved_default_mode = _resolve_default(default_mode, UI_MODES, MODE_AUTO, "mode")
+    config_transport = config.transport if config.transport in SUPPORTED_TRANSPORTS else SUPPORTED_TRANSPORTS[0]
+    resolved_default_transport = _resolve_default(
+        default_transport, SUPPORTED_TRANSPORTS, config_transport, "transport"
+    )
 
     async def default_factory(
         resolved_config: SampleConfig,
@@ -341,6 +378,9 @@ def create_app(
                 "scenarios": list(SUPPORTED_SCENARIO_NAMES),
                 "modes": list(UI_MODES),
                 "transports": list(SUPPORTED_TRANSPORTS),
+                "defaultScenario": resolved_default_scenario,
+                "defaultMode": resolved_default_mode,
+                "defaultTransport": resolved_default_transport,
             }
         )
 
@@ -351,9 +391,9 @@ def create_app(
             return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
-        scenario = body.get("scenario")
-        mode = body.get("mode", MODE_AUTO)
-        transport = body.get("transport")
+        scenario = body.get("scenario", resolved_default_scenario)
+        mode = body.get("mode", resolved_default_mode)
+        transport = body.get("transport", resolved_default_transport)
         if scenario not in SUPPORTED_SCENARIO_NAMES:
             return JSONResponse(
                 {"error": f"Unsupported scenario: {scenario}; expected one of {SUPPORTED_SCENARIO_NAMES}"},

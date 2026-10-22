@@ -422,6 +422,9 @@
           option.textContent = name;
           transportSelect.appendChild(option);
         }
+        if (meta.defaultScenario) scenarioSelect.value = meta.defaultScenario;
+        if (meta.defaultMode) modeSelect.value = meta.defaultMode;
+        if (meta.defaultTransport) transportSelect.value = meta.defaultTransport;
       } catch (error) {
         languageBadge.textContent = "language: unavailable";
         modelBadge.textContent = "model: unavailable";

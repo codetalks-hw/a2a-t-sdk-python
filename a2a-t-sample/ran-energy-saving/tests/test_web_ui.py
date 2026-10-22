@@ -183,6 +183,39 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     assert meta["modelLabel"] == "offline (scripted)"
     assert "information" in meta["scenarios"]
     assert meta["modes"] == ["auto", "manual"]
+    assert meta["defaultScenario"] == "information"
+    assert meta["defaultMode"] == "auto"
+    assert meta["defaultTransport"] == "sse"
+
+
+async def test_cli_defaults_are_exposed_and_used_when_the_body_omits_them(
+    offline_config: SampleConfig,
+    factory: Callable[..., Any],
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        runtime_factory=factory,
+        default_scenario="reject",
+        default_mode="auto",
+        default_transport="webhook",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        meta = (await http_client.get("/api/meta")).json()
+        assert meta["defaultScenario"] == "reject"
+        assert meta["defaultMode"] == "auto"
+        assert meta["defaultTransport"] == "webhook"
+
+        start = await http_client.post("/api/runs", json={})
+        assert start.status_code == 202
+        run_id = start.json()["runId"]
+        status = await _wait_status(http_client, run_id, lambda data: data["status"] == "finished")
+
+    assert status["scenario"] == "reject"
+    assert status["mode"] == "auto"
+    assert status["transport"] == "webhook"
 
 
 async def test_root_serves_the_single_page(client: httpx.AsyncClient) -> None:

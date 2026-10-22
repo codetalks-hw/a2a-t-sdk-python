@@ -350,17 +350,32 @@ async def _run_client_foreground(
     return 0
 
 
-def _run_ui(*, env_path: Path, ui_port: int, host: str = "127.0.0.1") -> int:
+def _run_ui(
+    *,
+    env_path: Path,
+    ui_port: int,
+    scenario: str,
+    mode: str,
+    transport: str,
+    host: str = "127.0.0.1",
+) -> int:
     """Serve the Web UI of the client process until interrupted."""
     import uvicorn
     from shared.config import load_config
     from web.app import create_app
 
     config = load_config(env_path=env_path)
-    app = create_app(config, env_path=env_path)
+    app = create_app(
+        config,
+        env_path=env_path,
+        default_scenario=scenario,
+        default_mode=mode,
+        default_transport=transport,
+    )
     print(
         f"[run_demo] Web UI on http://{host}:{ui_port} "
-        f"(language={config.language}, model_mode={config.model_label})"
+        f"(language={config.language}, model_mode={config.model_label}, "
+        f"defaults: scenario={scenario}, mode={mode}, transport={transport})"
     )
     try:
         uvicorn.run(app, host=host, port=ui_port, log_level="info")
@@ -571,7 +586,13 @@ def main() -> int:
                 f"[run_demo] starting Web UI (scenario selectable, mode manual/auto, "
                 f"transport={args.transport}, language={args.language}, model_mode={args.model_mode}) ..."
             )
-            return_code = _run_ui(env_path=env_path, ui_port=args.ui_port)
+            return_code = _run_ui(
+                env_path=env_path,
+                ui_port=args.ui_port,
+                scenario=args.scenario,
+                mode=args.mode,
+                transport=args.transport,
+            )
         else:
             print(
                 f"[run_demo] running client (scenario={args.scenario}, mode={args.mode}, "
