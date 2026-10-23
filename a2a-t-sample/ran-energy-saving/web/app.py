@@ -26,6 +26,7 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol
 
@@ -580,6 +581,7 @@ class RunManager:
             if run.mode != MODE_MANUAL:
                 return
             run.pending_decision = True
+            timeout_seconds = getattr(run.manual_provider, "timeout_seconds", None)
             run.broadcast(
                 {
                     "type": "decision_requested",
@@ -589,6 +591,14 @@ class RunManager:
                     "maxRounds": session.max_rounds,
                     "performative": session.performative.value,
                     "phase": "negotiation",
+                    # Tiny UI-support fields: the manual countdown would otherwise have to invent
+                    # the provider budget, and a replay after a reload would restart it.
+                    "timeoutSeconds": (
+                        float(timeout_seconds)
+                        if isinstance(timeout_seconds, (int, float))
+                        else None
+                    ),
+                    "requestedAt": _now_iso(),
                 }
             )
 
@@ -981,6 +991,11 @@ def create_app(
     app.state.run_manager = manager
     app.state.config = config
     return app
+
+
+def _now_iso() -> str:
+    """Return the current UTC time in ISO 8601 form (UI timestamps)."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _sse_data(message: dict[str, object]) -> dict[str, str]:

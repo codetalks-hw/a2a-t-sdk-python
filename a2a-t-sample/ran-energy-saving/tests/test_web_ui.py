@@ -314,12 +314,42 @@ async def test_cli_defaults_are_exposed_and_used_when_the_body_omits_them(
     assert status["transport"] == "webhook"
 
 
-async def test_root_serves_the_single_page(client: httpx.AsyncClient) -> None:
+async def test_root_serves_the_run_explorer_shell(client: httpx.AsyncClient) -> None:
     response = await client.get("/")
 
     assert response.status_code == 200
-    assert "RAN energy saving negotiation" in response.text
-    assert "EventSource" in response.text
+    page = response.text
+    assert "RAN energy saving negotiation" in page
+    assert "/static/app.css" in page
+    assert "/static/js/main.js" in page
+    for marker in (
+        'id="run-id"',
+        'id="status-pill"',
+        'id="elapsed"',
+        'id="token-total"',
+        'id="follow-toggle"',
+        'id="context-strip"',
+        'id="phase-steps"',
+        'id="scenario-select"',
+        'id="start-button"',
+        'id="analysis"',
+        'id="decision-log"',
+        'id="timeline-toolbar"',
+        'id="timeline"',
+        'id="inspector-tabs"',
+        'id="inspector-body"',
+        'id="connection-state"',
+        'id="manual-pinned"',
+        'id="shortcuts-dialog"',
+    ):
+        assert marker in page, marker
+    assert 'role="tablist"' in page
+    assert 'data-tab="llm-request"' in page
+    assert 'data-tab="llm-response"' in page
+    assert 'data-tab="tool"' in page
+    # Payloads are built as DOM nodes; the shell must not contain an inline script or innerHTML.
+    assert "innerHTML" not in page
+    assert page.count("<script") == 1
 
 
 async def test_run_lifecycle_streams_sse_events(client: httpx.AsyncClient, runtimes: list[FakeRuntime]) -> None:
@@ -429,6 +459,10 @@ async def test_manual_run_publishes_a_manual_decision_request(
     ]
     assert len(requests) == 1
     assert requests[0]["mode"] == "manual"
+    # The manual countdown reads the provider budget and the request time from the frame.
+    assert requests[0]["timeoutSeconds"] == 5.0
+    assert isinstance(requests[0]["requestedAt"], str)
+    assert requests[0]["requestedAt"].endswith("Z")
     await _wait_status(client, run_id, lambda data: data["status"] != "running")
 
 

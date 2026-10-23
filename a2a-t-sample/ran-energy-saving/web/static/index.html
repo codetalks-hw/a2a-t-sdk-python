@@ -3,442 +3,305 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RAN energy saving negotiation</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --line: #d0d7de;
-      --muted: #57606a;
-      --accent: #0969da;
-      --ok: #1a7f37;
-      --warn: #9a6700;
-      --bad: #cf222e;
-      --bg-soft: #f6f8fa;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font: 14px/1.45 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-      background: var(--bg-soft);
-      color: #1f2328;
-    }
-    header, main { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
-    header { padding-top: 24px; }
-    h1 { font-size: 20px; margin: 0 0 4px; }
-    .subtitle { color: var(--muted); margin: 0 0 18px; }
-    .panel {
-      background: #fff;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 16px;
-      margin-bottom: 16px;
-    }
-    .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
-    label { display: grid; gap: 4px; font-weight: 600; font-size: 13px; }
-    select, input, textarea, button {
-      font: inherit;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 6px 8px;
-      background: #fff;
-      color: inherit;
-    }
-    textarea { width: 100%; min-height: 64px; resize: vertical; font-family: ui-monospace, Consolas, monospace; }
-    button {
-      cursor: pointer;
-      border-color: var(--accent);
-      background: var(--accent);
-      color: #fff;
-      font-weight: 600;
-      padding: 7px 16px;
-    }
-    button:disabled { opacity: .55; cursor: not-allowed; }
-    button.secondary { background: #fff; color: var(--accent); }
-    .badge {
-      display: inline-block;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 2px 10px;
-      font-size: 12px;
-      color: var(--muted);
-      background: var(--bg-soft);
-      white-space: nowrap;
-    }
-    .badge.ok { color: var(--ok); border-color: var(--ok); }
-    .badge.warn { color: var(--warn); border-color: var(--warn); }
-    .badge.bad { color: var(--bad); border-color: var(--bad); }
-    #timeline { display: grid; gap: 8px; }
-    .event {
-      border-left: 4px solid var(--line);
-      background: #fff;
-      border-radius: 6px;
-      padding: 8px 12px;
-    }
-    .event.decision { border-left-color: var(--accent); }
-    .event.status { border-left-color: var(--ok); }
-    .event.artifact { border-left-color: var(--warn); }
-    .event-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .meta { color: var(--muted); font-size: 12px; }
-    .summary { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
-    .rationale { margin-top: 4px; color: var(--muted); font-style: italic; white-space: pre-wrap; }
-    #empty { color: var(--muted); }
-    #decision-panel { display: none; }
-    #decision-panel.visible { display: block; }
-    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-    .full { grid-column: 1 / -1; }
-    #finished { display: none; }
-    #finished.visible { display: block; }
-    pre {
-      background: var(--bg-soft);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 10px;
-      overflow: auto;
-      max-height: 360px;
-      margin: 0;
-    }
-    .downloads { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-    .downloads a { color: var(--accent); font-weight: 600; }
-    .error { color: var(--bad); }
-    .hidden { display: none !important; }
-  </style>
+  <meta name="color-scheme" content="light dark">
+  <title>RAN energy saving negotiation · Run explorer</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/js/main.js"></script>
 </head>
 <body>
-<header>
-  <h1>RAN energy saving negotiation</h1>
-  <p class="subtitle">Observe the A2A-T negotiation between the client and the RAN service agent.</p>
-</header>
-<main>
-  <section class="panel">
-    <div class="row">
-      <label>Scenario
-        <select id="scenario"></select>
-      </label>
-      <label>Decision mode
-        <select id="mode">
-          <option value="auto">auto</option>
-          <option value="manual">manual</option>
-        </select>
-      </label>
-      <label>Transport
-        <select id="transport">
-          <option value="sse">sse</option>
-          <option value="webhook">webhook</option>
-        </select>
-      </label>
-      <button id="run-button" type="button">Start run</button>
-      <span id="language-badge" class="badge">language: ...</span>
-      <span id="model-badge" class="badge">model: ...</span>
-      <span id="status-badge" class="badge">idle</span>
+  <a class="skip-link" href="#timeline-scroll">Skip to the run timeline</a>
+
+  <header class="app-header" role="banner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">A2A-T</span>
+      <span class="brand-text">
+        <span class="brand-title">RAN energy saving negotiation</span>
+        <span class="brand-subtitle">Run explorer</span>
+      </span>
     </div>
-    <p class="meta">The language is process-level and read-only; start another launcher to change it.</p>
+    <div class="header-run">
+      <button class="run-id" id="run-id" type="button" title="Copy the run id" disabled>No run</button>
+      <span class="status-pill status-idle" id="status-pill" data-status="idle">○ idle</span>
+      <span class="header-metric" title="Wall clock"><span class="header-metric-label">elapsed</span><span id="elapsed">00:00.0</span></span>
+      <span class="header-metric" title="LLM tokens"><span class="header-metric-label">tokens</span><span id="token-total">—</span></span>
+    </div>
+    <div class="header-actions">
+      <button class="toggle-button" id="follow-toggle" type="button" aria-pressed="true" title="Follow new events (f)"><span id="follow-label">Follow</span> <span class="toggle-dot" aria-hidden="true"></span></button>
+      <button class="icon-button" id="menu-button" type="button" aria-expanded="false" aria-controls="menu-panel" title="Menu">⋯</button>
+      <div class="menu-panel" id="menu-panel" hidden>
+        <button class="menu-item" id="theme-toggle" type="button">Theme: auto</button>
+        <button class="menu-item" id="menu-shortcuts" type="button">Keyboard shortcuts (?)</button>
+        <a class="menu-item" id="menu-trace" href="#" download>Download trace.json</a>
+        <a class="menu-item" id="menu-transcript" href="#" download>Download transcript.json</a>
+      </div>
+    </div>
+  </header>
+
+  <section class="context-strip" id="context-strip" aria-label="Run context">
+    <span class="ctx-item"><span class="ctx-label">scenario</span><span id="ctx-scenario">—</span></span>
+    <span class="ctx-item"><span class="ctx-label">mode</span><span id="ctx-mode">—</span></span>
+    <span class="ctx-item"><span class="ctx-label">transport</span><span id="ctx-transport">—</span></span>
+    <span class="ctx-item"><span class="ctx-label">discovery</span><span id="ctx-discovery">—</span></span>
+    <span class="ctx-item"><span class="ctx-label">language</span><span id="ctx-language">—</span></span>
+    <span class="ctx-item"><span class="ctx-label">model</span><span id="ctx-model">—</span></span>
+    <span class="ctx-item ctx-id"><span class="ctx-label">context</span><span id="context-id">—</span></span>
+    <span class="ctx-item ctx-id"><span class="ctx-label">task</span><span id="task-id">—</span></span>
+    <span class="ctx-item ctx-activity"><span class="ctx-label">activity</span><span id="current-activity">Idle</span></span>
   </section>
 
-  <section class="panel">
-    <h2 style="font-size:15px;margin:0 0 10px;">Timeline</h2>
-    <div id="timeline"><p id="empty">No events yet.</p></div>
-  </section>
+  <nav class="phase-stepper" id="phase-stepper" aria-label="Run phases">
+    <ol class="phase-list" id="phase-steps">
+      <li class="phase-step" data-phase="dispatch"><button type="button" class="phase-step-button" data-phase="dispatch"><span class="phase-step-index">01</span><span class="phase-step-label">Dispatch</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="task_prompt"><button type="button" class="phase-step-button" data-phase="task_prompt"><span class="phase-step-index">02</span><span class="phase-step-label">Task-T generation</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="task_validation"><button type="button" class="phase-step-button" data-phase="task_validation"><span class="phase-step-index">03</span><span class="phase-step-label">Task validation</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="negotiation"><button type="button" class="phase-step-button" data-phase="negotiation"><span class="phase-step-index">04</span><span class="phase-step-label">Negotiation</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="resolution"><button type="button" class="phase-step-button" data-phase="resolution"><span class="phase-step-index">05</span><span class="phase-step-label">Resolution</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="execution"><button type="button" class="phase-step-button" data-phase="execution"><span class="phase-step-index">06</span><span class="phase-step-label">Execution</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="report"><button type="button" class="phase-step-button" data-phase="report"><span class="phase-step-index">07</span><span class="phase-step-label">Report</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="done"><button type="button" class="phase-step-button" data-phase="done"><span class="phase-step-index">08</span><span class="phase-step-label">Done</span><span class="phase-step-meta">pending</span></button></li>
+    </ol>
+  </nav>
 
-  <section id="decision-panel" class="panel">
-    <h2 style="font-size:15px;margin:0 0 6px;">Manual decision</h2>
-    <p id="decision-context" class="meta"></p>
-    <div class="grid">
-      <label>Action
-        <select id="decision-action">
-          <option value="accept">accept</option>
-          <option value="reject">reject</option>
-          <option value="abort">abort</option>
-          <option value="counter">counter</option>
-        </select>
-      </label>
-      <label class="full">Rationale
-        <textarea id="decision-rationale" placeholder="Why this decision?"></textarea>
-      </label>
-      <label class="full">Counter proposal (counter only)
-        <textarea id="decision-counter" placeholder="Natural-language counter proposal"></textarea>
-      </label>
-      <label>Filled params (accept, JSON)
-        <textarea id="decision-filled" placeholder='{"region": "..."}'></textarea>
-      </label>
-      <label>Counter params (counter, JSON)
-        <textarea id="decision-counter-params" placeholder='{"cellId": "cell-001", "window": "00:00~06:00", "targetRate": "30"}'></textarea>
-      </label>
+  <div class="shell">
+    <aside class="rail" id="rail" aria-label="Run controls">
+      <button class="rail-toggle" id="rail-toggle" type="button" aria-expanded="false" title="Toggle the run controls">☰ Controls</button>
+      <section class="panel rail-section" aria-labelledby="rail-run-title">
+        <h2 class="panel-title" id="rail-run-title">Run setup</h2>
+        <form class="run-form" id="run-form">
+          <label class="field">Scenario
+            <select id="scenario-select" name="scenario">
+              <option value="information">information</option>
+              <option value="target">target</option>
+              <option value="feasibility">feasibility</option>
+              <option value="reject">reject</option>
+              <option value="abort">abort</option>
+            </select>
+          </label>
+          <label class="field">Mode
+            <select id="mode-select" name="mode">
+              <option value="auto">auto</option>
+              <option value="manual">manual</option>
+            </select>
+          </label>
+          <label class="field">Transport
+            <select id="transport-select" name="transport">
+              <option value="sse">sse</option>
+              <option value="webhook">webhook</option>
+            </select>
+          </label>
+          <label class="field">Discovery
+            <select id="discovery-select" name="discovery">
+              <option value="registry">registry</option>
+              <option value="direct">direct</option>
+            </select>
+          </label>
+          <button class="primary-button" id="start-button" type="submit">▶ Start run</button>
+          <p class="field-note">Language <span id="rail-language">—</span> is process-level and read-only.</p>
+          <p class="form-error" id="run-error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section class="panel rail-section manual-panel" id="manual-panel-rail" aria-labelledby="rail-manual-title" hidden>
+        <h2 class="panel-title" id="rail-manual-title">Manual decision</h2>
+        <p class="manual-context" data-role="manual-context">Waiting for a proposal…</p>
+        <p class="manual-countdown"><span class="micro-label">remaining</span> <span class="decision-countdown" data-role="countdown">—</span></p>
+        <div class="decision-form">
+          <label class="field">Action
+            <select data-field="action" aria-label="Decision action">
+              <option value="accept">accept</option>
+              <option value="reject">reject</option>
+              <option value="abort">abort</option>
+              <option value="counter">counter</option>
+            </select>
+          </label>
+          <label class="field">Rationale
+            <textarea data-field="rationale" rows="2" placeholder="Why this decision?"></textarea>
+          </label>
+          <label class="field">Filled params (accept, JSON)
+            <textarea data-field="filled" rows="2" placeholder='{"region": "…"}'></textarea>
+          </label>
+          <label class="field">Counter proposal (counter only)
+            <textarea data-field="counter" rows="2" placeholder="Natural-language counter proposal"></textarea>
+          </label>
+          <label class="field">Counter params (counter, JSON)
+            <textarea data-field="counterParams" rows="2" placeholder='{"cellId": "cell-001"}'></textarea>
+          </label>
+        </div>
+        <p class="form-error decision-error" data-role="error" hidden></p>
+        <div class="manual-actions">
+          <button class="primary-button decision-submit" type="button">Submit decision</button>
+          <button class="secondary-button decision-focus" type="button">Open the pinned card</button>
+        </div>
+      </section>
+
+      <section class="panel rail-section" aria-labelledby="rail-analysis-title">
+        <h2 class="panel-title" id="rail-analysis-title">Analysis</h2>
+        <dl class="analysis-grid" id="analysis">
+          <div><dt>Wall clock</dt><dd id="analysis-wall">00:00.0</dd></div>
+          <div><dt>LLM calls</dt><dd id="analysis-llm">0</dd></div>
+          <div><dt>Tokens</dt><dd id="analysis-tokens">—</dd></div>
+          <div><dt>Tools</dt><dd id="analysis-tools">0</dd></div>
+          <div><dt>Errors / retries</dt><dd id="analysis-errors">0 / 0</dd></div>
+          <div><dt>Parse failures</dt><dd id="analysis-parse">0</dd></div>
+          <div><dt>Decisions</dt><dd id="analysis-decisions">0</dd></div>
+        </dl>
+        <h3 class="micro-label">Phase durations</h3>
+        <ul class="phase-durations" id="phase-durations"></ul>
+        <h3 class="micro-label">Anomalies</h3>
+        <ul class="anomaly-list" id="anomalies-list"><li class="placeholder">None detected.</li></ul>
+      </section>
+
+      <section class="panel rail-section" aria-labelledby="rail-decisions-title">
+        <h2 class="panel-title" id="rail-decisions-title">Decision log</h2>
+        <ol class="decision-log" id="decision-log"><li class="placeholder">No decisions yet.</li></ol>
+      </section>
+
+      <section class="panel rail-section" aria-labelledby="rail-exports-title">
+        <h2 class="panel-title" id="rail-exports-title">Exports</h2>
+        <div class="export-links">
+          <a id="export-trace" href="#" download>Trace JSON</a>
+          <a id="export-json" href="#" download>Transcript JSON</a>
+          <a id="export-md" href="#" download>Transcript Markdown</a>
+        </div>
+      </section>
+    </aside>
+
+    <main class="timeline-column" id="timeline-column">
+      <div class="timeline-toolbar" id="timeline-toolbar" role="toolbar" aria-label="Timeline controls">
+        <div class="segmented" role="group" aria-label="Timeline view">
+          <button type="button" class="segment is-active" id="view-story" data-view="story" aria-pressed="true">Story</button>
+          <button type="button" class="segment" id="view-waterfall" data-view="waterfall" aria-pressed="false">Waterfall</button>
+        </div>
+        <div class="filter-chips" id="filter-chips" role="group" aria-label="Timeline filters">
+          <button type="button" class="chip is-active" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" class="chip" data-filter="protocol" aria-pressed="false">Protocol</button>
+          <button type="button" class="chip" data-filter="llm" aria-pressed="false">LLM</button>
+          <button type="button" class="chip" data-filter="tools" aria-pressed="false">Tools</button>
+          <button type="button" class="chip" data-filter="errors" aria-pressed="false">Errors</button>
+        </div>
+        <label class="inline-field"><span class="sr-only">Actor</span>
+          <select id="actor-filter" aria-label="Filter by actor">
+            <option value="all">All actors</option>
+            <option value="client">Client</option>
+            <option value="server">Server</option>
+            <option value="llm">LLM</option>
+            <option value="tool">Tool</option>
+            <option value="human">Human</option>
+            <option value="system">System</option>
+          </select>
+        </label>
+        <label class="inline-field"><span class="sr-only">Round</span>
+          <select id="round-filter" aria-label="Filter by negotiation round">
+            <option value="all">All rounds</option>
+          </select>
+        </label>
+        <label class="search-field"><span class="sr-only">Search the timeline</span>
+          <input type="search" id="search-input" placeholder="Search…  ( / )" autocomplete="off">
+        </label>
+        <button type="button" class="icon-text-button" id="expand-all" title="Expand all phases">Expand</button>
+        <button type="button" class="icon-text-button" id="collapse-all" title="Collapse all phases">Collapse</button>
+        <button type="button" class="icon-text-button" id="timeline-follow" aria-pressed="true" title="Follow new events (f)">Following</button>
+        <span class="toolbar-stats" id="timeline-stats">0 steps</span>
+      </div>
+
+      <div class="connection-banner" id="connection-banner" role="status" hidden>
+        <span id="connection-banner-text">Event stream disconnected; retrying…</span>
+        <button type="button" class="link-button" id="connection-retry">Retry now</button>
+      </div>
+
+      <section class="manual-pinned" id="manual-pinned" aria-labelledby="pinned-manual-title" hidden>
+        <h2 class="panel-title" id="pinned-manual-title">Decision required <span class="manual-round" data-role="manual-round"></span></h2>
+        <p class="manual-context" data-role="manual-context"></p>
+        <p class="manual-countdown"><span class="micro-label">remaining</span> <span class="decision-countdown" data-role="countdown">—</span></p>
+        <div class="decision-form">
+          <label class="field">Action
+            <select data-field="action" aria-label="Decision action">
+              <option value="accept">accept</option>
+              <option value="reject">reject</option>
+              <option value="abort">abort</option>
+              <option value="counter">counter</option>
+            </select>
+          </label>
+          <label class="field field-wide">Rationale
+            <textarea data-field="rationale" rows="2" placeholder="Why this decision?"></textarea>
+          </label>
+          <label class="field field-wide">Filled params (accept, JSON)
+            <textarea data-field="filled" rows="3" placeholder='{"region": "…"}'></textarea>
+          </label>
+          <label class="field field-wide">Counter proposal (counter only)
+            <textarea data-field="counter" rows="2" placeholder="Natural-language counter proposal"></textarea>
+          </label>
+          <label class="field field-wide">Counter params (counter, JSON)
+            <textarea data-field="counterParams" rows="2" placeholder='{"cellId": "cell-001", "window": "00:00~06:00", "targetRate": "30"}'></textarea>
+          </label>
+        </div>
+        <p class="form-error decision-error" data-role="error" hidden></p>
+        <div class="manual-actions">
+          <button class="primary-button decision-submit" type="button">Submit decision</button>
+          <span class="field-note">Cmd/Ctrl+Enter submits.</span>
+        </div>
+      </section>
+
+      <div class="timeline-scroll" id="timeline-scroll" tabindex="-1">
+        <div class="state-callout" id="timeline-loading" hidden>
+          <span class="state-glyph" aria-hidden="true">◌</span>
+          <div><h2>Loading run explorer…</h2><p>Reading the process metadata.</p></div>
+        </div>
+        <div class="state-callout" id="timeline-empty">
+          <span class="state-glyph" aria-hidden="true">○</span>
+          <div><h2>No run yet</h2><p>Choose a scenario in the left rail and start a run. Every dispatch step, protocol message, decision, LLM call and tool call will appear here in order.</p></div>
+        </div>
+        <div class="state-callout state-error" id="timeline-error" role="alert" hidden>
+          <span class="state-glyph" aria-hidden="true">✕</span>
+          <div><h2>Run unavailable</h2><p id="timeline-error-text">The run could not be started.</p></div>
+        </div>
+        <div class="state-callout state-warn" id="timeline-no-trace" hidden>
+          <span class="state-glyph" aria-hidden="true">!</span>
+          <div><h2>No trace payloads</h2><p>This run recorded protocol events only; no LLM or tool spans were captured.</p></div>
+        </div>
+        <div class="timeline" id="timeline"></div>
+      </div>
+    </main>
+
+    <aside class="inspector" id="inspector" aria-label="Step inspector" aria-hidden="true">
+      <div class="inspector-head">
+        <div class="inspector-identity">
+          <span class="micro-label" id="inspector-step">RUN SUMMARY</span>
+          <span class="inspector-kind" id="inspector-kind">No step selected</span>
+        </div>
+        <div class="inspector-nav">
+          <button type="button" class="icon-button" id="inspector-prev" title="Previous step ([)" aria-label="Previous step">‹</button>
+          <button type="button" class="icon-button" id="inspector-next" title="Next step (])" aria-label="Next step">›</button>
+          <button type="button" class="icon-button" id="inspector-close" title="Close inspector (Esc)" aria-label="Close inspector">✕</button>
+        </div>
+      </div>
+      <div class="inspector-tabs" id="inspector-tabs" role="tablist" aria-label="Inspector tabs">
+        <button type="button" role="tab" data-tab="summary" aria-selected="true" aria-controls="inspector-body">Summary</button>
+        <button type="button" role="tab" data-tab="protocol" aria-selected="false" aria-controls="inspector-body" disabled>Protocol</button>
+        <button type="button" role="tab" data-tab="llm-request" aria-selected="false" aria-controls="inspector-body" disabled>LLM request</button>
+        <button type="button" role="tab" data-tab="llm-response" aria-selected="false" aria-controls="inspector-body" disabled>LLM response</button>
+        <button type="button" role="tab" data-tab="tool" aria-selected="false" aria-controls="inspector-body" disabled>Tool call</button>
+        <button type="button" role="tab" data-tab="raw" aria-selected="false" aria-controls="inspector-body">Raw JSON</button>
+      </div>
+      <div class="inspector-body" id="inspector-body" role="tabpanel" aria-label="Step details" tabindex="0"></div>
+    </aside>
+    <div class="inspector-backdrop" id="inspector-backdrop" hidden></div>
+  </div>
+
+  <footer class="app-footer">
+    <span class="connection-state" id="connection-state" data-state="idle"><span class="conn-dot" aria-hidden="true"></span><span id="connection-label">idle</span></span>
+    <span class="last-event" id="last-event">No events yet</span>
+    <span class="shortcut-hint">j/k move · Enter open · / search · f follow · ? shortcuts</span>
+  </footer>
+
+  <dialog class="shortcuts-dialog" id="shortcuts-dialog" aria-labelledby="shortcuts-title">
+    <div class="shortcuts-head">
+      <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      <button type="button" class="icon-button" id="shortcuts-close" aria-label="Close">✕</button>
     </div>
-    <div class="row" style="margin-top:10px;">
-      <button id="decision-submit" type="button">Submit decision</button>
-      <span id="decision-error" class="error"></span>
-    </div>
-  </section>
+    <dl class="shortcuts-list" id="shortcuts-list"></dl>
+  </dialog>
 
-  <section id="finished" class="panel">
-    <h2 style="font-size:15px;margin:0 0 6px;">Result</h2>
-    <p id="finished-summary" class="meta"></p>
-    <pre id="finished-report"></pre>
-    <div class="downloads">
-      <a id="download-json" href="#" download>Download transcript (JSON)</a>
-      <a id="download-md" href="#" download>Download transcript (Markdown)</a>
-    </div>
-  </section>
-</main>
-<script>
-  (function () {
-    "use strict";
-
-    const state = { runId: null, source: null, pendingDecision: false, meta: null };
-
-    const $ = (id) => document.getElementById(id);
-    const scenarioSelect = $("scenario");
-    const modeSelect = $("mode");
-    const transportSelect = $("transport");
-    const runButton = $("run-button");
-    const languageBadge = $("language-badge");
-    const modelBadge = $("model-badge");
-    const statusBadge = $("status-badge");
-    const timeline = $("timeline");
-    const empty = $("empty");
-    const decisionPanel = $("decision-panel");
-    const decisionContext = $("decision-context");
-    const decisionError = $("decision-error");
-    const finishedPanel = $("finished");
-    const finishedSummary = $("finished-summary");
-    const finishedReport = $("finished-report");
-
-    function setStatus(text, tone) {
-      statusBadge.textContent = text;
-      statusBadge.className = "badge" + (tone ? " " + tone : "");
-    }
-
-    function clearTimeline() {
-      timeline.innerHTML = "";
-      timeline.appendChild(empty);
-      empty.hidden = false;
-      finishedPanel.classList.remove("visible");
-      decisionPanel.classList.remove("visible");
-      decisionError.textContent = "";
-      state.pendingDecision = false;
-    }
-
-    function addEvent(entry) {
-      empty.hidden = true;
-      const card = document.createElement("article");
-      const tone = entry.eventKind === "decision" ? "decision"
-        : entry.eventKind === "status" ? "status"
-        : entry.eventKind === "artifact" ? "artifact" : "";
-      card.className = "event" + (tone ? " " + tone : "");
-
-      const head = document.createElement("div");
-      head.className = "event-head";
-      const round = document.createElement("span");
-      round.className = "badge";
-      round.textContent = entry.round ? "round " + entry.round : "no round";
-      const performative = document.createElement("span");
-      performative.className = "badge";
-      performative.textContent = entry.performative || "-";
-      const kind = document.createElement("span");
-      kind.className = "badge";
-      // Show the negotiation type (information / target / feasibility); the performative badge
-      // already carries propose/accept/reject/abort.
-      kind.textContent = entry.negotiationType || entry.eventKind || entry.kind || "event";
-      const direction = document.createElement("span");
-      direction.className = "meta";
-      direction.textContent = entry.direction || "";
-      head.append(round, performative, kind, direction);
-      card.appendChild(head);
-
-      if (entry.summary) {
-        const summary = document.createElement("div");
-        summary.className = "summary";
-        summary.textContent = entry.summary;
-        card.appendChild(summary);
-      }
-      if (entry.rationale) {
-        const rationale = document.createElement("div");
-        rationale.className = "rationale";
-        rationale.textContent = "Decision rationale: " + entry.rationale;
-        card.appendChild(rationale);
-      }
-      timeline.appendChild(card);
-      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-
-    function showDecisionRequest(payload) {
-      state.pendingDecision = true;
-      decisionPanel.classList.add("visible");
-      const proposal = payload.proposal || {};
-      decisionContext.textContent = [
-        "type: " + (proposal.kind || "-"),
-        "round: " + payload.round + " / " + payload.maxRounds,
-        "performative: " + (payload.performative || "PROPOSE")
-      ].join("  |  ");
-      if (proposal.content) {
-        const content = document.createElement("div");
-        content.className = "meta";
-        content.style.marginTop = "4px";
-        content.style.whiteSpace = "pre-wrap";
-        content.textContent = proposal.content;
-        decisionContext.appendChild(content);
-      }
-      decisionError.textContent = "";
-    }
-
-    function parseJsonField(id) {
-      const raw = $(id).value.trim();
-      if (!raw) return null;
-      return JSON.parse(raw);
-    }
-
-    async function submitDecision() {
-      if (!state.runId || !state.pendingDecision) return;
-      let body;
-      try {
-        body = {
-          action: $("decision-action").value,
-          rationale: $("decision-rationale").value.trim(),
-          filled_params: parseJsonField("decision-filled"),
-          counter_proposal: $("decision-counter").value.trim() || null,
-          counter_params: parseJsonField("decision-counter-params")
-        };
-      } catch (error) {
-        decisionError.textContent = "Invalid JSON: " + error.message;
-        return;
-      }
-      $("decision-submit").disabled = true;
-      try {
-        const response = await fetch("/api/runs/" + state.runId + "/decisions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-        if (!response.ok) {
-          const detail = await response.json().catch(() => ({}));
-          throw new Error(detail.error || ("HTTP " + response.status));
-        }
-        state.pendingDecision = false;
-        decisionPanel.classList.remove("visible");
-      } catch (error) {
-        decisionError.textContent = String(error.message || error);
-      } finally {
-        $("decision-submit").disabled = false;
-      }
-    }
-
-    function showFinished(payload) {
-      state.pendingDecision = false;
-      decisionPanel.classList.remove("visible");
-      finishedPanel.classList.add("visible");
-      setStatus(payload.status || "finished", payload.status === "failed" ? "bad" : "ok");
-      finishedSummary.textContent = "Final state: " + (payload.finalState || "n/a") +
-        (payload.error ? " | Error: " + payload.error : "");
-      finishedReport.textContent = JSON.stringify(payload.report, null, 2);
-      $("download-json").href = payload.transcriptJson || "#";
-      $("download-md").href = payload.transcriptMarkdown || "#";
-    }
-
-    function connect(runId) {
-      if (state.source) state.source.close();
-      const source = new EventSource("/api/runs/" + runId + "/events");
-      state.source = source;
-      source.onmessage = (event) => {
-        let payload;
-        try {
-          payload = JSON.parse(event.data);
-        } catch (error) {
-          console.error("Invalid SSE payload", error);
-          return;
-        }
-        if (payload.type === "event") {
-          addEvent(payload.event);
-        } else if (payload.type === "decision_requested" && payload.mode === "manual") {
-          // The server only emits this prompt for manual runs; the guard keeps an auto run's
-          // timeline from ever exposing a decision form that the API would reject with 409.
-          showDecisionRequest(payload);
-        } else if (payload.type === "finished") {
-          showFinished(payload);
-          source.close();
-          state.source = null;
-          runButton.disabled = false;
-        }
-      };
-      source.onerror = () => {
-        if (state.source === source) {
-          setStatus("event stream closed", "warn");
-          runButton.disabled = false;
-        }
-      };
-    }
-
-    async function startRun() {
-      clearTimeline();
-      runButton.disabled = true;
-      setStatus("starting", "warn");
-      try {
-        const response = await fetch("/api/runs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scenario: scenarioSelect.value,
-            mode: modeSelect.value,
-            transport: transportSelect.value
-          })
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
-        state.runId = payload.runId;
-        setStatus("running", "warn");
-        connect(payload.runId);
-      } catch (error) {
-        setStatus("failed", "bad");
-        runButton.disabled = false;
-        const note = document.createElement("p");
-        note.className = "error";
-        note.textContent = String(error.message || error);
-        timeline.appendChild(note);
-        empty.hidden = true;
-      }
-    }
-
-    async function loadMeta() {
-      try {
-        const response = await fetch("/api/meta");
-        const meta = await response.json();
-        state.meta = meta;
-        languageBadge.textContent = "language: " + meta.language + " (read-only)";
-        modelBadge.textContent = "model: " + (meta.modelLabel || meta.modelMode);
-        modelBadge.className = "badge " + (meta.modelMode === "offline" ? "warn" : "ok");
-        scenarioSelect.innerHTML = "";
-        for (const name of meta.scenarios || []) {
-          const option = document.createElement("option");
-          option.value = name;
-          option.textContent = name;
-          scenarioSelect.appendChild(option);
-        }
-        modeSelect.innerHTML = "";
-        for (const name of meta.modes || []) {
-          const option = document.createElement("option");
-          option.value = name;
-          option.textContent = name;
-          modeSelect.appendChild(option);
-        }
-        transportSelect.innerHTML = "";
-        for (const name of meta.transports || []) {
-          const option = document.createElement("option");
-          option.value = name;
-          option.textContent = name;
-          transportSelect.appendChild(option);
-        }
-        if (meta.defaultScenario) scenarioSelect.value = meta.defaultScenario;
-        if (meta.defaultMode) modeSelect.value = meta.defaultMode;
-        if (meta.defaultTransport) transportSelect.value = meta.defaultTransport;
-      } catch (error) {
-        languageBadge.textContent = "language: unavailable";
-        modelBadge.textContent = "model: unavailable";
-      }
-    }
-
-    runButton.addEventListener("click", startRun);
-    $("decision-submit").addEventListener("click", submitDecision);
-    loadMeta();
-  })();
-</script>
+  <div class="sr-only" id="live-region" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>
