@@ -6,7 +6,10 @@ client agent and a RAN domain server agent agree on an energy-saving task throug
 Kit) agents on both sides.
 
 The sample is written for two audiences: teams building a **client agent** and teams building a
-**server agent**. When a component belongs to one side, this document names that side instead of
+**server agent**. Its primary purpose is the **client-side integration**: showing how one agent
+combines A2A transport, A2A-T semantics, and ADK reasoning without letting the model own protocol
+correctness. §2.1 is that integration guide; the rest of the document is the reference
+implementation. When a component belongs to one side, this document names that side instead of
 addressing an unspecified "you".
 
 **Glossary**
@@ -86,6 +89,231 @@ flowchart LR
 All negotiation happens **before the Task is created**: `Propose` / `Accept` / `Reject` /
 `Abort` are standalone `Message`s, not Task events. Only an accepted negotiation produces a
 Task, which the inner ADK `A2aAgentExecutor` creates and drives to `COMPLETED`.
+
+### 2.1 Client-layer integration: A2A, A2A-T, and ADK
+
+The sample's primary goal is the **client-side integration**, not the RAN business logic. A client
+agent has to combine three layers that solve different problems:
+
+| Layer | Responsibility | Owns | Does not do |
+| --- | --- | --- | --- |
+| **A2A** (`a2a-sdk`) | Transport and lifecycle: discover the AgentCard, send `Message`s, stream events or receive webhook pushes, represent the `Task` and its states. | HTTP+JSON, SSE/webhook, `contextId`, `Message`, `Task`, `TaskState`. | It does not know what Task-T or Negotiation-T means. |
+| **A2A-T** (`a2a_t`) | Semantic layer on top of A2A: extract and validate Task-T parameters, render Task-T prompts, generate and validate Negotiation-T performatives, carry `templateUri` and `negotiationContext`. | `A2ATClient` / `A2ATServer` facade, templates, structured validation, extension metadata. | It does not open HTTP connections or run agents. |
+| **ADK** (`google-adk`) | Reasoning and tools: decide what to do with a proposal, call client-side tools, produce a structured `NegotiationDecision`; on the server, execute the accepted Task with tools. | `LlmAgent`, tools, `output_schema`, `Runner`, sessions. | It never puts protocol content on the wire, never chooses a round or performative, and never parses raw A2A-T metadata. |
+| **Deterministic client flow** (this sample) | Orchestration and protocol correctness: call the right A2A-T API, send the right A2A message, keep rounds and performatives consistent, handle terminal states. | `protocol/client_flow.py`. | It does not make business decisions; those come from the provider. |
+
+The one-line mental model:
+
+> **A2A moves the message. A2A-T gives it meaning. ADK supplies the decision. The flow keeps the
+> protocol honest.**
+
+#### Client component model
+
+```mermaid
+flowchart TB
+    subgraph Client["Client process"]
+        UI["CLI / Web UI<br/>natural-language request"]
+        RT["ClientRuntime<br/>assembly"]
+        FLOW["run_client_flow<br/>deterministic protocol loop"]
+        PROV["NegotiationDecisionProvider<br/>ADK / manual / scripted"]
+        AGENT["ADK LlmAgent<br/>tools + output_schema"]
+        FACADE["A2ATClient<br/>Task-T / Negotiation-T facade"]
+        A2A["a2a-sdk Client<br/>HTTP+JSON + SSE/webhook"]
+        UI --> RT --> FLOW
+        FLOW --> PROV --> AGENT
+        AGENT --> PROV
+        FLOW --> FACADE
+        FACADE --> FLOW
+        FLOW --> A2A
+    end
+    SERVER["A2A-T server<br/>gate + ADK executor"]
+    A2A <-->|"Message / Task events"| SERVER
+```
+
+`ClientRuntime` is assembly only. It builds a per-run A2A-T SDK `.env`, registers the traced and
+scripted providers, creates `A2ATClient`, discovers the server AgentCard, creates the a2a-sdk
+client, selects the transport and the decision provider. `run_client_flow` is where the integration
+actually happens.
+
+#### End-to-end sequence: target scenario (counter, then accept)
+
+This is the most complete path: the initial Task-T is rejected by validation, the server opens a
+target negotiation, the client counters, the server revises, and the client accepts.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User / Web UI
+    participant R as ClientRuntime
+    participant F as run_client_flow
+    participant T as A2ATClient (A2A-T)
+    participant A as a2a-sdk (A2A)
+    participant G as Server gate
+    participant P as Server policy
+    participant S as A2ATServer (A2A-T)
+    participant D as Client ADK agent
+    participant X as Server ADK agent
+
+    U->>R: request + scenario + mode
+    R->>R: per-run SDK .env, discovery, A2A client, transport, provider
+    R->>F: run_client_flow(request, provider, transport)
+    F->>T: generate_task_prompt_from_text(request, Task-T URI)
+    T-->>F: Task-T prompt + templateUri
+    F->>A: Message(metadata[Task-T/v1], A2A-Extensions)
+    A->>G: HTTP+JSON message:send
+    G->>S: validate_task_prompt_and_data_filling(...)
+    S-->>G: content.value_not_allowed (overlap)
+    G->>P: decide(kind=target, round=1)
+    P-->>G: propose R1
+    G->>S: generate_negotiation_propose_prompt_from_text(R1 text)
+    S-->>G: Negotiation-T proposal
+    G-->>A: standalone Message (no Task)
+    A-->>F: message event + metadata
+    F->>F: parse templateUri + negotiationContext
+    F->>D: decision prompt (proposal + original request)
+    D->>D: get_sla_policy / evaluate_proposal_impact
+    D-->>F: NegotiationDecision(counter, counter_params)
+    F->>T: generate_negotiation_propose_prompt_from_text(counter, same round)
+    T-->>F: counter proposal content
+    F->>A: Message(counter + sampleProposal)
+    A->>G: HTTP+JSON
+    G->>S: validate_propose_prompt_and_data_filling(...)
+    G->>P: decide(counter, round=1)
+    P-->>G: propose R2
+    G->>S: generate_negotiation_propose_prompt_from_text(R2 text)
+    S-->>G: revised proposal
+    G-->>A: standalone Message (round=2)
+    A-->>F: message event
+    F->>D: decision prompt (R2)
+    D-->>F: NegotiationDecision(accept)
+    F->>T: generate_task_prompt_from_data_with_schema(filled)
+    T-->>F: refilled Task-T prompt
+    F->>T: generate_negotiation_accept_prompt_from_text(...)
+    T-->>F: accept content
+    F->>A: Message(accept + refilled Task-T, round=2)
+    A->>G: HTTP+JSON
+    G->>S: validate_accept_prompt_and_data_filling(...)
+    G->>S: validate_task_prompt_and_data_filling(refilled)
+    G->>X: delegate to ADK A2aAgentExecutor
+    X->>X: create Task, run tools
+    X-->>A: SUBMITTED, WORKING, artifacts, COMPLETED
+    A-->>F: stream / webhook events
+    F-->>U: timeline, report, transcript
+```
+
+The critical structural point: **round-1 and round-2 proposals are standalone `Message`s, not Task
+events.** The A2A `Task` appears only after the gate validates the `Accept` and the refilled Task-T.
+
+#### Direct path: Task-T validates without negotiation
+
+If the initial Task-T is complete and valid, the gate never opens a negotiation; the same request
+continues into the ADK executor. This is the Run Explorer case where phases 4 and 5 stay empty.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as run_client_flow
+    participant T as A2ATClient
+    participant A as a2a-sdk
+    participant G as Server gate
+    participant X as Server ADK agent
+    F->>T: generate_task_prompt_from_text(...)
+    T-->>F: Task-T prompt
+    F->>A: Message(Task-T metadata)
+    A->>G: HTTP+JSON
+    G->>G: validate_task_prompt_and_data_filling = OK
+    G->>X: delegate to ADK A2aAgentExecutor
+    X-->>A: Task events ... COMPLETED
+    A-->>F: events
+```
+
+#### Terminal paths: reject and abort
+
+`Reject` and `Abort` are also standalone `Negotiation-T` messages. The server validates the terminal
+message best-effort, returns a plain A2A `Message` (no Negotiation-T metadata), and **creates no
+Task**. The client flow ends as `no_task_negotiation_ended` (client reject) or
+`no_task_negotiation_aborted` (server abort at `maxRounds`).
+
+```mermaid
+stateDiagram-v2
+    [*] --> GenerateTaskT
+    GenerateTaskT --> AwaitResponse: send Task-T
+    AwaitResponse --> Done: Task COMPLETED / terminal Task state
+    AwaitResponse --> Ended: plain end Message
+    AwaitResponse --> Decide: server Propose
+    Decide --> AwaitResponse: accept, refill Task-T and send
+    Decide --> AwaitResponse: counter, same-round Propose
+    Decide --> Ended: reject
+    Decide --> Ended: abort
+    AwaitResponse --> Ended: server Abort
+    Done --> [*]
+    Ended --> [*]
+```
+
+#### Where the A2A-T SDK is called
+
+Every A2A-T call is synchronous and returns generated content or validated parameters. **It does not
+send anything.** The flow then wraps the content in an A2A `Message` and the a2a-sdk transport sends
+it.
+
+| Moment | Call | Side | Result |
+| --- | --- | --- | --- |
+| Initial Task-T | `A2ATClient.generate_task_prompt_from_text(request, TASK_TEMPLATE_URI)` | Client | Rendered Task-T prompt; slot extraction and content validation happen here. |
+| Initial validation | `A2ATServer.validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` | Server | Filled parameters or structured `SlotValidationError`s. |
+| Server opening proposal | `A2ATServer.generate_negotiation_propose_prompt_from_text(text, context, template_uri)` | Server | `MetadataContent` for `Propose`. |
+| Client decision message | `A2ATClient.generate_negotiation_{accept,propose,reject,abort}_prompt_from_text(...)` | Client | `MetadataContent` for the chosen performative. |
+| Counter validation | `A2ATServer.validate_propose_prompt_and_data_filling(...)` | Server | Validated counter or structured errors. |
+| Accept validation | `A2ATServer.validate_accept_prompt_and_data_filling(...)` | Server | Validated accept. |
+| Task-T refill | `A2ATClient.generate_task_prompt_from_data_with_schema(filled, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` | Client | The final agreed Task-T prompt sent with `Accept`. |
+| Final Task-T validation | `A2ATServer.validate_task_prompt_and_data_filling(...)` | Server | Gate approval; only now is a Task created. |
+
+`MetadataContent.build_metadata_content()` produces the wire metadata (`Task-T/v1` or
+`Negotiation-T/v1` value, `templateUri`, and for negotiation messages `negotiationContext`).
+[`protocol/messages.py`](protocol/messages.py) defines the A2A-T metadata keys and helpers, and
+[`protocol/client_flow.py`](protocol/client_flow.py) assembles the outbound metadata map and sends
+it.
+
+#### How ADK plugs into the client
+
+The ADK agent is deliberately **not** part of the wire path:
+
+1. `run_client_flow` parses the inbound `Propose` into a `NegotiationProposeView` and a
+   `NegotiationContext`.
+2. `AdkDecisionProvider.respond(propose, session)` builds a decision prompt containing the proposal,
+   its negotiation type and round, and the original user request.
+3. The provider runs `agents.client_agent.agent.build_client_agent` through an `InMemoryRunner`,
+   keeping one ADK session per negotiation id so later rounds see earlier proposals.
+4. The agent may call `get_sla_policy` and `evaluate_proposal_impact`;
+   `output_schema=NegotiationDecision` makes ADK return a typed decision.
+5. The flow turns `action` into exactly one A2A-T performative. **The model never sets `round`,
+   `performative`, `templateUri`, or message metadata.**
+
+This is the integration seam to keep if you replace the business logic: swap the tools and the
+instruction, keep `NegotiationDecision` and `AdkDecisionProvider`, and let the flow remain
+deterministic.
+
+#### Integration recipe for a new client
+
+1. Configure the A2A-T SDK through its **file-based** `.env`; build a per-run file instead of
+   mutating the source. The SDK reads `A2AT_LLM_*` from that file, not from process environment
+   variables.
+2. Discover the server AgentCard and confirm it declares `Task-T/v1` and `Negotiation-T/v1`.
+3. Create the a2a-sdk client with streaming for SSE, or with streaming disabled plus a push
+   notification config for webhook.
+4. Send the initial Task-T as an A2A `Message`: short text label in `parts`, Task-T prompt under the
+   Task-T extension URI in `metadata`, plus `templateUri`; set `A2A-Extensions`.
+5. Treat every inbound standalone `Message` with a `negotiationContext` as a negotiation step, not
+   as a Task event. Dispatch on `templateUri`, not on prose.
+6. Ask your decision provider for intent, then call the matching A2A-T generator with
+   `session.with_performative(...)`. Never call `next_round()` on the client; the server owns rounds.
+7. On `accept`, refill the Task-T with `generate_task_prompt_from_data_with_schema` and send both
+   the refilled Task-T and the Negotiation-T accept in one message.
+8. Consume Task events only after the accept; stop at `COMPLETED`, a terminal rejection/failure, or
+   the plain end message.
+
+The canonical implementation is [`protocol/client_runtime.py`](protocol/client_runtime.py)
+(assembly) and [`protocol/client_flow.py`](protocol/client_flow.py) (protocol loop). The replace
+checklist in §7 marks which files are reusable and which are sample business content.
 
 ### Directory layout
 

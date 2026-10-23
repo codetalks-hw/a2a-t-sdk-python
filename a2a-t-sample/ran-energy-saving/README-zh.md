@@ -2,7 +2,7 @@
 
 一个可运行的智能体协作参考实现：客户端智能体与 RAN（Radio Access Network，无线接入网）域服务端智能体通过 A2A-T 的 `Negotiation-T` 达成节能任务，再通过标准 A2A Task 和 Google ADK（Agent Development Kit）执行任务。
 
-本样例面向两类读者：**客户端智能体**开发团队与**服务端智能体**开发团队。当组件只属于一侧时，本文直接写明责任方，不使用未区分的“你”。
+本样例面向两类读者：**客户端智能体**开发团队与**服务端智能体**开发团队。首要目的是**客户端层集成**：展示一个智能体如何把 A2A 传输、A2A-T 语义与 ADK 推理组合起来，同时不让模型掌握协议正确性。§2.1 就是这份集成指南；其余部分是参考实现。当组件只属于一侧时，本文直接写明责任方，不使用未区分的“你”。
 
 **术语表**
 
@@ -69,6 +69,197 @@ flowchart LR
 ```
 
 所有协商都发生在**Task 创建之前**：`Propose` / `Accept` / `Reject` / `Abort` 都是独立的 `Message`，不是 Task 事件。只有协商被接受后才会创建 Task，并由内层 ADK `A2aAgentExecutor` 推进到 `COMPLETED`。
+
+### 2.1 客户端层集成：A2A、A2A-T 与 ADK
+
+本样例的首要目的是**客户端层集成**，而不是 RAN 业务逻辑。一个客户端智能体需要组合三层，它们解决的是不同问题：
+
+| 层 | 职责 | 拥有 | 不负责 |
+| --- | --- | --- | --- |
+| **A2A**（`a2a-sdk`） | 传输与生命周期：发现 AgentCard、发送 `Message`、流式接收事件或 webhook 推送、表达 `Task` 及其状态。 | HTTP+JSON、SSE/webhook、`contextId`、`Message`、`Task`、`TaskState`。 | 不理解 Task-T / Negotiation-T 的含义。 |
+| **A2A-T**（`a2a_t`） | A2A 之上的语义层：抽取并校验 Task-T 参数、渲染 Task-T 提示词、生成并校验 Negotiation-T performative、携带 `templateUri` 与 `negotiationContext`。 | `A2ATClient` / `A2ATServer` 门面、模板、结构化校验、扩展元数据。 | 不建立 HTTP 连接，也不运行智能体。 |
+| **ADK**（`google-adk`） | 推理与工具：决定如何应答提议、调用客户端工具、产出结构化 `NegotiationDecision`；在服务端用工具执行已接受的任务。 | `LlmAgent`、工具、`output_schema`、`Runner`、会话。 | 从不把协议内容放到线上，从不决定 round 或 performative，也从不解析原始 A2A-T 元数据。 |
+| **确定性客户端流程**（本样例） | 编排与协议正确性：调用正确的 A2A-T API、发送正确的 A2A 消息、保持 round/performative 一致、处理终态。 | `protocol/client_flow.py`。 | 不做业务决策；业务决策来自 Provider。 |
+
+一句话心智模型：
+
+> **A2A 负责把消息送到对端。A2A-T 赋予消息语义。ADK 给出决策。流程保证协议正确。**
+
+#### 客户端组件模型
+
+```mermaid
+flowchart TB
+    subgraph Client["客户端进程"]
+        UI["CLI / Web UI<br/>自然语言请求"]
+        RT["ClientRuntime<br/>装配"]
+        FLOW["run_client_flow<br/>确定性协议循环"]
+        PROV["NegotiationDecisionProvider<br/>ADK / manual / scripted"]
+        AGENT["ADK LlmAgent<br/>工具 + output_schema"]
+        FACADE["A2ATClient<br/>Task-T / Negotiation-T 门面"]
+        A2A["a2a-sdk Client<br/>HTTP+JSON + SSE/webhook"]
+        UI --> RT --> FLOW
+        FLOW --> PROV --> AGENT
+        AGENT --> PROV
+        FLOW --> FACADE
+        FACADE --> FLOW
+        FLOW --> A2A
+    end
+    SERVER["A2A-T 服务端<br/>网关 + ADK executor"]
+    A2A <-->|"Message / Task 事件"| SERVER
+```
+
+`ClientRuntime` 只负责装配：生成每次运行的 A2A-T SDK `.env`、注册 traced/scripted Provider、创建 `A2ATClient`、发现服务端 AgentCard、创建 a2a-sdk 客户端、选择传输与决策 Provider。真正的集成发生在 `run_client_flow`。
+
+#### 端到端时序：target 场景（反提议后接受）
+
+这是最完整的路径：初始 Task-T 未通过校验，服务端开启 target 协商，客户端反提议，服务端修订，客户端接受。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户 / Web UI
+    participant R as ClientRuntime
+    participant F as run_client_flow
+    participant T as A2ATClient (A2A-T)
+    participant A as a2a-sdk (A2A)
+    participant G as 服务端网关
+    participant P as 服务端策略
+    participant S as A2ATServer（A2A-T）
+    participant D as 客户端 ADK 智能体
+    participant X as 服务端 ADK 智能体
+
+    U->>R: 请求 + 场景 + 模式
+    R->>R: 生成 SDK .env、发现、A2A 客户端、传输、Provider
+    R->>F: run_client_flow(request, provider, transport)
+    F->>T: generate_task_prompt_from_text(request, Task-T URI)
+    T-->>F: Task-T 提示词 + templateUri
+    F->>A: Message(metadata[Task-T/v1], A2A-Extensions)
+    A->>G: HTTP+JSON message:send
+    G->>S: validate_task_prompt_and_data_filling(...)
+    S-->>G: content.value_not_allowed（时段重叠）
+    G->>P: decide(kind=target, round=1)
+    P-->>G: propose R1
+    G->>S: generate_negotiation_propose_prompt_from_text(R1 文本)
+    S-->>G: Negotiation-T 提议
+    G-->>A: 独立 Message（无 Task）
+    A-->>F: message 事件 + metadata
+    F->>F: 解析 templateUri + negotiationContext
+    F->>D: 决策提示词（提议 + 原始请求）
+    D->>D: get_sla_policy / evaluate_proposal_impact
+    D-->>F: NegotiationDecision(counter, counter_params)
+    F->>T: generate_negotiation_propose_prompt_from_text(counter, 保持当前轮)
+    T-->>F: 反提议内容
+    F->>A: Message(counter + sampleProposal)
+    A->>G: HTTP+JSON
+    G->>S: validate_propose_prompt_and_data_filling(...)
+    G->>P: decide(counter, round=1)
+    P-->>G: propose R2
+    G->>S: generate_negotiation_propose_prompt_from_text(R2 文本)
+    S-->>G: 修订后的提议
+    G-->>A: 独立 Message（round=2）
+    A-->>F: message 事件
+    F->>D: 决策提示词（R2）
+    D-->>F: NegotiationDecision(accept)
+    F->>T: generate_task_prompt_from_data_with_schema(filled)
+    T-->>F: 重填后的 Task-T 提示词
+    F->>T: generate_negotiation_accept_prompt_from_text(...)
+    T-->>F: accept 内容
+    F->>A: Message(accept + 重填 Task-T, round=2)
+    A->>G: HTTP+JSON
+    G->>S: validate_accept_prompt_and_data_filling(...)
+    G->>S: validate_task_prompt_and_data_filling(重填结果)
+    G->>X: 交给 ADK A2aAgentExecutor
+    X->>X: 创建 Task、执行工具
+    X-->>A: SUBMITTED、WORKING、artifacts、COMPLETED
+    A-->>F: 流式 / webhook 事件
+    F-->>U: 时间线、报告、运行记录
+```
+
+关键结构点：**第 1、2 轮的提议都是独立 `Message`，不是 Task 事件。** 只有网关校验了 `Accept` 和重填后的 Task-T 之后，A2A `Task` 才出现。
+
+#### 直接路径：Task-T 校验通过，不进入协商
+
+如果初始 Task-T 完整且有效，网关不会开启协商，同一请求直接进入 ADK executor。这就是 Run Explorer 中 Phase 04/05 为空的场景。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant F as run_client_flow
+    participant T as A2ATClient
+    participant A as a2a-sdk
+    participant G as 服务端网关
+    participant X as 服务端 ADK 智能体
+    F->>T: generate_task_prompt_from_text(...)
+    T-->>F: Task-T 提示词
+    F->>A: Message(Task-T metadata)
+    A->>G: HTTP+JSON
+    G->>G: validate_task_prompt_and_data_filling = OK
+    G->>X: 交给 ADK A2aAgentExecutor
+    X-->>A: Task 事件 ... COMPLETED
+    A-->>F: events
+```
+
+#### 终态路径：reject 与 abort
+
+`Reject` 与 `Abort` 同样是独立的 `Negotiation-T` 消息。服务端尽力校验终态消息后，返回一条普通 A2A `Message`（不含 Negotiation-T 元数据），并且**不创建 Task**。客户端流程以 `no_task_negotiation_ended`（客户端 reject）或 `no_task_negotiation_aborted`（服务端在 `maxRounds` abort）结束。
+
+```mermaid
+stateDiagram-v2
+    [*] --> GenerateTaskT
+    GenerateTaskT --> AwaitResponse: 发送 Task-T
+    AwaitResponse --> Done: Task COMPLETED / 终态 Task
+    AwaitResponse --> Ended: 普通结束 Message
+    AwaitResponse --> Decide: 服务端 Propose
+    Decide --> AwaitResponse: accept，重填 Task-T 并发送
+    Decide --> AwaitResponse: counter，同轮 Propose
+    Decide --> Ended: reject
+    Decide --> Ended: abort
+    AwaitResponse --> Ended: 服务端 Abort
+    Done --> [*]
+    Ended --> [*]
+```
+
+#### A2A-T SDK 在哪些环节被调用
+
+所有 A2A-T 调用都是同步的，只返回生成内容或校验结果，**不负责发送**。流程再把内容包进 A2A `Message`，由 a2a-sdk 传输发送。
+
+| 时机 | 调用 | 侧 | 结果 |
+| --- | --- | --- | --- |
+| 初始 Task-T | `A2ATClient.generate_task_prompt_from_text(request, TASK_TEMPLATE_URI)` | 客户端 | 渲染后的 Task-T 提示词；槽位抽取与内容校验在此发生。 |
+| 初始校验 | `A2ATServer.validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` | 服务端 | 填充参数或结构化 `SlotValidationError`。 |
+| 服务端首次提议 | `A2ATServer.generate_negotiation_propose_prompt_from_text(text, context, template_uri)` | 服务端 | `Propose` 的 `MetadataContent`。 |
+| 客户端决策消息 | `A2ATClient.generate_negotiation_{accept,propose,reject,abort}_prompt_from_text(...)` | 客户端 | 所选 performative 的 `MetadataContent`。 |
+| 反提议校验 | `A2ATServer.validate_propose_prompt_and_data_filling(...)` | 服务端 | 校验后的反提议或结构化错误。 |
+| Accept 校验 | `A2ATServer.validate_accept_prompt_and_data_filling(...)` | 服务端 | 校验后的 accept。 |
+| Task-T 重填 | `A2ATClient.generate_task_prompt_from_data_with_schema(filled, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` | 客户端 | 随 `Accept` 发送的最终 Task-T 提示词。 |
+| 最终 Task-T 校验 | `A2ATServer.validate_task_prompt_and_data_filling(...)` | 服务端 | 网关放行；此时才创建 Task。 |
+
+`MetadataContent.build_metadata_content()` 产出线上元数据（`Task-T/v1` 或 `Negotiation-T/v1` 的值、`templateUri`，协商消息还包含 `negotiationContext`）。[`protocol/messages.py`](protocol/messages.py) 定义 A2A-T 元数据的键与助手，[`protocol/client_flow.py`](protocol/client_flow.py) 组装出站元数据映射并发送。
+
+#### ADK 如何接入客户端
+
+ADK 智能体刻意**不在线上路径中**：
+
+1. `run_client_flow` 把入站 `Propose` 解析为 `NegotiationProposeView` 与 `NegotiationContext`。
+2. `AdkDecisionProvider.respond(propose, session)` 构造决策提示词，包含提议、协商类型/轮次和原始用户请求。
+3. Provider 通过 `InMemoryRunner` 运行 `agents.client_agent.agent.build_client_agent`，每个协商 id 保留一个 ADK 会话，使后续轮次能看到之前的提议。
+4. 智能体可调用 `get_sla_policy` 与 `evaluate_proposal_impact`；`output_schema=NegotiationDecision` 让 ADK 返回类型化决策。
+5. 流程把 `action` 转换为恰好一个 A2A-T performative。**模型从不设置 `round`、`performative`、`templateUri` 或消息元数据。**
+
+替换业务逻辑时应保留的正是这个集成缝：替换工具与 instruction，保留 `NegotiationDecision` 与 `AdkDecisionProvider`，让流程继续保持确定性。
+
+#### 新客户端集成步骤
+
+1. 通过**文件式** `.env` 配置 A2A-T SDK；生成每次运行的临时文件，不要修改源文件。SDK 从该文件读取 `A2AT_LLM_*`，而不是进程环境变量。
+2. 发现服务端 AgentCard，确认它声明了 `Task-T/v1` 与 `Negotiation-T/v1`。
+3. 创建 a2a-sdk 客户端：SSE 使用流式；webhook 关闭流式并配置 push notification。
+4. 把初始 Task-T 作为 A2A `Message` 发送：`parts` 放短文本标签，`metadata` 的 Task-T 扩展 URI 下放提示词，同时带 `templateUri`，并设置 `A2A-Extensions`。
+5. 把所有携带 `negotiationContext` 的独立 `Message` 当作协商步骤，而不是 Task 事件；按 `templateUri` 分派，不要解析自由文本。
+6. 向决策 Provider 索取意图，再用 `session.with_performative(...)` 调用对应的 A2A-T 生成器。客户端绝不调用 `next_round()`；轮次由服务端掌握。
+7. 在 `accept` 时用 `generate_task_prompt_from_data_with_schema` 重填 Task-T，并在同一条消息里同时发送重填后的 Task-T 与 Negotiation-T accept。
+8. 只有 accept 之后才消费 Task 事件；在 `COMPLETED`、终态拒绝/失败或普通结束消息处停止。
+
+规范实现见 [`protocol/client_runtime.py`](protocol/client_runtime.py)（装配）与 [`protocol/client_flow.py`](protocol/client_flow.py)（协议循环）。§7 的替换清单标明了哪些文件可直接复用、哪些属于样例业务内容。
 
 ### 目录说明
 
