@@ -164,6 +164,7 @@ const frames = [
     phase: "done",
     phaseStep: 1,
     spanId: "ui_0004",
+    startedAt: "2026-10-23T00:00:04.000Z",
   },
 ];
 
@@ -203,6 +204,16 @@ assert.equal(store.tokenTotal().scripted, 1);
 assert.equal(store.runMeta().scenario, "information");
 assert.equal(store.ids().contextId, "ctx");
 assert.equal(store.resolutionLabel(), "Accepted");
+
+// The terminal frame's start time must survive into the item, so the Done phase has a duration
+// instead of a null one (the backend stamps `startedAt` on the finished frame).
+const finishedItem = store.list().at(-1);
+assert.equal(finishedItem.entryType, "finished");
+assert.equal(finishedItem.startedAt, "2026-10-23T00:00:04.000Z");
+const doneGroup = derived.groups.find((group) => group.key === "done");
+assert.equal(doneGroup.stats.steps, 1);
+assert.notEqual(doneGroup.stats.durationMs, null, "the Done phase card needs a duration");
+assert.equal(derived.phaseStates.done, "done");
 
 const filters = new FilterState();
 assert.equal(filterItems(store.list(), filters).length, 6);

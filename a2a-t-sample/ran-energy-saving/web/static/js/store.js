@@ -450,7 +450,7 @@ export class RunStore extends EventTarget {
         purpose: null,
         rationale: null,
         status: failed ? "error" : "ok",
-        durationMs: null,
+        durationMs: typeof frame.durationMs === "number" ? frame.durationMs : null,
         model: null,
         tokens: null,
         error: frame.error || null,
@@ -460,7 +460,9 @@ export class RunStore extends EventTarget {
         templateUri: null,
         negotiationType: null,
         performative: null,
-        startedAt: null,
+        // The backend stamps the terminal span start; dropping it left the Done phase without a
+        // duration even though the frame carried one.
+        startedAt: frame.startedAt || null,
         endedAt: null,
         detail: { finished: frame },
         payload: frame,

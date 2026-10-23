@@ -63,6 +63,14 @@ const executionArtifacts = derived.groups
   .items.filter((item) => item.kind === "artifact");
 assert.ok(executionArtifacts.length > 0, "tool artifacts must be execution rows");
 
+// The finished frame carries the terminal span start; the Done card must render a duration.
+const finishedItem = items.at(-1);
+assert.equal(finishedItem.entryType, "finished");
+assert.ok(finishedItem.startedAt, "the finished row must keep its startedAt");
+const doneGroup = derived.groups.find((group) => group.key === "done");
+assert.ok(doneGroup, "the Done group must exist");
+assert.notEqual(doneGroup.stats.durationMs, null, "the Done phase must have a duration");
+
 const llm = items.filter((item) => item.kind === "llm");
 const tools = items.filter((item) => item.kind === "tool");
 assert.ok(llm.length > 0, "the run must contain LLM spans");
