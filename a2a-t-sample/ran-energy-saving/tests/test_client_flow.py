@@ -27,6 +27,7 @@ from a2a_t.core.standard_templates import (
 )
 from google.protobuf.json_format import MessageToDict
 from protocol.client_flow import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
     TASK_REQUEST_LABEL,
     ClientFlowResult,
     SseClientTransport,
@@ -406,6 +407,43 @@ async def test_initial_request_matches_the_old_message_shape() -> None:
     service_parameters = transport.call_contexts[0].service_parameters
     assert service_parameters is not None
     assert service_parameters["A2A-Extensions"] == TASK_T_EXTENSION_URI
+
+
+async def test_every_send_carries_the_configured_call_timeout() -> None:
+    """The flow must set ``ClientCallContext.timeout`` on the initial and every follow-up send."""
+    transport = ScriptedTransport(
+        [
+            [propose_event("target", 1)],
+            [propose_event("target", 2)],
+            _task_completed_batch(),
+        ]
+    )
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=SCENARIO_TARGET_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(SCENARIO_TARGET_SPEC.scripted_client_decisions),
+        language="en-US",
+        call_timeout_seconds=123.0,
+    )
+
+    assert len(transport.call_contexts) == 3  # TASK_T, counter PROPOSE, ACCEPT
+    assert [context.timeout for context in transport.call_contexts] == [123.0, 123.0, 123.0]
+
+
+async def test_call_timeout_defaults_to_the_documented_budget() -> None:
+    transport = ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+    )
+
+    assert all(context.timeout == DEFAULT_CALL_TIMEOUT_SECONDS for context in transport.call_contexts)
 
 
 def test_webhook_payload_normalization_matches_sse_shape() -> None:

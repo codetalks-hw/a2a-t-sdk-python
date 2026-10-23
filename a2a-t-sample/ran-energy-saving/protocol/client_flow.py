@@ -115,6 +115,9 @@ _TERMINAL_STATE_NAMES: Final[frozenset[str]] = frozenset(
 #: Default maximum number of client sends; a backstop against a server that never terminates.
 DEFAULT_MAX_EXCHANGES: Final[int] = 16
 
+#: Default HTTP budget of one A2A send; the client runtime passes the configured value.
+DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 180.0
+
 #: Negotiation-T accept/reject template URI per kind.
 _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND: Final[dict[str, str]] = {
     NegotiationKind.INFORMATION.value: INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
@@ -400,6 +403,7 @@ async def run_client_flow(
     task_template_uri: str = TASK_TEMPLATE_URI,
     language: str = LANGUAGE_ZH,
     max_exchanges: int = DEFAULT_MAX_EXCHANGES,
+    call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS,
     event_sink: Callable[[dict[str, object]], None] | None = None,
     on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
     on_decision_made: DecisionMadeCallback | None = None,
@@ -416,6 +420,9 @@ async def run_client_flow(
         task_template_uri: Task-T template the initial and accept prompts address.
         language: Process-level language of the refilled Task-T values.
         max_exchanges: Backstop on the number of client sends.
+        call_timeout_seconds: HTTP budget of every send, carried in ``ClientCallContext.timeout``.
+            It must outlast a live-mode server gate that performs several LLM calls before it
+            emits any event.
         event_sink: Optional observer invoked for every normalized event. The SSE and webhook
             transports forward each event as it arrives; a transport without a ``set_event_sink``
             hook has its returned batch forwarded instead, so the observer sees every event exactly
@@ -529,7 +536,7 @@ async def run_client_flow(
         # Sample-only correlation of the server trace with this client run (design §4).
         initial_metadata[SAMPLE_RUN_ID_METADATA_KEY] = run_id
     initial_request = _build_message_request(metadata=initial_metadata, label=label)
-    initial_context = _call_context((TASK_T_EXTENSION_URI,))
+    initial_context = _call_context((TASK_T_EXTENSION_URI,), call_timeout_seconds)
 
     result = ClientFlowResult()
     context_id: str | None = None
@@ -629,6 +636,7 @@ async def run_client_flow(
                 label=label,
                 task_template_uri=task_template_uri,
                 language=language,
+                call_timeout_seconds=call_timeout_seconds,
             )
             send_phase = PHASE_RESOLUTION
             send_performative = NegotiationPerformative.ACCEPT.value
@@ -641,6 +649,7 @@ async def run_client_flow(
                 session=session,
                 context_id=context_id,
                 label=label,
+                call_timeout_seconds=call_timeout_seconds,
             )
             send_phase = PHASE_NEGOTIATION
             send_performative = NegotiationPerformative.PROPOSE.value
@@ -660,6 +669,7 @@ async def run_client_flow(
                 label=label,
                 propose_content=propose.content,
                 performative=performative,
+                call_timeout_seconds=call_timeout_seconds,
             )
             send_phase = PHASE_RESOLUTION
             send_performative = performative.value
@@ -711,9 +721,16 @@ def _build_message_request(
     return request
 
 
-def _call_context(extension_uris: tuple[str, ...]) -> ClientCallContext:
-    """Build the call context carrying the ``A2A-Extensions`` header."""
-    return ClientCallContext(service_parameters={"A2A-Extensions": ",".join(sorted(set(extension_uris)))})
+def _call_context(extension_uris: tuple[str, ...], timeout: float) -> ClientCallContext:
+    """Build the call context carrying the ``A2A-Extensions`` header and the request budget.
+
+    The SDK applies ``timeout`` to the HTTP request of every send (``get_http_args`` builds an
+    ``httpx.Timeout`` from it), so the configured budget wins over the httpx client default.
+    """
+    return ClientCallContext(
+        timeout=timeout,
+        service_parameters={"A2A-Extensions": ",".join(sorted(set(extension_uris)))},
+    )
 
 
 def _negotiation_request(
@@ -723,6 +740,7 @@ def _negotiation_request(
     label: str,
     context_id: str,
     session: NegotiationContext,
+    call_timeout_seconds: float,
     extra_metadata: Mapping[str, object] | None = None,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Build one negotiation response request from generated protocol content."""
@@ -740,7 +758,9 @@ def _negotiation_request(
     if extra_metadata:
         metadata.update(extra_metadata)
     request = _build_message_request(metadata=metadata, label=label, context_id=context_id)
-    return request, _call_context((TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI))
+    return request, _call_context(
+        (TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI), call_timeout_seconds
+    )
 
 
 def _build_accept_request(
@@ -753,6 +773,7 @@ def _build_accept_request(
     label: str,
     task_template_uri: str,
     language: str,
+    call_timeout_seconds: float,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type."""
     filled = accept_filled_params(kind.value, language)
@@ -777,6 +798,7 @@ def _build_accept_request(
         label=label,
         context_id=context_id,
         session=accept_context,
+        call_timeout_seconds=call_timeout_seconds,
         extra_metadata=metadata,
     )
 
@@ -789,6 +811,7 @@ def _build_counter_request(
     session: NegotiationContext,
     context_id: str,
     label: str,
+    call_timeout_seconds: float,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Generate a counter proposal that keeps the inbound round (same-round ``Propose``)."""
     text = decision.counter_proposal or decision.rationale
@@ -808,6 +831,7 @@ def _build_counter_request(
         label=label,
         context_id=context_id,
         session=propose_context,
+        call_timeout_seconds=call_timeout_seconds,
         extra_metadata=extra or None,
     )
 
@@ -822,6 +846,7 @@ def _build_terminal_request(
     label: str,
     propose_content: str,
     performative: NegotiationPerformative,
+    call_timeout_seconds: float,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Generate a terminal reject or abort message (no Task is created)."""
     terminal_context = session.with_performative(performative)
@@ -843,6 +868,7 @@ def _build_terminal_request(
         label=label,
         context_id=context_id,
         session=terminal_context,
+        call_timeout_seconds=call_timeout_seconds,
     )
 
 

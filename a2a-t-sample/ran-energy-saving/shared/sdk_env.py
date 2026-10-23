@@ -9,6 +9,14 @@ for its AgentCard constants (which built an unused ADK model at import time).
 Offline mode pins the traced scripted provider; live mode keeps the SDK endpoint values of the
 source file and fills any missing one from the ADK model configuration, so both SDK and ADK address
 the same endpoint (design §5.1).
+
+Both modes also write the sample's live fail-fast policy into the SDK ``.env``:
+``A2AT_LLM_TIMEOUT_SECONDS`` and ``A2AT_LLM_MAX_ATTEMPTS`` come from the sample configuration and
+always override the source values. A live server gate may perform several LLM calls before it emits
+any event, while the client gives up after ``A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS``; letting the SDK
+retry a slow call for minutes would therefore surface as a transport timeout
+(``A2AClientTimeoutError``) instead of a structured protocol message. One attempt with a 30-second
+budget makes the gate fail fast and answer the client with an error message it can display.
 """
 
 from __future__ import annotations
@@ -102,6 +110,14 @@ def prepare_sdk_env(
                 "A2AT_LLM_BASE_URL": values.get("A2AT_LLM_BASE_URL") or config.adk_model_api_base,
             }
         )
+    values.update(
+        {
+            # The sample's fail-fast policy always wins over the source file: a slow or retrying
+            # live LLM call must finish well inside the client's HTTP budget.
+            "A2AT_LLM_TIMEOUT_SECONDS": f"{config.llm_timeout_seconds:g}",
+            "A2AT_LLM_MAX_ATTEMPTS": str(config.llm_max_attempts),
+        }
+    )
     temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
     target = temp_dir / ".env"
     target.write_text(

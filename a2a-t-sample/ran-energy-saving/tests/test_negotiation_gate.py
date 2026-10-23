@@ -11,7 +11,7 @@ from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext, UnauthenticatedUser
 from a2a.types import Message, Role, SendMessageRequest, Task, TaskState
 from a2a_t.core.errors.catalog import ErrorCatalog
-from a2a_t.core.errors.exceptions import ContentValidationError, SlotValidationError
+from a2a_t.core.errors.exceptions import A2ATError, ContentValidationError, SlotValidationError
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
@@ -63,6 +63,7 @@ class FakePromptServer:
         self.task_error: Exception | None = None
         self.accept_error: Exception | None = None
         self.propose_error: Exception | None = None
+        self.propose_generation_error: Exception | None = None
         self.reject_error: Exception | None = None
         self.abort_error: Exception | None = None
         self.task_calls: list[tuple[str, Mapping[str, object], str]] = []
@@ -137,6 +138,8 @@ class FakePromptServer:
         self, text: str | None, context: NegotiationContext, template_uri: str
     ) -> MetadataContent:
         self.propose_generations.append((text, context, template_uri))
+        if self.propose_generation_error is not None:
+            raise self.propose_generation_error
         return MetadataContent(
             template_uri=template_uri,
             prompt_text=f"Generated propose for round {context.round}",
@@ -266,6 +269,23 @@ async def test_initial_validation_failure_emits_a_propose_without_a_task(
     assert len(server.propose_generations) == 1
     assert server.propose_generations[0][1].round == 1
     assert server.propose_generations[0][2] == expected_uri
+
+
+async def test_proposal_generation_failure_returns_a_structured_message() -> None:
+    """A timed-out SDK proposal must reach the client as a message, not as a transport error."""
+    gate, server = _gate()
+    server.task_error = _content_error("content.param_missing")
+    server.propose_generation_error = A2ATError("LLM call timed out after 30s")
+
+    outcome = await gate.handle(_make_context(_initial_message()))
+
+    message = _assert_no_task(outcome)
+    assert "Negotiation proposal generation failed" in message.parts[0].text
+    assert "LLM call timed out after 30s" in message.parts[0].text
+    assert CONTEXT_ID == message.context_id
+    metadata = _metadata(message)
+    assert NEGOTIATION_CONTEXT_METADATA_KEY not in metadata
+    assert len(server.propose_generations) == 1
 
 
 async def test_unmapped_validation_failure_returns_a_rejected_task() -> None:

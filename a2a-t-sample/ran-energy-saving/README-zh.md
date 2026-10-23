@@ -515,7 +515,10 @@ root_agent = LlmAgent(
 | `A2AT_SAMPLE_TRANSPORT` | `sse`（默认）、`webhook` | 客户端事件传输。 |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | 默认 `9000`（`0` = 临时端口） | 内置 webhook 接收器端口。 |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | 默认 `demo-webhook-token` | 与 `X-A2A-Notification-Token` 比对的静态推送 token。 |
-| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 默认 `30` | 无推送多少秒后结束 webhook 阶段。 |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 默认 `120` | 无推送多少秒后结束 webhook 阶段；必须长于在线服务端网关耗时。 |
+| `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | 默认 `180`（> 0） | 单次 A2A 请求的客户端 HTTP 预算：`httpx` 客户端超时与每次发送的 `ClientCallContext.timeout`。 |
+| `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | 默认 `30`（> 0） | 在线 SDK 单次 LLM 调用预算，写入每次运行的 SDK `.env`。 |
+| `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | 默认 `1`（`1`..`10`） | 在线 SDK 每个可重试步骤的尝试次数，写入每次运行的 SDK `.env`。 |
 | `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | Web UI 的默认绑定端口；`run_demo.py` 将其作为 `--ui-port` 的默认值读取。 |
 | `A2AT_SAMPLE_TRACE_URL` | 默认未设置；`--ui` 设为 `http://127.0.0.1:<ui_port>` | 服务端 trace 端点（Web UI）。仅用于本地演示；服务端把 span POST 到这里。 |
 | `A2AT_SAMPLE_TRACE_TOKEN` | 默认未设置；`--ui` 生成随机 token | 服务端出示、UI 校验的本地 token；未设置时 ingest 路由关闭（失败关闭）。 |
@@ -528,13 +531,15 @@ root_agent = LlmAgent(
 | `A2AT_LLM_MODEL` | 默认 `mass/volcengine/deepseek-v4.1-flash` | SDK 模型 id（不带 LiteLlm 前缀）。 |
 | `A2AT_LLM_API_KEY` | 默认 `not-needed`；离线被覆盖 | SDK 端点 key。 |
 | `A2AT_LLM_BASE_URL` | 默认 `http://127.0.0.1:31943/v1` | SDK 端点基础 URL。 |
-| `A2AT_LLM_MAX_TOKENS`、`A2AT_LLM_TEMPERATURE`、`A2AT_LLM_TIMEOUT_SECONDS` | SDK 默认值 | 结构化调用限制。 |
+| `A2AT_LLM_MAX_TOKENS`、`A2AT_LLM_TEMPERATURE`、`A2AT_LLM_TIMEOUT_SECONDS` | SDK 默认值（`A2AT_LLM_TIMEOUT_SECONDS` 会按运行被覆盖） | 结构化调用限制。每次运行的 SDK `.env` 始终使用 `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` / `A2AT_SAMPLE_LLM_MAX_ATTEMPTS`。 |
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false`（默认） | 打印完整 LLM 载荷（调试；可能暴露敏感内容）。 |
 | `A2AT_SAMPLE_DEBUG` | `false`（默认） | 额外样例调试日志。 |
 
 **离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册 traced 包装（离线 `scripted_traced`、在线 `openai_traced`），并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted_traced`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。ADK 侧使用 `shared/adk_fake_model.py`。日志与 Web UI 标注为 `offline (scripted)`。
 
 **在线模式。** SDK 与 ADK 都使用配置端点。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取与语义校验，见 §3。
+
+**超时预算。** 客户端每次 A2A 请求都通过 `ClientCallContext.timeout` 携带 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`（默认 180s），`httpx` 客户端使用同一预算。在线模式下服务端网关在发出任何事件前会执行多次 SDK LLM 调用，因此客户端预算必须长于该最坏情况；原先固定的 60s 会让客户端在服务端仍在重试时提前放弃（`A2AClientTimeoutError`）。在线 LLM 调用则快速失败：每次运行的 SDK `.env` 始终写入 `A2AT_LLM_TIMEOUT_SECONDS=30` 与 `A2AT_LLM_MAX_ATTEMPTS=1`，单次慢调用约 30s 内结束，网关返回结构化的协议错误消息供客户端展示。离线模式不受影响（脚本化 Provider 不发起网络调用）。webhook 空闲兜底遵循同一原则，默认 120s，避免在长时间网关期间提前结束阶段。
 
 **端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`。`run_demo.py` 会把这些值写入交给三个进程的每次运行 `.env`。
 
@@ -549,7 +554,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（331 个测试）。覆盖范围：
+测试套件完全离线且确定性（351 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

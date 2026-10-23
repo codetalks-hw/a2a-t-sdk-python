@@ -73,9 +73,6 @@ SUPPORTED_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL, MODE_SCRIPTED
 #: Discovery key of the direct server base URL.
 DIRECT_SERVER_URL_ENV_KEY: Final[str] = "A2AT_SAMPLE_DIRECT_SERVER_URL"
 
-#: Default HTTP timeout of the client requests.
-DEFAULT_HTTP_TIMEOUT_SECONDS: Final[float] = 60.0
-
 #: Prefix of the temporary SDK ``.env`` directories.
 _SDK_ENV_PREFIX: Final[str] = "a2at-ran-client-env-"
 
@@ -227,6 +224,7 @@ class ClientRuntime:
                     on_decision_requested=on_decision_requested,
                     on_decision_made=on_decision_made,
                     trace_sink=sink,
+                    call_timeout_seconds=self.config.http_timeout_seconds,
                 )
         finally:
             if temporary_sink:
@@ -303,7 +301,9 @@ async def build_client_runtime(
     if log_sink is not None:
         log_sink(f"[client] agent-discovered: url={discovered.url} discovery={config.discovery}")
 
-    httpx_client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT_SECONDS, trust_env=False)
+    # One budget for both the transport and the per-call context (the SDK applies the context
+    # timeout to every request, overriding the httpx client default).
+    httpx_client = httpx.AsyncClient(timeout=config.http_timeout_seconds, trust_env=False)
     client_config = ClientConfig(
         streaming=transport == TRANSPORT_SSE,
         httpx_client=httpx_client,

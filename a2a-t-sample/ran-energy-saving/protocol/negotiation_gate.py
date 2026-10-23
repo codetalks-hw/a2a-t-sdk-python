@@ -449,13 +449,21 @@ class NegotiationGate:
                 max_rounds=self._max_rounds,
                 performative=NegotiationPerformative.PROPOSE,
             )
-            generated = await self._call(
-                self._prompt_server.generate_negotiation_propose_prompt_from_text,
-                content.text,
-                session,
-                content.template_uri,
-                stage="negotiation_propose_extraction",
-            )
+            try:
+                generated = await self._call(
+                    self._prompt_server.generate_negotiation_propose_prompt_from_text,
+                    content.text,
+                    session,
+                    content.template_uri,
+                    stage="negotiation_propose_extraction",
+                )
+            except (A2ATError, ValueError) as exc:
+                # A failed (e.g. timed-out) proposal generation must reach the client as a plain
+                # protocol message, not as a transport error: the client is still waiting for an
+                # event, and an unhandled exception would only surface as a connection failure.
+                return GateOutcome.short(
+                    build_error_message(context_id, f"Negotiation proposal generation failed: {exc}")
+                )
             self._logger.info(
                 "server propose generated: kind=%s round=%s", content.kind.value, content.round
             )

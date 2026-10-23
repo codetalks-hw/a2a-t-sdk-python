@@ -230,7 +230,13 @@ def test_prepare_client_sdk_env_does_not_mutate_the_source(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / ".env"
-    original = "A2AT_LLM_PROVIDER=openai\nA2AT_LLM_MODEL=my-model\nA2AT_LLM_BASE_URL=http://example.test/v1\n"
+    original = (
+        "A2AT_LLM_PROVIDER=openai\n"
+        "A2AT_LLM_MODEL=my-model\n"
+        "A2AT_LLM_BASE_URL=http://example.test/v1\n"
+        "A2AT_LLM_TIMEOUT_SECONDS=99\n"
+        "A2AT_LLM_MAX_ATTEMPTS=5\n"
+    )
     source.write_text(original, encoding="utf-8")
     live_config = replace(offline_config, model_mode=MODEL_MODE_LIVE)
 
@@ -242,6 +248,67 @@ def test_prepare_client_sdk_env_does_not_mutate_the_source(
     assert values["A2AT_LLM_MODEL"] == "my-model"
     assert values["A2AT_LLM_BASE_URL"] == "http://example.test/v1"
     assert values["A2AT_LANGUAGE"] == "en-US"
+    # The sample's fail-fast policy always overrides the source values (both modes).
+    assert values["A2AT_LLM_TIMEOUT_SECONDS"] == "30"
+    assert values["A2AT_LLM_MAX_ATTEMPTS"] == "1"
+
+
+def test_offline_sdk_env_carries_the_configured_fail_fast_policy(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    config = replace(offline_config, llm_timeout_seconds=12.5, llm_max_attempts=2)
+
+    values = dotenv_values(prepare_client_sdk_env(config, tmp_path / "missing.env").path)
+
+    assert values["A2AT_LLM_PROVIDER"] == "scripted_traced"
+    assert values["A2AT_LLM_TIMEOUT_SECONDS"] == "12.5"
+    assert values["A2AT_LLM_MAX_ATTEMPTS"] == "2"
+
+
+async def test_runtime_http_client_uses_the_configured_http_budget(
+    offline_config: SampleConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import protocol.client_runtime as client_runtime
+
+    async def fake_discover(**kwargs: object) -> DiscoveredAgent:
+        del kwargs
+        return _card()
+
+    async def fake_create(agent: object, client_config: ClientConfig | None = None) -> _FakeA2AClient:
+        del agent, client_config
+        return _FakeA2AClient()
+
+    monkeypatch.setattr(client_runtime, "discover_agent", fake_discover)
+    monkeypatch.setattr(client_runtime, "create_client", fake_create)
+    config = replace(offline_config, http_timeout_seconds=42.0)
+
+    runtime = await build_client_runtime(
+        config, "information", "manual", "sse", env_path=tmp_path / "missing.env"
+    )
+    try:
+        assert runtime._httpx_client.timeout.read == 42.0
+        assert runtime._httpx_client.timeout.connect == 42.0
+    finally:
+        await runtime.aclose()
+
+    captured: list[dict[str, object]] = []
+
+    async def fake_flow(**kwargs: object) -> object:
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(client_runtime, "run_client_flow", fake_flow)
+    runtime = await build_client_runtime(
+        config, "information", "manual", "sse", env_path=tmp_path / "missing.env"
+    )
+    try:
+        await runtime.run()
+    finally:
+        await runtime.aclose()
+
+    assert captured[0]["call_timeout_seconds"] == 42.0
 
 
 def test_importing_the_client_runtime_does_not_build_a_server_model() -> None:
