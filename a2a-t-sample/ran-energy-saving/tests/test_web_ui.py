@@ -21,7 +21,7 @@ from protocol.client_flow import ClientFlowResult
 from protocol.decision_provider import ManualDecisionProvider
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import FINAL_STATE_TASK_COMPLETED
+from shared.scenario import FINAL_STATE_TASK_COMPLETED, get_scenario, resolve_user_request
 from web.app import create_app
 
 CONTEXT_ID = "ctx-web"
@@ -75,6 +75,45 @@ def _status_event() -> dict[str, object]:
     }
 
 
+def _trace_span(
+    kind: str,
+    *,
+    phase: str,
+    title: str,
+    round_number: int | None = None,
+    context_id: str | None = CONTEXT_ID,
+    detail: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build one synthetic trace span for the runtime double."""
+    return {
+        "schemaVersion": 1,
+        "runId": "",
+        "seq": 0,
+        "spanId": "",
+        "parentSpanId": None,
+        "contextId": context_id,
+        "taskId": None,
+        "phase": phase,
+        "phaseStep": 0,
+        "round": round_number,
+        "actor": "client",
+        "side": "client",
+        "kind": kind,
+        "stage": None,
+        "title": title,
+        "purpose": None,
+        "status": "ok",
+        "startedAt": "2026-10-23T00:00:00.000Z",
+        "endedAt": None,
+        "durationMs": None,
+        "direction": "internal",
+        "model": None,
+        "tokens": None,
+        "error": None,
+        "detail": detail or {},
+    }
+
+
 class FakeRuntime:
     """Deterministic runtime double: one proposal, an optional manual wait, then completion."""
 
@@ -88,14 +127,48 @@ class FakeRuntime:
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
+        on_decision_made: Callable[
+            [NegotiationDecision, NegotiationProposeView, NegotiationContext], None
+        ]
+        | None = None,
+        trace_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> ClientFlowResult:
+        if trace_sink is not None:
+            trace_sink(
+                _trace_span(
+                    "task_prompt_rendered",
+                    phase="task_prompt",
+                    title="Task-T prompt rendered",
+                    detail={"length": 12},
+                )
+            )
         if event_sink is not None:
             event_sink(_propose_event())
+        if trace_sink is not None:
+            trace_sink(
+                _trace_span(
+                    "decision_requested",
+                    phase="negotiation",
+                    title="Decision requested",
+                    round_number=1,
+                )
+            )
         if on_decision_requested is not None:
             on_decision_requested(_propose_view(), _session())
         decision = NegotiationDecision(action="accept", rationale="The proposal is acceptable.")
         if self.manual_provider is not None:
             decision = await self.manual_provider.respond(_propose_view(), _session())
+        if trace_sink is not None:
+            trace_sink(
+                _trace_span(
+                    "decision_made",
+                    phase="resolution",
+                    title="Decision made",
+                    round_number=1,
+                )
+            )
+        if on_decision_made is not None:
+            on_decision_made(decision, _propose_view(), _session())
         if event_sink is not None:
             event_sink(_status_event())
         if self.fail:
@@ -122,8 +195,14 @@ def runtimes() -> list[FakeRuntime]:
 def factory(runtimes: list[FakeRuntime]) -> Callable[..., Any]:
     """Runtime factory creating a runtime according to the requested mode."""
 
-    async def build(config: SampleConfig, scenario: str, mode: str, transport: str) -> FakeRuntime:
-        del config, scenario, transport
+    async def build(
+        config: SampleConfig,
+        scenario: str,
+        mode: str,
+        transport: str,
+        discovery: str,
+    ) -> FakeRuntime:
+        del config, scenario, transport, discovery
         runtime = FakeRuntime(manual=(mode == "manual"))
         runtimes.append(runtime)
         return runtime
@@ -183,9 +262,11 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     assert meta["modelLabel"] == "offline (scripted)"
     assert "information" in meta["scenarios"]
     assert meta["modes"] == ["auto", "manual"]
+    assert meta["discoveries"] == ["registry", "direct"]
     assert meta["defaultScenario"] == "information"
     assert meta["defaultMode"] == "auto"
     assert meta["defaultTransport"] == "sse"
+    assert meta["defaultDiscovery"] == "registry"
 
 
 async def test_cli_defaults_are_exposed_and_used_when_the_body_omits_them(
@@ -237,11 +318,14 @@ async def test_run_lifecycle_streams_sse_events(client: httpx.AsyncClient, runti
     events = await client.get(f"/api/runs/{run_id}/events")
     payloads = _sse_payloads(events.text)
     types = [payload["type"] for payload in payloads]
+    assert types[0] == "run_started"
     assert "event" in types
+    assert "trace" in types
     # An auto run never exposes a pending manual decision.
     assert "decision_requested" not in types
     assert types[-1] == "finished"
     assert payloads[-1]["finalState"] == FINAL_STATE_TASK_COMPLETED
+    assert [payload["seq"] for payload in payloads] == list(range(1, len(payloads) + 1))
 
     status = await _wait_status(client, run_id, lambda data: data["status"] == "finished")
     assert status["taskId"] == "task-1"
@@ -398,6 +482,162 @@ async def test_transcript_downloads(client: httpx.AsyncClient) -> None:
     document = json_response.json()
     assert document["finalState"] == FINAL_STATE_TASK_COMPLETED
     assert document["scenario"] == "information"
+    assert [entry["seq"] for entry in document["timeline"]] == sorted(
+        entry["seq"] for entry in document["timeline"]
+    )
     assert markdown_response.status_code == 200
     assert "text/markdown" in markdown_response.headers["content-type"]
     assert "RAN energy-saving negotiation transcript" in markdown_response.text
+    assert "| # | Seq | Phase | Step |" in markdown_response.text
+
+
+async def test_run_started_is_the_first_replayable_frame(client: httpx.AsyncClient) -> None:
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse", "discovery": "direct"},
+    )
+    assert start.status_code == 202
+    assert start.json()["discovery"] == "direct"
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    payloads = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    first = payloads[0]
+    spec = get_scenario("information")
+    assert first["type"] == "run_started"
+    assert first["seq"] == 1
+    assert first["runId"] == run_id
+    assert first["description"] == spec.description
+    assert first["userRequest"] == resolve_user_request(spec, "en-US")
+    assert first["language"] == "en-US"
+    assert first["mode"] == "auto"
+    assert first["transport"] == "sse"
+    assert first["discovery"] == "direct"
+    assert first["modelMode"] == "offline"
+    assert first["modelLabel"] == "offline (scripted)"
+    assert first["expectedSequence"] == [
+        {"actor": step.actor, "performative": step.performative, "round": step.round}
+        for step in spec.expected_sequence
+    ]
+    assert first["phase"] == "dispatch"
+    assert first["spanId"]
+
+    # A reconnect replays the same ordered messages without duplicating seq values.
+    replay = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    assert replay[0] == first
+    assert [payload["seq"] for payload in replay] == list(range(1, len(replay) + 1))
+
+
+async def test_live_decision_is_recorded_before_the_task_events(client: httpx.AsyncClient) -> None:
+    start = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
+    )
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    payloads = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    entries = [payload["event"] for payload in payloads if payload["type"] == "event"]
+    decision_index = next(
+        index for index, entry in enumerate(entries) if entry["eventKind"] == "decision"
+    )
+    task_index = next(index for index, entry in enumerate(entries) if entry["eventKind"] == "status")
+    assert decision_index < task_index
+    assert entries[decision_index]["action"] == "accept"
+    assert entries[decision_index]["spanId"]
+
+
+async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -> None:
+    start = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
+    )
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    trace_response = await client.get(f"/api/runs/{run_id}/trace.json")
+    assert trace_response.status_code == 200
+    document = trace_response.json()
+    assert document["runId"] == run_id
+    assert document["schemaVersion"] == 1
+    assert document["transcript"]["finalState"] == FINAL_STATE_TASK_COMPLETED
+    spans = document["spans"]
+    assert spans
+    assert [span["seq"] for span in spans] == sorted(span["seq"] for span in spans)
+    assert {span["phase"] for span in spans} >= {"dispatch", "task_prompt", "done"}
+
+    lookup = await client.get(f"/api/runs/{run_id}/spans/{spans[0]['spanId']}")
+    assert lookup.status_code == 200
+    assert lookup.json()["spanId"] == spans[0]["spanId"]
+    assert (await client.get(f"/api/runs/{run_id}/spans/missing-span")).status_code == 404
+
+    remote = {
+        "spanId": "server-span-1",
+        "parentSpanId": "client-span",
+        "kind": "llm",
+        "phase": "execution",
+        "phaseStep": 4,
+        "round": None,
+        "actor": "llm",
+        "side": "server",
+        "title": "Server LLM call",
+        "status": "ok",
+        "detail": {"model": "fake-model"},
+    }
+    accepted = await client.post(f"/api/runs/{run_id}/trace", json=[remote])
+    assert accepted.status_code == 202
+    assert accepted.json() == {"accepted": 1, "runId": run_id}
+
+    stored = (await client.get(f"/api/runs/{run_id}/spans/server-span-1")).json()
+    assert stored["runId"] == run_id
+    assert stored["seq"] > spans[-1]["seq"]
+    assert stored["detail"]["model"] == "fake-model"
+
+    replay = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    ingested = [
+        payload
+        for payload in replay
+        if payload["type"] == "trace" and payload["event"]["spanId"] == "server-span-1"
+    ]
+    assert len(ingested) == 1
+    assert ingested[0]["seq"] == stored["seq"]
+
+    wrapped = await client.post(
+        f"/api/runs/{run_id}/trace",
+        json={"spans": [{"spanId": "server-span-2", "kind": "tool", "phase": "execution"}]},
+    )
+    assert wrapped.status_code == 202
+    assert (await client.get(f"/api/runs/{run_id}/spans/server-span-2")).status_code == 200
+
+
+async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.AsyncClient) -> None:
+    start = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
+    )
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    assert (await client.post("/api/runs/missing/trace", json=[])).status_code == 404
+    assert (await client.post(f"/api/runs/{run_id}/trace", json=42)).status_code == 400
+    assert (await client.post(f"/api/runs/{run_id}/trace", json=[1, 2])).status_code == 400
+    malformed = await client.post(
+        f"/api/runs/{run_id}/trace",
+        content=b"not-json",
+        headers={"content-type": "application/json"},
+    )
+    assert malformed.status_code == 400
+
+
+async def test_start_accepts_discovery_and_rejects_unknown_values(client: httpx.AsyncClient) -> None:
+    accepted = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse", "discovery": "direct"},
+    )
+    assert accepted.status_code == 202
+    run_id = accepted.json()["runId"]
+    status = await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+    assert status["discovery"] == "direct"
+
+    rejected = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse", "discovery": "nope"},
+    )
+    assert rejected.status_code == 400

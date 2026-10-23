@@ -48,6 +48,7 @@ from shared.webhook_receiver import WebhookReceiver
 from protocol.client_flow import (
     ClientFlowResult,
     ClientTransport,
+    DecisionMadeCallback,
     SseClientTransport,
     WebhookClientTransport,
     build_webhook_receiver,
@@ -227,12 +228,17 @@ class ClientRuntime:
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
+        on_decision_made: DecisionMadeCallback | None = None,
+        trace_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> ClientFlowResult:
         """Run the full client flow of the configured scenario.
 
         Args:
             event_sink: Optional live observer of the normalized events (Web UI timeline).
             on_decision_requested: Optional observer invoked before asking the provider.
+            on_decision_made: Optional observer invoked immediately after the provider returns,
+                before the response is sent.
+            trace_sink: Optional observer of synthetic Run Explorer spans.
 
         Returns:
             The collected events, decisions and terminal state.
@@ -247,6 +253,8 @@ class ClientRuntime:
             language=self.config.language,
             event_sink=event_sink,
             on_decision_requested=on_decision_requested,
+            on_decision_made=on_decision_made,
+            trace_sink=trace_sink,
         )
 
     async def aclose(self) -> None:

@@ -23,6 +23,7 @@ from a2a_t.core.metadata import (
 )
 from shared.logging_utils import summarize_text
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.trace import PHASE_NEGOTIATION, infer_event_phase
 
 from protocol.client_flow import ClientFlowResult
 from protocol.messages import parse_negotiation_context
@@ -163,14 +164,35 @@ class NegotiationTranscript:
     report: dict[str, object] | None = None
     error: str | None = None
     runs_dir: Path = DEFAULT_RUNS_DIR
+    _seq: int = field(default=0, repr=False)
+
+    def _next_seq(self, seq: int | None) -> int:
+        """Return the explicit sequence number or allocate the next one."""
+        if seq is None:
+            self._seq += 1
+            return self._seq
+        self._seq = max(self._seq, seq)
+        return seq
 
     def record_event(
         self,
         event: Mapping[str, object],
         *,
         direction: str = DIRECTION_SERVER_TO_CLIENT,
+        phase: str | None = None,
+        phase_step: int | None = None,
+        seq: int | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        status: str | None = None,
+        duration_ms: float | None = None,
+        detail: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        """Record one normalized client event and return its timeline entry."""
+        """Record one normalized client event and return its timeline entry.
+
+        The Run Explorer fields (``seq``, ``phase``, ``phaseStep``, ``spanId``, ...) are optional so
+        CLI and older callers keep working; they are inferred/allocated when omitted.
+        """
         metadata = event.get("metadata")
         metadata_map = dict(metadata) if isinstance(metadata, Mapping) else {}
         session = parse_negotiation_context(metadata_map)
@@ -182,8 +204,19 @@ class NegotiationTranscript:
         )
         template_uri = metadata_map.get(TEMPLATE_URI_METADATA_KEY)
         negotiation_text = _text(metadata_map.get(NEGOTIATION_T_EXTENSION_URI))
+        explicit_detail = detail if detail is not None else event.get("detail")
+        if not isinstance(explicit_detail, Mapping):
+            explicit_detail = None
+        resolved_phase = phase or infer_event_phase(event)
+        resolved_step = phase_step if phase_step is not None else self._count_phase(resolved_phase)
         entry: dict[str, object] = {
             "ts": _now_iso(),
+            "seq": self._next_seq(seq),
+            "entryType": "event",
+            "phase": resolved_phase,
+            "phaseStep": resolved_step,
+            "spanId": span_id,
+            "parentSpanId": parent_span_id,
             "direction": direction,
             "kind": _event_kind(_text(event.get("kind")), performative),
             "eventKind": _text(event.get("kind")),
@@ -195,6 +228,9 @@ class NegotiationTranscript:
             "performative": performative,
             "summary": _event_summary(event, performative, negotiation_text),
             "rationale": None,
+            "status": status or "ok",
+            "durationMs": duration_ms,
+            "detail": dict(explicit_detail) if explicit_detail is not None else None,
         }
         self.events.append(entry)
         self.context_id = self.context_id or (
@@ -205,17 +241,76 @@ class NegotiationTranscript:
             self.task_id = self.task_id or task_id
         return entry
 
+    def record_trace(
+        self,
+        span: Mapping[str, object],
+        *,
+        seq: int | None = None,
+    ) -> dict[str, object]:
+        """Record one trace span as a timeline entry (synthetic protocol/LLM/tool rows)."""
+        phase = _text(span.get("phase")) or PHASE_NEGOTIATION
+        phase_step = span.get("phaseStep")
+        resolved_step = phase_step if isinstance(phase_step, int) else self._count_phase(phase)
+        detail = span.get("detail")
+        entry: dict[str, object] = {
+            "ts": _text(span.get("startedAt")) or _now_iso(),
+            "seq": self._next_seq(seq),
+            "entryType": "trace",
+            "phase": phase,
+            "phaseStep": resolved_step,
+            "spanId": _text(span.get("spanId")) or None,
+            "parentSpanId": _text(span.get("parentSpanId")) or None,
+            "direction": _text(span.get("direction")) or "internal",
+            "kind": _text(span.get("kind")) or "trace",
+            "eventKind": "trace",
+            "round": span.get("round") if isinstance(span.get("round"), int) else None,
+            "maxRounds": None,
+            "contextId": _text(span.get("contextId")) or self.context_id,
+            "templateUri": None,
+            "negotiationType": None,
+            "performative": None,
+            "summary": _text(span.get("title")) or _text(span.get("kind")) or "trace",
+            "rationale": _text(span.get("purpose")) or None,
+            "status": _text(span.get("status")) or "ok",
+            "durationMs": span.get("durationMs") if isinstance(span.get("durationMs"), (int, float)) else None,
+            "detail": dict(detail) if isinstance(detail, Mapping) else None,
+        }
+        self.events.append(entry)
+        context_id = entry["contextId"]
+        if isinstance(context_id, str):
+            self.context_id = self.context_id or context_id
+        task_id = _text(span.get("taskId"))
+        if task_id:
+            self.task_id = self.task_id or task_id
+        return entry
+
     def record_decision(
         self,
         decision: NegotiationDecision,
         *,
         propose: NegotiationProposeView | None = None,
         round_number: int | None = None,
+        phase: str | None = None,
+        phase_step: int | None = None,
+        seq: int | None = None,
+        span_id: str | None = None,
+        parent_span_id: str | None = None,
+        status: str = "ok",
+        duration_ms: float | None = None,
+        detail: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Record one provider decision and return its timeline entry."""
         resolved_round = round_number if round_number is not None else (propose.round if propose else None)
+        resolved_phase = phase or PHASE_NEGOTIATION
+        resolved_step = phase_step if phase_step is not None else self._count_phase(resolved_phase)
         entry: dict[str, object] = {
             "ts": _now_iso(),
+            "seq": self._next_seq(seq),
+            "entryType": "decision",
+            "phase": resolved_phase,
+            "phaseStep": resolved_step,
+            "spanId": span_id,
+            "parentSpanId": parent_span_id,
             "direction": DIRECTION_CLIENT_TO_SERVER,
             "kind": decision.action,
             "eventKind": "decision",
@@ -233,9 +328,18 @@ class NegotiationTranscript:
             "counterParams": dict(decision.counter_params) if decision.counter_params else None,
             "confirmedIntent": decision.confirmed_intent,
             "feasibilitySummary": decision.feasibility_summary,
+            "status": status,
+            "durationMs": duration_ms,
+            "detail": dict(detail) if detail is not None else None,
         }
         self.decisions.append(entry)
         return entry
+
+    def _count_phase(self, phase: str) -> int:
+        """Return the next step number of one phase in the recorded timeline."""
+        return 1 + sum(
+            1 for entry in (*self.events, *self.decisions) if entry.get("phase") == phase
+        )
 
     def record_final(self, result: ClientFlowResult) -> None:
         """Record the terminal state, ids and report of one finished run."""
@@ -250,6 +354,11 @@ class NegotiationTranscript:
         self.final_state = FINAL_STATE_FAILED
         self.error = message
         self.finished_at = _now_iso()
+
+    def timeline(self) -> list[dict[str, object]]:
+        """Return events, trace rows and decisions in one ``seq``-ordered timeline."""
+        entries = [*self.events, *self.decisions]
+        return sorted(entries, key=_entry_seq)
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-serializable transcript document."""
@@ -268,6 +377,7 @@ class NegotiationTranscript:
             "error": self.error,
             "events": list(self.events),
             "decisions": list(self.decisions),
+            "timeline": self.timeline(),
         }
 
     def to_json(self) -> str:
@@ -297,8 +407,8 @@ class NegotiationTranscript:
                 "",
                 "## Timeline",
                 "",
-                "| # | Round | Direction | Kind | Performative | Summary | Rationale |",
-                "|---|-------|-----------|------|--------------|---------|-----------|",
+                "| # | Seq | Phase | Step | Round | Direction | Kind | Performative | Summary | Rationale |",
+                "|---|-----|-------|------|-------|-----------|------|--------------|---------|-----------|",
             ]
         )
         for index, entry in enumerate(self.events, start=1):
@@ -332,6 +442,12 @@ class NegotiationTranscript:
         return TranscriptPaths(json_path=json_path, markdown_path=markdown_path)
 
 
+def _entry_seq(entry: Mapping[str, object]) -> int:
+    """Return the ``seq`` of one timeline entry, ``0`` when it has none."""
+    value = entry.get("seq")
+    return value if isinstance(value, int) else 0
+
+
 def _safe_name(value: str) -> str:
     """Return a file-name-safe version of one scenario name."""
     return "".join(char if char.isalnum() or char in "-_" else "_" for char in value) or "run"
@@ -345,9 +461,15 @@ def _markdown_cell(value: object) -> str:
 
 
 def _markdown_row(index: int, entry: Mapping[str, object]) -> str:
-    """Render one event entry as a Markdown table row of the timeline table."""
-    return "| {index} | {round} | {direction} | {kind} | {performative} | {summary} | {rationale} |".format(
+    """Render one event/trace entry as a row of the phase-aware timeline table."""
+    return (
+        "| {index} | {seq} | {phase} | {step} | {round} | {direction} | {kind} | {performative} | "
+        "{summary} | {rationale} |"
+    ).format(
         index=index,
+        seq=_markdown_cell(entry.get("seq")),
+        phase=_markdown_cell(entry.get("phase")),
+        step=_markdown_cell(entry.get("phaseStep")),
         round=_markdown_cell(entry.get("round")),
         direction=_markdown_cell(entry.get("direction")),
         kind=_markdown_cell(entry.get("kind")),

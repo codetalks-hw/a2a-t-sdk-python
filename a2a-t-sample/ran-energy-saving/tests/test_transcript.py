@@ -162,9 +162,79 @@ def test_record_final_and_write_json_and_markdown(tmp_path: Path) -> None:
     assert document["events"][2]["round"] == 1
     markdown = paths.markdown_path.read_text(encoding="utf-8")
     assert "# RAN energy-saving negotiation transcript" in markdown
-    assert "| 1 | 1 | server->client | propose | PROPOSE |" in markdown
+    assert "| # | Seq | Phase | Step | Round | Direction | Kind |" in markdown
+    assert "| 1 | 1 | negotiation | 1 | 1 | server->client | propose | PROPOSE |" in markdown
     assert "task_completed" in markdown
     assert "Plan applied" in markdown
+
+
+def test_run_explorer_fields_share_one_seq_ordered_timeline() -> None:
+    transcript = _transcript()
+
+    event = transcript.record_event(
+        _propose_event(),
+        phase="negotiation",
+        phase_step=2,
+        seq=5,
+        span_id="span-event",
+        status="ok",
+        duration_ms=12.5,
+        detail={"metadataKeys": ["templateUri"]},
+    )
+    decision = transcript.record_decision(
+        NegotiationDecision(action="accept", rationale="Acceptable."),
+        phase="resolution",
+        phase_step=1,
+        seq=6,
+        span_id="span-decision",
+    )
+    trace = transcript.record_trace(
+        {
+            "phase": "task_prompt",
+            "phaseStep": 1,
+            "spanId": "span-trace",
+            "kind": "task_prompt_rendered",
+            "title": "Task-T prompt rendered",
+            "status": "ok",
+            "detail": {"length": 12},
+        },
+        seq=7,
+    )
+
+    assert event["seq"] == 5
+    assert event["phase"] == "negotiation"
+    assert event["phaseStep"] == 2
+    assert event["spanId"] == "span-event"
+    assert event["status"] == "ok"
+    assert event["durationMs"] == 12.5
+    assert event["detail"] == {"metadataKeys": ["templateUri"]}
+    assert decision["seq"] == 6
+    assert decision["entryType"] == "decision"
+    assert trace["seq"] == 7
+    assert trace["entryType"] == "trace"
+    document = transcript.to_dict()
+    timeline = document["timeline"]
+    assert isinstance(timeline, list)
+    assert [entry["seq"] for entry in timeline] == [5, 6, 7]
+    assert [entry["entryType"] for entry in timeline] == [
+        "event",
+        "decision",
+        "trace",
+    ]
+
+
+def test_record_event_infers_phase_and_seq_when_omitted() -> None:
+    transcript = _transcript()
+
+    status = transcript.record_event(_status_event())
+    proposal = transcript.record_event(_propose_event())
+
+    assert status["seq"] == 1
+    assert status["phase"] == "report"
+    assert status["phaseStep"] == 1
+    assert proposal["seq"] == 2
+    assert proposal["phase"] == "negotiation"
+    assert proposal["phaseStep"] == 1
 
 
 def test_record_error_marks_the_run_failed() -> None:

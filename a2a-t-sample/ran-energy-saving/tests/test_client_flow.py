@@ -37,7 +37,7 @@ from protocol.client_flow import (
 from protocol.decision_provider import ScriptedDecisionProvider
 from protocol.messages import END_MESSAGE_TEXT, SAMPLE_PROPOSAL_METADATA_KEY
 from shared.config import SampleConfig
-from shared.models import NegotiationDecision
+from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
@@ -620,6 +620,88 @@ async def test_event_sink_sees_every_event_and_the_decision_hook_the_proposal() 
 
     assert seen == result.events
     assert requested == [("information", 1)]
+
+
+async def test_decision_hook_fires_before_the_response_is_sent() -> None:
+    order: list[str] = []
+    spans: list[dict[str, object]] = []
+
+    class RecordingTransport(ScriptedTransport):
+        async def send(
+            self,
+            request: SendMessageRequest,
+            call_context: ClientCallContext,
+        ) -> list[dict[str, object]]:
+            metadata = MessageToDict(request.message.metadata)
+            context = metadata.get(NEGOTIATION_CONTEXT_METADATA_KEY)
+            if isinstance(context, Mapping):
+                order.append(f"send:{context['performative']}")
+            else:
+                order.append("send:TASK_T")
+            return await super().send(request, call_context)
+
+    def on_decision_made(
+        decision: NegotiationDecision,
+        propose: NegotiationProposeView,
+        session: NegotiationContext,
+    ) -> None:
+        del propose
+        order.append(f"decision:{decision.action}:R{session.round}")
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=RecordingTransport(
+            [[propose_event("information", 1)], _task_completed_batch()]
+        ),
+        user_request="request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        on_decision_made=on_decision_made,
+        trace_sink=spans.append,
+    )
+
+    assert order == ["send:TASK_T", "decision:accept:R1", "send:ACCEPT"]
+    assert result.decisions[0].action == "accept"
+    assert [span["kind"] for span in spans] == [
+        "task_prompt_rendered",
+        "message_sent",
+        "decision_requested",
+        "decision_made",
+        "message_sent",
+    ]
+    assert [span["phase"] for span in spans] == [
+        "task_prompt",
+        "task_validation",
+        "negotiation",
+        "resolution",
+        "resolution",
+    ]
+    assert spans[1]["direction"] == "client->server"
+    assert spans[2]["round"] == 1
+    decision_detail = spans[3]["detail"]
+    assert isinstance(decision_detail, dict)
+    assert decision_detail["action"] == "accept"
+
+
+async def test_counter_decision_stays_in_the_negotiation_phase() -> None:
+    spans: list[dict[str, object]] = []
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport([[propose_event("target", 1)], [abort_event(1)]]),
+        user_request="request",
+        provider=ScriptedDecisionProvider([SCENARIO_TARGET_SPEC.scripted_client_decisions[0]]),
+        language="en-US",
+        trace_sink=spans.append,
+    )
+
+    decision_made = next(span for span in spans if span["kind"] == "decision_made")
+    counter_sent = [span for span in spans if span["kind"] == "message_sent"][-1]
+    assert decision_made["phase"] == "negotiation"
+    assert counter_sent["phase"] == "negotiation"
+    counter_detail = counter_sent["detail"]
+    assert isinstance(counter_detail, dict)
+    assert counter_detail["performative"] == "PROPOSE"
 
 
 async def test_sse_transport_forwards_events_to_its_sink_as_they_arrive() -> None:

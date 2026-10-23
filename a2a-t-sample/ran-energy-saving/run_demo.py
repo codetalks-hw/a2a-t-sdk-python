@@ -321,6 +321,26 @@ async def _run_client_foreground(
         proposals.append(propose)
         print(f"[client] decision-requested round={getattr(session, 'round', '?')}")
 
+    def on_decision_made(
+        decision: object,
+        propose: NegotiationProposeView,
+        session: object,
+    ) -> None:
+        from shared.models import NegotiationDecision
+        from shared.trace import infer_decision_phase
+
+        if not isinstance(decision, NegotiationDecision):
+            return
+        transcript.record_decision(
+            decision,
+            propose=propose,
+            phase=infer_decision_phase(decision.action),
+        )
+        print(f"[client] decision-made action={decision.action} round={getattr(session, 'round', '?')}")
+
+    def trace_sink(span: dict[str, object]) -> None:
+        transcript.record_trace(span)
+
     runtime = None
     try:
         runtime = await build_client_runtime(
@@ -334,8 +354,12 @@ async def _run_client_foreground(
         result = await runtime.run(
             event_sink=event_sink,
             on_decision_requested=on_decision_requested,
+            on_decision_made=on_decision_made,
+            trace_sink=trace_sink,
         )
         for index, decision in enumerate(result.decisions):
+            if index < len(transcript.decisions):
+                continue
             propose = proposals[index] if index < len(proposals) else None
             transcript.record_decision(decision, propose=propose)
         transcript.record_final(result)

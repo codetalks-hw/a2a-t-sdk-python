@@ -65,6 +65,15 @@ from shared.scenario import (
 )
 from shared.sse_event_consumer import normalize_event
 from shared.task_schema import TASK_PARAM_SCHEMA
+from shared.trace import (
+    PHASE_NEGOTIATION,
+    PHASE_RESOLUTION,
+    PHASE_TASK_PROMPT,
+    PHASE_TASK_VALIDATION,
+    TraceRecorder,
+    current_trace,
+    infer_decision_phase,
+)
 from shared.webhook_receiver import WebhookReceiver
 
 from protocol.decision_provider import NegotiationDecisionProvider
@@ -171,6 +180,12 @@ class SendMessageClient(Protocol):
         *,
         context: ClientCallContext,
     ) -> AsyncIterator[StreamResponse]: ...
+
+
+#: Observer invoked immediately after a provider returns its decision (Run Explorer §6).
+DecisionMadeCallback = Callable[
+    [NegotiationDecision, NegotiationProposeView, NegotiationContext], None
+]
 
 
 class ClientTransport(Protocol):
@@ -384,6 +399,8 @@ async def run_client_flow(
     max_exchanges: int = DEFAULT_MAX_EXCHANGES,
     event_sink: Callable[[dict[str, object]], None] | None = None,
     on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
+    on_decision_made: DecisionMadeCallback | None = None,
+    trace_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -403,6 +420,12 @@ async def run_client_flow(
         on_decision_requested: Optional observer invoked immediately before the provider is asked
             for a decision, carrying the proposal view and its negotiation session (the Web UI
             uses it to display the manual decision form).
+        on_decision_made: Optional observer invoked immediately after the provider returns, before
+            the response is built or sent. It lets the Web UI and the transcript record a decision
+            causally, i.e. before the task events it causes.
+        trace_sink: Optional observer of synthetic Run Explorer spans (``task_prompt_rendered``,
+            ``message_sent``, ``decision_requested``, ``decision_made``). Protocol events keep using
+            ``event_sink``; the two streams share the Web UI sequence numbering.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -425,8 +448,74 @@ async def run_client_flow(
             for event in batch:
                 event_sink(event)
 
+    recorder = TraceRecorder(current_trace().run_id or "")
+
+    def emit_trace(
+        kind: str,
+        *,
+        phase: str,
+        title: str,
+        direction: str = "internal",
+        round_number: int | None = None,
+        context_id: str | None = None,
+        detail: Mapping[str, object] | None = None,
+    ) -> None:
+        """Build one synthetic span and forward it to the optional trace sink."""
+        if trace_sink is None:
+            return
+        span = recorder.emit(
+            kind=kind,
+            phase=phase,
+            title=title,
+            actor="client",
+            side="client",
+            direction=direction,
+            round=round_number,
+            context_id=context_id,
+            detail=detail,
+        )
+        trace_sink(span.to_dict())
+
+    def emit_message_sent(
+        request: SendMessageRequest,
+        *,
+        phase: str,
+        title: str,
+        performative: str,
+        round_number: int | None,
+        context_id: str | None,
+    ) -> None:
+        """Emit one outbound ``message_sent`` span for an A2A request."""
+        metadata = metadata_to_dict(request.message.metadata)
+        template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
+        label_text = request.message.parts[0].text if request.message.parts else ""
+        emit_trace(
+            "message_sent",
+            phase=phase,
+            title=title,
+            direction="client->server",
+            round_number=round_number,
+            context_id=context_id or (request.message.context_id or None),
+            detail={
+                "performative": performative,
+                "summary": label_text,
+                "metadataKeys": sorted(str(key) for key in metadata),
+                "templateUri": template_uri if isinstance(template_uri, str) else None,
+            },
+        )
+
     prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
+    emit_trace(
+        "task_prompt_rendered",
+        phase=PHASE_TASK_PROMPT,
+        title="Task-T prompt rendered",
+        detail={
+            "promptText": prompt_text,
+            "templateUri": prompt_content.template_uri or task_template_uri,
+            "length": len(prompt_text),
+        },
+    )
     initial_request = _build_message_request(
         metadata={
             prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
@@ -439,6 +528,14 @@ async def run_client_flow(
     result = ClientFlowResult()
     context_id: str | None = None
     exchanges = 0
+    emit_message_sent(
+        initial_request,
+        phase=PHASE_TASK_VALIDATION,
+        title="Task-T sent",
+        performative="TASK_T",
+        round_number=None,
+        context_id=None,
+    )
     batch = await transport.send(initial_request, initial_context)
     exchanges += 1
     collect(batch)
@@ -472,10 +569,42 @@ async def run_client_flow(
         if kind is None:
             raise ClientFlowError(f"{_ERROR_UNKNOWN_KIND} templateUri={template_uri}")
         propose = _propose_view(event, metadata, session, kind, template_uri, context_id)
+        emit_trace(
+            "decision_requested",
+            phase=PHASE_NEGOTIATION,
+            title=f"Decision requested · {kind.value} R{session.round}",
+            round_number=session.round,
+            context_id=context_id,
+            detail={
+                "negotiationKind": kind.value,
+                "round": session.round,
+                "maxRounds": session.max_rounds,
+                "templateUri": template_uri,
+                "content": propose.content,
+            },
+        )
         if on_decision_requested is not None:
             on_decision_requested(propose, session)
         decision = await provider.respond(propose, session)
+        if on_decision_made is not None:
+            on_decision_made(decision, propose, session)
         result.decisions.append(decision)
+        emit_trace(
+            "decision_made",
+            phase=infer_decision_phase(decision.action),
+            title=f"Decision made · {decision.action}",
+            round_number=session.round,
+            context_id=context_id,
+            detail={
+                "action": decision.action,
+                "rationale": decision.rationale,
+                "filledParams": dict(decision.filled_params) if decision.filled_params else None,
+                "counterProposal": decision.counter_proposal,
+                "counterParams": dict(decision.counter_params) if decision.counter_params else None,
+                "confirmedIntent": decision.confirmed_intent,
+                "feasibilitySummary": decision.feasibility_summary,
+            },
+        )
 
         if exchanges >= max_exchanges:
             raise ClientFlowError(f"The client flow exceeded {max_exchanges} exchanges.")
@@ -491,6 +620,9 @@ async def run_client_flow(
                 task_template_uri=task_template_uri,
                 language=language,
             )
+            send_phase = PHASE_RESOLUTION
+            send_performative = NegotiationPerformative.ACCEPT.value
+            send_title = "Accept sent"
         elif decision.action == "counter":
             request, call_context = _build_counter_request(
                 prompt_client=prompt_client,
@@ -500,6 +632,9 @@ async def run_client_flow(
                 context_id=context_id,
                 label=label,
             )
+            send_phase = PHASE_NEGOTIATION
+            send_performative = NegotiationPerformative.PROPOSE.value
+            send_title = f"Counter proposal sent · R{session.round}"
         else:
             performative = (
                 NegotiationPerformative.REJECT
@@ -516,7 +651,18 @@ async def run_client_flow(
                 propose_content=propose.content,
                 performative=performative,
             )
+            send_phase = PHASE_RESOLUTION
+            send_performative = performative.value
+            send_title = f"{performative.value.capitalize()} sent"
 
+        emit_message_sent(
+            request,
+            phase=send_phase,
+            title=send_title,
+            performative=send_performative,
+            round_number=session.round,
+            context_id=context_id,
+        )
         batch = await transport.send(request, call_context)
         exchanges += 1
         collect(batch)
