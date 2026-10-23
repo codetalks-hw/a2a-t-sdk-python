@@ -249,9 +249,22 @@ class _TracedStructuredMixin:
 
 
 class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
-    """Live ``OpenAIClient`` that captures the raw response before JSON validation."""
+    """Live ``OpenAIClient`` that captures the raw response before JSON validation.
+
+    The sample disables the OpenAI SDK's own HTTP retries: ``A2AT_LLM_MAX_ATTEMPTS`` is the
+    SDK's protocol-level retry budget, not the transport retry count. With the SDK default
+    ``max_retries=2``, one ``A2AT_LLM_TIMEOUT_SECONDS`` timeout becomes three attempts and can
+    overrun the client's A2A budget. One attempt keeps every budget predictable; transient
+    failures surface as a structured protocol message instead of a hidden long retry.
+    """
 
     _provider_label = TRACED_OPENAI_PROVIDER
+
+    def _get_client(self) -> Any:
+        """Return the SDK OpenAI client with HTTP retries disabled."""
+        client = OpenAIClient._get_client(self)
+        client.max_retries = 0
+        return client
 
     def _call_structured(
         self,

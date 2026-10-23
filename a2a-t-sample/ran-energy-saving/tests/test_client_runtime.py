@@ -249,7 +249,7 @@ def test_prepare_client_sdk_env_does_not_mutate_the_source(
     assert values["A2AT_LLM_BASE_URL"] == "http://example.test/v1"
     assert values["A2AT_LANGUAGE"] == "en-US"
     # The sample's fail-fast policy always overrides the source values (both modes).
-    assert values["A2AT_LLM_TIMEOUT_SECONDS"] == "30"
+    assert values["A2AT_LLM_TIMEOUT_SECONDS"] == "120"
     assert values["A2AT_LLM_MAX_ATTEMPTS"] == "1"
 
 

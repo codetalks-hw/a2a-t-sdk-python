@@ -76,10 +76,10 @@ def test_missing_env_file_uses_offline_defaults(tmp_path: Path) -> None:
 
     assert config.model_mode == MODEL_MODE_OFFLINE
     assert config.registry_url == "http://127.0.0.1:5001"
-    assert config.http_timeout_seconds == DEFAULT_HTTP_TIMEOUT_SECONDS == 180.0
-    assert config.llm_timeout_seconds == DEFAULT_LLM_TIMEOUT_SECONDS == 30.0
+    assert config.http_timeout_seconds == DEFAULT_HTTP_TIMEOUT_SECONDS == 300.0
+    assert config.llm_timeout_seconds == DEFAULT_LLM_TIMEOUT_SECONDS == 120.0
     assert config.llm_max_attempts == DEFAULT_LLM_MAX_ATTEMPTS == 1
-    assert config.webhook_idle_timeout == DEFAULT_WEBHOOK_IDLE_TIMEOUT == 180
+    assert config.webhook_idle_timeout == DEFAULT_WEBHOOK_IDLE_TIMEOUT == 300
     assert DEFAULT_WEBHOOK_IDLE_TIMEOUT == int(DEFAULT_HTTP_TIMEOUT_SECONDS)
 
 
@@ -145,3 +145,22 @@ def test_build_adk_model_rejects_empty_live_model_name(offline_config: SampleCon
 
     with pytest.raises(ValueError, match="ADK_MODEL_NAME"):
         build_adk_model(live_config)
+
+
+def test_build_adk_model_applies_the_live_timeout_and_disables_retries(
+    offline_config: SampleConfig,
+) -> None:
+    from dataclasses import replace
+
+    live_config = replace(
+        offline_config,
+        model_mode=MODEL_MODE_LIVE,
+        llm_timeout_seconds=42.0,
+    )
+
+    model = build_adk_model(live_config)
+
+    assert model.model == live_config.adk_model_name
+    additional_args = getattr(model, "_additional_args")
+    assert additional_args["timeout"] == 42.0
+    assert additional_args["num_retries"] == 0

@@ -632,10 +632,10 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_TRANSPORT` | `sse` (default), `webhook` | Client event transport. |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | default `9000` (`0` = ephemeral) | Embedded webhook receiver port. |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | default `demo-webhook-token` | Static push token checked against `X-A2A-Notification-Token`. |
-| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `180` (the HTTP budget) | Seconds without a push before a webhook phase ends; a phase must not end before the client gives up. |
-| `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | default `180` (> 0) | Client HTTP budget of one A2A request: the `httpx` client timeout and `ClientCallContext.timeout` of every send. |
-| `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | default `30` (> 0) | Live SDK LLM budget of one call, written into the per-run SDK `.env`. |
-| `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | default `1` (`1`..`10`) | Live SDK LLM attempt limit per retryable step, written into the per-run SDK `.env`. |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `300` (the HTTP budget) | Seconds without a push before a webhook phase ends; a phase must not end before the client gives up. |
+| `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | default `300` (> 0) | Client HTTP budget of one A2A request: the `httpx` client timeout and `ClientCallContext.timeout` of every send. |
+| `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | default `120` (> 0) | Live LLM budget of one call (SDK structured call or ADK `LiteLlm` turn), written into the per-run SDK `.env`. |
+| `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | default `1` (`1`..`10`) | Live SDK protocol retry limit per retryable step, written into the per-run SDK `.env`; OpenAI transport retries are disabled separately. |
 | `A2AT_SAMPLE_UI_PORT` | default `8080` | Default bind port of the Web UI; read by `run_demo.py` as the default of `--ui-port`. |
 | `A2AT_SAMPLE_TRACE_URL` | unset; `--ui` sets `http://127.0.0.1:<ui_port>` | Server trace endpoint (Web UI). Local demo only; the server POSTs spans there. |
 | `A2AT_SAMPLE_TRACE_TOKEN` | unset; `--ui` mints a random token | Local token the server presents and the UI requires; unset disables ingestion (fails closed). |
@@ -663,20 +663,21 @@ label the run `offline (scripted)`.
 semantic validation; see §3.
 
 **Timeout budgets.** The client sends every A2A request with `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`
-(180s default) in `ClientCallContext.timeout`, and the `httpx` client uses the same budget. In live
-mode the server gate performs several SDK LLM calls before it emits any event, so the client budget
-must outlast that worst case; the old fixed 60s made the client give up while the server was still
-retrying (`A2AClientTimeoutError`). Live LLM calls instead fail fast: the per-run SDK `.env` always
-carries `A2AT_LLM_TIMEOUT_SECONDS=30` and `A2AT_LLM_MAX_ATTEMPTS=1`. The 30s is per HTTP attempt:
-the underlying OpenAI client defaults to `max_retries=2`, so one stuck call can take ~90s; the 180s
-client budget covers that for the demo path. The gate then answers with a structured protocol error
-message the client can display. Offline mode is unaffected (the scripted provider makes no network
-call). The webhook idle backstop follows the same rule and defaults to the 180s HTTP budget, so it
-cannot end a phase while the client is still waiting.
+(300s default) in `ClientCallContext.timeout`, and the `httpx` client uses the same budget. In live
+mode the server gate performs several LLM calls before it emits any event, so the client budget must
+outlast that worst case; the old fixed 60s made the client give up while the server was still
+working (`A2AClientTimeoutError`). Live LLM calls have a **120s per-call budget** (shared by SDK
+structured calls and ADK `LiteLlm` turns; raise it for slower endpoints). The per-run SDK `.env`
+carries `A2AT_LLM_TIMEOUT_SECONDS=120` and `A2AT_LLM_MAX_ATTEMPTS=1`. The OpenAI SDK's own transport
+retries are disabled by the traced provider, and LiteLLM is built with `num_retries=0`, so one call
+cannot silently become three attempts; a stuck call fails within the configured budget and the gate
+answers with a structured protocol error message the client can display. Offline mode is unaffected
+(the scripted provider makes no network call). The webhook idle backstop follows the same rule and
+defaults to the 300s HTTP budget, so it cannot end a phase while the client is still waiting.
 
 Existing `.env` files that set `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` or `A2AT_LLM_TIMEOUT_SECONDS=60`
-should be updated or removed: the new sample keys are `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=180`,
-`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=30`, and `A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`.
+should be updated or removed: the new sample keys are `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`,
+`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`, and `A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`.
 
 **Ports.** Defaults are server `8000`, registry `5001`, webhook `9000`, Web UI `8080`.
 `run_demo.py` writes these into the per-run `.env` it hands to all three processes.
@@ -693,7 +694,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (353 tests). What it covers:
+The suite is fully offline and deterministic (355 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

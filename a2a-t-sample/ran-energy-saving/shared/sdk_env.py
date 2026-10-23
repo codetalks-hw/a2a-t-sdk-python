@@ -15,8 +15,10 @@ Both modes also write the sample's live fail-fast policy into the SDK ``.env``:
 always override the source values. A live server gate may perform several LLM calls before it emits
 any event, while the client gives up after ``A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS``; letting the SDK
 retry a slow call for minutes would therefore surface as a transport timeout
-(``A2AClientTimeoutError``) instead of a structured protocol message. One attempt with a 30-second
-budget makes the gate fail fast and answer the client with an error message it can display.
+(``A2AClientTimeoutError``) instead of a structured protocol message. The timeout is per LLM call
+(120s by default, raised for slower endpoints); ``A2AT_LLM_MAX_ATTEMPTS`` is the SDK's
+protocol-level retry budget, while ``TracedOpenAIClient`` disables the OpenAI client's own
+transport retries so this budget stays predictable.
 """
 
 from __future__ import annotations

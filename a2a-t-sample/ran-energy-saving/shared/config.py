@@ -11,7 +11,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import dotenv_values
 from google.adk.models.base_llm import BaseLlm
@@ -64,15 +64,18 @@ DEFAULT_WEBHOOK_TOKEN = "demo-webhook-token"
 
 #: Client HTTP budget of one A2A request (``ClientCallContext.timeout`` and the httpx client).
 #: A live-mode server gate may perform several LLM calls before sending any event, so the budget
-#: must exceed the server-side worst case (LLM timeout × attempts × calls).
-DEFAULT_HTTP_TIMEOUT_SECONDS = 180.0
+#: must exceed the server-side worst case (LLM timeout × calls; the sample disables transport
+#: retries). 300s covers two 120s gate calls plus ADK agent turns.
+DEFAULT_HTTP_TIMEOUT_SECONDS = 300.0
 
 #: Backstop idle timeout of a webhook phase; it must not end a phase before the client budget, so
 #: it follows the HTTP budget by default.
 DEFAULT_WEBHOOK_IDLE_TIMEOUT = int(DEFAULT_HTTP_TIMEOUT_SECONDS)
 
-#: Live SDK LLM budget of one call; the sample fails fast instead of retrying for minutes.
-DEFAULT_LLM_TIMEOUT_SECONDS = 30.0
+#: Live LLM budget of one call (SDK structured calls and ADK LiteLlm turns). A local live smoke
+#: observed a 58s validation and a >90s accept validation; 120s leaves headroom for slower
+#: endpoints while the 300s client budget still covers the gate plus ADK agent turns.
+DEFAULT_LLM_TIMEOUT_SECONDS = 120.0
 
 #: Live SDK LLM attempt limit per retryable step (the SDK accepts 1..10).
 DEFAULT_LLM_MAX_ATTEMPTS = 1
@@ -151,7 +154,7 @@ class SampleConfig:
         discovery: Discovery mode (``registry`` / ``direct``).
         transport: Event transport (``sse`` / ``webhook``).
         http_timeout_seconds: Client HTTP budget of one A2A request, in seconds.
-        llm_timeout_seconds: Live SDK LLM budget of one call, in seconds.
+        llm_timeout_seconds: Live LLM budget of one call (SDK structured call or ADK turn), in seconds.
         llm_max_attempts: Live SDK LLM attempt limit per retryable step.
     """
 
@@ -255,7 +258,13 @@ def build_adk_model(config: SampleConfig | None = None) -> BaseLlm:
         raise ValueError(f"{ADK_MODEL_NAME_ENV_KEY} must be non-empty in live mode")
     from google.adk.models.lite_llm import LiteLlm
 
-    kwargs: dict[str, str] = {}
+    kwargs: dict[str, Any] = {
+        # LiteLlm forwards these to litellm. Keep every ADK turn inside the same per-call budget
+        # as the SDK structured calls, and disable LiteLLM's own retries so the client budget
+        # stays predictable (one call cannot silently become three attempts).
+        "timeout": resolved.llm_timeout_seconds,
+        "num_retries": 0,
+    }
     if resolved.adk_model_api_base:
         kwargs["api_base"] = resolved.adk_model_api_base
     if resolved.adk_model_api_key:

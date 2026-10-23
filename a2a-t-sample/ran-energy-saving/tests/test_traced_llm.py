@@ -192,6 +192,15 @@ def test_traced_scripted_client_captures_an_error_and_reraises(
     assert detail["request"]["messages"][0]["content"] == "unroutable"
 
 
+def test_traced_openai_client_disables_http_retries() -> None:
+    client = TracedOpenAIClient(_client_config("test-model"))
+
+    raw_client = client._get_client()
+
+    assert raw_client.max_retries == 0
+    assert raw_client.timeout == 5.0
+
+
 def test_traced_openai_client_captures_raw_content_and_usage(
     monkeypatch: pytest.MonkeyPatch,
     spans: list[dict[str, object]],
