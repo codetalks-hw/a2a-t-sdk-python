@@ -1,236 +1,438 @@
-"""Custom A2A ``AgentExecutor`` gluing the negotiation gate to ADK's ``A2aAgentExecutor``.
+"""Deterministic A2A task executor and the pre-task negotiation wrapper.
 
-The outer executor runs the gate first. A short-circuit outcome enqueues one standalone
-``Message`` (a negotiation ``Propose``/``Abort`` or the plain end message) and creates no Task.
-Otherwise the already validated request is delegated to the inner ``A2aAgentExecutor``, which
-creates the Task and runs the ADK server agent.
+The server deliberately uses **no ADK agent**. After the negotiation gate accepts a Task-T, the
+request is handed to :class:`DeterministicTaskExecutor`, which runs the sample's four OSS tools in
+order and publishes a standard A2A Task lifecycle. The protocol layer stays in
+:class:`NegotiationAgentExecutor`: it runs the gate first, enqueues standalone negotiation messages
+without creating a Task, and delegates only accepted work to the deterministic executor.
 
-Two ADK integration seams are configured explicitly:
-
-* ``request_converter`` — ADK's default converter reads request-level metadata only, while A2A-T
-  metadata travels on ``context.message.metadata``. The converter reads it explicitly, puts the
-  negotiated Task-T prompt into the agent message (so the agent never sees the short label text) and
-  mirrors the A2A-T context into the ADK session state.
-* ``ExecuteInterceptor.after_event`` — stamps the Task-T extension metadata on the report artifact.
-  ``after_agent`` only receives the terminal ``TaskStatusUpdateEvent`` (not the final agent
-  content), so artifact metadata is added on the artifact update instead.
+The plan executed here is **sample business logic**, not a protocol rule: it reads cell-001's
+profile, evaluates and applies a 30% saving plan in 00:00~06:00, and writes the report. A real
+deployment replaces :func:`execute_sample_plan` with its own OSS planning logic.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Final
 
+from a2a.helpers.proto_helpers import new_task_from_user_message
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
-from a2a.server.events import Event as A2AEvent
 from a2a.server.events.event_queue import EventQueue
-from a2a.types import TaskArtifactUpdateEvent, TaskStatusUpdateEvent
+from a2a.server.tasks.task_updater import TaskUpdater
+from a2a.types import Part, TaskState
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
-from agents.server_agent.agent import build_server_agent
-from google.adk.a2a.converters.part_converter import A2APartToGenAIPartConverter
-from google.adk.a2a.converters.request_converter import (
-    A2ARequestToAgentRunRequestConverter,
-    AgentRunRequest,
+from agents.server_agent.tools import (
+    apply_energy_saving_plan,
+    evaluate_energy_saving_plan,
+    generate_energy_saving_report,
+    get_cell_energy_profile,
 )
-from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
-from google.adk.a2a.executor.config import A2aAgentExecutorConfig, ExecuteInterceptor
-from google.adk.a2a.executor.executor_context import ExecutorContext
-from google.adk.apps import App
-from google.adk.events.event import Event as AdkEvent
-from google.adk.models.base_llm import BaseLlm
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types as genai_types
-from shared.adk_tracing import TracePlugin
-from shared.config import SampleConfig, build_traced_adk_model, load_config
-from shared.trace import trace_scope
+from google.protobuf.json_format import ParseDict
+from shared import ran_data
+from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
 from protocol.messages import (
-    SAMPLE_PROPOSAL_METADATA_KEY,
     SAMPLE_RUN_ID_METADATA_KEY,
     TASK_TEMPLATE_URI,
     metadata_to_dict,
     negotiation_context_metadata,
     parse_negotiation_context,
-    task_prompt_from_metadata,
 )
 from protocol.negotiation_gate import NegotiationGate
 
-#: ADK application name of the server runtime.
-SERVER_APP_NAME: Final[str] = "ran_energy_saving_server"
+#: Sample plan executed by the deterministic server.
+DEFAULT_CELL_ID: Final[str] = "cell-001"
+DEFAULT_WINDOW: Final[str] = "00:00~06:00"
+DEFAULT_TARGET_RATE: Final[str] = "30"
 
-#: Artifact name of the energy-saving report.
+#: Artifact names.
 REPORT_ARTIFACT_NAME: Final[str] = "energy saving intent report"
+TOOL_ARTIFACT_NAME: Final[str] = "tool result"
 
-#: ADK session state key carrying the validated Task-T prompt.
-STATE_TASK_PROMPT: Final[str] = "a2at_task_prompt"
+#: Final text of a completed Task.
+FINAL_TASK_TEXT: Final[str] = "RAN energy-saving task completed."
 
-#: ADK session state key carrying the Task-T template URI.
-STATE_TASK_TEMPLATE_URI: Final[str] = "a2at_task_template_uri"
-
-#: ADK session state key carrying the inbound negotiation context (audit only).
-STATE_NEGOTIATION_CONTEXT: Final[str] = "a2at_negotiation_context"
-
-#: ADK session state key carrying the sample-only counter proposal (audit only).
-STATE_SAMPLE_PROPOSAL: Final[str] = "a2at_sample_proposal"
+#: Trace stage of the deterministic server execution.
+EXECUTOR_STAGE: Final[str] = "server_execution_agent"
 
 _LOGGER = logging.getLogger("ran_energy_saving.server_executor")
 
 
 @dataclass(frozen=True)
-class _AuditContext:
-    """Per-session A2A-T values needed when the report artifact is emitted.
+class SamplePlan:
+    """The deterministic sample plan executed after a Task-T is accepted.
 
     Attributes:
-        task_template_uri: Task-T template URI of the sample.
-        negotiation_context: inbound negotiation context, when the task followed a negotiation.
+        cell_id: Cell to optimise.
+        window: Energy-saving window.
+        target_rate: Energy-saving rate in percent.
+        date: Profile date; ``None`` uses the dataset date.
     """
 
-    task_template_uri: str
-    negotiation_context: dict[str, object] | None
+    cell_id: str = DEFAULT_CELL_ID
+    window: str = DEFAULT_WINDOW
+    target_rate: str = DEFAULT_TARGET_RATE
+    date: str | None = None
 
 
-def build_request_converter(
-    *, task_template_uri: str = TASK_TEMPLATE_URI
-) -> A2ARequestToAgentRunRequestConverter:
-    """Build the ADK request converter used by the inner ``A2aAgentExecutor``.
+@dataclass(frozen=True)
+class ToolStep:
+    """One executed OSS tool step.
 
-    ADK's default converter reads only request-level metadata. The A2A-T Task-T and Negotiation-T
-    payloads travel on ``context.message.metadata``, so this converter reads them there, replaces
-    the short label part with the negotiated Task-T prompt and exposes the protocol context as ADK
-    session state.
+    Attributes:
+        name: Tool name.
+        args: Arguments passed to the tool.
+        result: Structured tool result.
+        duration_ms: Wall-clock duration of the tool call.
+    """
+
+    name: str
+    args: dict[str, object]
+    result: dict[str, object]
+    duration_ms: float = 0.0
+
+
+class PlanExecutionError(RuntimeError):
+    """Raised when one deterministic tool returns a structured failure."""
+
+    def __init__(self, tool: str, args: dict[str, object], result: dict[str, object]) -> None:
+        """Create one failed plan step.
+
+        Args:
+            tool: Tool name.
+            args: Arguments passed to the tool.
+            result: Structured failure returned by the tool.
+        """
+        self.tool = tool
+        self.arguments = args
+        self.result = result
+        message = result.get("error_message", "the tool returned ok=false")
+        super().__init__(f"{tool} failed: {message}")
+
+
+def execute_sample_plan(plan: SamplePlan | None = None) -> list[ToolStep]:
+    """Run the sample's four OSS tools in order.
 
     Args:
-        task_template_uri: Task-T template URI the accepted prompt addresses.
-    """
+        plan: Plan to execute; defaults to :class:`SamplePlan`.
 
-    def convert(
-        context: RequestContext,
-        part_converter: A2APartToGenAIPartConverter,
-    ) -> AgentRunRequest:
-        """Convert one gate-approved A2A request into an ADK run request."""
-        del part_converter  # the prompt text is authoritative; parts are rebuilt below
+    Returns:
+        The four executed steps in order.
+
+    Raises:
+        PlanExecutionError: when a tool returns ``{"ok": False, ...}``.
+    """
+    resolved = plan or SamplePlan()
+    date = resolved.date or ran_data.dataset_date()
+    steps: list[ToolStep] = []
+
+    profile_args: dict[str, object] = {"cell_id": resolved.cell_id, "date": date}
+    started = time.perf_counter()
+    profile = get_cell_energy_profile(resolved.cell_id, date)
+    steps.append(
+        ToolStep("get_cell_energy_profile", profile_args, profile, _elapsed_ms(started))
+    )
+    _require_ok("get_cell_energy_profile", profile_args, profile)
+
+    evaluate_args: dict[str, object] = {
+        "cell_id": resolved.cell_id,
+        "window": resolved.window,
+        "target_rate": resolved.target_rate,
+    }
+    started = time.perf_counter()
+    evaluation = evaluate_energy_saving_plan(
+        resolved.cell_id, resolved.window, resolved.target_rate
+    )
+    steps.append(
+        ToolStep("evaluate_energy_saving_plan", evaluate_args, evaluation, _elapsed_ms(started))
+    )
+    _require_ok("evaluate_energy_saving_plan", evaluate_args, evaluation)
+
+    apply_args: dict[str, object] = {
+        "cell_id": resolved.cell_id,
+        "window": resolved.window,
+        "target_rate": resolved.target_rate,
+    }
+    started = time.perf_counter()
+    applied = apply_energy_saving_plan(resolved.cell_id, resolved.window, resolved.target_rate)
+    steps.append(
+        ToolStep("apply_energy_saving_plan", apply_args, applied, _elapsed_ms(started))
+    )
+    _require_ok("apply_energy_saving_plan", apply_args, applied)
+
+    plan_id = applied.get("plan_id")
+    if not isinstance(plan_id, str) or not plan_id:
+        raise PlanExecutionError("apply_energy_saving_plan", apply_args, applied)
+    report_args: dict[str, object] = {"plan_id": plan_id}
+    started = time.perf_counter()
+    report = generate_energy_saving_report(plan_id)
+    steps.append(
+        ToolStep("generate_energy_saving_report", report_args, report, _elapsed_ms(started))
+    )
+    _require_ok("generate_energy_saving_report", report_args, report)
+    return steps
+
+
+def _elapsed_ms(started: float) -> float:
+    """Return the milliseconds elapsed since ``started``."""
+    return round((time.perf_counter() - started) * 1000.0, 3)
+
+
+def _require_ok(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
+    """Raise :class:`PlanExecutionError` when a tool result is not successful."""
+    if result.get("ok") is not True:
+        raise PlanExecutionError(tool, args, result)
+
+
+def _metadata(context: RequestContext) -> dict[str, object]:
+    """Return the inbound message metadata as a plain mapping."""
+    message = context.message
+    return metadata_to_dict(message.metadata) if message is not None else {}
+
+
+def _run_id(context: RequestContext) -> str:
+    """Return the Run Explorer run id carried by the current trace or message."""
+    trace_run_id = current_trace().run_id
+    if trace_run_id:
+        return trace_run_id
+    value = _metadata(context).get(SAMPLE_RUN_ID_METADATA_KEY)
+    return value if isinstance(value, str) else ""
+
+
+def _negotiation_context(context: RequestContext) -> dict[str, object] | None:
+    """Return the accepted negotiation context of the request, when it has one."""
+    session = parse_negotiation_context(_metadata(context))
+    return negotiation_context_metadata(session) if session is not None else None
+
+
+def _report_metadata(
+    context: RequestContext,
+    summary: str,
+    negotiation_context: dict[str, object] | None,
+) -> dict[str, object]:
+    """Build the metadata stamped on the final report artifact and status."""
+    metadata: dict[str, object] = {
+        TASK_T_EXTENSION_URI: summary,
+        TEMPLATE_URI_METADATA_KEY: TASK_TEMPLATE_URI,
+    }
+    if negotiation_context is not None:
+        metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation_context
+    run_id = _run_id(context)
+    if run_id:
+        metadata[SAMPLE_RUN_ID_METADATA_KEY] = run_id
+    return metadata
+
+
+def _execution_span_id(task_id: str) -> str:
+    """Return the stable parent span id of one deterministic execution."""
+    return f"exec_server_{task_id}"
+
+
+def _emit_execution_span(context: RequestContext, task_id: str) -> str:
+    """Emit the execution parent span and return its id."""
+    span_id = _execution_span_id(task_id)
+    emit_span(
+        Span(
+            run_id=_run_id(context),
+            span_id=span_id,
+            context_id=context.context_id,
+            task_id=task_id,
+            phase=PHASE_EXECUTION,
+            actor="server",
+            side="server",
+            kind="execution",
+            stage=EXECUTOR_STAGE,
+            title="Deterministic OSS task execution",
+            purpose="Run the four OSS tools in order.",
+            direction="internal",
+        )
+    )
+    return span_id
+
+
+def _emit_tool_span(
+    context: RequestContext,
+    task_id: str,
+    parent_span_id: str,
+    step: ToolStep,
+) -> None:
+    """Emit one tool span parented to the deterministic execution span."""
+    emit_span(
+        Span(
+            run_id=_run_id(context),
+            span_id=f"tool_server_{uuid.uuid4().hex}",
+            parent_span_id=parent_span_id,
+            context_id=context.context_id,
+            task_id=task_id,
+            phase=PHASE_EXECUTION,
+            actor="tool",
+            side="server",
+            kind="tool",
+            stage=EXECUTOR_STAGE,
+            title=step.name,
+            purpose="Deterministic OSS tool call.",
+            status="ok" if step.result.get("ok") is True else "error",
+            duration_ms=step.duration_ms,
+            detail={
+                "toolName": step.name,
+                "args": step.args,
+                "result": step.result,
+            },
+        )
+    )
+
+
+class DeterministicTaskExecutor(AgentExecutor):
+    """Execute one accepted Task-T with the sample's deterministic OSS tools."""
+
+    def __init__(self, *, plan: SamplePlan | None = None) -> None:
+        """Create one executor.
+
+        Args:
+            plan: Plan override (tests); defaults to the sample plan.
+        """
+        self._plan = plan
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Create the Task, run the tools, and publish artifacts/status updates.
+
+        Args:
+            context: Gate-approved request; its message already carries the agreed Task-T prompt.
+            event_queue: A2A event queue of this request.
+        """
+        if context.current_task is not None:
+            # The five scenarios are single-shot. Re-enqueueing the existing Task keeps a follow-up
+            # request from accidentally starting a second plan.
+            await event_queue.enqueue_event(context.current_task)
+            return
         message = context.message
         if message is None:
-            raise ValueError("The A2A request carries no message")
-        metadata = metadata_to_dict(message.metadata)
-        prompt = task_prompt_from_metadata(metadata) or context.get_user_input()
-        if not prompt.strip():
-            raise ValueError("The A2A request carries no Task-T prompt")
+            raise ValueError("The approved request carries no A2A message")
 
-        state_delta: dict[str, object] = {
-            STATE_TASK_PROMPT: prompt,
-            STATE_TASK_TEMPLATE_URI: task_template_uri,
-        }
-        negotiation = metadata.get(NEGOTIATION_CONTEXT_METADATA_KEY)
-        if isinstance(negotiation, dict):
-            state_delta[STATE_NEGOTIATION_CONTEXT] = dict(negotiation)
-        sample = metadata.get(SAMPLE_PROPOSAL_METADATA_KEY)
-        if isinstance(sample, dict):
-            state_delta[STATE_SAMPLE_PROPOSAL] = dict(sample)
+        task_id = context.task_id or str(uuid.uuid4())
+        context_id = context.context_id or task_id
+        task = new_task_from_user_message(message)
+        task.id = task_id
+        task.context_id = context_id
+        run_id = _run_id(context)
+        if run_id:
+            task.metadata[SAMPLE_RUN_ID_METADATA_KEY] = run_id
+        await event_queue.enqueue_event(task)
 
-        identity = context.context_id or context.task_id or "anonymous"
-        return AgentRunRequest(
-            user_id=f"A2A_USER_{identity}",
-            session_id=context.context_id,
-            new_message=genai_types.Content(
-                role="user",
-                parts=[genai_types.Part(text=prompt)],
-            ),
-            state_delta=state_delta,
+        updater = TaskUpdater(event_queue, task.id, task.context_id)
+        await updater.start_work()
+        execution_span_id = _emit_execution_span(context, task.id)
+
+        try:
+            steps = await asyncio.to_thread(execute_sample_plan, self._plan)
+        except PlanExecutionError as exc:
+            _LOGGER.warning("deterministic plan failed at %s: %s", exc.tool, exc)
+            _emit_failed_tool_span(context, task.id, execution_span_id, exc)
+            await updater.failed(
+                message=updater.new_agent_message(
+                    [Part(text=f"The energy-saving plan failed: {exc}")]
+                )
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the Task must always reach a terminal state
+            _LOGGER.exception("unexpected deterministic executor failure")
+            await updater.failed(
+                message=updater.new_agent_message(
+                    [Part(text=f"The energy-saving task failed unexpectedly: {exc}")]
+                )
+            )
+            return
+
+        negotiation_context = _negotiation_context(context)
+        for step in steps[:-1]:
+            _emit_tool_span(context, task.id, execution_span_id, step)
+            await updater.add_artifact(
+                [Part(text=json.dumps(step.result, ensure_ascii=False))],
+                name=TOOL_ARTIFACT_NAME,
+                metadata={"toolName": step.name},
+                last_chunk=True,
+            )
+
+        report_step = steps[-1]
+        _emit_tool_span(context, task.id, execution_span_id, report_step)
+        report = report_step.result
+        summary = str(report.get("summary", ""))
+        report_metadata = _report_metadata(context, summary, negotiation_context)
+        report_part = Part()
+        ParseDict(report, report_part.data)
+        await updater.add_artifact(
+            [report_part, Part(text=summary)],
+            name=REPORT_ARTIFACT_NAME,
+            metadata=report_metadata,
+            last_chunk=True,
+        )
+        final_message = updater.new_agent_message(
+            [Part(text=FINAL_TASK_TEXT)], metadata=report_metadata
+        )
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED,
+            message=final_message,
+            metadata=report_metadata,
         )
 
-    return convert
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Mark the Task canceled.
 
-
-class NegotiationArtifactInterceptor:
-    """Stamps A2A-T metadata on the report artifact of the ADK server agent.
-
-    The interceptor caches the inbound A2A-T context per ADK session in ``before_agent``:
-    ``after_event`` receives only the executor context, so the cache is how the artifact update is
-    connected to the Task-T/Negotiation-T metadata. The cache entry is released by ``after_agent``.
-    """
-
-    def __init__(self, *, task_template_uri: str = TASK_TEMPLATE_URI) -> None:
-        self._task_template_uri = task_template_uri
-        self._audit: dict[str, _AuditContext] = {}
-
-    def as_execute_interceptor(self) -> ExecuteInterceptor:
-        """Return the ADK ``ExecuteInterceptor`` bound to this instance."""
-        return ExecuteInterceptor(
-            before_agent=self.before_agent,
-            after_event=self.after_event,
-            after_agent=self.after_agent,
+        Args:
+            context: Request context of the Task.
+            event_queue: A2A event queue of this request.
+        """
+        updater = TaskUpdater(
+            event_queue,
+            context.task_id or "",
+            context.context_id or "",
         )
+        await updater.cancel()
 
-    async def before_agent(self, context: RequestContext) -> RequestContext:
-        """Remember the A2A-T context of the session before the agent runs."""
-        metadata = metadata_to_dict(context.message.metadata) if context.message is not None else {}
-        session = parse_negotiation_context(metadata)
-        key = context.context_id or context.task_id or ""
-        self._audit[key] = _AuditContext(
-            task_template_uri=self._task_template_uri,
-            negotiation_context=negotiation_context_metadata(session) if session is not None else None,
-        )
-        return context
 
-    async def after_event(
-        self,
-        executor_context: ExecutorContext,
-        a2a_event: A2AEvent,
-        adk_event: AdkEvent,
-    ) -> A2AEvent:
-        """Stamp the Task-T report metadata on a text artifact update."""
-        if not isinstance(a2a_event, TaskArtifactUpdateEvent) or not _adk_event_has_text(adk_event):
-            return a2a_event
-        audit = self._audit.get(executor_context.session_id)
-        artifact = a2a_event.artifact
-        report_text = _artifact_text(artifact)
-        if report_text:
-            artifact.metadata[TASK_T_EXTENSION_URI] = report_text
-        artifact.metadata[TEMPLATE_URI_METADATA_KEY] = (
-            audit.task_template_uri if audit is not None else self._task_template_uri
-        )
-        if audit is not None and audit.negotiation_context is not None:
-            artifact.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context  # ty: ignore[invalid-assignment]
-        if not artifact.name:
-            artifact.name = REPORT_ARTIFACT_NAME
-        return a2a_event
-
-    async def after_agent(
-        self,
-        executor_context: ExecutorContext,
-        final_event: TaskStatusUpdateEvent,
-    ) -> TaskStatusUpdateEvent:
-        """Attach the negotiation context to the terminal status and release the cache."""
-        audit = self._audit.pop(executor_context.session_id, None)
-        if audit is not None and audit.negotiation_context is not None:
-            final_event.metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = audit.negotiation_context  # ty: ignore[invalid-assignment]
-        return final_event
+def _emit_failed_tool_span(
+    context: RequestContext,
+    task_id: str,
+    parent_span_id: str,
+    error: PlanExecutionError,
+) -> None:
+    """Emit one failed tool span for a plan step that returned a structured error."""
+    _emit_tool_span(
+        context,
+        task_id,
+        parent_span_id,
+        ToolStep(error.tool, error.arguments, error.result),
+    )
 
 
 class NegotiationAgentExecutor(AgentExecutor):
-    """Outer executor: pre-task negotiation gate in front of ADK's ``A2aAgentExecutor``."""
+    """Outer executor: pre-task negotiation gate in front of the deterministic executor."""
 
     def __init__(self, *, gate: NegotiationGate, inner: AgentExecutor) -> None:
         """Create one executor.
 
         Args:
             gate: pre-task negotiation gate.
-            inner: ADK executor that creates and runs the Task after the gate approves it.
+            inner: deterministic executor that runs an accepted Task.
         """
         self._gate = gate
         self._inner = inner
-        # Run Explorer: the client sends its run id once, on the initial Task-T message; the
-        # follow-up accept/reject/abort messages of the same context reuse it so their spans are
-        # still routed to the same UI run.
+        # The client sends its run id once, on the initial Task-T message; the follow-up
+        # accept/reject/abort messages of the same context reuse it for trace correlation.
         self._run_ids: dict[str, str] = {}
         self._run_ids_lock = threading.Lock()
 
@@ -241,15 +443,15 @@ class NegotiationAgentExecutor(AgentExecutor):
 
     @property
     def inner(self) -> AgentExecutor:
-        """Return the inner ADK executor."""
+        """Return the inner deterministic executor."""
         return self._inner
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Run the gate, then short-circuit or delegate to the inner executor.
+        """Run the gate, then short-circuit or delegate to the deterministic executor.
 
-        The whole invocation runs under one ``trace_scope`` (run id, ``server`` role, context id,
-        execution stage), so every SDK/ADK span produced while handling the request is tagged with
-        the client run it belongs to.
+        Args:
+            context: inbound A2A request context.
+            event_queue: A2A event queue of this request.
         """
         with trace_scope(
             run_id=self._resolve_run_id(context),
@@ -273,7 +475,7 @@ class NegotiationAgentExecutor(AgentExecutor):
     def _resolve_run_id(self, context: RequestContext) -> str | None:
         """Return the client run id advertised on the initial message (sticky per context)."""
         key = context.context_id or context.task_id or ""
-        metadata = metadata_to_dict(context.message.metadata) if context.message is not None else {}
+        metadata = _metadata(context)
         advertised = metadata.get(SAMPLE_RUN_ID_METADATA_KEY)
         if isinstance(advertised, str) and advertised.strip():
             with self._run_ids_lock:
@@ -283,55 +485,14 @@ class NegotiationAgentExecutor(AgentExecutor):
             return self._run_ids.get(key)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Delegate cancellation to the inner executor."""
+        """Delegate cancellation to the deterministic executor."""
         await self._inner.cancel(context, event_queue)
 
 
-def build_negotiation_executor(
-    *,
-    gate: NegotiationGate,
-    config: SampleConfig | None = None,
-    model: BaseLlm | None = None,
-) -> NegotiationAgentExecutor:
-    """Build the outer executor with an ADK runner around the server agent.
+def build_negotiation_executor(*, gate: NegotiationGate) -> NegotiationAgentExecutor:
+    """Build the outer executor with the deterministic sample executor inside.
 
     Args:
         gate: pre-task negotiation gate.
-        config: sample configuration; defaults to :func:`shared.config.load_config`.
-        model: optional ADK model override (tests inject the fake model); defaults to
-            :func:`shared.config.build_adk_model`.
     """
-    resolved_config = config or load_config()
-    resolved_model = build_traced_adk_model(resolved_config, model=model)
-    # The plugin is attached through the ``App`` (the ``plugins=`` runner argument is deprecated).
-    app = App(name=SERVER_APP_NAME, root_agent=build_server_agent(resolved_model), plugins=[TracePlugin()])
-    runner = Runner(
-        app=app,
-        session_service=InMemorySessionService(),
-    )
-    interceptor = NegotiationArtifactInterceptor(task_template_uri=TASK_TEMPLATE_URI)
-    executor_config = A2aAgentExecutorConfig(
-        request_converter=build_request_converter(task_template_uri=TASK_TEMPLATE_URI),
-        execute_interceptors=[interceptor.as_execute_interceptor()],
-    )
-    inner = A2aAgentExecutor(
-        runner=runner,
-        config=executor_config,
-        force_new_version=True,
-    )
-    _LOGGER.info("negotiation executor built (force_new_version=True)")
-    return NegotiationAgentExecutor(gate=gate, inner=inner)
-
-
-def _adk_event_has_text(event: AdkEvent) -> bool:
-    """Report whether one ADK event carries model text (as opposed to tool traffic)."""
-    content = event.content
-    if content is None:
-        return False
-    return any(part.text for part in (content.parts or ()))
-
-
-def _artifact_text(artifact: object) -> str:
-    """Return the concatenated text parts of one artifact."""
-    parts = getattr(artifact, "parts", ())
-    return "\n".join(part.text for part in parts if getattr(part, "text", "")).strip()
+    return NegotiationAgentExecutor(gate=gate, inner=DeterministicTaskExecutor())

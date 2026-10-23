@@ -49,6 +49,30 @@
     <span class="ctx-item ctx-activity"><span class="ctx-label">activity</span><span id="current-activity">Idle</span></span>
   </section>
 
+  <section class="task-history panel" aria-labelledby="task-history-title">
+    <div class="task-history-head">
+      <h2 class="panel-title" id="task-history-title">Persisted OSS tasks</h2>
+      <span class="task-history-count" id="task-history-count">0 tasks</span>
+    </div>
+    <p class="task-history-note" id="task-table-note">No persisted tasks yet.</p>
+    <div class="task-table-scroll" hidden>
+      <table class="task-table" id="task-table">
+        <caption class="sr-only">Persisted A2A tasks of the OSS server</caption>
+        <thead>
+          <tr>
+            <th scope="col">Task</th>
+            <th scope="col">State</th>
+            <th scope="col">Context</th>
+            <th scope="col">Updated</th>
+            <th scope="col">Report</th>
+            <th scope="col">Run</th>
+          </tr>
+        </thead>
+        <tbody id="task-table-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <nav class="phase-stepper" id="phase-stepper" aria-label="Run phases">
     <ol class="phase-list" id="phase-steps">
       <li class="phase-step" data-phase="dispatch"><button type="button" class="phase-step-button" data-phase="dispatch"><span class="phase-step-index">01</span><span class="phase-step-label">Dispatch</span><span class="phase-step-meta">pending</span></button></li>

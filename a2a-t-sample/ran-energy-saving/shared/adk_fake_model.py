@@ -1,27 +1,18 @@
-"""Deterministic ADK ``BaseLlm`` for offline runs and tests.
+"""Deterministic ADK ``BaseLlm`` for the offline client and tests.
 
 The fake model never touches the network. It selects a script by a **marker** found in the agent's
-system instruction or message contents (the ADK identity processor injects the agent name, so the
-built-in scripts are keyed by the server/client agent names), then serves the script's turns in
-order. Turn progress is derived from the number of function-response parts already present in the
-request, so the model is stateless and safe to share across sessions.
+system instruction or message contents (the ADK identity processor injects the agent name), then
+serves the script's turns in order. Turn progress is derived from the number of function-response
+parts already present in the request, so the model is stateless and safe to share across sessions.
 
-Built-in scripts cover the two agent roles:
-
-* the server agent reads the cell profile, evaluates the plan, applies it, and writes the report;
-* the client agent returns a structured ``NegotiationDecision``.
+The sample uses this fake model for the **client decision agent** only; the server is a
+deterministic A2A executor with no ADK model. Tests can still inject custom scripts with
+:func:`build_fake_model`, and the offline scenarios build their client script with
+:func:`build_client_script`.
 
 Tool arguments may echo a value returned by an earlier tool call with the
-``${last_tool_response.<key>}`` placeholder; the built-in server script uses it for the ``plan_id``
-of the report call, so the script always targets the plan the apply tool actually created.
-
-A script's progress is normally derived from the function responses of the request (an agent with
-tools). The client decision script's turns issue no tool calls, so :func:`build_client_script`
-advances on the model turns already present in its session instead; a scenario can then return one
-decision per inbound proposal.
-
-Tests and later tasks can inject their own scripts with :func:`build_fake_model`; the offline
-scenarios build their client script with :func:`build_client_script`.
+``${last_tool_response.<key>}`` placeholder; the generic helper remains available to injected
+scripts even though the built-in client script issues no tool calls.
 """
 
 from __future__ import annotations
@@ -41,8 +32,7 @@ from shared.models import NegotiationDecision
 #: Model name reported by the fake model.
 DEFAULT_MODEL_NAME = "fake-ran-energy-saving"
 
-#: Agent names of the sample (design §6.1 / §7.3); the scripts are keyed by them.
-SERVER_AGENT_NAME = "ran_energy_service_agent"
+#: Client agent name; the offline script is keyed by it.
 CLIENT_AGENT_NAME = "ran_energy_request_agent"
 
 #: Final text served when a script runs out of turns.
@@ -128,46 +118,6 @@ class FakeScript:
     progress: Literal["function_responses", "model_turns"] = PROGRESS_FUNCTION_RESPONSES
 
 
-#: Server agent script: read profile -> evaluate -> apply -> report -> final answer.
-DEFAULT_SERVER_SCRIPT = FakeScript(
-    marker=SERVER_AGENT_NAME,
-    turns=(
-        FakeTurn(
-            tool_calls=(
-                FakeToolCall(
-                    name="get_cell_energy_profile",
-                    args={"cell_id": "cell-001", "date": "2026-10-22"},
-                ),
-            )
-        ),
-        FakeTurn(
-            tool_calls=(
-                FakeToolCall(
-                    name="evaluate_energy_saving_plan",
-                    args={"cell_id": "cell-001", "window": "00:00~06:00", "target_rate": "30"},
-                ),
-            )
-        ),
-        FakeTurn(
-            tool_calls=(
-                FakeToolCall(
-                    name="apply_energy_saving_plan",
-                    args={"cell_id": "cell-001", "window": "00:00~06:00", "target_rate": "30"},
-                ),
-            )
-        ),
-        FakeTurn(
-            tool_calls=(
-                FakeToolCall(
-                    name="generate_energy_saving_report",
-                    args={"plan_id": LAST_RESPONSE_PLACEHOLDER_PREFIX + "plan_id}"},
-                ),
-            )
-        ),
-        FakeTurn(text=DEFAULT_FINAL_TEXT),
-    ),
-)
-
 #: Client agent script: one structured decision, no tool call.
 DEFAULT_CLIENT_SCRIPT = FakeScript(
     marker=CLIENT_AGENT_NAME,
@@ -182,8 +132,8 @@ DEFAULT_CLIENT_SCRIPT = FakeScript(
     default_text=DEFAULT_FINAL_TEXT,
 )
 
-#: Default scripts served when no custom scripts are injected.
-DEFAULT_SCRIPTS: tuple[FakeScript, ...] = (DEFAULT_SERVER_SCRIPT, DEFAULT_CLIENT_SCRIPT)
+#: Default script served when no custom scripts are injected.
+DEFAULT_SCRIPTS: tuple[FakeScript, ...] = (DEFAULT_CLIENT_SCRIPT,)
 
 
 def _content_texts(llm_request: LlmRequest) -> list[str]:

@@ -6,7 +6,7 @@ reliable signal because ``RequestContext`` generates one in its constructor):
 
 * initial Task-T validation, mapped to an information/target/feasibility negotiation on failure;
 * client ``Accept``: validate the negotiation answer and the agreed Task-T prompt, then hand the
-  request to the inner ADK executor so a Task is created and executed;
+  request to the deterministic executor so a Task is created and executed;
 * client ``Reject``/``Abort``: terminal; answer with a plain ``Message("协商已结束")`` and create no
   Task;
 * client counter-``Propose``: validate it, let the deterministic policy decide the next proposal or
@@ -137,7 +137,7 @@ class GateOutcome:
             without running the agent.
         message: short-circuit message (plain end/error or negotiation message); ``None`` when
             execution continues or a terminal Task is returned.
-        task_request: request context to hand to the inner ADK executor; ``None`` on short circuit.
+        task_request: request context to hand to the deterministic executor; ``None`` on short circuit.
         terminal_task: terminal ``REJECTED`` Task for an unmapped Task-T validation failure; it is
             enqueued as-is, so no agent runs and no Task lifecycle beyond REJECTED is produced.
     """
@@ -149,7 +149,7 @@ class GateOutcome:
 
     @classmethod
     def execution(cls, context: RequestContext) -> GateOutcome:
-        """Return an outcome that lets the inner ADK executor create and run the Task."""
+        """Return an outcome that lets the deterministic executor create and run the Task."""
         return cls(short_circuit=False, task_request=context)
 
     @classmethod
@@ -197,7 +197,7 @@ class NegotiationGate:
             context: inbound A2A request context.
 
         Returns:
-            Either a short-circuit message (no Task) or the request to hand to the ADK executor.
+            Either a short-circuit message (no Task) or the request to hand to the deterministic executor.
         """
         if context.current_task is not None:
             return GateOutcome.execution(context)
@@ -257,7 +257,7 @@ class NegotiationGate:
             return GateOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
 
         self._rewrite_task_prompt(context, prompt)
-        self._logger.info("initial Task-T validated; handing the request to the ADK executor")
+        self._logger.info("initial Task-T validated; handing the request to the deterministic executor")
         return GateOutcome.execution(context)
 
     # ------------------------------------------------------------------
@@ -289,7 +289,7 @@ class NegotiationGate:
         metadata: Mapping[str, object],
         session: NegotiationContext,
     ) -> GateOutcome:
-        """Validate the accept and hand the agreed Task-T prompt to the ADK executor."""
+        """Validate the accept and hand the agreed Task-T prompt to the deterministic executor."""
         context_id = context.context_id
         prompt = negotiation_prompt_from_metadata(metadata)
         template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)

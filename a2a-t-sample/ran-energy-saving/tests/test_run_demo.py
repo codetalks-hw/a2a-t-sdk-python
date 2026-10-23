@@ -8,6 +8,34 @@ from typing import Any
 
 import pytest
 import run_demo
+from dotenv import dotenv_values
+
+
+def test_write_run_env_points_both_processes_at_the_task_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The server writes and the UI reads the same absolute SQLite task store."""
+    monkeypatch.setattr(run_demo, "RUN_DIR", tmp_path)
+    env_path = run_demo._write_run_env(
+        source=None,
+        language="en-US",
+        model_mode="offline",
+        discovery="direct",
+        transport="sse",
+        webhook_port=0,
+        server_host="127.0.0.1",
+        server_port=8000,
+        registry_host="127.0.0.1",
+        registry_port=5001,
+        ui_port=8080,
+    )
+
+    values = dotenv_values(env_path)
+    task_db = Path(str(values["A2AT_SAMPLE_TASK_DB"]))
+
+    assert task_db.is_absolute()
+    assert task_db == run_demo.TASK_DB_PATH
+    assert task_db.name == "task-status.sqlite3"
 
 
 def test_ui_port_default_reads_the_env_key(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 import shared.adk_tracing as adk_tracing
-from agents.server_agent.agent import build_server_agent
+from google.adk.agents import LlmAgent
 from google.adk.apps import App
 from google.adk.models._capabilities import LlmCapabilities
 from google.adk.models.base_llm import BaseLlm
@@ -15,7 +15,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
-from shared.adk_fake_model import build_fake_model
+from shared.adk_fake_model import FakeScript, FakeToolCall, FakeTurn, build_fake_model
 from shared.adk_tracing import (
     SHARED_LINKER,
     SpanLinker,
@@ -226,10 +226,27 @@ def test_serializers_tolerate_none_and_json_safe_objects() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_plugin_emits_spans_parented_to_the_llm_call(spans: list[dict[str, object]]) -> None:
-    """A real ADK runner over the fake server script produces LLM and tool spans."""
+    """A real ADK runner over a local tool script produces LLM and tool spans."""
     linker = SpanLinker()
-    model = TracingLlm.wrap(build_fake_model(), linker=linker)
-    agent = build_server_agent(model)
+    script = FakeScript(
+        marker="trace-tool-agent",
+        turns=(
+            FakeTurn(tool_calls=(FakeToolCall(name="echo_tool", args={"value": "x"}),)),
+            FakeTurn(text="done"),
+        ),
+    )
+    model = TracingLlm.wrap(build_fake_model((script,)), linker=linker)
+
+    def echo_tool(value: str) -> dict[str, object]:
+        """Echo one value back to the model."""
+        return {"ok": True, "value": value}
+
+    agent = LlmAgent(
+        name="trace_tool_agent",
+        model=model,
+        instruction="trace-tool-agent",
+        tools=[echo_tool],
+    )
     runner = InMemoryRunner(
         app=App(name=_APP_NAME, root_agent=agent, plugins=[TracePlugin(linker=linker)]),
         app_name=_APP_NAME,
@@ -240,24 +257,19 @@ async def test_tool_plugin_emits_spans_parented_to_the_llm_call(spans: list[dict
         async for _ in runner.run_async(
             user_id="user-1",
             session_id="ctx-tools",
-            new_message=types.Content(role="user", parts=[types.Part(text="Apply the energy-saving plan.")]),
+            new_message=types.Content(role="user", parts=[types.Part(text="Call the tool.")]),
         ):
             continue
 
     llm_spans = [span for span in spans if span["kind"] == "llm"]
     tool_spans = [span for span in spans if span["kind"] == "tool"]
     assert llm_spans
-    tool_details: list[object] = []
+    tool_names: list[object] = []
     for span in tool_spans:
         detail = span["detail"]
         assert isinstance(detail, dict)
-        tool_details.append(detail["toolName"])
-    assert tool_details == [
-        "get_cell_energy_profile",
-        "evaluate_energy_saving_plan",
-        "apply_energy_saving_plan",
-        "generate_energy_saving_report",
-    ]
+        tool_names.append(detail["toolName"])
+    assert tool_names == ["echo_tool"]
     llm_ids = {str(span["spanId"]) for span in llm_spans}
     for span in tool_spans:
         assert span["runId"] == "run-tools"
@@ -268,8 +280,8 @@ async def test_tool_plugin_emits_spans_parented_to_the_llm_call(spans: list[dict
         assert span["parentSpanId"] in llm_ids
         detail = span["detail"]
         assert isinstance(detail, dict)
-        assert detail["args"]
-        assert detail["result"] is not None
+        assert detail["args"] == {"value": "x"}
+        assert detail["result"] == {"ok": True, "value": "x"}
     assert linker.last_llm("ctx-tools") in llm_ids
 
 

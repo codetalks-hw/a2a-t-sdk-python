@@ -8,11 +8,14 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from a2a.server.context import ServerCallContext, UnauthenticatedUser
+from a2a.types import Artifact, Part, Task, TaskState, TaskStatus
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
@@ -27,6 +30,7 @@ from integration_helpers import (
 )
 from protocol.client_flow import ClientFlowResult
 from protocol.decision_provider import ManualDecisionProvider
+from protocol.sqlite_task_store import SqliteTaskStore
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import FINAL_STATE_TASK_COMPLETED, get_scenario, resolve_user_request
@@ -308,6 +312,53 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     # The UI's stream grace is served by the backend, never hard-coded client-side. This fixture
     # disables the grace so streaming tests finish immediately.
     assert meta["finishedGraceMs"] == 0
+
+
+async def test_tasks_endpoint_returns_persisted_task_summaries(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "tasks.sqlite3"
+    store = SqliteTaskStore(db_path)
+    task = Task(
+        id="task-1",
+        context_id="ctx-1",
+        status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+        artifacts=[
+            Artifact(
+                artifact_id="artifact-1",
+                name="energy saving intent report",
+                parts=[Part(text="Plan applied to cell-001.")],
+            )
+        ],
+    )
+    await store.save(
+        task,
+        ServerCallContext(state={}, user=UnauthenticatedUser()),
+    )
+    config = replace(offline_config, task_db_path=str(db_path))
+    app = create_app(config, runs_dir=tmp_path, finished_grace_seconds=0.0)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.get("/api/tasks")
+
+    assert response.status_code == 200
+    document = response.json()
+    assert document["enabled"] is True
+    assert len(document["tasks"]) == 1
+    row = document["tasks"][0]
+    assert row["taskId"] == "task-1"
+    assert row["contextId"] == "ctx-1"
+    assert row["state"] == "TASK_STATE_COMPLETED"
+    assert row["summary"] == "Plan applied to cell-001."
+
+
+async def test_tasks_endpoint_is_disabled_without_a_task_database(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/api/tasks")
+
+    assert response.status_code == 200
+    assert response.json() == {"enabled": False, "tasks": []}
 
 
 async def test_cli_defaults_are_exposed_and_used_when_the_body_omits_them(
@@ -1057,11 +1108,17 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
             assert any(span["phase"] == "execution" for span in artifact_spans)
             assert all(span["phase"] in {"execution", "report"} for span in artifact_spans)
 
-            # The SDK and ADK producers are traced on both sides of the in-process run.
+            # ADK is client-only now. The server still makes A2A-T SDK LLM calls in the gate, but
+            # it has no ADK model; only the client has ADK LLM spans. The deterministic executor
+            # produces the server tool spans.
             llm_spans = [span for span in spans if span["kind"] == "llm"]
             tool_spans = [span for span in spans if span["kind"] == "tool"]
             assert llm_spans and tool_spans
-            assert {span["side"] for span in llm_spans} >= {"client", "server"}
+            server_llm = [span for span in llm_spans if span["side"] == "server"]
+            assert server_llm
+            assert all(span["model"] == "scripted" for span in server_llm)
+            assert any(span["side"] == "client" for span in llm_spans)
+            assert {span["side"] for span in tool_spans} == {"server"}
             for span in llm_spans:
                 assert span["stage"]
                 assert isinstance(span["durationMs"], (int, float))

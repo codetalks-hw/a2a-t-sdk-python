@@ -1,9 +1,9 @@
-"""ADK function tools of the RAN energy-saving server agent.
+"""Deterministic OSS tools of the RAN energy-saving server.
 
 Every tool is a deterministic function over the in-memory dataset of :mod:`shared.ran_data` and its
 process-local plan store. Tools never access the network and never raise for expected failures:
 unknown cells, unknown plans, malformed requests, and infeasible plans are reported as structured
-error dictionaries so the LLM can explain them and adapt.
+error dictionaries so the caller can explain them and adapt.
 
 All return values are JSON-serializable dictionaries. Successful results carry ``"ok": True``;
 failures carry ``"ok": False``, ``"error_code"``, and ``"error_message"``.

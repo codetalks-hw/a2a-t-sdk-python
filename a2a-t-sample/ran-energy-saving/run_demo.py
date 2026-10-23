@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Three-process launcher of the RAN energy-saving ADK sample.
+"""Three-process launcher of the RAN energy-saving A2A-T sample (ADK client only).
 
 The registry center and the A2A server each bind a port; started in the foreground they would
 block the terminal. This launcher starts them as **background subprocesses** (new layout:
@@ -53,6 +53,7 @@ SAMPLE_DIR = CASE_DIR.parent
 REPO_ROOT = SAMPLE_DIR.parent
 RUN_DIR = Path(tempfile.gettempdir()) / "a2at-ran-energy-saving-adk"
 PID_FILE = RUN_DIR / "pids.json"
+TASK_DB_PATH = CASE_DIR / "runs" / "task-status.sqlite3"
 
 #: Source ``.env`` candidates, in resolution order.
 ENV_CANDIDATES = (CASE_DIR / ".env", SAMPLE_DIR / ".env", SAMPLE_DIR / "env.example")
@@ -228,6 +229,7 @@ def _write_run_env(
             "A2AT_SAMPLE_PORT": str(server_port),
             "A2AT_SAMPLE_UI_PORT": str(ui_port),
             "A2AT_SAMPLE_DIRECT_SERVER_URL": f"http://{server_host}:{server_port}",
+            "A2AT_SAMPLE_TASK_DB": str(TASK_DB_PATH),
             "REGISTRY_CENTER_HOST": registry_host,
             "REGISTRY_CENTER_PORT": str(registry_port),
         }

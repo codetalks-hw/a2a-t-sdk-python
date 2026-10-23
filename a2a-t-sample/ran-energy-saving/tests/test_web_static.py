@@ -35,6 +35,7 @@ MODULES: tuple[str, ...] = (
 #: The public API operations the UI contract relies on.
 API_ROUTES: tuple[str, ...] = (
     "/api/meta",
+    "/api/tasks",
     "/api/runs",
     "/api/runs/${encodeURIComponent(runId)}",
     "/events",
@@ -126,6 +127,10 @@ def test_payloads_are_never_rendered_with_innerhtml() -> None:
     # Views must build nodes and set text explicitly.
     for name in ("timeline", "inspector", "main"):
         assert "textContent" in _module_source(name), name
+    main_source = _module_source("main")
+    assert "replaceChildren" in main_source
+    assert "renderTaskTable" in main_source
+    assert "refreshTasks" in main_source
 
 
 def test_api_module_covers_the_backend_contract() -> None:
@@ -136,6 +141,7 @@ def test_api_module_covers_the_backend_contract() -> None:
     for route in API_ROUTES:
         assert route in source, route
     assert "getSpan" in source
+    assert "getTasks" in source
 
 
 def test_store_module_deduplicates_and_exposes_the_phase_model() -> None:
@@ -214,6 +220,9 @@ async def test_index_shell_is_accessible_and_complete(static_client: httpx.Async
     assert page.count("data-field=") == 10  # both manual panels carry all five fields
     assert 'data-role="countdown"' in page
     assert 'data-role="error"' in page
+    assert 'id="task-table"' in page
+    assert 'id="task-table-body"' in page
+    assert "Persisted OSS tasks" in page
     for phase in (
         "dispatch",
         "task_prompt",
@@ -248,7 +257,15 @@ def test_css_implements_the_visual_spec() -> None:
     assert "grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--inspector-width)" in css
     for breakpoint in ("max-width: 1359px", "max-width: 1119px", "max-width: 899px", "max-width: 639px"):
         assert breakpoint in css, breakpoint
-    for anatomy in (".tl-row", ".tl-node", ".actor-badge", ".round-chip", ".status-pill", ".inspector-tabs"):
+    for anatomy in (
+        ".tl-row",
+        ".tl-node",
+        ".actor-badge",
+        ".round-chip",
+        ".status-pill",
+        ".inspector-tabs",
+        ".task-table",
+    ):
         assert anatomy in css, anatomy
     assert '.connection-state[data-state="closed"]' in css
 

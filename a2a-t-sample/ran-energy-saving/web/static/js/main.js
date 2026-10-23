@@ -49,6 +49,10 @@ const app = {
   finalizing: false,
   finishTimer: null,
   pendingScrollKey: null,
+  tasks: [],
+  tasksEnabled: false,
+  taskFetching: false,
+  taskTimer: null,
 };
 
 const timeline = new TimelineView({
@@ -564,6 +568,7 @@ async function startRun(event) {
     store.beginRun(payload.runId, app.meta);
     history.replaceState(null, "", `#run=${payload.runId}`);
     connect(payload.runId);
+    refreshTasks();
     scheduleRender();
   } catch (error) {
     showStartError(String(error?.message ?? error));
@@ -697,6 +702,7 @@ async function finalizeRun() {
   } catch {
     // The stream already carried every span it could; a missing trace document is not an error.
   }
+  await refreshTasks();
   scheduleRender();
 }
 
@@ -1154,6 +1160,83 @@ function startTicker() {
   }, 250);
 }
 
+/** Human label of one A2A task state. */
+function taskStateLabel(state) {
+  const value = typeof state === "string" ? state.replace(/^TASK_STATE_/, "") : "";
+  return value ? value.toLowerCase() : "unknown";
+}
+
+/** Format one ISO timestamp of the task table. */
+function taskTime(value) {
+  if (typeof value !== "string" || !value) return EM_DASH;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? EM_DASH : date.toLocaleString();
+}
+
+/** Render the persisted OSS task table from ``app.tasks``. */
+function renderTaskTable() {
+  const body = $("task-table-body");
+  if (!body) return;
+  body.replaceChildren();
+  const count = app.tasks.length;
+  $("task-history-count").textContent = `${count} ${count === 1 ? "task" : "tasks"}`;
+
+  const note = $("task-table-note");
+  const scroll = body.closest(".task-table-scroll");
+  if (!app.tasksEnabled) {
+    note.hidden = false;
+    note.textContent = "Task persistence is disabled (A2AT_SAMPLE_TASK_DB is unset).";
+    if (scroll) scroll.hidden = true;
+    return;
+  }
+  if (count === 0) {
+    note.hidden = false;
+    note.textContent = "No persisted tasks yet. Start a run to create one.";
+    if (scroll) scroll.hidden = true;
+    return;
+  }
+  note.hidden = true;
+  if (scroll) scroll.hidden = false;
+
+  for (const task of app.tasks) {
+    const row = el("tr");
+    append(
+      row,
+      el("td", "task-id-cell", shortId(task.taskId)),
+      el("td", "task-state-cell", taskStateLabel(task.state)),
+      el("td", "task-context-cell", shortId(task.contextId)),
+      el("td", "task-time-cell", taskTime(task.updatedAt)),
+      el("td", "task-summary-cell", truncate(task.summary, 180) || EM_DASH),
+      el("td", "task-run-cell", task.runId ? shortId(task.runId) : EM_DASH),
+    );
+    body.appendChild(row);
+  }
+}
+
+/** Fetch the persisted task summaries without overlapping requests. */
+async function refreshTasks() {
+  if (app.taskFetching) return;
+  app.taskFetching = true;
+  try {
+    const payload = await api.getTasks(50);
+    app.tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+    app.tasksEnabled = Boolean(payload?.enabled);
+    renderTaskTable();
+  } catch {
+    // The task table is diagnostic; a transient API failure must not disturb the run UI.
+  } finally {
+    app.taskFetching = false;
+  }
+}
+
+/** Poll the task table while a run is active so WORKING rows appear before the run ends. */
+function startTaskPolling() {
+  if (app.taskTimer) return;
+  app.taskTimer = window.setInterval(() => {
+    if (store.running) refreshTasks();
+  }, 3000);
+}
+
 /** Load the process metadata and restore a run from the URL hash. */
 async function boot() {
   bindControls();
@@ -1171,6 +1254,8 @@ async function boot() {
   applyInspectorLayout();
   startPolling();
   startTicker();
+  startTaskPolling();
+  refreshTasks();
   scheduleRender();
 
   try {

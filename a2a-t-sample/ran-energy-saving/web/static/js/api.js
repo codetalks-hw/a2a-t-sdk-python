@@ -41,6 +41,11 @@ export class ApiClient {
     return requestJson(`${this.baseUrl}/api/meta`);
   }
 
+  /** Read the persisted OSS task summaries. */
+  getTasks(limit = 50) {
+    return requestJson(`${this.baseUrl}/api/tasks?limit=${encodeURIComponent(limit)}`);
+  }
+
   /** Start one run. */
   startRun(body) {
     return requestJson(`${this.baseUrl}/api/runs`, {

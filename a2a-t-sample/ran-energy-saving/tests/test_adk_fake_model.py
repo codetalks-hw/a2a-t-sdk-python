@@ -12,7 +12,6 @@ from shared.adk_fake_model import (
     CLIENT_AGENT_NAME,
     DEFAULT_FINAL_TEXT,
     PROGRESS_MODEL_TURNS,
-    SERVER_AGENT_NAME,
     FakeLlm,
     FakeScript,
     FakeToolCall,
@@ -35,46 +34,6 @@ def _request(agent_name: str, user_text: str = "run the task") -> LlmRequest:
 
 async def _collect(model: FakeLlm, request: LlmRequest) -> list[LlmResponse]:
     return [response async for response in model.generate_content_async(request)]
-
-
-@pytest.mark.asyncio
-async def test_server_script_runs_the_tool_sequence_then_reports() -> None:
-    model = build_fake_model()
-    request = _request(SERVER_AGENT_NAME)
-    tool_names: list[str] = []
-
-    for _ in range(5):
-        responses = await _collect(model, request)
-        assert len(responses) == 1
-        response = responses[0]
-        assert response.content is not None
-        parts = response.content.parts or []
-        function_call = parts[0].function_call
-        if function_call is not None:
-            assert function_call.name is not None
-            tool_names.append(function_call.name)
-            request.contents.append(
-                types.Content(
-                    role="user",
-                    parts=[
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=function_call.name,
-                                response={"ok": True},
-                            )
-                        )
-                    ],
-                )
-            )
-        else:
-            assert parts[0].text == DEFAULT_FINAL_TEXT
-
-    assert tool_names == [
-        "get_cell_energy_profile",
-        "evaluate_energy_saving_plan",
-        "apply_energy_saving_plan",
-        "generate_energy_saving_report",
-    ]
 
 
 @pytest.mark.asyncio

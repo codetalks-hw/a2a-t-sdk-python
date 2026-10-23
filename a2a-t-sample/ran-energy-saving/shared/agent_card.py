@@ -1,8 +1,8 @@
 """AgentCard identity constants of the RAN energy-saving sample.
 
 The constants live in ``shared`` (instead of :mod:`protocol.server_app`) because the client also
-needs them for discovery: importing the server assembly from the client process would pull in
-``agents.server_agent.agent`` and build an unused ADK model at import time.
+needs them for discovery: importing the server assembly from the client process would pull in the
+server protocol modules and an unused server runtime at import time.
 """
 
 from __future__ import annotations

@@ -1,17 +1,11 @@
-"""Tests for the RAN energy-saving server agent tools and their offline agent wiring."""
+"""Tests for the deterministic RAN energy-saving server tools."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 
 import pytest
-from agents.server_agent.agent import (
-    AGENT_NAME,
-    SERVICE_INSTRUCTION,
-    build_server_agent,
-    root_agent,
-)
 from agents.server_agent.tools import (
     ERROR_INVALID_DATE,
     ERROR_INVALID_REQUEST,
@@ -23,15 +17,7 @@ from agents.server_agent.tools import (
     generate_energy_saving_report,
     get_cell_energy_profile,
 )
-from google.adk.models.llm_request import LlmRequest
-from google.adk.models.llm_response import LlmResponse
-from google.genai import types
 from shared import ran_data
-from shared.adk_fake_model import (
-    SERVER_AGENT_NAME,
-    FakeLlm,
-    build_fake_model,
-)
 
 
 def _as_mapping(value: object) -> dict[str, object]:
@@ -44,23 +30,6 @@ def _as_list(value: object) -> list[object]:
     """Narrow one nested JSON array of a tool result."""
     assert isinstance(value, list)
     return value
-
-
-#: Tool lookup used to replay the fake model's scripted calls.
-TOOLS: dict[str, Callable[..., dict[str, object]]] = {
-    "get_cell_energy_profile": get_cell_energy_profile,
-    "evaluate_energy_saving_plan": evaluate_energy_saving_plan,
-    "apply_energy_saving_plan": apply_energy_saving_plan,
-    "generate_energy_saving_report": generate_energy_saving_report,
-}
-
-#: Expected tool sequence of the scripted server agent.
-EXPECTED_TOOL_SEQUENCE = [
-    "get_cell_energy_profile",
-    "evaluate_energy_saving_plan",
-    "apply_energy_saving_plan",
-    "generate_energy_saving_report",
-]
 
 
 @pytest.fixture(autouse=True)
@@ -232,71 +201,3 @@ def test_report_reports_a_non_string_plan_id() -> None:
     assert report["ok"] is False
     assert report["error_code"] == ERROR_INVALID_REQUEST
     assert report["argument"] == "plan_id"
-
-
-def test_built_server_agent_uses_the_injected_fake_model() -> None:
-    agent = build_server_agent(build_fake_model())
-
-    assert agent.name == AGENT_NAME
-    assert isinstance(agent.model, FakeLlm)
-    assert [getattr(tool, "__name__", None) for tool in agent.tools] == EXPECTED_TOOL_SEQUENCE
-
-
-def test_root_agent_is_constructible_with_the_default_offline_model() -> None:
-    assert root_agent.name == AGENT_NAME
-    assert isinstance(root_agent.model, FakeLlm)
-    assert [getattr(tool, "__name__", None) for tool in root_agent.tools] == EXPECTED_TOOL_SEQUENCE
-    assert "get_cell_energy_profile" in SERVICE_INSTRUCTION
-    assert "generate_energy_saving_report" in SERVICE_INSTRUCTION
-
-
-def _server_request() -> LlmRequest:
-    """Build a request the fake model routes to the server agent script."""
-    return LlmRequest(
-        model="fake-ran-energy-saving",
-        contents=[types.Content(role="user", parts=[types.Part(text="Apply the energy-saving plan.")])],
-        config=types.GenerateContentConfig(
-            system_instruction=f'You are an agent. Your internal name is "{SERVER_AGENT_NAME}".',
-        ),
-    )
-
-
-async def _next_response(model: FakeLlm, request: LlmRequest) -> LlmResponse:
-    """Return the single response the fake model serves for a request."""
-    responses = [response async for response in model.generate_content_async(request)]
-    assert len(responses) == 1
-    return responses[0]
-
-
-@pytest.mark.asyncio
-async def test_fake_model_sequence_is_accepted_by_the_real_tools() -> None:
-    model = build_fake_model()
-    request = _server_request()
-    tool_names: list[str] = []
-    results: list[dict[str, object]] = []
-
-    for _ in range(len(EXPECTED_TOOL_SEQUENCE)):
-        response = await _next_response(model, request)
-        assert response.content is not None
-        call = (response.content.parts or [])[0].function_call
-        assert call is not None
-        assert call.name is not None
-        tool = TOOLS[call.name]
-        result = tool(**dict(call.args or {}))
-        tool_names.append(call.name)
-        results.append(result)
-        request.contents.append(
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        function_response=types.FunctionResponse(name=call.name, response=result)
-                    )
-                ],
-            )
-        )
-
-    assert tool_names == EXPECTED_TOOL_SEQUENCE
-    assert all(result["ok"] is True for result in results)
-    assert results[2]["window"] == "00:00~06:00"
-    assert results[3]["plan_id"] == results[2]["plan_id"]

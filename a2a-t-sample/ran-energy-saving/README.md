@@ -1,9 +1,10 @@
-﻿# RAN Energy Saving Sample (A2A + A2A-T + ADK)
+﻿# RAN Energy Saving Sample (A2A + A2A-T + ADK client)
 
 A runnable reference for an agent-to-agent RAN (Radio Access Network) energy-saving service. A
 client agent and a RAN domain server agent agree on an energy-saving task through A2A-T
-`Negotiation-T`, then execute it through a standard A2A Task with Google ADK (Agent Development
-Kit) agents on both sides.
+`Negotiation-T`, then execute it through a standard A2A Task. Google ADK (Agent Development Kit)
+is used **only for the client decision agent**; the server is a plain A2A/A2A-T service with a
+deterministic OSS executor.
 
 The sample is written for two audiences: teams building a **client agent** and teams building a
 **server agent**. Its primary purpose is the **client-side integration**: showing how one agent
@@ -18,10 +19,10 @@ addressing an unspecified "you".
 | --- | --- |
 | A2A | Agent2Agent protocol: transports messages and Tasks between agents. |
 | A2A-T | The A2A-T SDK extension used here: `Task-T` (structured task prompts) and `Negotiation-T` (pre-task negotiation messages). |
-| ADK | Google Agent Development Kit: builds the `LlmAgent`s, tools, `Runner`, and sessions used by this sample. |
+| ADK | Google Agent Development Kit: builds the client `LlmAgent`, its tools, `Runner`, and sessions. The server does not use ADK. |
 | RAN | Radio Access Network: the radio cells and their energy/load behaviour. |
 | SLA | Service Level Agreement: the guaranteed throughput floor a cell must keep. |
-| OSS / BSS | Operations / Business Support Systems: a production integration target, not part of this sample. |
+| OSS / BSS | Operations / Business Support Systems: the server-side domain role, and a production integration target. The sample models the OSS task executor and its persisted Task store. |
 | OCS | Online Charging System: a production charging integration target, not part of this sample. |
 
 ## 1. What this sample solves
@@ -37,20 +38,20 @@ received:
 
 Instead of rejecting immediately, the server opens a **Negotiation-T** session. Server and client
 exchange standalone A2A `Message`s — `Propose`, `Accept`, `Reject`, `Abort` — **before any Task
-exists**. When the client accepts, the negotiated `Task-T` prompt is handed to an ADK server agent,
-which creates the Task and runs four deterministic tools: read the cell profile, evaluate the plan,
-apply the plan, and write the report.
+exists**. When the client accepts, the negotiated `Task-T` prompt is handed to a deterministic OSS
+executor, which creates the Task, runs four tools (read the cell profile, evaluate the plan, apply
+the plan, write the report), and persists every Task transition in SQLite.
 
 The sample demonstrates:
 
 - four A2A-T performatives on a real A2A HTTP+JSON chain;
 - true multi-round negotiation (`maxRounds = 3`), including counter-proposals;
-- an ADK `LlmAgent` with tools and a structured `output_schema` on the client, and an ADK
-  `LlmAgent` with tools on the server;
-- an explicit integration seam between a pre-task negotiation gate and ADK's
-  `A2aAgentExecutor`;
-- deterministic offline runs (scripted SDK LLM + ADK fake model) and a live mode against an
+- an ADK `LlmAgent` with tools and a structured `output_schema` on the client; the server uses a
+  deterministic `AgentExecutor` with no ADK model;
+- an explicit integration seam between the pre-task negotiation gate and the task executor;
+- deterministic offline runs (scripted SDK LLM + client ADK fake model) and a live mode against an
   OpenAI-compatible endpoint;
+- a SQLite `TaskStore` and a Web UI task-status table for persisted OSS tasks;
 - a CLI and a lightweight Web UI.
 
 ## 2. Architecture and layout
@@ -71,12 +72,14 @@ flowchart LR
         G[Negotiation gate<br/>Task-T + Negotiation-T]
         P[Deterministic policy<br/>propose / abort / execute / end]
         EX[NegotiationAgentExecutor]
-        ADK[ADK A2aAgentExecutor<br/>+ Runner + session]
-        SA[ADK service agent<br/>4 tools]
+        DET[Deterministic OSS executor<br/>no ADK / no LLM]
+        TOOLS[Four OSS tools]
+        DB[(SQLite TaskStore)]
         G --> P
         G --> EX
-        EX --> ADK
-        ADK --> SA
+        EX --> DET
+        DET --> TOOLS
+        DET --> DB
     end
 
     REG[(Mock registry center<br/>:5001)]
@@ -88,7 +91,8 @@ flowchart LR
 
 All negotiation happens **before the Task is created**: `Propose` / `Accept` / `Reject` /
 `Abort` are standalone `Message`s, not Task events. Only an accepted negotiation produces a
-Task, which the inner ADK `A2aAgentExecutor` creates and drives to `COMPLETED`.
+Task, which the deterministic executor creates and drives to `COMPLETED`; the server uses no ADK
+agent or LLM at execution time.
 
 ### 2.1 Client-layer integration: A2A, A2A-T, and ADK
 
@@ -99,7 +103,7 @@ agent has to combine three layers that solve different problems:
 | --- | --- | --- | --- |
 | **A2A** (`a2a-sdk`) | Transport and lifecycle: discover the AgentCard, send `Message`s, stream events or receive webhook pushes, represent the `Task` and its states. | HTTP+JSON, SSE/webhook, `contextId`, `Message`, `Task`, `TaskState`. | It does not know what Task-T or Negotiation-T means. |
 | **A2A-T** (`a2a_t`) | Semantic layer on top of A2A: extract and validate Task-T parameters, render Task-T prompts, generate and validate Negotiation-T performatives, carry `templateUri` and `negotiationContext`. | `A2ATClient` / `A2ATServer` facade, templates, structured validation, extension metadata. | It does not open HTTP connections or run agents. |
-| **ADK** (`google-adk`) | Reasoning and tools: decide what to do with a proposal, call client-side tools, produce a structured `NegotiationDecision`; on the server, execute the accepted Task with tools. | `LlmAgent`, tools, `output_schema`, `Runner`, sessions. | It never puts protocol content on the wire, never chooses a round or performative, and never parses raw A2A-T metadata. |
+| **ADK** (`google-adk`, client only) | Reasoning and tools: decide what to do with a proposal, call client-side tools, produce a structured `NegotiationDecision`. | `LlmAgent`, tools, `output_schema`, `Runner`, sessions. | It never puts protocol content on the wire, never chooses a round or performative, and never parses raw A2A-T metadata. The server does not use ADK. |
 | **Deterministic client flow** (this sample) | Orchestration and protocol correctness: call the right A2A-T API, send the right A2A message, keep rounds and performatives consistent, handle terminal states. | `protocol/client_flow.py`. | It does not make business decisions; those come from the provider. |
 
 The one-line mental model:
@@ -126,7 +130,7 @@ flowchart TB
         FACADE --> FLOW
         FLOW --> A2A
     end
-    SERVER["A2A-T server<br/>gate + ADK executor"]
+    SERVER["A2A-T server<br/>gate + deterministic OSS executor<br/>+ SQLite TaskStore"]
     A2A <-->|"Message / Task events"| SERVER
 ```
 
@@ -152,7 +156,7 @@ sequenceDiagram
     participant P as Server policy
     participant S as A2ATServer (A2A-T)
     participant D as Client ADK agent
-    participant X as Server ADK agent
+    participant X as Server OSS executor
 
     U->>R: request + scenario + mode
     R->>R: per-run SDK .env, discovery, A2A client, transport, provider
@@ -194,8 +198,8 @@ sequenceDiagram
     A->>G: HTTP+JSON
     G->>S: validate_accept_prompt_and_data_filling(...)
     G->>S: validate_task_prompt_and_data_filling(refilled)
-    G->>X: delegate to ADK A2aAgentExecutor
-    X->>X: create Task, run tools
+    G->>X: delegate to deterministic OSS executor
+    X->>X: create Task, run four tools, persist state
     X-->>A: SUBMITTED, WORKING, artifacts, COMPLETED
     A-->>F: stream / webhook events
     F-->>U: timeline, report, transcript
@@ -207,7 +211,8 @@ events.** The A2A `Task` appears only after the gate validates the `Accept` and 
 #### Direct path: Task-T validates without negotiation
 
 If the initial Task-T is complete and valid, the gate never opens a negotiation; the same request
-continues into the ADK executor. This is the Run Explorer case where phases 4 and 5 stay empty.
+continues into the deterministic OSS executor. This is the Run Explorer case where phases 4 and 5
+stay empty.
 
 ```mermaid
 sequenceDiagram
@@ -216,13 +221,13 @@ sequenceDiagram
     participant T as A2ATClient
     participant A as a2a-sdk
     participant G as Server gate
-    participant X as Server ADK agent
+    participant X as Server OSS executor
     F->>T: generate_task_prompt_from_text(...)
     T-->>F: Task-T prompt
     F->>A: Message(Task-T metadata)
     A->>G: HTTP+JSON
     G->>G: validate_task_prompt_and_data_filling = OK
-    G->>X: delegate to ADK A2aAgentExecutor
+    G->>X: delegate to deterministic OSS executor
     X-->>A: Task events ... COMPLETED
     A-->>F: events
 ```
@@ -315,17 +320,71 @@ The canonical implementation is [`protocol/client_runtime.py`](protocol/client_r
 (assembly) and [`protocol/client_flow.py`](protocol/client_flow.py) (protocol loop). The replace
 checklist in §7 marks which files are reusable and which are sample business content.
 
+### 2.2 ADK-native A2A vs ADK + A2A-T
+
+The left side is the baseline an ADK developer gets from ADK's built-in A2A support. The right side
+is this sample: the same ADK authoring step, plus the A2A-T semantic layer and a deterministic
+server.
+
+```mermaid
+flowchart LR
+    subgraph LEFT["A · ADK-native A2A"]
+        direction TB
+        L1["Step 1 · Define agent<br/>LlmAgent + tools + instruction"]
+        L2["Step 2 · Expose with ADK A2A<br/>A2aAgentExecutor + Runner<br/>AgentCard + DefaultRequestHandler"]
+        L3["Step 3 · Multi-agent interaction<br/>RemoteA2aAgent → message:send<br/>Task events; no pre-task negotiation"]
+        L1 --> L2 --> L3
+    end
+
+    subgraph RIGHT["B · ADK + A2A-T (this sample)"]
+        direction TB
+        R1["Step 1 · Define agent<br/>ADK LlmAgent (client decisions)<br/>output_schema NegotiationDecision"]
+        R2["Step 2 · Add A2A-T layer<br/>A2ATClient/Server + NegotiationGate<br/>deterministic OSS executor (no ADK)"]
+        R3["Step 3 · Negotiation-aware interaction<br/>Task-T → Propose/Accept/Counter<br/>Task only after Accept"]
+        R1 --> R2 --> R3
+    end
+
+    L2 -. "reuse: A2A transport, AgentCard, Task types" .-> R2
+    L2 -. "rewrite: request converter → gate prompt rewrite" .-> R2
+    L3 -. "hook: TaskUpdater metadata replaces ExecuteInterceptor" .-> R3
+
+    classDef reuse fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20;
+    classDef hook fill:#fff8e1,stroke:#f9a825,color:#6d4c00;
+    classDef rewrite fill:#ffebee,stroke:#c62828,color:#8e0000;
+    class L1,L2,R1 reuse;
+    class R2 hook;
+    class R3 rewrite;
+```
+
+**Legend:** green = reused from ADK/A2A; amber = injected hook; red = new or rewritten.
+
+| Seam | ADK-native A2A | ADK + A2A-T (this sample) | Verdict |
+| --- | --- | --- | --- |
+| Transport, AgentCard, `Task`/event types | `a2a-sdk` | `a2a-sdk` | Reuse |
+| Client reasoning | `RemoteA2aAgent` or an ADK agent | ADK `LlmAgent` + `Runner` + `output_schema`, narrowed to decisions | Reuse |
+| Initial request conversion | `A2ARequestToAgentRunRequestConverter` | `NegotiationGate` reads message metadata and rewrites the Task-T prompt | Rewrite |
+| Pre-task protocol | None | Gate + `NegotiationAgentExecutor` standalone messages | Rewrite |
+| Server execution | ADK agent + tools + session | `DeterministicTaskExecutor` + four pure OSS tools | Rewrite |
+| Artifact/status metadata | `ExecuteInterceptor.after_event` / `after_agent` | `TaskUpdater.add_artifact(metadata=...)` / `update_status(metadata=...)` | Hook |
+| Memory/continuity | ADK `SessionService` keyed by `contextId` | `contextId`/`taskId` + SQLite `TaskStore`; client ADK session per negotiation | Rewrite |
+| Observability | ADK `TracePlugin` | Client ADK tracing + server `emit_span` execution/tool spans | Reuse client, rewrite server |
+
+The important boundary: A2A's transport, AgentCard and Task types are reused unchanged. A2A-T adds
+the pre-task protocol and structured prompts; the server executor is deterministic. The client ADK
+agent only produces a `NegotiationDecision`; it never writes protocol metadata or rounds.
+
 ### Directory layout
 
 | Path | Responsibility |
 | --- | --- |
 | [`run_demo.py`](run_demo.py) | Three-process launcher: starts registry and server in the background, runs the CLI client in the foreground (or serves the Web UI with `--ui`), and stops the children afterwards. |
 | [`env.example`](env.example) | Unified offline-ready configuration template. |
-| [`agents/server_agent/`](agents/server_agent) | Server ADK agent: `agent.py` exports `root_agent`; `tools.py` holds the four tools; `prompts/service_instruction.md` is the instruction. |
+| [`agents/server_agent/`](agents/server_agent) | Deterministic server tools: `tools.py` holds the four OSS tools; there is no ADK agent or instruction. |
 | [`agents/client_agent/`](agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |
 | [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
-| [`protocol/server_executor.py`](protocol/server_executor.py) | Outer `AgentExecutor` around ADK's `A2aAgentExecutor`, plus the custom request converter and artifact interceptor. |
+| [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `DeterministicTaskExecutor`: runs the four OSS tools and publishes the A2A Task lifecycle. No ADK. |
+| [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore` for persisted A2A Task state and the UI task summaries. |
 | [`protocol/server_app.py`](protocol/server_app.py) | Server assembly: AgentCard (declares `Task-T/v1` and `Negotiation-T/v1`), request handler, Starlette app, registry registration. |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | Client protocol flow: initial Task-T, multi-round negotiation, accept refill, and terminal handling over SSE or webhook. |
 | [`protocol/client_runtime.py`](protocol/client_runtime.py) | Client assembly: per-run SDK `.env`, discovery, SDK client, transport, and decision provider. |
@@ -333,7 +392,7 @@ checklist in §7 marks which files are reusable and which are sample business co
 | [`protocol/discovery.py`](protocol/discovery.py) | AgentCard discovery through the registry center or `/.well-known/agent-card.json`. |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T metadata helpers: extension URIs, `templateUri`, `negotiationContext`, end message, sample-only metadata. |
 | [`protocol/transcript.py`](protocol/transcript.py) | Structured run transcript written to `runs/<timestamp>-<scenario>.json` and `.md`. |
-| [`shared/config.py`](shared/config.py) | Reads `.env` and builds the ADK model (fake model offline, `LiteLlm` live). |
+| [`shared/config.py`](shared/config.py) | Reads `.env`, resolves the task database path, and builds the client ADK model (fake model offline, `LiteLlm` live). |
 | [`shared/agent_card.py`](shared/agent_card.py) | AgentCard identity constants shared by the client (discovery) and the server (card build). |
 | [`shared/sdk_env.py`](shared/sdk_env.py) | Per-run SDK `.env` builder shared by both runtimes (no client↔server import). |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision` (client `output_schema`) and the provider-facing proposal view. |
@@ -341,7 +400,7 @@ checklist in §7 marks which files are reusable and which are sample business co
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
 | [`shared/ran_data.py`](shared/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | In-memory RAN dataset, plan evaluation, and process-local plan store. |
 | [`shared/scripted_llm.py`](shared/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | Scripted SDK `LLMClient` registered with the official factory; schema-routed canned responses. |
-| [`shared/adk_fake_model.py`](shared/adk_fake_model.py) | Deterministic ADK `BaseLlm` used offline and in tests. |
+| [`shared/adk_fake_model.py`](shared/adk_fake_model.py) | Deterministic client ADK `BaseLlm` used offline and in tests. |
 | [`shared/registry_client.py`](shared/registry_client.py) | Registry center register/query HTTP calls. |
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | Embedded webhook push receiver with token validation. |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
@@ -407,13 +466,14 @@ Expected output for `information` (abridged: tool-artifact payload lines, ids an
 [client] decision-requested round=1
 [client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
 [client] event kind=status performative=status summary=TASK_STATE_WORKING
-[client] event kind=artifact performative=artifact summary=<id>: {"args": {"cell_id": "cell-001", "date": "<date>"}, "id": "<id>", "name": "get_cell_energy_profile"}
-...  # 7 more tool-call artifacts; ids and payloads omitted
-[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+[client] event kind=artifact performative=artifact summary={"ok": true, "cell_id": "cell-001", ...}
+...  # 2 more tool results, then the report artifact
+[client] event kind=artifact performative=artifact summary=energy saving intent report: {"ok": true, "summary": "..."}
+[client] event kind=status performative=status summary=RAN energy-saving task completed.
 [client] event kind=status performative=status summary=TASK_STATE_COMPLETED
-[client] sse-received events=12
+[client] sse-received events=<n>
 [client] final_state=task_completed task_id=<uuid>
-[client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[client] report={"ok": true, "summary": "Plan plan-cell-001-001 applied ...", ...}
 [client] transcript: .../runs/<timestamp>-information.json
 [client] transcript: .../runs/<timestamp>-information.md
 [run_demo] stopped 2 background process(es)
@@ -435,12 +495,13 @@ abridged: tool-artifact payload lines, ids and paths omitted):
 [client] decision-requested round=2
 [client] event kind=status performative=status summary=TASK_STATE_SUBMITTED
 [client] event kind=status performative=status summary=TASK_STATE_WORKING
-...  # 8 tool-call artifacts; ids and payloads omitted
-[client] event kind=artifact performative=artifact summary=RAN energy-saving task completed.
+...  # 3 tool results + the report artifact
+[client] event kind=artifact performative=artifact summary=energy saving intent report: {"ok": true, "summary": "..."}
+[client] event kind=status performative=status summary=RAN energy-saving task completed.
 [client] event kind=status performative=status summary=TASK_STATE_COMPLETED
-[client] sse-received events=12
+[client] sse-received events=<n>
 [client] final_state=task_completed task_id=<uuid>
-[client] report={"artifact_id": "<uuid>", "name": "energy saving intent report", "text": "RAN energy-saving task completed."}
+[client] report={"ok": true, "summary": "Plan plan-cell-001-001 applied ...", ...}
 [client] transcript: .../runs/<timestamp>-target.json
 [client] transcript: .../runs/<timestamp>-target.md
 [run_demo] stopped 2 background process(es)
@@ -457,12 +518,13 @@ two-way sequence (see §9).
 python run_demo.py --scenario target --mode auto --model-mode live
 ```
 
-Live mode uses `ADK_MODEL_*` for the two ADK agents and `A2AT_LLM_*` for the A2A-T SDK. Both must
-point at the same OpenAI-compatible endpoint; `env.example` defaults to the local proxy at
-`http://127.0.0.1:31943/v1`. The command runs end to end, but the negotiation sequence is
-**model-dependent**: the SDK's LLM-backed extraction and semantic validation decide what reaches
-the server. Offline mode is the reproducible reference used by the tests and by §4. A live run
-should be treated as an integration smoke, not as an acceptance test.
+Live mode uses `ADK_MODEL_*` for the **client** ADK decision agent and `A2AT_LLM_*` for the A2A-T
+SDK on both sides. Both must point at the same OpenAI-compatible endpoint; `env.example` defaults
+to the local proxy at `http://127.0.0.1:31943/v1`. The command runs end to end, but the negotiation
+sequence is **model-dependent**: the SDK's LLM-backed extraction and semantic validation decide
+what reaches the server. The accepted Task itself is deterministic. Offline mode is the
+reproducible reference used by the tests and by §4. A live run should be treated as an integration
+smoke, not as an acceptance test.
 
 **Live mode is best-effort.** In the `information` scenario the server-side semantic validation and
 the client decision agent are model-driven: with the flash model the server may accept the
@@ -504,12 +566,20 @@ processes. Offline is the deterministic reference; live is best-effort.
 python run_demo.py --ui --scenario information --mode auto --model-mode offline
 # open http://127.0.0.1:8080
 
-# Live (best-effort; both SDK and ADK use the configured OpenAI-compatible endpoint)
+# Live (best-effort; SDK on both sides, ADK client only, same OpenAI-compatible endpoint)
 python run_demo.py --ui --scenario information --mode auto --model-mode live
 ```
 
 Use the left rail to pick a scenario and `auto`/`manual` mode, then **Start run**. The context
 strip and `GET /api/meta` show the read-only process language and model mode.
+
+#### Persisted OSS task table
+
+The server persists every accepted A2A Task in `runs/task-status.sqlite3` (override with
+`A2AT_SAMPLE_TASK_DB`). The full-width **Persisted OSS tasks** table above the phase stepper reads
+`GET /api/tasks` and shows task id, state, context, update time, report summary and run id. It
+refreshes on start/finish and while a run is active, so a `WORKING` row appears before the run
+ends. The table is read-only; the server remains the only writer.
 
 #### The eight phases
 
@@ -520,7 +590,7 @@ strip and `GET /api/meta` show the read-only process language and model mode.
 | 3 | Task validation | First A2A send, server gate validation, negotiation opened or task accepted directly. |
 | 4 | Negotiation | Per round: server propose, decision request, decision, response, server validation. |
 | 5 | Resolution | Accepted/rejected/aborted/ended, refilled Task-T and agreed parameters. |
-| 6 | Execution | ADK turns, tool calls, intermediate artifacts and `WORKING` status. |
+| 6 | Execution | Deterministic OSS tool calls, intermediate artifacts and `WORKING` status. |
 | 7 | Report | Report artifact payload and `COMPLETED`. |
 | 8 | Done | Final state, transcript and summary. |
 
@@ -627,26 +697,23 @@ Notes:
   implemented in `NEGOTIATION_KIND_BY_ERROR_CODE` in
   [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py).
 
-## 5. ADK agent development
+## 5. Client ADK agent and deterministic server executor
 
-### Server agent
+### Server: deterministic OSS executor (no ADK)
 
-[`agents/server_agent/agent.py`](agents/server_agent/agent.py) exports `root_agent`, loadable by
-`adk run` / `adk web`:
+The server has no `LlmAgent`, no ADK `Runner`, and no server session. After the gate approves a
+Task-T, [`protocol/server_executor.py`](protocol/server_executor.py) runs
+`execute_sample_plan`: read the cell profile, evaluate a plan, apply it, and generate the report.
+The plan is sample business logic (`cell-001`, `00:00~06:00`, `30%`); a real deployment replaces
+this function with its own planner.
 
-```python
-root_agent = LlmAgent(
-    name="ran_energy_service_agent",
-    model=build_adk_model(),           # fake model offline, LiteLlm live
-    instruction=SERVICE_INSTRUCTION,
-    tools=[
-        get_cell_energy_profile,
-        evaluate_energy_saving_plan,
-        apply_energy_saving_plan,
-        generate_energy_saving_report,
-    ],
-)
-```
+The executor publishes a normal A2A Task lifecycle with `TaskUpdater`:
+
+1. enqueue `Task(SUBMITTED)` with the request history;
+2. `start_work()` -> `WORKING`;
+3. one execution artifact per tool call, plus a `tool` trace span;
+4. the report artifact with `Task-T/v1`, `templateUri`, negotiation context and run id metadata;
+5. `COMPLETED` with the final text.
 
 | Tool | Inputs | Purpose |
 | --- | --- | --- |
@@ -657,15 +724,13 @@ root_agent = LlmAgent(
 
 Tools are deterministic functions over [`shared/ran_data.py`](shared/ran_data.py). Expected
 failures (unknown cell, malformed input, infeasible plan) return structured
-`{"ok": false, "error_code": ...}` dictionaries instead of raising, so the model can explain them.
-The instruction (`prompts/service_instruction.md`) tells the agent to read first, evaluate second,
-apply third, and report last; it must not skip the evaluation.
+`{"ok": false, "error_code": ...}` dictionaries; the executor turns a failure into a `FAILED`
+Task instead of a report.
 
-ADK runtime: [`protocol/server_executor.py`](protocol/server_executor.py) builds a `Runner` with
-`InMemorySessionService`, uses `session_id = context.context_id`, and wraps the agent in ADK's
-`A2aAgentExecutor` with `force_new_version=True`.
+Every Task transition is saved by [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py)
+when `A2AT_SAMPLE_TASK_DB` is set. The Web UI reads the same file read-only for its task table.
 
-### Client decision agent
+### Client ADK decision agent
 
 [`agents/client_agent/agent.py`](agents/client_agent/agent.py):
 
@@ -688,25 +753,26 @@ parse the model's structured answer; the client flow never parses free text.
 `InMemoryRunner`, keeps one ADK session per negotiation id (so later rounds see earlier proposals),
 and falls back to a safe `accept` decision only in offline mode.
 
-### Executor and interceptor integration
+### Executor and persistence integration
 
 `NegotiationAgentExecutor` runs the gate first. A short-circuit outcome enqueues exactly one
 standalone message (a negotiation `Propose`/`Abort`, or the plain end message) and creates no Task;
-otherwise it delegates to the inner ADK executor. Two seams are configured explicitly:
+otherwise it delegates to `DeterministicTaskExecutor`. The A2A-T metadata that the old ADK
+`request_converter` and `ExecuteInterceptor` used to inject is now written directly by the
+deterministic executor:
 
-- **`request_converter`** — ADK's default converter reads request-level metadata, but A2A-T
-  payloads travel on `context.message.metadata`. The custom converter reads the Task-T prompt from
-  there, replaces the short text label with the negotiated prompt, and mirrors the negotiation
-  context into ADK session state for audit.
-- **`ExecuteInterceptor.after_event` / `after_agent`** — the interceptor stamps the Task-T
-  extension URI and template URI on the report artifact, attaches the negotiation context to the
-  terminal status, and releases its per-session cache.
+- the gate rewrites `context.message` to the agreed Task-T prompt;
+- the executor stamps the report artifact and terminal status with `Task-T/v1`, `templateUri`,
+  `negotiationContext` and the sample run id;
+- `TaskUpdater` emits the standard A2A status/artifact events, and the SQLite `TaskStore` persists
+  each transition.
 
 ### What a customer replaces
 
-The four tools and the two instructions are the business layer. A customer implementing its own
-RAN service replaces the tool bodies with calls to its OSS/BSS/network-management systems and
-rewrites the instructions; the ADK wiring, gate, policy shape, and executor seams stay.
+The four tools and `execute_sample_plan` are the server business layer. A customer implementing its
+own RAN service replaces the tool bodies with calls to its OSS/BSS/network-management systems and
+replaces the sample plan with its own planner. On the client, replace the two ADK tools and the
+instruction. The A2A-T gate, policy state machine, deterministic flow, and TaskStore shape stay.
 
 ## 6. A2A-T negotiation integration
 
@@ -733,7 +799,7 @@ not a reliable signal because `RequestContext` generates one in its constructor)
 2. A validation failure whose first error code maps to a negotiation type becomes the initial
    `Propose`; an unmappable failure becomes a terminal `REJECTED` Task with structured errors.
 3. An `Accept` is validated with `validate_accept_prompt_and_data_filling`; the agreed Task-T
-   prompt is then validated again and handed to the ADK executor.
+   prompt is then validated again and handed to the deterministic executor.
 4. A `Reject` or `Abort` is terminal: the gate answers with a plain message and creates no Task.
 5. A client counter-`Propose` is validated with `validate_propose_prompt_and_data_filling`, then
    answered by the policy.
@@ -829,11 +895,10 @@ sample business content or demo-only machinery.
 | File / function | Verdict | Why |
 | --- | --- | --- |
 | `protocol/negotiation_gate.py` (`NegotiationGate`) | KEEP | Protocol entry and validation/short-circuit logic. |
-| `protocol/server_executor.py` (`NegotiationAgentExecutor`, converter, interceptor) | KEEP | ADK integration seams. |
-| `protocol/server_app.py` (`build_agent_card`, `build_server_runtime`) | KEEP | Assembly; replace card metadata/provider URL. |
+| `protocol/server_executor.py` (`NegotiationAgentExecutor`, `DeterministicTaskExecutor`) | KEEP the shell, **REPLACE** `execute_sample_plan` | The A2A lifecycle and gate wiring are reusable; the sample plan is business logic. |
+| `protocol/sqlite_task_store.py` (`SqliteTaskStore`) | KEEP | Minimal durable A2A TaskStore; swap for your database in production. |
+| `protocol/server_app.py` (`build_agent_card`, `build_server_runtime`) | KEEP | Assembly; replace card metadata/provider URL and TaskStore. |
 | `protocol/negotiation_policy.py` (`decide` and rule helpers) | REPLACE the rules, KEEP the shape | The state machine is reusable; the business rules and proposal texts are sample-specific. |
-| `agents/server_agent/agent.py` (`build_server_agent`) | KEEP | ADK wiring. |
-| `agents/server_agent/prompts/service_instruction.md` | **REPLACE** | Your service procedure and wording. |
 | `agents/server_agent/tools.py` (four tools) | **REPLACE** | Wire real RAN/OSS/BSS/network-management operations. |
 | `shared/ran_data.py`, `resources/ran_data/cells.json` | **REPLACE** | In-memory demo data and plan store. |
 
@@ -860,7 +925,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 
 | Key | Values | Effect |
 | --- | --- | --- |
-| `A2AT_SAMPLE_MODEL_MODE` | `offline` (default), `live` | `offline` = scripted SDK provider + deterministic ADK fake model; `live` = both use the OpenAI-compatible endpoint. |
+| `A2AT_SAMPLE_MODEL_MODE` | `offline` (default), `live` | `offline` = scripted SDK provider + deterministic client ADK fake model; `live` = SDK on both sides and the client ADK model use the OpenAI-compatible endpoint. The server executor is deterministic in both modes. |
 | `A2AT_LANGUAGE` | `en-US`, `zh-CN` (default `zh-CN` when unset; `run_demo.py` defaults to `en-US`) | Process-level language for templates, canned responses, registry/server/client. Not switchable per run; the Web UI only displays it. |
 | `A2AT_SAMPLE_HOST` / `A2AT_SAMPLE_PORT` | default `127.0.0.1` / `8000` | Server bind and advertised AgentCard interface. |
 | `REGISTRY_CENTER_HOST` / `REGISTRY_CENTER_PORT` | default `127.0.0.1` / `5001` | Mock registry bind and lookup URL. |
@@ -878,7 +943,8 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_TRACE_URL` | unset; `--ui` sets `http://127.0.0.1:<ui_port>` | Server trace endpoint (Web UI). Local demo only; the server POSTs spans there. |
 | `A2AT_SAMPLE_TRACE_TOKEN` | unset; `--ui` mints a random token | Local token the server presents and the UI requires; unset disables ingestion (fails closed). |
 | `A2AT_SAMPLE_TRACE_DIR` | unset; CLI sets `<sample>/runs` | Directory of the CLI server trace (`<dir>/<runId>/server-trace.jsonl`). |
-| `ADK_MODEL_PROVIDER` | `litellm` | ADK model provider (only LiteLlm is implemented by this sample). |
+| `A2AT_SAMPLE_TASK_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/task-status.sqlite3` | Absolute SQLite path of the server's persisted A2A Task store, also read by `GET /api/tasks`. |
+| `ADK_MODEL_PROVIDER` | `litellm` | Client ADK model provider (only LiteLlm is implemented by this sample). |
 | `ADK_MODEL_NAME` | default `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm model id (provider prefix required). |
 | `ADK_MODEL_API_BASE` | default `http://127.0.0.1:31943/v1` | OpenAI-compatible endpoint. |
 | `ADK_MODEL_API_KEY` | default `not-needed` | Endpoint key. |
@@ -893,19 +959,20 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 **Offline mode.** Before constructing `A2ATClient` / `A2ATServer`, the runtimes register the traced
 wrappers (`scripted_traced`, live `openai_traced`) and build a temporary SDK `.env` with
 `A2AT_LLM_PROVIDER=scripted_traced`, `A2AT_LLM_MODEL=scripted`, `A2AT_LLM_API_KEY=not-needed`. The
-source `.env` is never modified. The ADK side uses `shared/adk_fake_model.py`. Logs and the Web UI
-label the run `offline (scripted)`.
+source `.env` is never modified. The client ADK agent uses `shared/adk_fake_model.py`; the server
+executor is deterministic. Logs and the Web UI label the run `offline (scripted)`.
 
-**Live mode.** Both SDK and ADK use the configured endpoint. On Windows, keep `PYTHONUTF8=1`
-(`run_demo.py` sets it for its children). Live output depends on the model's extraction and
-semantic validation; see §3.
+**Live mode.** The SDK on both sides and the client ADK agent use the configured endpoint; the
+server executor still runs deterministic tools. On Windows, keep `PYTHONUTF8=1` (`run_demo.py`
+sets it for its children). Live output depends on the model's extraction and semantic validation;
+see §3.
 
 **Timeout budgets.** The client sends every A2A request with `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`
 (300s default) in `ClientCallContext.timeout`, and the `httpx` client uses the same budget. In live
 mode the server gate performs several LLM calls before it emits any event, so the client budget must
 outlast that worst case; the old fixed 60s made the client give up while the server was still
 working (`A2AClientTimeoutError`). Live LLM calls have a **120s per-call budget** (shared by SDK
-structured calls and ADK `LiteLlm` turns; raise it for slower endpoints). The per-run SDK `.env`
+structured calls and client ADK `LiteLlm` turns; raise it for slower endpoints). The per-run SDK `.env`
 carries `A2AT_LLM_TIMEOUT_SECONDS=120` and `A2AT_LLM_MAX_ATTEMPTS=1`. The OpenAI SDK's own transport
 retries are disabled by the traced provider, and LiteLLM is built with `num_retries=0`, so one call
 cannot silently become three attempts; a stuck call fails within the configured budget and the gate
@@ -936,7 +1003,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (367 tests). What it covers:
+The suite is fully offline and deterministic (372 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -944,14 +1011,15 @@ The suite is fully offline and deterministic (367 tests). What it covers:
 | `test_negotiation_gate.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, and the real offline server. |
 | `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
 | `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout. |
-| `test_scenarios.py` | End-to-end acceptance: a real server + real client + ADK fake model, asserting the exact performative/round sequence and final state. |
+| `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
-| `test_web_ui.py` | `/api/meta`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client/server LLM and tool spans, `trace.json`) and a real manual decision flow. |
+| `test_web_ui.py` | `/api/meta`, `/api/tasks`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server tool spans, `trace.json`) and a real manual decision flow. |
 | `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs, CSS tokens; runs `node --check` on every JS module and the in-repo `tests/js` store and real-frame harnesses (skipped without Node). |
-| `test_server_executor.py` | Request converter, artifact interceptor, executor delegation, AgentCard extensions, registry payload. |
+| `test_server_executor.py` | Deterministic plan sequence, Task lifecycle, report metadata, failure path, gate delegation, AgentCard extensions, registry payload. |
+| `test_sqlite_task_store.py` | Task save/get/delete, list filters/pagination, summaries/run ids, concurrent saves, read-only missing DB. |
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
-| `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic ADK model. |
-| `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration, scenario definitions, transcripts, runtime assembly (including the client import that must not build a server model). |
+| `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic client ADK model. |
+| `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration (including `A2AT_SAMPLE_TASK_DB`), scenario definitions, transcripts, runtime assembly, and the server import that must not load ADK. |
 | `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
 
 The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
@@ -1013,10 +1081,11 @@ contains the two-way timeline and the decisions table.
 
 The sample is deliberately a prototype. Before production:
 
-- **Persistence.** Plans live in a process-local store (`shared/ran_data._PLANS`), Tasks in
-  `InMemoryTaskStore`, push configs in `InMemoryPushNotificationConfigStore`, and ADK sessions in
-  `InMemorySessionService`. Replace all four with durable stores; ADK also requires a persistent
-  session service for multi-instance deployments.
+- **Persistence.** Tasks are saved in SQLite (`protocol/sqlite_task_store.py`) for the demo;
+  production should use your database and migrations. Plans still live in a process-local store
+  (`shared/ran_data._PLANS`), push configs use `InMemoryPushNotificationConfigStore`, and the
+  client ADK decision agent uses `InMemorySessionService`. Replace the plan and session stores for
+  restart-safe, multi-instance deployments. The server has no ADK session.
 - **Registry.** `registry/` is a mock. Use the deployment's real registry center or configure
   `direct` discovery with a stable AgentCard endpoint.
 - **Webhook security.** `A2AT_SAMPLE_WEBHOOK_TOKEN` is a static demo token. Use per-client secrets,
@@ -1035,3 +1104,8 @@ The sample is deliberately a prototype. Before production:
   it is not a multi-tenant console.
 - **SDK scope.** This sample does not modify `src/a2a_t/`. SDK defects should be handled as
   separate SDK changes, not patched inside the sample.
+- **Gemini Enterprise.** Gemini Enterprise consumes an A2A AgentCard registered in Google Cloud
+  Agent Registry; the card advertises the service URL and interfaces, while conversation continuity
+  remains the agent's responsibility (`contextId`/`taskId` + a durable session or Task store). See
+  the official registration guide:
+  <https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent>.

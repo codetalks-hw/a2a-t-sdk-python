@@ -11,12 +11,14 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from dotenv import dotenv_values
-from google.adk.models.base_llm import BaseLlm
 
 from shared.scenario import LANGUAGE_ZH, SUPPORTED_LANGUAGES
+
+if TYPE_CHECKING:
+    from google.adk.models.base_llm import BaseLlm
 
 #: Model modes.
 MODEL_MODE_LIVE = "live"
@@ -53,6 +55,7 @@ TRANSPORT_ENV_KEY = "A2AT_SAMPLE_TRANSPORT"
 HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
 LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
+TASK_DB_ENV_KEY = "A2AT_SAMPLE_TASK_DB"
 
 #: Defaults matching ``env.example``.
 DEFAULT_HOST = "127.0.0.1"
@@ -134,6 +137,17 @@ def _llm_max_attempts(values: dict[str, str | None]) -> int:
     return value
 
 
+def _optional_absolute_path(values: dict[str, str | None], key: str) -> str | None:
+    """Resolve an optional absolute path key, rejecting relative values."""
+    raw_value = _env_value(values, key, "")
+    if not raw_value:
+        return None
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"Invalid value for {key}: {raw_value}; expected an absolute path")
+    return str(path)
+
+
 @dataclass(frozen=True)
 class SampleConfig:
     """Resolved sample configuration.
@@ -156,6 +170,8 @@ class SampleConfig:
         http_timeout_seconds: Client HTTP budget of one A2A request, in seconds.
         llm_timeout_seconds: Live LLM budget of one call (SDK structured call or ADK turn), in seconds.
         llm_max_attempts: Live SDK LLM attempt limit per retryable step.
+        task_db_path: Absolute SQLite path of the persisted A2A Task store; ``None`` keeps the
+            in-memory store (tests and ephemeral runs).
     """
 
     model_mode: ModelMode
@@ -175,6 +191,7 @@ class SampleConfig:
     http_timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_max_attempts: int = DEFAULT_LLM_MAX_ATTEMPTS
+    task_db_path: str | None = None
 
     @property
     def is_offline(self) -> bool:
@@ -192,7 +209,8 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
 
     Raises:
         ValueError: when ``A2AT_SAMPLE_MODEL_MODE``, ``A2AT_LANGUAGE``, a port, a timeout, the LLM
-            attempt limit, or a discovery / transport key carries an unsupported value.
+            attempt limit, a discovery / transport key, or ``A2AT_SAMPLE_TASK_DB`` carries an
+            unsupported value.
     """
     resolved = env_path or Path.cwd() / ".env"
     values: dict[str, str | None] = dict(dotenv_values(resolved)) if resolved.exists() else {}
@@ -236,6 +254,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         ),
         llm_timeout_seconds=_positive_seconds(values, LLM_TIMEOUT_ENV_KEY, DEFAULT_LLM_TIMEOUT_SECONDS),
         llm_max_attempts=_llm_max_attempts(values),
+        task_db_path=_optional_absolute_path(values, TASK_DB_ENV_KEY),
     )
 
 

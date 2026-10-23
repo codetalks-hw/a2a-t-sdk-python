@@ -673,6 +673,99 @@ body.inspector-closed .inspector {
   margin-bottom: 10px;
 }
 
+/* ---------- Persisted OSS task table ---------- */
+
+.task-history {
+  flex: 0 0 auto;
+  margin: 10px 24px 0;
+  padding: 10px 12px;
+}
+
+.task-history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-history-head .panel-title {
+  margin-bottom: 0;
+}
+
+.task-history-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-history-note {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.task-table-scroll {
+  margin-top: 8px;
+  max-height: 170px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+}
+
+.task-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.task-table th,
+.task-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.task-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.task-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.task-id-cell,
+.task-context-cell,
+.task-run-cell {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.task-state-cell {
+  color: var(--actor-server);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.task-time-cell {
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.task-summary-cell {
+  color: var(--text-secondary);
+  min-width: 260px;
+}
+
 .field {
   display: grid;
   gap: 4px;
@@ -2239,6 +2332,10 @@ body.inspector-closed .inspector {
 
   .phase-list {
     min-width: 760px;
+  }
+
+  .task-history {
+    margin: 8px 12px 0;
   }
 
   .tl-metrics {

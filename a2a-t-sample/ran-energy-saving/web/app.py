@@ -34,6 +34,7 @@ from typing import Any, Final, Literal, Protocol
 from a2a_t.core.metadata import NegotiationContext
 from protocol.client_flow import ClientFlowResult, DecisionMadeCallback
 from protocol.client_runtime import MODE_AUTO, MODE_MANUAL, build_client_runtime
+from protocol.sqlite_task_store import read_task_summaries
 from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript, TranscriptPaths
 from shared.config import (
     DISCOVERY_REGISTRY,
@@ -846,6 +847,22 @@ def create_app(
             }
         )
 
+    async def tasks(request: Request) -> Response:
+        """Return the persisted A2A task summaries for the task-status table."""
+        raw_limit = request.query_params.get("limit", "50")
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer."}, status_code=400)
+        if not 1 <= limit <= 500:
+            return JSONResponse({"error": "limit must be between 1 and 500."}, status_code=400)
+        path = config.task_db_path
+        enabled = path is not None and Path(path).is_file()
+        if not enabled:
+            return JSONResponse({"enabled": False, "tasks": []})
+        rows = await asyncio.to_thread(read_task_summaries, path, limit)
+        return JSONResponse({"enabled": True, "tasks": rows})
+
     async def start_run(request: Request) -> Response:
         try:
             body = await request.json()
@@ -1047,6 +1064,7 @@ def create_app(
         routes=[
             Route("/", index),
             Route("/api/meta", meta),
+            Route("/api/tasks", tasks),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{run_id}", run_status),
             Route("/api/runs/{run_id}/events", run_events),

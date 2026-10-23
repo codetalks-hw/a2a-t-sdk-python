@@ -2,7 +2,8 @@
 
 The module builds the AgentCard (declaring the Task-T and Negotiation-T extensions), the A2A
 request handler, the Starlette app and the registry registration. The server always runs the
-negotiation gate in front of the ADK agent, so all negotiation happens before a Task is created.
+negotiation gate in front of the deterministic OSS executor, so all negotiation happens before a
+Task is created and the server uses no ADK agent.
 
 Offline mode registers the traced scripted SDK provider and points the SDK at a temporary ``.env``
 carrying ``A2AT_LLM_PROVIDER=scripted_traced`` / ``A2AT_LLM_MODEL=scripted`` /
@@ -32,6 +33,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_rest_routes
 from a2a.server.tasks import BasePushNotificationSender, InMemoryPushNotificationConfigStore
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
+from a2a.server.tasks.task_store import TaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -42,7 +44,6 @@ from a2a.types import (
 from a2a.utils.constants import TransportProtocol
 from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from a2a_t.server.a2at_server import A2ATServer
-from google.adk.models.base_llm import BaseLlm
 from google.protobuf.json_format import MessageToDict
 from shared.agent_card import (
     AGENT_CARD_DESCRIPTION,
@@ -63,6 +64,7 @@ from starlette.applications import Starlette
 
 from protocol.negotiation_gate import NegotiationGate
 from protocol.server_executor import NegotiationAgentExecutor, build_negotiation_executor
+from protocol.sqlite_task_store import SqliteTaskStore
 
 #: Temporary SDK ``.env`` directory prefix of the server runtime.
 SERVER_ENV_PREFIX: Final[str] = "a2at-ran-energy-saving-env-"
@@ -80,6 +82,7 @@ class ServerRuntime:
         prompt_server: A2A-T SDK server facade.
         gate: pre-task negotiation gate.
         executor: outer executor used by the request handler.
+        task_store: Task store backing the A2A Task lifecycle (SQLite when configured).
         app: Starlette application.
         trace_emitter: Run Explorer emitter attached to this process, when configured.
     """
@@ -89,6 +92,7 @@ class ServerRuntime:
     prompt_server: A2ATServer
     gate: NegotiationGate
     executor: NegotiationAgentExecutor
+    task_store: TaskStore
     app: Starlette
     trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None
 
@@ -191,6 +195,7 @@ def build_rest_app(
     *,
     agent_card: AgentCard,
     executor: NegotiationAgentExecutor,
+    task_store: TaskStore | None = None,
     trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None,
 ) -> Starlette:
     """Build the Starlette app with the AgentCard routes and the A2A REST routes.
@@ -198,8 +203,14 @@ def build_rest_app(
     The push-notification machinery is assembled unconditionally: it idles in SSE mode and is used
     when a client registers a webhook. The sender's HTTP client is closed by the app lifespan; the
     optional Run Explorer emitter is flushed and stopped there too.
+
+    Args:
+        agent_card: card served at the well-known A2A route.
+        executor: negotiation-aware AgentExecutor.
+        task_store: A2A Task store; defaults to an in-memory store (tests/direct runs).
+        trace_emitter: optional Run Explorer span emitter.
     """
-    task_store = InMemoryTaskStore()
+    resolved_task_store: TaskStore = task_store if task_store is not None else InMemoryTaskStore()
     push_config_store = InMemoryPushNotificationConfigStore()
     push_httpx_client = httpx.AsyncClient(trust_env=False)
     push_sender = BasePushNotificationSender(push_httpx_client, push_config_store)
@@ -214,7 +225,7 @@ def build_rest_app(
 
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
-        task_store=task_store,
+        task_store=resolved_task_store,
         agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,
@@ -225,6 +236,7 @@ def build_rest_app(
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.request_handler = request_handler
+    app.state.task_store = resolved_task_store
     return app
 
 
@@ -232,7 +244,6 @@ def build_server_runtime(
     *,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
-    model: BaseLlm | None = None,
     logger: logging.Logger | None = None,
 ) -> ServerRuntime:
     """Assemble the full server runtime.
@@ -240,7 +251,6 @@ def build_server_runtime(
     Args:
         config: resolved sample configuration; defaults to :func:`shared.config.load_config`.
         env_path: optional ``.env`` source path.
-        model: optional ADK model override (tests inject the fake model).
         logger: optional logger shared by the gate and the runtime.
 
     Returns:
@@ -257,9 +267,19 @@ def build_server_runtime(
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
     gate = NegotiationGate(prompt_server, max_rounds=MAX_ROUNDS, logger=resolved_logger)
-    executor = build_negotiation_executor(gate=gate, config=resolved_config, model=model)
+    executor = build_negotiation_executor(gate=gate)
+    task_store: TaskStore = (
+        SqliteTaskStore(resolved_config.task_db_path)
+        if resolved_config.task_db_path
+        else InMemoryTaskStore()
+    )
     agent_card = build_agent_card(host=resolved_config.host, port=resolved_config.port)
-    app = build_rest_app(agent_card=agent_card, executor=executor, trace_emitter=trace_emitter)
+    app = build_rest_app(
+        agent_card=agent_card,
+        executor=executor,
+        task_store=task_store,
+        trace_emitter=trace_emitter,
+    )
     app.state.config = resolved_config
     app.state.prompt_server = prompt_server
     app.state.gate = gate
@@ -270,6 +290,7 @@ def build_server_runtime(
         prompt_server=prompt_server,
         gate=gate,
         executor=executor,
+        task_store=task_store,
         app=app,
         trace_emitter=trace_emitter,
     )
@@ -279,11 +300,10 @@ def build_server_app(
     *,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
-    model: BaseLlm | None = None,
     logger: logging.Logger | None = None,
 ) -> Starlette:
     """Build only the Starlette app (see :func:`build_server_runtime` for the full runtime)."""
-    return build_server_runtime(config=config, env_path=env_path, model=model, logger=logger).app
+    return build_server_runtime(config=config, env_path=env_path, logger=logger).app
 
 
 async def register_server_agent_card(
@@ -338,13 +358,13 @@ def main() -> None:
         )
     )
     _LOGGER.info(
-        "starting RAN energy-saving server on %s:%s (model_mode=%s, model=%s, language=%s, provider=%s)",
+        "starting RAN energy-saving server on %s:%s (model_mode=%s, model=%s, language=%s, task_db=%s)",
         runtime.config.host,
         runtime.config.port,
         runtime.config.model_mode,
         runtime.config.model_label,
         runtime.config.language,
-        runtime.config.adk_model_provider,
+        runtime.config.task_db_path or "in-memory",
     )
     uvicorn.run(runtime.app, host=runtime.config.host, port=runtime.config.port)
 

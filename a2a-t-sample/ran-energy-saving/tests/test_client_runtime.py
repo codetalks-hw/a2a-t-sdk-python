@@ -312,6 +312,31 @@ async def test_runtime_http_client_uses_the_configured_http_budget(
     assert captured[0]["user_request"] == "custom request from the UI"
 
 
+def test_importing_the_server_does_not_import_adk() -> None:
+    """The server is a plain A2A/A2A-T service: its assembly must not load Google ADK."""
+    sample_root = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys\n"
+        "import protocol.server_app\n"
+        "assert 'google.adk' not in sys.modules, 'google.adk imported'\n"
+        "assert 'google.genai' not in sys.modules, 'google.genai imported'\n"
+        "print('server-import-ok')\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(sample_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(sample_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "server-import-ok" in result.stdout
+
+
 def test_importing_the_client_runtime_does_not_build_a_server_model() -> None:
     """The client process must not import the server assembly (which used to build LiteLlm).
 
