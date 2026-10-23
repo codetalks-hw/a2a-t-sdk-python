@@ -701,6 +701,12 @@ body.inspector-closed .inspector {
   resize: vertical;
   font-family: var(--font-mono);
   font-size: 12px;
+  min-height: 84px;
+}
+
+.request-reset {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 .field-note {

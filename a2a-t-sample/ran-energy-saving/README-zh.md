@@ -220,9 +220,11 @@ python run_demo.py --ui --ui-host 0.0.0.0 --ui-port 8080
 
 打开 <http://127.0.0.1:8080>。页面可选择场景、`auto`/`manual` 模式与 SSE/webhook；展示实时时间线、最终报告，并提供 JSON/Markdown 运行记录下载。语言与模型模式是进程级、只读的（见 `GET /api/meta`）。
 
+运行设置中新增可编辑的 **Original user request** 输入框：默认填入所选场景的预置请求，启动 run 时作为 `userRequest` 发给 `POST /api/runs`，客户端用它生成 Task-T，而不是使用预置请求。留空时回退到场景默认请求；**Reset to scenario default** 可恢复预置文本。这是用五个预设之外的请求演示协商的最快方式。
+
 ```bash
 curl http://127.0.0.1:8080/api/meta
-{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"discoveries":["registry","direct"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse","defaultDiscovery":"registry","finishedGraceMs":2000}
+# `scenarioRequests` 提供每个场景可编辑的默认请求文本。
 ```
 
 ### Run Explorer（运行探索器）
@@ -559,7 +561,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（362 个测试）。覆盖范围：
+测试套件完全离线且确定性（367 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

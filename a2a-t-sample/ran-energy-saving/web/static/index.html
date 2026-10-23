@@ -77,6 +77,14 @@
               <option value="abort">abort</option>
             </select>
           </label>
+          <label class="field">Original user request
+            <textarea id="user-request-input" name="userRequest" rows="6" spellcheck="false"
+              placeholder="Enter the natural-language request sent to the Task-T generator."></textarea>
+          </label>
+          <button class="secondary-button request-reset" id="reset-request-button" type="button">
+            Reset to scenario default
+          </button>
+          <p class="field-note">Scenario still controls the expected sequence and decision script; the text feeds Task-T generation.</p>
           <label class="field">Mode
             <select id="mode-select" name="mode">
               <option value="auto">auto</option>

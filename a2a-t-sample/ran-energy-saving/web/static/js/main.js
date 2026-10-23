@@ -557,6 +557,7 @@ async function startRun(event) {
       mode: $("mode-select").value,
       transport: $("transport-select").value,
       discovery: $("discovery-select").value,
+      userRequest: $("user-request-input").value.trim() || null,
     });
     app.runId = payload.runId;
     resetRunUiState();
@@ -774,7 +775,15 @@ function populateMeta(meta) {
   fillSelect($("mode-select"), meta.modes || [], meta.defaultMode);
   fillSelect($("transport-select"), meta.transports || [], meta.defaultTransport);
   fillSelect($("discovery-select"), meta.discoveries || [], meta.defaultDiscovery);
+  fillUserRequest($("scenario-select").value);
   $("rail-language").textContent = meta.language || EM_DASH;
+}
+
+/** Fill the request editor with the selected scenario's default request. */
+function fillUserRequest(scenario) {
+  const input = $("user-request-input");
+  if (!input) return;
+  input.value = app.meta?.scenarioRequests?.[scenario] || "";
 }
 
 /** Fill one select with options, keeping one default selected. */
@@ -965,6 +974,8 @@ function cycleTheme() {
 /** Wire the static toolbar, form and dialog controls. */
 function bindControls() {
   $("run-form").addEventListener("submit", startRun);
+  $("scenario-select").addEventListener("change", () => fillUserRequest($("scenario-select").value));
+  $("reset-request-button").addEventListener("click", () => fillUserRequest($("scenario-select").value));
   $("run-id").addEventListener("click", () => {
     if (!store.runId) return;
     navigator.clipboard?.writeText(store.runId).then(

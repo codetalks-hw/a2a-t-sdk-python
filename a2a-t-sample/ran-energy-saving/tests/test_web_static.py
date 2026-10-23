@@ -339,6 +339,17 @@ def test_format_module_behavior_for_large_payloads_and_offline_tokens() -> None:
     assert "format-ok" in result.stdout
 
 
+def test_run_form_exposes_the_user_request_editor() -> None:
+    """The rail lets the user edit the original request used by the Task-T generator."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="user-request-input"' in html
+    assert 'id="reset-request-button"' in html
+
+    source = _module_source("main")
+    assert "userRequest:" in _function_source(source, "startRun")
+    assert "fillUserRequest" in _function_source(source, "populateMeta")
+
+
 def test_switching_hash_runs_closes_the_previous_stream_and_resets_decision_state() -> None:
     source = _module_source("main")
     resume = _function_source(source, "resumeRun")

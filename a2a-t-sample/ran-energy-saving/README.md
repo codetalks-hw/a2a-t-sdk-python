@@ -254,9 +254,15 @@ a scenario, `auto`/`manual` mode, and SSE/webhook; it shows a live timeline, the
 JSON/Markdown transcript downloads. The language and model mode are process-level and read-only
 (see `GET /api/meta`).
 
+The run setup also has an editable **Original user request** box. It is prefilled with the selected
+scenario's default request and sent as `userRequest` on `POST /api/runs`; the client uses it for
+Task-T generation instead of the canned request. An empty box falls back to the scenario default,
+and **Reset to scenario default** restores the canned text. This is the quickest way to demonstrate
+negotiation with a request that is not one of the five presets.
+
 ```bash
 curl http://127.0.0.1:8080/api/meta
-{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"discoveries":["registry","direct"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse","defaultDiscovery":"registry","finishedGraceMs":2000}
+# `scenarioRequests` carries the editable default request of every scenario.
 ```
 
 ### Run Explorer
@@ -702,7 +708,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (362 tests). What it covers:
+The suite is fully offline and deterministic (367 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

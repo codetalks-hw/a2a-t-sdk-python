@@ -304,11 +304,12 @@ async def test_runtime_http_client_uses_the_configured_http_budget(
         config, "information", "manual", "sse", env_path=tmp_path / "missing.env"
     )
     try:
-        await runtime.run()
+        await runtime.run(user_request="custom request from the UI")
     finally:
         await runtime.aclose()
 
     assert captured[0]["call_timeout_seconds"] == 42.0
+    assert captured[0]["user_request"] == "custom request from the UI"
 
 
 def test_importing_the_client_runtime_does_not_build_a_server_model() -> None:

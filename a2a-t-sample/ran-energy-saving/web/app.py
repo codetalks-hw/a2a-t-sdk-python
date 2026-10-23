@@ -93,6 +93,7 @@ class ClientRuntimeLike(Protocol):
         on_decision_made: DecisionMadeCallback | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
+        user_request: str | None = None,
     ) -> ClientFlowResult: ...
 
     async def aclose(self) -> None: ...
@@ -114,6 +115,8 @@ class RunState:
         scenario: scenario name.
         mode: decision mode (``auto`` / ``manual``).
         transport: event transport.
+        user_request: optional natural-language request supplied by the UI; ``None`` uses the
+            scenario default.
         status: ``running`` / ``finished`` / ``failed``.
         messages: every SSE message broadcast so far (replayed to late subscribers).
         subscribers: live SSE queues.
@@ -137,6 +140,7 @@ class RunState:
     mode: str
     transport: str
     discovery: str = DISCOVERY_REGISTRY
+    user_request: str | None = None
     status: RunStatus = STATUS_RUNNING
     messages: list[dict[str, object]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, object]]] = field(default_factory=set)
@@ -546,20 +550,27 @@ class RunManager:
         mode: str,
         transport: str,
         discovery: str = DISCOVERY_REGISTRY,
+        user_request: str | None = None,
     ) -> RunState:
         """Start one background run and broadcast ``run_started`` before the task is scheduled.
+
+        ``user_request`` overrides the scenario's canned request when the UI supplied one.
 
         Raises:
             RunConflictError: when another run is still active.
         """
         if self._active is not None and not self._active.finished():
             raise RunConflictError("Another run is still active; wait for it to finish.")
+        custom_request = user_request.strip() if isinstance(user_request, str) else None
+        if not custom_request:
+            custom_request = None
         run = RunState(
             run_id=uuid.uuid4().hex,
             scenario=scenario,
             mode=mode,
             transport=transport,
             discovery=discovery,
+            user_request=custom_request,
         )
         run.transcript = NegotiationTranscript(
             scenario=scenario,
@@ -572,7 +583,7 @@ class RunManager:
         spec = get_scenario(scenario)
         run.emit_run_started(
             description=spec.description,
-            user_request=resolve_user_request(spec, self._config.language),
+            user_request=custom_request or resolve_user_request(spec, self._config.language),
             language=self._config.language,
             model_mode=self._config.model_mode,
             model_label=self._config.model_label,
@@ -671,6 +682,7 @@ class RunManager:
                 on_decision_made=on_decision_made,
                 trace_sink=trace_sink,
                 run_id=run.run_id,
+                user_request=run.user_request,
             )
             run.result = result
             # Decisions are normally recorded live by ``on_decision_made``; the late loop is only
@@ -817,6 +829,10 @@ def create_app(
                 "modelMode": config.model_mode,
                 "modelLabel": config.model_label,
                 "scenarios": list(SUPPORTED_SCENARIO_NAMES),
+                "scenarioRequests": {
+                    name: resolve_user_request(get_scenario(name), config.language)
+                    for name in SUPPORTED_SCENARIO_NAMES
+                },
                 "modes": list(UI_MODES),
                 "transports": list(SUPPORTED_TRANSPORTS),
                 "discoveries": list(SUPPORTED_DISCOVERY_MODES),
@@ -841,6 +857,13 @@ def create_app(
         mode = body.get("mode", resolved_default_mode)
         transport = body.get("transport", resolved_default_transport)
         discovery = body.get("discovery", resolved_default_discovery)
+        raw_user_request = body.get("userRequest")
+        if raw_user_request is not None and not isinstance(raw_user_request, str):
+            return JSONResponse(
+                {"error": "The userRequest field must be a string."},
+                status_code=400,
+            )
+        user_request = raw_user_request.strip() if isinstance(raw_user_request, str) else None
         if scenario not in SUPPORTED_SCENARIO_NAMES:
             return JSONResponse(
                 {"error": f"Unsupported scenario: {scenario}; expected one of {SUPPORTED_SCENARIO_NAMES}"},
@@ -862,7 +885,7 @@ def create_app(
                 status_code=400,
             )
         try:
-            run = manager.start(str(scenario), str(mode), str(transport), str(discovery))
+            run = manager.start(str(scenario), str(mode), str(transport), str(discovery), user_request)
         except RunConflictError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse(

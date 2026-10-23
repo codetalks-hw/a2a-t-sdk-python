@@ -141,6 +141,7 @@ class FakeRuntime:
         self.fail = fail
         self.closed = False
         self.run_id: str | None = None
+        self.user_request: str | None = None
 
     async def run(
         self,
@@ -153,8 +154,10 @@ class FakeRuntime:
         | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
+        user_request: str | None = None,
     ) -> ClientFlowResult:
         self.run_id = run_id
+        self.user_request = user_request
         if trace_sink is not None:
             trace_sink(
                 _trace_span(
@@ -617,6 +620,61 @@ async def test_transcript_downloads(client: httpx.AsyncClient) -> None:
     assert "text/markdown" in markdown_response.headers["content-type"]
     assert "RAN energy-saving negotiation transcript" in markdown_response.text
     assert "| # | Seq | Phase | Step |" in markdown_response.text
+
+
+async def test_meta_exposes_the_default_request_per_scenario(client: httpx.AsyncClient) -> None:
+    meta = (await client.get("/api/meta")).json()
+
+    for scenario in meta["scenarios"]:
+        assert meta["scenarioRequests"][scenario] == resolve_user_request(get_scenario(scenario), "en-US")
+
+
+async def test_custom_user_request_reaches_run_started_and_runtime(
+    client: httpx.AsyncClient,
+    runtimes: list[FakeRuntime],
+) -> None:
+    custom = "Create a RAN energy saving task for the Songshanhu area at 30% saving."
+    start = await client.post(
+        "/api/runs",
+        json={
+            "scenario": "information",
+            "mode": "auto",
+            "transport": "sse",
+            "userRequest": custom,
+        },
+    )
+    assert start.status_code == 202
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    first = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)[0]
+    assert first["userRequest"] == custom
+    assert runtimes[-1].user_request == custom
+
+
+async def test_blank_user_request_falls_back_to_the_scenario_default(
+    client: httpx.AsyncClient,
+) -> None:
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse", "userRequest": "   "},
+    )
+    assert start.status_code == 202
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    first = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)[0]
+    assert first["userRequest"] == resolve_user_request(get_scenario("information"), "en-US")
+
+
+async def test_non_string_user_request_is_rejected(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse", "userRequest": 42},
+    )
+
+    assert response.status_code == 400
+    assert "userRequest" in response.json()["error"]
 
 
 async def test_run_started_is_the_first_replayable_frame(client: httpx.AsyncClient) -> None:

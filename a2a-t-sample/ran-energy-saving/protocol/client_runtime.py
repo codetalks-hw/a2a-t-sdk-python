@@ -191,6 +191,7 @@ class ClientRuntime:
         on_decision_made: DecisionMadeCallback | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
+        user_request: str | None = None,
     ) -> ClientFlowResult:
         """Run the full client flow of the configured scenario.
 
@@ -206,6 +207,8 @@ class ClientRuntime:
             trace_sink: Optional observer of synthetic Run Explorer spans (LLM/tool producers
                 included); defaults to the sink the runtime was built with.
             run_id: Optional Run Explorer run id (the Web UI and the CLI pass theirs).
+            user_request: Optional natural-language request entered in the Web UI; ``None`` uses
+                the scenario's canned request.
 
         Returns:
             The collected events, decisions and terminal state.
@@ -220,10 +223,15 @@ class ClientRuntime:
             set_global_sink(sink)
         try:
             with trace_scope(run_id=run_id, role="client"):
+                request_text = (
+                    user_request.strip()
+                    if isinstance(user_request, str) and user_request.strip()
+                    else resolve_user_request(self.scenario, self.config.language)
+                )
                 return await run_client_flow(
                     prompt_client=self.prompt_client,
                     transport=self.transport,
-                    user_request=resolve_user_request(self.scenario, self.config.language),
+                    user_request=request_text,
                     provider=self.provider,
                     language=self.config.language,
                     event_sink=event_sink,
