@@ -178,12 +178,10 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
 _ACCEPT_TARGET_OVERRIDES: dict[str, dict[str, str]] = {
     KIND_TARGET: {
         LANGUAGE_EN: (
-            "{00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, "
-            "{17:30~23:00,20Mbps}, {23:00~00:00,10Mbps}"
+            "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,10Mbps}"
         ),
         LANGUAGE_ZH: (
-            "{00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
-            "{17:30~23:00,20Mbps}、{23:00~00:00,10Mbps}"
+            "{00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~24:00,10Mbps}"
         ),
     },
     KIND_FEASIBILITY: {
