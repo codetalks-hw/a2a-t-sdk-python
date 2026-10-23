@@ -62,13 +62,14 @@ DEFAULT_REGISTRY_PORT = 5001
 DEFAULT_WEBHOOK_PORT = 9000
 DEFAULT_WEBHOOK_TOKEN = "demo-webhook-token"
 
-#: Backstop idle timeout of a webhook phase; must outlast a server gate that calls the LLM.
-DEFAULT_WEBHOOK_IDLE_TIMEOUT = 120
-
 #: Client HTTP budget of one A2A request (``ClientCallContext.timeout`` and the httpx client).
 #: A live-mode server gate may perform several LLM calls before sending any event, so the budget
 #: must exceed the server-side worst case (LLM timeout × attempts × calls).
 DEFAULT_HTTP_TIMEOUT_SECONDS = 180.0
+
+#: Backstop idle timeout of a webhook phase; it must not end a phase before the client budget, so
+#: it follows the HTTP budget by default.
+DEFAULT_WEBHOOK_IDLE_TIMEOUT = int(DEFAULT_HTTP_TIMEOUT_SECONDS)
 
 #: Live SDK LLM budget of one call; the sample fails fast instead of retrying for minutes.
 DEFAULT_LLM_TIMEOUT_SECONDS = 30.0

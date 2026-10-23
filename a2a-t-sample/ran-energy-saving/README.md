@@ -632,7 +632,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_TRANSPORT` | `sse` (default), `webhook` | Client event transport. |
 | `A2AT_SAMPLE_WEBHOOK_PORT` | default `9000` (`0` = ephemeral) | Embedded webhook receiver port. |
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | default `demo-webhook-token` | Static push token checked against `X-A2A-Notification-Token`. |
-| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `120` | Seconds without a push before a webhook phase ends; must outlast a live server gate. |
+| `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `180` (the HTTP budget) | Seconds without a push before a webhook phase ends; a phase must not end before the client gives up. |
 | `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | default `180` (> 0) | Client HTTP budget of one A2A request: the `httpx` client timeout and `ClientCallContext.timeout` of every send. |
 | `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | default `30` (> 0) | Live SDK LLM budget of one call, written into the per-run SDK `.env`. |
 | `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | default `1` (`1`..`10`) | Live SDK LLM attempt limit per retryable step, written into the per-run SDK `.env`. |
@@ -667,10 +667,16 @@ semantic validation; see §3.
 mode the server gate performs several SDK LLM calls before it emits any event, so the client budget
 must outlast that worst case; the old fixed 60s made the client give up while the server was still
 retrying (`A2AClientTimeoutError`). Live LLM calls instead fail fast: the per-run SDK `.env` always
-carries `A2AT_LLM_TIMEOUT_SECONDS=30` and `A2AT_LLM_MAX_ATTEMPTS=1`, so one slow call ends within
-~30s and the gate answers with a structured protocol error message the client can display. Offline
-mode is unaffected (the scripted provider makes no network call). The webhook idle backstop follows
-the same rule and defaults to 120s so it does not end a phase during a long gate.
+carries `A2AT_LLM_TIMEOUT_SECONDS=30` and `A2AT_LLM_MAX_ATTEMPTS=1`. The 30s is per HTTP attempt:
+the underlying OpenAI client defaults to `max_retries=2`, so one stuck call can take ~90s; the 180s
+client budget covers that for the demo path. The gate then answers with a structured protocol error
+message the client can display. Offline mode is unaffected (the scripted provider makes no network
+call). The webhook idle backstop follows the same rule and defaults to the 180s HTTP budget, so it
+cannot end a phase while the client is still waiting.
+
+Existing `.env` files that set `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` or `A2AT_LLM_TIMEOUT_SECONDS=60`
+should be updated or removed: the new sample keys are `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=180`,
+`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=30`, and `A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`.
 
 **Ports.** Defaults are server `8000`, registry `5001`, webhook `9000`, Web UI `8080`.
 `run_demo.py` writes these into the per-run `.env` it hands to all three processes.
@@ -687,7 +693,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (351 tests). What it covers:
+The suite is fully offline and deterministic (353 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

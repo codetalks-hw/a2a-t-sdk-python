@@ -79,7 +79,8 @@ def test_missing_env_file_uses_offline_defaults(tmp_path: Path) -> None:
     assert config.http_timeout_seconds == DEFAULT_HTTP_TIMEOUT_SECONDS == 180.0
     assert config.llm_timeout_seconds == DEFAULT_LLM_TIMEOUT_SECONDS == 30.0
     assert config.llm_max_attempts == DEFAULT_LLM_MAX_ATTEMPTS == 1
-    assert config.webhook_idle_timeout == DEFAULT_WEBHOOK_IDLE_TIMEOUT == 120
+    assert config.webhook_idle_timeout == DEFAULT_WEBHOOK_IDLE_TIMEOUT == 180
+    assert DEFAULT_WEBHOOK_IDLE_TIMEOUT == int(DEFAULT_HTTP_TIMEOUT_SECONDS)
 
 
 def test_timeout_budgets_are_read_from_the_env_file(tmp_path: Path) -> None:

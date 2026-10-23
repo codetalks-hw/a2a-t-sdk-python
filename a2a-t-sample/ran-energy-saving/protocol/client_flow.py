@@ -54,6 +54,7 @@ from a2a_t.core.standard_templates import (
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
 from google.protobuf.json_format import ParseDict
+from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
@@ -115,8 +116,9 @@ _TERMINAL_STATE_NAMES: Final[frozenset[str]] = frozenset(
 #: Default maximum number of client sends; a backstop against a server that never terminates.
 DEFAULT_MAX_EXCHANGES: Final[int] = 16
 
-#: Default HTTP budget of one A2A send; the client runtime passes the configured value.
-DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 180.0
+#: Default HTTP budget of one A2A send; the client runtime passes the configured value. It reuses
+#: the sample configuration default so the flow and the httpx client cannot drift.
+DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = DEFAULT_HTTP_TIMEOUT_SECONDS
 
 #: Negotiation-T accept/reject template URI per kind.
 _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND: Final[dict[str, str]] = {
@@ -307,7 +309,7 @@ class WebhookClientTransport:
         queue: asyncio.Queue[dict[str, object]],
         push_url: str,
         push_token: str,
-        idle_timeout: float = 30.0,
+        idle_timeout: float = float(DEFAULT_WEBHOOK_IDLE_TIMEOUT),
         log_sink: Callable[[str], None] | None = None,
     ) -> None:
         """Create one webhook transport.

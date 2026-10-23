@@ -432,6 +432,31 @@ async def test_every_send_carries_the_configured_call_timeout() -> None:
     assert [context.timeout for context in transport.call_contexts] == [123.0, 123.0, 123.0]
 
 
+@pytest.mark.parametrize("terminal", ["reject", "abort"])
+async def test_terminal_sends_carry_the_configured_call_timeout(terminal: str) -> None:
+    """Reject and abort responses are ordinary sends and must carry the same budget."""
+    if terminal == "reject":
+        batches = [[propose_event("information", 1)], [end_event()]]
+        decisions = SCENARIO_REJECT_SPEC.scripted_client_decisions
+    else:
+        batches = [[propose_event("target", 1)], [end_event()]]
+        decisions = (NegotiationDecision(action="abort", rationale="Stop the negotiation."),)
+    transport = ScriptedTransport(batches)
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(decisions),
+        language="en-US",
+        call_timeout_seconds=77.0,
+    )
+
+    assert result.final_state == FINAL_STATE_NEGOTIATION_ENDED
+    assert len(transport.call_contexts) == 2  # initial TASK_T + terminal REJECT/ABORT
+    assert [context.timeout for context in transport.call_contexts] == [77.0, 77.0]
+
+
 async def test_call_timeout_defaults_to_the_documented_budget() -> None:
     transport = ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()])
 
