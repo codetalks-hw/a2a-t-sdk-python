@@ -173,11 +173,12 @@ export class TimelineView {
     if (!collapsed) {
       const body = el("div", "phase-body");
       if (items.length === 0) {
+        const note = store.phaseNote(group.key);
         body.appendChild(
           el(
             "p",
             "phase-empty",
-            state === "skipped" ? "Skipped in this run." : "No steps recorded yet.",
+            note || (state === "skipped" ? "Skipped in this run." : "No steps recorded yet."),
           ),
         );
       } else {

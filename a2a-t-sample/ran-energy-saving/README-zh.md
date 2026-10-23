@@ -556,7 +556,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（355 个测试）。覆盖范围：
+测试套件完全离线且确定性（360 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

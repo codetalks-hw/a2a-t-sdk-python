@@ -31,6 +31,31 @@ Follow this order for every server proposal. Do not skip steps.
    - `abort` only when the negotiation is hopeless; it is terminal.
 4. **When in doubt, verify with the tools.** Do not invent cells, windows, rates, or savings.
 
+## Negotiation-type rules
+
+- **target**: the first server proposal only reports overlapping time segments and asks for a
+  corrected target; it does not contain a concrete non-overlapping target. Return `counter` with a
+  corrected non-overlapping target from the original request (`counter_proposal` plus
+  `counter_params`), not `accept`. Accept a later proposal only when it contains the corrected
+  target.
+- **information**: return `accept` with `filled_params` containing the missing values requested by
+  the proposal.
+- **feasibility**: return `accept` with `feasibility_summary` when the server's alternative is
+  feasible; otherwise `counter` or `reject` with a clear rationale.
+
+## Output format
+
+Return exactly one JSON object and nothing else — no reasoning, markdown fences, or prose before or
+after it:
+
+```json
+{"action": "accept", "rationale": "...", "filled_params": {}, "counter_proposal": null,
+ "counter_params": null, "confirmed_intent": null, "feasibility_summary": null}
+```
+
+`action` is one of `accept`, `counter`, `reject`, `abort`. Include only the fields that apply to
+the action; the remaining fields may be omitted or `null`.
+
 ## Output rules
 
 - Always include a short, factual `rationale`; it is shown in the CLI, the Web UI, and the

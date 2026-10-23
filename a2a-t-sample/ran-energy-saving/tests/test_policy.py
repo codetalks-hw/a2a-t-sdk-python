@@ -195,14 +195,34 @@ def test_information_counter_propose_at_max_rounds_aborts() -> None:
 def test_template_and_error_code_mapping() -> None:
     assert negotiation_kind_for_error_code("content.param_missing") is NegotiationKind.INFORMATION
     assert negotiation_kind_for_error_code("content.value_not_allowed") is NegotiationKind.TARGET
+    assert negotiation_kind_for_error_code("content.semantic_conflict") is NegotiationKind.TARGET
     assert negotiation_kind_for_error_code("content.rule_violation") is NegotiationKind.FEASIBILITY
     assert negotiation_kind_for_error_code("content.format_error") is None
     assert negotiation_kind_for_template_uri(TARGET_NEGOTIATION_PROPOSE_URI) is NegotiationKind.TARGET
     assert negotiation_kind_for_template_uri(NEGOTIATION_ABORT_URI) is None
 
 
-def test_errors_are_mapped_by_their_first_entry() -> None:
+def test_semantic_conflicts_are_split_into_target_and_feasibility() -> None:
+    target = SlotValidationError(
+        slot_name="guaranteedThroughputTarget",
+        code="content.semantic_conflict",
+        message="overlap",
+        facts={"reason": "17:30~23:00 and 20:00~00:00 overlap with different rates"},
+    )
+    feasibility = SlotValidationError(
+        slot_name="guaranteedThroughputTarget",
+        code="content.semantic_conflict",
+        message="outage",
+        facts={"reason": "The guaranteed rate conflicts with the power outage from 00:00 to 18:00"},
+    )
+
+    assert negotiation_kind_for_errors([target]) is NegotiationKind.TARGET
+    assert negotiation_kind_for_errors([feasibility]) is NegotiationKind.FEASIBILITY
+
+
+def test_errors_are_mapped_by_their_first_mapped_entry() -> None:
     errors = [
+        SlotValidationError(slot_name="region", code="content.format_error", message="format"),
         SlotValidationError(slot_name="region", code="content.value_not_allowed", message="bad"),
         SlotValidationError(slot_name="region", code="content.param_missing", message="missing"),
     ]

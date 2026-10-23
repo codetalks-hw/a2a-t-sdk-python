@@ -95,33 +95,41 @@ NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN = (
 #: target has two overlapping time segments, so the Task-T validation reports the
 #: value-not-allowed content error.
 NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH = (
-    "在松山湖管委会创建无线网络节能任务：在满足任务上下文的前提下最大化节能；"
-    "分时段保障速率目标为 {00:00~07:00,2Mbps}、{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、"
-    "{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}。"
+    "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
+    "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
+    "在满足任务上下文的前提下最大化节能；分时段保障速率目标为 {00:00~07:00,2Mbps}、"
+    "{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}。"
 )
 
 #: English natural-language task request of the target negotiation (overlapping segments).
 NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN = (
     "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
-    "energy saving. The time-segment-based guaranteed throughput target is {00:00~07:00,2Mbps}, "
-    "{07:00~09:00,10Mbps}, {09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}."
+    "energy saving. Based on the task object and task context, output a wireless network energy "
+    "saving plan that achieves the energy saving goal defined in the task target and returns the "
+    "energy saving result in the format defined in the expected output. The time-segment-based "
+    "guaranteed throughput target is {00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, "
+    "{09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}."
 )
 
 #: Chinese natural-language task request of the feasibility negotiation: two stations must keep a
 #: guaranteed rate through an 18-hour power outage, so the Task-T validation reports the
 #: rule-violation content error.
 NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH = (
-    "在松山湖管委会创建无线网络节能任务：站点列表1为[站点名称1, 站点名称2]；"
-    "分时段保障速率目标为 {00:00~06:00,2Mbps}、{06:00~18:00,10Mbps}；"
-    "背景事件为在00:00~18:00停电；在满足任务上下文的前提下最大化节能。"
+    "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
+    "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
+    "站点列表1为[站点名称1, 站点名称2]；分时段保障速率目标为 {00:00~06:00,2Mbps}、"
+    "{06:00~18:00,10Mbps}；背景事件为在00:00~18:00停电；在满足任务上下文的前提下最大化节能。"
 )
 
 #: English natural-language task request of the feasibility negotiation (outage case).
 NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN = (
     "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
-    "energy saving. Station list 1 is [Station 1, Station 2]; the time-segment-based guaranteed "
-    "throughput target is {00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}; the background event is a "
-    "power outage from 00:00 to 18:00."
+    "energy saving. Based on the task object and task context, output a wireless network energy "
+    "saving plan that achieves the energy saving goal defined in the task target and returns the "
+    "energy saving result in the format defined in the expected output. Station list 1 is "
+    "[Station 1, Station 2]; the time-segment-based guaranteed throughput target is "
+    "{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}; the background event is a power outage from "
+    "00:00 to 18:00."
 )
 
 #: Region display string per language (used by the scripted LLM routing fallback and the accept
@@ -137,7 +145,15 @@ REGION_STRINGS: dict[str, str] = {
 #: the value their negotiation agrees on.
 _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
     LANGUAGE_EN: {
-        "operationType": "create",
+        "operationType": "Create",
+        # Task-T requires task_description; data-based generation validates the same slot schema
+        # as text-based generation, so the fixed Create description must be supplied explicitly.
+        "task_description": (
+            "Based on <Task Object> and <Task Context>, output a wireless network energy saving "
+            "plan that achieves the wireless network energy saving goal defined in <Task Target>, "
+            "and return the wireless network energy saving result in the format defined in "
+            "<Expected Output>."
+        ),
         "region": REGION_STRINGS[LANGUAGE_EN],
         "energySavingGoal": "Maximize energy saving under the condition that the task context is met.",
         "guaranteedThroughputTarget": (
@@ -145,7 +161,11 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
         ),
     },
     LANGUAGE_ZH: {
-        "operationType": "create",
+        "operationType": "Create",
+        "task_description": (
+            "基于任务对象和任务上下文，输出无线网络节能方案，达成任务目标中定义的无线网络节能目标，"
+            "并按照预期输出中定义的格式返回无线网络节能结果。"
+        ),
         "region": REGION_STRINGS[LANGUAGE_ZH],
         "energySavingGoal": "在满足任务上下文的前提下最大化节能。",
         "guaranteedThroughputTarget": (

@@ -188,6 +188,9 @@ function renderStepper() {
     const item = button.closest(".phase-step");
     item.className = `phase-step phase-${state}`;
     button.setAttribute("aria-current", state === "active" ? "step" : "false");
+    const note = store.phaseNote(key);
+    if (note) button.title = note;
+    else button.removeAttribute("title");
     // A glyph plus a word keeps the state readable without relying on colour.
     const marker = { pending: "○", skipped: "–", failed: "✕", done: "✓", active: "●" }[state] || "•";
     const meta = button.querySelector(".phase-step-meta");

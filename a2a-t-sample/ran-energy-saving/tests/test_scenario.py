@@ -11,8 +11,10 @@ from shared.scenario import (
     SUPPORTED_LANGUAGES,
     SUPPORTED_SCENARIO_NAMES,
     ExpectedStep,
+    accept_filled_params,
     resolve_user_request,
 )
+from shared.task_schema import TASK_PARAM_SCHEMA
 
 
 def _sequence(name: str) -> tuple[tuple[str, str, int | None], ...]:
@@ -28,6 +30,35 @@ def test_scenario_names_and_request_languages() -> None:
     for scenario in SCENARIOS.values():
         for language in SUPPORTED_LANGUAGES:
             assert resolve_user_request(scenario, language)
+
+
+def test_every_request_supplies_the_required_task_description() -> None:
+    """The Task-T template requires ``task_description``; every request must state it explicitly.
+
+    A live extraction model follows the SDK rule "do not generate values not present in the input",
+    so an omitted clause makes ``generate_task_prompt_from_text`` fail before Task-T is sent.
+    """
+    markers = {
+        "en-US": "output a wireless network energy saving plan",
+        "zh-CN": "输出无线网络节能方案",
+    }
+    for scenario in SCENARIOS.values():
+        for language, marker in markers.items():
+            assert marker in resolve_user_request(scenario, language)
+
+
+def test_accept_params_match_the_task_schema_operation_values() -> None:
+    """The refilled Task-T prompt is re-validated; its operation value must match the enum."""
+    properties = TASK_PARAM_SCHEMA.get("properties")
+    assert isinstance(properties, dict)
+    operation_type = properties.get("operationType")
+    assert isinstance(operation_type, dict)
+    operation_enum = operation_type.get("enum")
+    assert isinstance(operation_enum, list)
+    for language in SUPPORTED_LANGUAGES:
+        params = accept_filled_params("information", language)
+        assert params["operationType"] in operation_enum
+        assert str(params["task_description"]).strip(), "data-based Task-T requires task_description"
 
 
 def test_information_sequence() -> None:

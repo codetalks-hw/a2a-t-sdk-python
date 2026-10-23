@@ -57,8 +57,25 @@ PolicyAction = Literal["propose", "abort", "execute", "end"]
 NEGOTIATION_KIND_BY_ERROR_CODE: Final[dict[str, NegotiationKind]] = {
     "content.param_missing": NegotiationKind.INFORMATION,
     "content.value_not_allowed": NegotiationKind.TARGET,
+    # A conflict in the time-segmented target is the target-negotiation case (overlapping
+    # windows). Feasibility conflicts are distinguished by their facts in
+    # :func:`negotiation_kind_for_errors`.
+    "content.semantic_conflict": NegotiationKind.TARGET,
     "content.rule_violation": NegotiationKind.FEASIBILITY,
 }
+
+#: Facts that identify a semantic conflict as the feasibility/outage case rather than an
+#: overlapping target. Reasons are model-generated in the process language, so both languages
+#: are matched.
+_FEASIBILITY_CONFLICT_MARKERS: Final[tuple[str, ...]] = (
+    "outage",
+    "power",
+    "background event",
+    "停电",
+    "背景事件",
+    "site",
+    "站点",
+)
 
 #: Negotiation-T propose template URI per kind.
 PROPOSE_TEMPLATE_URI_BY_KIND: Final[dict[NegotiationKind, str]] = {
@@ -215,10 +232,34 @@ def negotiation_kind_for_error_code(code: str) -> NegotiationKind | None:
 def negotiation_kind_for_errors(
     errors: Sequence[SlotValidationError] | None,
 ) -> NegotiationKind | None:
-    """Map a failed Task-T validation to a negotiation kind using its first error code."""
+    """Map a failed Task-T validation to a negotiation kind using its first mapped error.
+
+    ``content.semantic_conflict`` covers both overlapping target windows and feasibility conflicts;
+    its facts decide which negotiation applies. Later errors are considered only when an earlier
+    error has no mapping, so a leading format/unknown entry does not hide a negotiable failure.
+    """
     if not errors:
         return None
-    return negotiation_kind_for_error_code(str(errors[0].code))
+    for error in errors:
+        code = str(error.code)
+        if code == "content.semantic_conflict":
+            return _semantic_conflict_kind(error)
+        kind = NEGOTIATION_KIND_BY_ERROR_CODE.get(code)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _semantic_conflict_kind(error: SlotValidationError) -> NegotiationKind:
+    """Classify one ``content.semantic_conflict`` as target or feasibility from its facts."""
+    slot_name = error.slot_name.strip().lower()
+    facts = error.facts or {}
+    reason = str(facts.get("reason", "")).lower()
+    if slot_name in {"backgroundevent", "sitelist"}:
+        return NegotiationKind.FEASIBILITY
+    if any(marker in reason for marker in _FEASIBILITY_CONFLICT_MARKERS):
+        return NegotiationKind.FEASIBILITY
+    return NegotiationKind.TARGET
 
 
 def negotiation_kind_for_template_uri(template_uri: str | None) -> NegotiationKind | None:

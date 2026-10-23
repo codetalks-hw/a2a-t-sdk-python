@@ -694,7 +694,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (355 tests). What it covers:
+The suite is fully offline and deterministic (360 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

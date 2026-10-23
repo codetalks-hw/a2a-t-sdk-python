@@ -248,6 +248,7 @@ async def test_initial_task_success_hands_the_request_to_the_executor() -> None:
     [
         ("content.param_missing", INFORMATION_NEGOTIATION_PROPOSE_URI, "region"),
         ("content.value_not_allowed", TARGET_NEGOTIATION_PROPOSE_URI, "guaranteedThroughputTarget"),
+        ("content.semantic_conflict", TARGET_NEGOTIATION_PROPOSE_URI, "guaranteedThroughputTarget"),
         ("content.rule_violation", FEASIBILITY_NEGOTIATION_PROPOSE_URI, "guaranteedThroughputTarget"),
     ],
 )

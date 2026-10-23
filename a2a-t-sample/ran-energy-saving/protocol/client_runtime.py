@@ -138,8 +138,14 @@ def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> N
             model = build_fake_model((build_client_script(scenario.scripted_client_decisions),))
         else:
             model = None
-        # The traced wrapper keeps the ADK decision turns visible in the Run Explorer.
-        return AdkDecisionProvider(model=build_traced_adk_model(config, model=model), offline=config.is_offline)
+        # The traced wrapper keeps the ADK decision turns visible in the Run Explorer. The original
+        # request is carried into every decision prompt: target/feasibility proposals describe the
+        # conflict but not the concrete throughput target, so the model cannot resolve them alone.
+        return AdkDecisionProvider(
+            model=build_traced_adk_model(config, model=model),
+            offline=config.is_offline,
+            user_request=resolve_user_request(scenario, config.language),
+        )
     raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
 
 

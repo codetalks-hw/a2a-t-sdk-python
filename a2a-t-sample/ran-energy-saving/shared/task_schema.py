@@ -16,7 +16,10 @@ TASK_PARAM_SCHEMA: dict[str, object] = {
         "operationType": {
             "type": "string",
             "description": "Operation type of the RAN energy-saving task.",
-            "enum": ["create", "modify"],
+            # The Task-T template's allowed values are capitalized ("Create, Modify"); the
+            # accept-time refill renders the prompt from this schema, and the server extracts the
+            # rendered value verbatim, so the caller schema must use the same casing.
+            "enum": ["Create", "Modify"],
         },
         "region": {
             "type": "string",

@@ -655,6 +655,37 @@ export class RunStore extends EventTarget {
     return "done";
   }
 
+  /** Return why a phase was skipped, or ``null`` when the phase has rows or is still running. */
+  phaseNote(key) {
+    if (this.status !== "finished" && this.status !== "failed") return null;
+    if (this.items.some((item) => item.phase === key)) return null;
+    const finalState = this.finishedFrame?.finalState || this.snapshot?.finalState || null;
+    if (key === "negotiation") {
+      if (this.status === "failed") {
+        return this.error
+          ? `Run failed before a negotiation was opened: ${this.error}`
+          : "Run failed before a negotiation was opened.";
+      }
+      if (finalState === "task_completed") {
+        return "Task-T validation passed; no negotiation was required.";
+      }
+      if (finalState === "task_rejected") {
+        return "The server rejected the Task-T before opening a negotiation.";
+      }
+      return "No Negotiation-T proposal was received.";
+    }
+    if (key === "resolution") {
+      if (finalState === "no_task_negotiation_aborted") {
+        return "The negotiation was aborted; no accept/reject resolution was sent.";
+      }
+      if (finalState === "no_task_negotiation_ended") {
+        return "The negotiation ended without an accept/reject resolution.";
+      }
+      return "No resolution message was sent.";
+    }
+    return "No steps were recorded for this phase.";
+  }
+
   /** Return the label shown next to the Resolution phase. */
   resolutionLabel() {
     const decisions = this.items.filter(

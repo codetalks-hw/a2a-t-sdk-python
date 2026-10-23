@@ -204,6 +204,50 @@ assert.equal(store.tokenTotal().scripted, 1);
 assert.equal(store.runMeta().scenario, "information");
 assert.equal(store.ids().contextId, "ctx");
 assert.equal(store.resolutionLabel(), "Accepted");
+assert.equal(store.phaseNote("negotiation"), null, "a phase with rows has no skip note");
+
+// A run whose Task-T validation passed emits no Negotiation-T proposal; the skipped phases must
+// explain why instead of only saying "Skipped".
+const noNegotiation = new RunStore();
+noNegotiation.beginRun("r-no-negotiation");
+noNegotiation.applyFrame({
+  type: "run_started",
+  seq: 1,
+  runId: "r-no-negotiation",
+  scenario: "target",
+});
+noNegotiation.applyFrame({
+  type: "finished",
+  seq: 2,
+  status: "finished",
+  finalState: "task_completed",
+});
+const skipped = noNegotiation.derived();
+assert.equal(skipped.phaseStates.negotiation, "skipped");
+assert.equal(
+  noNegotiation.phaseNote("negotiation"),
+  "Task-T validation passed; no negotiation was required.",
+);
+assert.equal(
+  noNegotiation.phaseNote("resolution"),
+  "No resolution message was sent.",
+);
+
+const failed = new RunStore();
+failed.beginRun("r-failed");
+failed.applyFrame({
+  type: "run_started",
+  seq: 1,
+  runId: "r-failed",
+  scenario: "target",
+});
+failed.applyFrame({
+  type: "finished",
+  seq: 2,
+  status: "failed",
+  error: "PromptGenerationError: 'Task Description' is not provided in the input.",
+});
+assert.match(failed.phaseNote("negotiation"), /PromptGenerationError/);
 
 // The terminal frame's start time must survive into the item, so the Done phase has a duration
 // instead of a null one (the backend stamps `startedAt` on the finished frame).

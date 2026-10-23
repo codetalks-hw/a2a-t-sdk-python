@@ -59,6 +59,19 @@ def test_build_decision_prompt_carries_the_round_and_content() -> None:
     assert "Please provide the region." in prompt
 
 
+def test_build_decision_prompt_carries_the_original_request() -> None:
+    prompt = build_decision_prompt(
+        _view("target"),
+        _session(2),
+        user_request="The target is {00:00~07:00,2Mbps}; {20:00~00:00,10Mbps}.",
+    )
+
+    assert "Original user request:" in prompt
+    assert "00:00~07:00,2Mbps" in prompt
+    assert "Return exactly one NegotiationDecision JSON object" in prompt
+    assert "no reasoning" in prompt
+
+
 async def test_scripted_provider_returns_decisions_in_order_and_then_raises() -> None:
     provider = ScriptedDecisionProvider.from_scenario(SCENARIO_TARGET)
     session = _session()
