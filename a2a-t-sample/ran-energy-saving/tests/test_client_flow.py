@@ -47,7 +47,16 @@ from shared.scenario import (
     SCENARIO_INFORMATION_SPEC,
     SCENARIO_REJECT_SPEC,
     SCENARIO_TARGET_SPEC,
+    SUPPORTED_SCENARIO_NAMES,
     Scenario,
+    get_scenario,
+)
+from shared.trace import (
+    PHASE_NEGOTIATION,
+    PHASE_RESOLUTION,
+    PHASE_TASK_PROMPT,
+    PHASE_TASK_VALIDATION,
+    PHASES,
 )
 
 CONTEXT_ID = "ctx-client-flow"
@@ -681,6 +690,81 @@ async def test_decision_hook_fires_before_the_response_is_sent() -> None:
     decision_detail = spans[3]["detail"]
     assert isinstance(decision_detail, dict)
     assert decision_detail["action"] == "accept"
+
+
+def _scenario_batches(scenario_name: str) -> list[list[dict[str, object]]]:
+    """Return the transport batches that replay one scenario's server behavior."""
+    if scenario_name == "information":
+        return [[propose_event("information", 1)], _task_completed_batch()]
+    if scenario_name == "target":
+        return [
+            [propose_event("target", 1)],
+            [propose_event("target", 2)],
+            _task_completed_batch(),
+        ]
+    if scenario_name == "feasibility":
+        return [[propose_event("feasibility", 1)], _task_completed_batch()]
+    if scenario_name == "reject":
+        return [
+            [
+                propose_event(
+                    "information",
+                    1,
+                    content="Please provide the following missing items: guaranteedThroughputTarget.",
+                )
+            ],
+            [end_event()],
+        ]
+    if scenario_name == "abort":
+        return [
+            [propose_event("target", 1)],
+            [propose_event("target", 2)],
+            [propose_event("target", 3)],
+            [abort_event(3)],
+        ]
+    raise AssertionError(f"Unsupported scenario: {scenario_name}")
+
+
+@pytest.mark.parametrize("scenario_name", SUPPORTED_SCENARIO_NAMES)
+async def test_trace_phases_and_steps_for_every_scenario(scenario_name: str) -> None:
+    """Every scenario exposes ordered phases with contiguous per-phase steps and unique ids."""
+    scenario = get_scenario(scenario_name)
+    spans: list[dict[str, object]] = []
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport(_scenario_batches(scenario_name)),
+        user_request=scenario.user_request["en-US"],
+        provider=ScriptedDecisionProvider(scenario.scripted_client_decisions),
+        language="en-US",
+        trace_sink=spans.append,
+    )
+
+    assert result.final_state == scenario.expected_final_state
+    assert [decision.action for decision in result.decisions] == [
+        decision.action for decision in scenario.scripted_client_decisions
+    ]
+    span_ids = [span["spanId"] for span in spans]
+    assert len(span_ids) == len(set(span_ids))
+    assert all(str(span_id).startswith("flow_") for span_id in span_ids)
+
+    expected_phases = {PHASE_TASK_PROMPT, PHASE_TASK_VALIDATION, PHASE_NEGOTIATION}
+    if scenario_name != "abort":
+        expected_phases.add(PHASE_RESOLUTION)
+    assert {str(span["phase"]) for span in spans} == expected_phases
+
+    order: list[str] = []
+    for span in spans:
+        phase = str(span["phase"])
+        if phase not in order:
+            order.append(phase)
+    assert order == [phase for phase in PHASES if phase in expected_phases]
+
+    grouped: dict[str, list[object]] = {}
+    for span in spans:
+        grouped.setdefault(str(span["phase"]), []).append(span["phaseStep"])
+    for steps in grouped.values():
+        assert steps == list(range(1, len(steps) + 1))
 
 
 async def test_counter_decision_stays_in_the_negotiation_phase() -> None:

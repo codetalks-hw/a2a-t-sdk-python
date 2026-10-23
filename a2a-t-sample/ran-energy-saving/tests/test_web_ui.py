@@ -17,11 +17,13 @@ from a2a_t.core.metadata import (
     NegotiationContext,
     NegotiationPerformative,
 )
+from integration_helpers import free_tcp_port, offline_direct_config, running_server
 from protocol.client_flow import ClientFlowResult
 from protocol.decision_provider import ManualDecisionProvider
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import FINAL_STATE_TASK_COMPLETED, get_scenario, resolve_user_request
+from shared.trace import PHASES
 from web.app import create_app
 
 CONTEXT_ID = "ctx-web"
@@ -624,6 +626,71 @@ async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.Async
         headers={"content-type": "application/json"},
     )
     assert malformed.status_code == 400
+
+
+async def test_real_offline_information_run_has_unique_spans_and_all_phases(
+    english_language: None,
+    tmp_path: Path,
+) -> None:
+    """The real client flow (not a double) must keep run-wide span ids unique and all 8 phases."""
+    del english_language  # fixture side effect: pin the scripted SDK language
+    config = offline_direct_config(free_tcp_port())
+    with running_server(config):
+        app = create_app(config, runs_dir=tmp_path)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            start = await http_client.post(
+                "/api/runs",
+                json={
+                    "scenario": "information",
+                    "mode": "auto",
+                    "transport": "sse",
+                    "discovery": "direct",
+                },
+            )
+            assert start.status_code == 202
+            run_id = start.json()["runId"]
+            status = await _wait_status(
+                http_client,
+                run_id,
+                lambda data: data["status"] != "running",
+                timeout=30.0,
+            )
+            assert status["status"] == "finished"
+            assert status["finalState"] == FINAL_STATE_TASK_COMPLETED
+
+            payloads = _sse_payloads((await http_client.get(f"/api/runs/{run_id}/events")).text)
+            run_started = payloads[0]
+            assert run_started["type"] == "run_started"
+
+            looked_up = await http_client.get(
+                f"/api/runs/{run_id}/spans/{run_started['spanId']}"
+            )
+            assert looked_up.status_code == 200
+            assert looked_up.json()["kind"] == "run_started"
+
+            document = (await http_client.get(f"/api/runs/{run_id}/trace.json")).json()
+            spans = document["spans"]
+            span_ids = [span["spanId"] for span in spans]
+            assert len(span_ids) == len(set(span_ids))
+            assert span_ids.count(run_started["spanId"]) == 1
+            assert {span["spanId"]: span["kind"] for span in spans}[run_started["spanId"]] == "run_started"
+
+            phases = {span["phase"] for span in spans}
+            assert set(PHASES) <= phases
+
+            order: list[str] = []
+            for span in spans:
+                phase = str(span["phase"])
+                if phase not in order:
+                    order.append(phase)
+            assert order == list(PHASES)
+
+            grouped: dict[str, list[object]] = {}
+            for span in spans:
+                grouped.setdefault(str(span["phase"]), []).append(span["phaseStep"])
+            for steps in grouped.values():
+                assert steps == list(range(1, len(steps) + 1))
 
 
 async def test_start_accepts_discovery_and_rejects_unknown_values(client: httpx.AsyncClient) -> None:

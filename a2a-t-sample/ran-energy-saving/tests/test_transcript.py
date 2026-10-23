@@ -223,6 +223,52 @@ def test_run_explorer_fields_share_one_seq_ordered_timeline() -> None:
     ]
 
 
+def test_record_trace_allocates_a_fresh_phase_step_instead_of_trusting_the_producer() -> None:
+    transcript = _transcript()
+
+    event = transcript.record_event(_propose_event(), phase="negotiation")
+    requested = transcript.record_trace(
+        {
+            "phase": "negotiation",
+            "phaseStep": 1,
+            "spanId": "flow-1",
+            "kind": "decision_requested",
+            "title": "Decision requested",
+        }
+    )
+    decision = transcript.record_decision(
+        NegotiationDecision(action="accept", rationale="Acceptable."),
+        phase="resolution",
+    )
+    made = transcript.record_trace(
+        {
+            "phase": "resolution",
+            "phaseStep": 1,
+            "spanId": "flow-2",
+            "kind": "decision_made",
+            "title": "Decision made",
+        }
+    )
+
+    assert event["phaseStep"] == 1
+    assert requested["phaseStep"] == 2
+    assert decision["phaseStep"] == 1
+    assert made["phaseStep"] == 2
+    assert [entry["phaseStep"] for entry in transcript.timeline()] == [1, 2, 1, 2]
+
+    explicit = transcript.record_trace(
+        {
+            "phase": "resolution",
+            "phaseStep": 1,
+            "spanId": "ui-3",
+            "kind": "message_sent",
+            "title": "Accept sent",
+        },
+        phase_step=9,
+    )
+    assert explicit["phaseStep"] == 9
+
+
 def test_record_event_infers_phase_and_seq_when_omitted() -> None:
     transcript = _transcript()
 

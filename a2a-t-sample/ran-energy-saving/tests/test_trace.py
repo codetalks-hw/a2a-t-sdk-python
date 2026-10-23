@@ -30,6 +30,20 @@ def test_recorder_assigns_seq_phase_step_and_span_id() -> None:
     assert first.run_id == "run-1"
 
 
+def test_recorders_with_distinct_prefixes_never_share_generated_ids() -> None:
+    ui = TraceRecorder("run-1", id_prefix="ui")
+    flow = TraceRecorder("run-1", id_prefix="flow")
+
+    ui_span = ui.emit(kind="run_started", phase=PHASE_DISPATCH)
+    flow_span = flow.emit(kind="task_prompt_rendered", phase=PHASE_DISPATCH)
+    second_flow = flow.emit(kind="message_sent", phase=PHASE_DISPATCH)
+
+    assert ui_span.span_id == "ui_0001"
+    assert flow_span.span_id == "flow_0001"
+    assert second_flow.span_id == "flow_0002"
+    assert ui_span.span_id != flow_span.span_id
+
+
 def test_recorder_respects_explicit_seq_step_and_span_id() -> None:
     recorder = TraceRecorder("run-1")
 

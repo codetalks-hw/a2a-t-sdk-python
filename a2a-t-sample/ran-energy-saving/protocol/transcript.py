@@ -246,11 +246,16 @@ class NegotiationTranscript:
         span: Mapping[str, object],
         *,
         seq: int | None = None,
+        phase_step: int | None = None,
     ) -> dict[str, object]:
-        """Record one trace span as a timeline entry (synthetic protocol/LLM/tool rows)."""
+        """Record one trace span as a timeline entry (synthetic protocol/LLM/tool rows).
+
+        The producer's ``phaseStep`` is deliberately ignored: producers keep their own counters, so
+        trusting it would duplicate a step already allocated for a protocol event or decision.
+        Callers that own the run-wide counter (the Web UI) pass ``phase_step`` explicitly.
+        """
         phase = _text(span.get("phase")) or PHASE_NEGOTIATION
-        phase_step = span.get("phaseStep")
-        resolved_step = phase_step if isinstance(phase_step, int) else self._count_phase(phase)
+        resolved_step = phase_step if phase_step is not None else self._count_phase(phase)
         detail = span.get("detail")
         entry: dict[str, object] = {
             "ts": _text(span.get("startedAt")) or _now_iso(),

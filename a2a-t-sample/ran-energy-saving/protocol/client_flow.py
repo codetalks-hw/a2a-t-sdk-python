@@ -448,7 +448,7 @@ async def run_client_flow(
             for event in batch:
                 event_sink(event)
 
-    recorder = TraceRecorder(current_trace().run_id or "")
+    recorder = TraceRecorder(current_trace().run_id or "", id_prefix="flow")
 
     def emit_trace(
         kind: str,

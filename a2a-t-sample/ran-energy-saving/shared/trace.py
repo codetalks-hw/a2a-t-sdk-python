@@ -326,11 +326,15 @@ class TraceRecorder:
 
     Attributes:
         run_id: Run id stamped on every span generated here.
+        id_prefix: Namespace of generated span ids. Independent recorders (the UI and the client
+            flow) must use distinct prefixes so their ``span_0001`` sequences never collide in the
+            run-wide lookup map.
     """
 
-    def __init__(self, run_id: str = "") -> None:
+    def __init__(self, run_id: str = "", *, id_prefix: str = "span") -> None:
         """Create one recorder for a run (``run_id`` may be empty in CLI mode)."""
         self.run_id = run_id
+        self.id_prefix = id_prefix or "span"
         self._lock = threading.RLock()
         self._seq = 0
         self._span_counter = 0
@@ -346,7 +350,7 @@ class TraceRecorder:
         """Return the next unused generated span id (the lock must be held)."""
         while True:
             self._span_counter += 1
-            candidate = f"span_{self._span_counter:04d}"
+            candidate = f"{self.id_prefix}_{self._span_counter:04d}"
             if candidate not in self._spans:
                 return candidate
 

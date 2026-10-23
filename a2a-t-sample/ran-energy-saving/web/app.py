@@ -139,11 +139,12 @@ class RunState:
     task: asyncio.Task[None] | None = None
     _seq: int = field(default=0, repr=False)
     _phase_steps: dict[str, int] = field(default_factory=dict, repr=False)
+    _span_id_map: dict[str, str] = field(default_factory=dict, repr=False)
     _recorder: TraceRecorder = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Create the per-run span recorder."""
-        self._recorder = TraceRecorder(self.run_id)
+        """Create the per-run span recorder (UI ids never collide with client-flow ids)."""
+        self._recorder = TraceRecorder(self.run_id, id_prefix="ui")
 
     @property
     def manual_provider(self) -> Any | None:
@@ -265,15 +266,31 @@ class RunState:
         return self._store_span(span, seq=seq, record=True)
 
     def record_trace(self, span: Mapping[str, object]) -> dict[str, object]:
-        """Ingest one producer span (client flow or server HTTP transport) and broadcast it."""
+        """Ingest one producer span (client flow or server HTTP transport) and broadcast it.
+
+        A producer id that is empty or already taken by another span is remapped to a fresh UI id;
+        the parent reference follows the same mapping so nested spans stay connected.
+        """
         candidate = Span.from_dict(span)
         phase = candidate.phase
         seq, step = self.allocate(phase)
+        span_id: str | None = candidate.span_id or None
+        if span_id is None or span_id in self.spans:
+            if span_id is not None:
+                span_id = self._recorder.new_span_id()
+                self._span_id_map[candidate.span_id] = span_id
+            else:
+                span_id = None
+        elif candidate.span_id:
+            self._span_id_map.setdefault(candidate.span_id, candidate.span_id)
+        parent_span_id = candidate.parent_span_id
+        if parent_span_id is not None:
+            parent_span_id = self._span_id_map.get(parent_span_id, parent_span_id)
         built = self._recorder.emit(
             seq=seq,
             phase_step=step,
-            span_id=candidate.span_id or None,
-            parent_span_id=candidate.parent_span_id,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
             kind=candidate.kind,
             phase=phase,
             title=candidate.title,
@@ -309,7 +326,7 @@ class RunState:
         self.traces.append(payload)
         self.spans[span.span_id] = payload
         if record and self.transcript is not None:
-            self.transcript.record_trace(payload, seq=seq)
+            self.transcript.record_trace(payload, seq=seq, phase_step=span.phase_step)
         if broadcast_frame:
             self.broadcast({"type": "trace", "event": payload}, seq=seq)
         return payload
