@@ -214,6 +214,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 ```bash
 python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
+# 局域网访问（仅限可信网络；演示 UI 没有认证）：
+python run_demo.py --ui --ui-host 0.0.0.0 --ui-port 8080
 ```
 
 打开 <http://127.0.0.1:8080>。页面可选择场景、`auto`/`manual` 模式与 SSE/webhook；展示实时时间线、最终报告，并提供 JSON/Markdown 运行记录下载。语言与模型模式是进程级、只读的（见 `GET /api/meta`）。
@@ -519,6 +521,7 @@ root_agent = LlmAgent(
 | `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | 默认 `300`（> 0） | 单次 A2A 请求的客户端 HTTP 预算：`httpx` 客户端超时与每次发送的 `ClientCallContext.timeout`。 |
 | `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | 默认 `120`（> 0） | 在线单次 LLM 调用预算（SDK 结构化调用或 ADK `LiteLlm` turn），写入每次运行的 SDK `.env`。 |
 | `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | 默认 `1`（`1`..`10`） | 在线 SDK 每个可重试步骤的协议级尝试次数，写入每次运行的 SDK `.env`；OpenAI 传输层重试另行关闭。 |
+| `A2AT_SAMPLE_UI_HOST` | 默认 `127.0.0.1` | Web UI 的默认绑定主机；`run_demo.py` 将其作为 `--ui-host` 的默认值读取。设为 `0.0.0.0` 可监听所有网卡（仅限可信网络）。 |
 | `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | Web UI 的默认绑定端口；`run_demo.py` 将其作为 `--ui-port` 的默认值读取。 |
 | `A2AT_SAMPLE_TRACE_URL` | 默认未设置；`--ui` 设为 `http://127.0.0.1:<ui_port>` | 服务端 trace 端点（Web UI）。仅用于本地演示；服务端把 span POST 到这里。 |
 | `A2AT_SAMPLE_TRACE_TOKEN` | 默认未设置；`--ui` 生成随机 token | 服务端出示、UI 校验的本地 token；未设置时 ingest 路由关闭（失败关闭）。 |
@@ -543,7 +546,7 @@ root_agent = LlmAgent(
 
 已有的 `.env` 若设置了 `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` 或 `A2AT_LLM_TIMEOUT_SECONDS=60`，应更新或删除：新的样例键为 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`、`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`、`A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`。
 
-**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`。`run_demo.py` 会把这些值写入交给三个进程的每次运行 `.env`。
+**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`（绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给三个进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。演示 UI 没有认证，请只在可信网络中暴露。
 
 ## 9. 测试与验证
 
@@ -556,7 +559,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（360 个测试）。覆盖范围：
+测试套件完全离线且确定性（362 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

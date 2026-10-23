@@ -17,12 +17,27 @@ def test_ui_port_default_reads_the_env_key(monkeypatch: pytest.MonkeyPatch) -> N
     assert run_demo._ui_port_default({"A2AT_SAMPLE_UI_PORT": "18080"}) == 18080
 
 
+def test_ui_host_default_reads_the_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``A2AT_SAMPLE_UI_HOST`` is the default of ``--ui-host``; absent means loopback."""
+    monkeypatch.delenv("A2AT_SAMPLE_UI_HOST", raising=False)
+    assert run_demo._ui_host_default({}) == run_demo.DEFAULT_UI_HOST
+    assert run_demo._ui_host_default({"A2AT_SAMPLE_UI_HOST": "0.0.0.0"}) == "0.0.0.0"
+
+
 def test_parser_uses_the_configured_ui_port_default() -> None:
     """An explicit ``--ui-port`` overrides the configured default."""
     parser = run_demo._build_parser(default_ui_port=18080)
 
     assert parser.parse_args([]).ui_port == 18080
     assert parser.parse_args(["--ui-port", "9999"]).ui_port == 9999
+
+
+def test_parser_uses_the_configured_ui_host_default() -> None:
+    """An explicit ``--ui-host`` overrides the configured default."""
+    parser = run_demo._build_parser(default_ui_host="0.0.0.0")
+
+    assert parser.parse_args([]).ui_host == "0.0.0.0"
+    assert parser.parse_args(["--ui-host", "127.0.0.1"]).ui_host == "127.0.0.1"
 
 
 def test_server_trace_env_targets_the_ui_endpoint_or_the_cli_file() -> None:

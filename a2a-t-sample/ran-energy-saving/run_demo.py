@@ -63,6 +63,7 @@ SERVER_MODULE = "protocol.server_app"
 DEFAULT_REGISTRY_PORT = 5001
 DEFAULT_SERVER_PORT = 8000
 DEFAULT_UI_PORT = 8080
+DEFAULT_UI_HOST = "127.0.0.1"
 
 #: Decisions of the launcher when a background port is already listening.
 REUSE_START = "start"
@@ -124,6 +125,11 @@ def _env_int(values: dict[str, str], key: str, default: int) -> int:
 def _ui_port_default(values: dict[str, str]) -> int:
     """Return the ``--ui-port`` default: ``A2AT_SAMPLE_UI_PORT``, else ``8080``."""
     return _env_int(values, "A2AT_SAMPLE_UI_PORT", DEFAULT_UI_PORT)
+
+
+def _ui_host_default(values: dict[str, str]) -> str:
+    """Return the ``--ui-host`` default: ``A2AT_SAMPLE_UI_HOST``, else ``127.0.0.1``."""
+    return values.get("A2AT_SAMPLE_UI_HOST") or os.environ.get("A2AT_SAMPLE_UI_HOST") or DEFAULT_UI_HOST
 
 
 def _child_env(language: str, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -603,12 +609,17 @@ def _run_ui(
     return 0
 
 
-def _build_parser(default_ui_port: int = DEFAULT_UI_PORT) -> argparse.ArgumentParser:
+def _build_parser(
+    default_ui_port: int = DEFAULT_UI_PORT,
+    default_ui_host: str = DEFAULT_UI_HOST,
+) -> argparse.ArgumentParser:
     """Build the CLI parser of the new launcher.
 
     Args:
         default_ui_port: default of ``--ui-port``, resolved from ``A2AT_SAMPLE_UI_PORT`` by the
             caller (``8080`` when the key is absent).
+        default_ui_host: default of ``--ui-host``, resolved from ``A2AT_SAMPLE_UI_HOST`` by the
+            caller (``127.0.0.1`` when the key is absent).
     """
     from protocol.client_runtime import SUPPORTED_MODES
     from shared.config import SUPPORTED_DISCOVERY_MODES, SUPPORTED_MODEL_MODES, SUPPORTED_TRANSPORTS
@@ -659,6 +670,14 @@ def _build_parser(default_ui_port: int = DEFAULT_UI_PORT) -> argparse.ArgumentPa
         default=default_ui_port,
         help=f"bind port of the Web UI (default: {default_ui_port}; A2AT_SAMPLE_UI_PORT)",
     )
+    parser.add_argument(
+        "--ui-host",
+        default=default_ui_host,
+        help=(
+            f"bind host of the Web UI (default: {default_ui_host}; A2AT_SAMPLE_UI_HOST). "
+            "Use 0.0.0.0 to expose it on all interfaces."
+        ),
+    )
     parser.add_argument("--keep-alive", action="store_true", help="leave registry/server running afterwards")
     parser.add_argument("--keep-logs", action="store_true", help="keep the temporary run directory (logs/.env)")
     parser.add_argument("--stop", action="store_true", help="stop a previous --keep-alive run and exit")
@@ -677,7 +696,10 @@ def main() -> int:
 
     source_env = _source_env_path()
     source_values = _read_env(source_env) if source_env is not None else {}
-    parser = _build_parser(default_ui_port=_ui_port_default(source_values))
+    parser = _build_parser(
+        default_ui_port=_ui_port_default(source_values),
+        default_ui_host=_ui_host_default(source_values),
+    )
     args = parser.parse_args()
 
     if args.stop:
@@ -890,6 +912,7 @@ def main() -> int:
             return_code = _run_ui(
                 env_path=env_path,
                 ui_port=args.ui_port,
+                host=args.ui_host,
                 scenario=args.scenario,
                 mode=args.mode,
                 transport=args.transport,

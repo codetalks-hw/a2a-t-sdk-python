@@ -245,11 +245,14 @@ parsed. Offline mode is deterministic and is the acceptance path.
 
 ```bash
 python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
+# LAN access (trusted networks only; the demo UI has no authentication):
+python run_demo.py --ui --ui-host 0.0.0.0 --ui-port 8080
 ```
 
-Open <http://127.0.0.1:8080>. The page selects a scenario, `auto`/`manual` mode, and SSE/webhook;
-it shows a live timeline, the final report, and JSON/Markdown transcript downloads. The language
-and model mode are process-level and read-only (see `GET /api/meta`).
+Open <http://127.0.0.1:8080> (or `http://<host-ip>:8080` when bound to `0.0.0.0`). The page selects
+a scenario, `auto`/`manual` mode, and SSE/webhook; it shows a live timeline, the final report, and
+JSON/Markdown transcript downloads. The language and model mode are process-level and read-only
+(see `GET /api/meta`).
 
 ```bash
 curl http://127.0.0.1:8080/api/meta
@@ -636,6 +639,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS` | default `300` (> 0) | Client HTTP budget of one A2A request: the `httpx` client timeout and `ClientCallContext.timeout` of every send. |
 | `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` | default `120` (> 0) | Live LLM budget of one call (SDK structured call or ADK `LiteLlm` turn), written into the per-run SDK `.env`. |
 | `A2AT_SAMPLE_LLM_MAX_ATTEMPTS` | default `1` (`1`..`10`) | Live SDK protocol retry limit per retryable step, written into the per-run SDK `.env`; OpenAI transport retries are disabled separately. |
+| `A2AT_SAMPLE_UI_HOST` | default `127.0.0.1` | Default bind host of the Web UI; read by `run_demo.py` as the default of `--ui-host`. Use `0.0.0.0` to expose it on all interfaces (trusted networks only). |
 | `A2AT_SAMPLE_UI_PORT` | default `8080` | Default bind port of the Web UI; read by `run_demo.py` as the default of `--ui-port`. |
 | `A2AT_SAMPLE_TRACE_URL` | unset; `--ui` sets `http://127.0.0.1:<ui_port>` | Server trace endpoint (Web UI). Local demo only; the server POSTs spans there. |
 | `A2AT_SAMPLE_TRACE_TOKEN` | unset; `--ui` mints a random token | Local token the server presents and the UI requires; unset disables ingestion (fails closed). |
@@ -679,8 +683,12 @@ Existing `.env` files that set `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` or `A2AT_LL
 should be updated or removed: the new sample keys are `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`,
 `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`, and `A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`.
 
-**Ports.** Defaults are server `8000`, registry `5001`, webhook `9000`, Web UI `8080`.
-`run_demo.py` writes these into the per-run `.env` it hands to all three processes.
+**Ports.** Defaults are server `8000`, registry `5001`, webhook `9000`, Web UI `8080` on
+`127.0.0.1`. `run_demo.py` writes these into the per-run `.env` it hands to all three processes.
+The UI binds loopback by default; `--ui-host 0.0.0.0` (or `A2AT_SAMPLE_UI_HOST=0.0.0.0`) exposes it
+on all interfaces. The server-to-UI trace POST still targets `127.0.0.1`, which is correct when the
+UI and server run on the same host. The demo UI has no authentication, so only expose it on a
+trusted network.
 
 ## 9. Testing and verification
 
@@ -694,7 +702,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (360 tests). What it covers:
+The suite is fully offline and deterministic (362 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
