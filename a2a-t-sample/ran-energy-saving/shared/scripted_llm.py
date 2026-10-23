@@ -132,7 +132,7 @@ _FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
 _COMPLETE_THROUGHPUT_MARKER = "07:00~17:30,10Mbps"
 
 #: From-data Task-T refill markers (the accepted values are the only distinguishing text).
-_TARGET_REFILL_MARKERS = ("23:00~24:00,10Mbps",)
+_TARGET_REFILL_MARKERS = ("23:00~23:59,10Mbps",)
 _FEASIBILITY_REFILL_MARKERS = ("power outage from 00:00 to 18:00", "00:00~18:00 停电")
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the

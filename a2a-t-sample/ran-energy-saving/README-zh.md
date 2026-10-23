@@ -454,7 +454,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 在线模式下，**客户端** ADK 决策智能体使用 `ADK_MODEL_*`，两侧 A2A-T SDK 使用 `A2AT_LLM_*`，两者必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么；被接受的 Task 本身仍是确定性的。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
 
-**在线模式为尽力而为。** 在 `information` 场景中，服务端语义校验与客户端决策智能体均由模型驱动：使用 flash 模型时，服务端可能接受不完整的提示词（从而不触发协商），或客户端返回无法解析的决策。离线模式是确定性的，也是验收路径。
+**在线模式为尽力而为，但有确定性护栏。** SDK 语义结论与客户端决策智能体由模型驱动，但样例在接受 Task-T 前会重新检查调用方 schema 的必填字段，以及设计中的冲突条件（目标时段重叠、背景停电期间仍要求保障速率）。客户端 accept 路径只回答被请求的信息项，并把目标规整到模板允许的三段式上限。离线模式仍是验收路径。
 
 ### Web UI
 
@@ -614,6 +614,8 @@ root_agent = LlmAgent(
 `get_sla_policy(cell_id)` 返回小区的 SLA 下限、最大节能率与可用窗口。`evaluate_proposal_impact(proposal)` 从提议文本中解析小区 id、窗口与节能率，返回确定性可行性与影响视图。`output_schema=NegotiationDecision` 让 ADK 解析模型的结构化答案；客户端流程从不解析自由文本。
 
 [`protocol/decision_provider.py`](protocol/decision_provider.py) 通过 `InMemoryRunner` 运行智能体，每个协商 id 保留一个 ADK 会话（后续轮次可见之前的提议），仅在离线模式下回退到安全的 `accept` 决策。
+
+当提议包含具体小区、时间窗或速率时，决策智能体会调用 `get_sla_policy` / `evaluate_proposal_impact`。在 Web UI 中运行 **`target`** 场景可以看到客户端 ADK 工具 span；`information` 提议可能不需要工具调用，而如果根本没有开启协商，客户端决策智能体不会被调用。
 
 ### 执行器与持久化集成
 
@@ -806,7 +808,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（372 个测试）。覆盖范围：
+测试套件完全离线且确定性（376 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

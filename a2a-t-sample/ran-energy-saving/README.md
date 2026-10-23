@@ -526,10 +526,12 @@ what reaches the server. The accepted Task itself is deterministic. Offline mode
 reproducible reference used by the tests and by §4. A live run should be treated as an integration
 smoke, not as an acceptance test.
 
-**Live mode is best-effort.** In the `information` scenario the server-side semantic validation and
-the client decision agent are model-driven: with the flash model the server may accept the
-incomplete prompt (so no negotiation opens), or the client may return a decision that cannot be
-parsed. Offline mode is deterministic and is the acceptance path.
+**Live mode is best-effort, with deterministic guards.** The SDK semantic verdict and the client
+decision agent are model-driven, but the sample re-checks the caller schema's required fields and
+the designed conflict conditions (overlapping target segments, guaranteed rate during a background
+outage) before accepting a Task-T. The client accept path also answers only the requested
+information item and normalizes the target to the template's three-segment limit. Offline mode
+remains the acceptance path.
 
 ### Web UI
 
@@ -752,6 +754,11 @@ parse the model's structured answer; the client flow never parses free text.
 [`protocol/decision_provider.py`](protocol/decision_provider.py) runs the agent through an
 `InMemoryRunner`, keeps one ADK session per negotiation id (so later rounds see earlier proposals),
 and falls back to a safe `accept` decision only in offline mode.
+
+The decision agent calls `get_sla_policy` / `evaluate_proposal_impact` when the proposal names a
+concrete cell, window, or rate. In the Web UI, run the **`target`** scenario to see client ADK tool
+spans; the `information` proposal may be answered without a tool call, and if no negotiation opens
+at all the client decision agent is never invoked.
 
 ### Executor and persistence integration
 
@@ -1003,7 +1010,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (372 tests). What it covers:
+The suite is fully offline and deterministic (376 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

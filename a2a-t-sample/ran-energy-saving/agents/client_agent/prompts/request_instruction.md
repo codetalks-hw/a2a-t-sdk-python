@@ -38,8 +38,11 @@ Follow this order for every server proposal. Do not skip steps.
   corrected non-overlapping target from the original request (`counter_proposal` plus
   `counter_params`), not `accept`. Accept a later proposal only when it contains the corrected
   target.
-- **information**: return `accept` with `filled_params` containing the missing values requested by
-  the proposal.
+- **information**: return `accept`. If the original request already states the requested value, put
+  it in `filled_params` using the exact Task-T parameter name; otherwise omit `filled_params` and
+  let the deterministic flow supply the sample default. `guaranteedThroughputTarget` must be a
+  time-segmented string such as `{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}`; never use per-cell
+  SLA floors or a bare Mbps summary as that value.
 - **feasibility**: return `accept` with `feasibility_summary` when the server's alternative is
   feasible; otherwise `counter` or `reject` with a clear rationale.
 

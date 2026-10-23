@@ -283,12 +283,36 @@ async def test_information_scenario_accepts_and_completes_a_task() -> None:
     assert _client_negotiation_steps(transport.requests) == [("ACCEPT", 1)]
     assert prompt_client.refill_data[0]["region"] == "Songshanhu Administration Committee"
     assert prompt_client.refill_data[0]["guaranteedThroughputTarget"] == (
-        "{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
-        "{23:00~24:00,2Mbps}"
+        "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
+        "{23:00~23:59,10Mbps}"
     )
     accept_metadata = MessageToDict(transport.requests[1].message.metadata)
     assert accept_metadata[TASK_T_EXTENSION_URI].startswith("Refilled Task-T prompt:")
     assert accept_metadata[TEMPLATE_URI_METADATA_KEY] == "Negotiation-T/information-negotiation/accept-reject/v1"
+
+
+async def test_information_accept_discards_an_invalid_model_filled_target() -> None:
+    """A live model must not replace the required segmented target with per-cell SLA floors."""
+    decision = NegotiationDecision(
+        action="accept",
+        rationale="The dataset SLA floors supply the value.",
+        filled_params={
+            "guaranteedThroughputTarget": "cell-001: 250 Mbps; cell-002: 150 Mbps",
+            "unit": "Mbps",
+        },
+    )
+    result, _transport, prompt_client = await _run(
+        SCENARIO_INFORMATION_SPEC,
+        [[propose_event("information", 1)], _task_completed_batch()],
+        (decision,),
+    )
+
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    assert prompt_client.refill_data[0]["guaranteedThroughputTarget"] == (
+        "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
+        "{23:00~23:59,10Mbps}"
+    )
+    assert "unit" not in prompt_client.refill_data[0]
 
 
 async def test_target_scenario_counters_in_round_one_then_accepts_round_two() -> None:

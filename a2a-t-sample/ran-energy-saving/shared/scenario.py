@@ -59,15 +59,15 @@ SUPPORTED_LANGUAGES = (LANGUAGE_EN, LANGUAGE_ZH)
 #: Chinese natural-language task request used for prompt generation (UC1, complete input).
 NATURAL_LANGUAGE_PROMPT_INPUT_ZH = (
     "在松山湖管委会创建无线网络节能任务：在满足任务上下文的前提下最大化节能；"
-    "分时段保障速率目标为 {00:00~07:00,2Mbps}、{07:00~17:30,10Mbps}、"
-    "{17:30~23:00,20Mbps}、{23:00~24:00,2Mbps}。"
+    "分时段保障速率目标为 {00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、"
+    "{23:00~23:59,10Mbps}。"
 )
 
 #: English natural-language task request used for prompt generation (UC1, complete input).
 NATURAL_LANGUAGE_PROMPT_INPUT_EN = (
     "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
-    "energy saving. The time-segment-based guaranteed throughput target is {00:00~07:00,2Mbps}, "
-    "{07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}."
+    "energy saving. The time-segment-based guaranteed throughput target is {00:00~17:30,10Mbps}, "
+    "{17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}."
 )
 
 #: Chinese natural-language task request of the information negotiation: the region is present but
@@ -157,7 +157,7 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
         "region": REGION_STRINGS[LANGUAGE_EN],
         "energySavingGoal": "Maximize energy saving under the condition that the task context is met.",
         "guaranteedThroughputTarget": (
-            "{00:00~07:00,2Mbps}, {07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}"
+            "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
         ),
     },
     LANGUAGE_ZH: {
@@ -169,7 +169,7 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
         "region": REGION_STRINGS[LANGUAGE_ZH],
         "energySavingGoal": "在满足任务上下文的前提下最大化节能。",
         "guaranteedThroughputTarget": (
-            "{00:00~07:00,2Mbps}、{07:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~24:00,2Mbps}"
+            "{00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~23:59,10Mbps}"
         ),
     },
 }
@@ -178,10 +178,10 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
 _ACCEPT_TARGET_OVERRIDES: dict[str, dict[str, str]] = {
     KIND_TARGET: {
         LANGUAGE_EN: (
-            "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,10Mbps}"
+            "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
         ),
         LANGUAGE_ZH: (
-            "{00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~24:00,10Mbps}"
+            "{00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~23:59,10Mbps}"
         ),
     },
     KIND_FEASIBILITY: {

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
@@ -60,6 +61,7 @@ from protocol.negotiation_policy import (
     ABORT_TEMPLATE_URI,
     AbortContent,
     InboundDecision,
+    NegotiationKind,
     NegotiationState,
     PolicyDecision,
     ProposalContent,
@@ -235,7 +237,7 @@ class NegotiationGate:
                 build_error_message(context_id, "The request carries no Task-T prompt.")
             )
         try:
-            await self._call(
+            filled = await self._call(
                 self._prompt_server.validate_task_prompt_and_data_filling,
                 prompt,
                 self._task_schema,
@@ -255,6 +257,37 @@ class NegotiationGate:
             return await self._emit_policy_decision(context_id, decide(state))
         except (A2ATError, ValueError) as exc:
             return GateOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
+
+        # The SDK's semantic verdict is model-dependent and may accept a prompt whose required
+        # caller-schema fields were extracted as null. Enforce the sample's required fields here so
+        # the information scenario still opens a negotiation on live models.
+        missing_required = _missing_required_params(filled, self._task_schema)
+        if missing_required:
+            state = NegotiationState(
+                kind=NegotiationKind.INFORMATION,
+                round=1,
+                max_rounds=self._max_rounds,
+                missing_items=missing_required,
+            )
+            self._logger.info(
+                "Task-T validation passed semantically but required fields are missing: %s",
+                ", ".join(missing_required),
+            )
+            return await self._emit_policy_decision(context_id, decide(state))
+
+        data = filled.data if isinstance(filled.data, Mapping) else {}
+        deterministic_kind = _deterministic_negotiation_kind(data)
+        if deterministic_kind is not None:
+            state = NegotiationState(
+                kind=deterministic_kind,
+                round=1,
+                max_rounds=self._max_rounds,
+            )
+            self._logger.info(
+                "Task-T validation passed semantically but the sample detected a %s conflict",
+                deterministic_kind.value,
+            )
+            return await self._emit_policy_decision(context_id, decide(state))
 
         self._rewrite_task_prompt(context, prompt)
         self._logger.info("initial Task-T validated; handing the request to the deterministic executor")
@@ -543,6 +576,97 @@ class NegotiationGate:
         message.ClearField("parts")
         message.parts.add(text=prompt)
         message.metadata[TASK_T_EXTENSION_URI] = prompt
+
+
+#: One ``HH:MM~HH:MM`` interval in a target or background-event string.
+_TIME_INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(\d{2}:\d{2})\s*(?:~|to|-)\s*(\d{2}:\d{2})", re.IGNORECASE
+)
+
+#: One ``HH:MM~HH:MM,<rate>Mbps`` target segment.
+_TARGET_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(\d{2}:\d{2})~(\d{2}:\d{2})\s*,\s*(\d+(?:\.\d+)?)\s*Mbps", re.IGNORECASE
+)
+
+#: Markers of a background outage in the sample's feasibility request.
+_OUTAGE_MARKERS: Final[tuple[str, ...]] = ("outage", "power", "停电")
+
+
+def _minutes(value: str) -> int:
+    """Convert one ``HH:MM`` value to minutes from midnight."""
+    hours, minutes = value.split(":", 1)
+    return int(hours) * 60 + int(minutes)
+
+
+def _span(start: str, end: str) -> tuple[int, int]:
+    """Return one interval in minutes, wrapping midnight for an end at or before the start."""
+    start_minutes = _minutes(start)
+    end_minutes = _minutes(end)
+    if end_minutes <= start_minutes:
+        end_minutes += 24 * 60
+    return start_minutes, end_minutes
+
+
+def _target_segments(data: Mapping[str, object]) -> list[tuple[int, int, float]]:
+    """Return the target segments of one Task-T parameter map."""
+    target = data.get("guaranteedThroughputTarget")
+    if not isinstance(target, str):
+        return []
+    return [
+        (*_span(match.group(1), match.group(2)), float(match.group(3)))
+        for match in _TARGET_SEGMENT_PATTERN.finditer(target)
+    ]
+
+
+def _overlaps(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    """Return whether two half-open minute intervals overlap."""
+    return first[0] < second[1] and second[0] < first[1]
+
+
+def _deterministic_negotiation_kind(data: Mapping[str, object]) -> NegotiationKind | None:
+    """Detect the sample's target/feasibility triggers without relying on a model verdict.
+
+    Live semantic validation occasionally accepts an overlapping target or an impossible outage
+    guarantee. These deterministic checks keep the three designed negotiation scenarios stable.
+    """
+    segments = _target_segments(data)
+    for index, first in enumerate(segments):
+        for second in segments[index + 1 :]:
+            if _overlaps(first[:2], second[:2]):
+                return NegotiationKind.TARGET
+
+    background = data.get("backgroundEvent")
+    if isinstance(background, str) and any(marker in background.lower() for marker in _OUTAGE_MARKERS):
+        outage_match = _TIME_INTERVAL_PATTERN.search(background)
+        if outage_match is not None:
+            outage = _span(outage_match.group(1), outage_match.group(2))
+            if any(_overlaps(segment[:2], outage) and segment[2] > 2.0 for segment in segments):
+                return NegotiationKind.FEASIBILITY
+    return None
+
+
+def _missing_required_params(
+    filled: FilledParamData,
+    schema: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return required caller-schema fields that the semantic pass left empty.
+
+    The SDK's semantic verdict is model-driven; live models sometimes return ``verdict=true``
+    while extracting a required field as ``null``. This deterministic check keeps the sample's
+    negotiation trigger stable in both offline and live modes.
+    """
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return ()
+    data = filled.data if isinstance(filled.data, dict) else {}
+    missing: list[str] = []
+    for name in required:
+        if not isinstance(name, str):
+            continue
+        value = data.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(name)
+    return tuple(missing)
 
 
 def _missing_slot_names(errors: Sequence[SlotValidationError]) -> tuple[str, ...]:

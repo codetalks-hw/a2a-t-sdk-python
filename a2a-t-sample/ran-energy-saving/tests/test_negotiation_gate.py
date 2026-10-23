@@ -73,6 +73,7 @@ class FakePromptServer:
         self.abort_calls: list[tuple[str | None, NegotiationContext | None, str]] = []
         self.propose_generations: list[tuple[str | None, NegotiationContext, str]] = []
         self.abort_generations: list[tuple[str | None, NegotiationContext, str]] = []
+        self.task_params: dict[str, object] | None = None
 
     def validate_task_prompt_and_data_filling(
         self, prompt: str, schema: Mapping[str, object], template_uri: str
@@ -80,7 +81,15 @@ class FakePromptServer:
         self.task_calls.append((prompt, schema, template_uri))
         if self.task_error is not None:
             raise self.task_error
-        return FilledParamData({"region": "Songshanhu"})
+        return FilledParamData(
+            self.task_params
+            if self.task_params is not None
+            else {
+                "operationType": "Create",
+                "region": "Songshanhu",
+                "guaranteedThroughputTarget": "{00:00~06:00,2Mbps}",
+            }
+        )
 
     def validate_accept_prompt_and_data_filling(
         self,
@@ -241,6 +250,68 @@ async def test_initial_task_success_hands_the_request_to_the_executor() -> None:
     assert server.task_calls[0][0] == TASK_PROMPT
     assert context.message is not None
     assert context.message.parts[0].text == TASK_PROMPT
+
+
+async def test_initial_task_with_a_missing_required_field_opens_information_negotiation() -> None:
+    """A model-approved semantic verdict must not bypass the caller schema's required fields."""
+    gate, server = _gate()
+    server.task_params = {
+        "operationType": "Create",
+        "region": "Songshanhu",
+        "guaranteedThroughputTarget": None,
+    }
+
+    message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
+
+    metadata = _metadata(message)
+    session = metadata[NEGOTIATION_CONTEXT_METADATA_KEY]
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == INFORMATION_NEGOTIATION_PROPOSE_URI
+    assert session["round"] == 1
+    assert session["performative"] == NegotiationPerformative.PROPOSE.value
+    assert server.propose_generations
+    proposal_text = server.propose_generations[0][0]
+    assert isinstance(proposal_text, str)
+    assert "guaranteedThroughputTarget" in proposal_text
+
+
+@pytest.mark.parametrize(
+    ("task_params", "expected_uri"),
+    [
+        (
+            {
+                "operationType": "Create",
+                "region": "Songshanhu",
+                "guaranteedThroughputTarget": (
+                    "{17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}"
+                ),
+            },
+            TARGET_NEGOTIATION_PROPOSE_URI,
+        ),
+        (
+            {
+                "operationType": "Create",
+                "region": "Songshanhu",
+                "guaranteedThroughputTarget": (
+                    "{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}"
+                ),
+                "backgroundEvent": "power outage from 00:00 to 18:00",
+            },
+            FEASIBILITY_NEGOTIATION_PROPOSE_URI,
+        ),
+    ],
+)
+async def test_semantically_accepted_sample_conflicts_still_open_negotiation(
+    task_params: dict[str, object], expected_uri: str
+) -> None:
+    """Deterministic sample checks cover live models that miss an overlap or outage conflict."""
+    gate, server = _gate()
+    server.task_params = task_params
+
+    message = _assert_no_task(await gate.handle(_make_context(_initial_message())))
+
+    metadata = _metadata(message)
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == expected_uri
+    assert metadata[NEGOTIATION_CONTEXT_METADATA_KEY]["round"] == 1
 
 
 @pytest.mark.parametrize(

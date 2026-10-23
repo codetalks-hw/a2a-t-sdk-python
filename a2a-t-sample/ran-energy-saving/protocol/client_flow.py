@@ -139,6 +139,11 @@ _MISSING_ITEMS_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"(?:missing items?|provide the following items?)\s*:\s*([^.]+)\.", re.IGNORECASE
 )
 
+#: A Task-T throughput target must be time-segmented, for example ``{00:00~07:00,2Mbps}``.
+_TIME_SEGMENTED_TARGET_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\d{2}:\d{2}~\d{2}:\d{2}\s*,\s*\d+(?:\.\d+)?\s*Mbps", re.IGNORECASE
+)
+
 #: Client-side errors.
 _ERROR_NO_TEMPLATE_URI: Final[str] = "The negotiation propose carries no template URI."
 _ERROR_NO_SESSION: Final[str] = "The negotiation propose carries no valid negotiationContext."
@@ -765,6 +770,37 @@ def _negotiation_request(
     )
 
 
+def _accept_filled_values(
+    kind: NegotiationKind,
+    decision: NegotiationDecision,
+    language: str,
+) -> dict[str, object]:
+    """Merge model-filled values into the scenario's agreed Task-T parameters safely.
+
+    Live models sometimes fill an information request with per-cell SLA floors instead of the
+    required time-segmented target. Only whitelisted Task-T keys are accepted, and the throughput
+    target must have the ``{HH:MM~HH:MM,<rate>Mbps}`` shape; otherwise the scenario's agreed value
+    wins. For target/feasibility accepts, the negotiated target is authoritative.
+    """
+    filled = accept_filled_params(kind.value, language)
+    if kind is NegotiationKind.INFORMATION and decision.filled_params:
+        allowed = TASK_PARAM_SCHEMA.get("properties")
+        if isinstance(allowed, Mapping):
+            for key, value in decision.filled_params.items():
+                if key not in allowed or value is None:
+                    continue
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    filled[key] = value
+        target = filled.get("guaranteedThroughputTarget")
+        if not isinstance(target, str) or not _TIME_SEGMENTED_TARGET_PATTERN.search(target):
+            filled["guaranteedThroughputTarget"] = accept_filled_params(
+                kind.value, language
+            )["guaranteedThroughputTarget"]
+    if filled.get("operationType") not in {"Create", "Modify"}:
+        filled["operationType"] = "Create"
+    return filled
+
+
 def _build_accept_request(
     *,
     prompt_client: PromptClient,
@@ -778,9 +814,7 @@ def _build_accept_request(
     call_timeout_seconds: float,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type."""
-    filled = accept_filled_params(kind.value, language)
-    if decision.filled_params:
-        filled.update(decision.filled_params)
+    filled = _accept_filled_values(kind, decision, language)
     with trace_stage("task_t_slot_extraction_refill"):
         task_content = prompt_client.generate_task_prompt_from_data_with_schema(
             filled, TASK_PARAM_SCHEMA, task_template_uri
@@ -961,7 +995,18 @@ def _accept_text(
 ) -> str:
     """Render the natural-language input of an accept for the proposal type."""
     if kind is NegotiationKind.INFORMATION:
-        items = " ".join(f"{name}: {value}." for name, value in filled.items())
+        # The information accept result must answer the requested item only. Repeating every base
+        # Task-T field (region, description, ...) makes the Negotiation-T validator treat unrelated
+        # text as result content and, on live models, reject the accept.
+        allowed = TASK_PARAM_SCHEMA.get("properties")
+        requested = [
+            name
+            for name in (decision.filled_params or {})
+            if isinstance(allowed, Mapping) and name in allowed
+        ]
+        if not requested:
+            requested = ["guaranteedThroughputTarget"]
+        items = " ".join(f"{name}: {filled.get(name, '')}." for name in requested)
         return f"Accept. {items}"
     confirmation = (
         decision.confirmed_intent
