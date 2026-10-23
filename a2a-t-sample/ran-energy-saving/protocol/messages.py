@@ -39,6 +39,13 @@ TASK_TEMPLATE_URI: Final[str] = ENERGY_SAVING_URI
 #: when it is absent (the policy then advances through its preset revision sequence).
 SAMPLE_PROPOSAL_METADATA_KEY: Final[str] = "sampleProposal"
 
+#: Metadata key carrying the sample-only Run Explorer run id on the initial Task-T message.
+#:
+#: The server reads it to tag its own spans with the client run id, so the Web UI can merge the
+#: cross-process server trace into the run timeline. It is a sample convention, not an A2A-T field;
+#: without it the server simply emits no trace (the CLI and plain A2A clients keep working).
+SAMPLE_RUN_ID_METADATA_KEY: Final[str] = "sampleRunId"
+
 #: Metadata key of the machine-readable structured errors on a REJECTED Task status message.
 #:
 #: Sample convention, not an A2A-T protocol field: the underlying ``ContentValidationError`` carries

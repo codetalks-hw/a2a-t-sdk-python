@@ -200,3 +200,26 @@ def build_adk_model(config: SampleConfig | None = None) -> BaseLlm:
     if resolved.adk_model_api_key:
         kwargs["api_key"] = resolved.adk_model_api_key
     return LiteLlm(model=resolved.adk_model_name, **kwargs)
+
+
+def build_traced_adk_model(
+    config: SampleConfig | None = None,
+    *,
+    model: BaseLlm | None = None,
+) -> BaseLlm:
+    """Build the ADK model of the configured mode wrapped in the Run Explorer tracer.
+
+    Production entry points use this builder so every ADK turn produces an ``llm`` span. The
+    wrapped model still reports the same ``model`` id and ``capabilities``; an explicit ``model``
+    override (tests) is wrapped as-is, and an already-traced model is returned unchanged.
+
+    Args:
+        config: resolved sample configuration; defaults to :func:`load_config`.
+        model: optional model override (the deterministic fake model in tests).
+    """
+    from shared.adk_tracing import TracingLlm
+
+    resolved = model if model is not None else build_adk_model(config)
+    if isinstance(resolved, TracingLlm):
+        return resolved
+    return TracingLlm.wrap(resolved)

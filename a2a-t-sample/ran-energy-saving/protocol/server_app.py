@@ -4,16 +4,22 @@ The module builds the AgentCard (declaring the Task-T and Negotiation-T extensio
 request handler, the Starlette app and the registry registration. The server always runs the
 negotiation gate in front of the ADK agent, so all negotiation happens before a Task is created.
 
-Offline mode registers the scripted SDK provider and points the SDK at a temporary ``.env`` carrying
-``A2AT_LLM_PROVIDER=scripted`` / ``A2AT_LLM_MODEL=scripted`` / ``A2AT_LLM_API_KEY=not-needed``; the
-SDK reads its configuration from a file, not from process environment variables, so the temporary
-copy is the non-destructive way to honor the sample's offline switch.
+Offline mode registers the traced scripted SDK provider and points the SDK at a temporary ``.env``
+carrying ``A2AT_LLM_PROVIDER=scripted_traced`` / ``A2AT_LLM_MODEL=scripted`` /
+``A2AT_LLM_API_KEY=not-needed``; the SDK reads its configuration from a file, not from process
+environment variables, so the temporary copy is the non-destructive way to honor the sample's
+offline switch. Live mode uses ``A2AT_LLM_PROVIDER=openai_traced``.
+
+Run Explorer: when ``A2AT_SAMPLE_TRACE_URL`` (Web UI) or ``A2AT_SAMPLE_TRACE_DIR`` (CLI file) is
+set, the runtime attaches the matching trace emitter as the process-wide span sink, so the server
+side of a cross-process run reaches the client timeline (design §4).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -44,6 +50,8 @@ from shared.config import SampleConfig, load_config
 from shared.registry_client import register_agentcard
 from shared.scenario import MAX_ROUNDS
 from shared.scripted_llm import register_scripted_provider
+from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
+from shared.traced_llm import register_traced_providers, sdk_provider_name
 from starlette.applications import Starlette
 
 from protocol.negotiation_gate import NegotiationGate
@@ -85,6 +93,7 @@ class ServerRuntime:
         gate: pre-task negotiation gate.
         executor: outer executor used by the request handler.
         app: Starlette application.
+        trace_emitter: Run Explorer emitter attached to this process, when configured.
     """
 
     config: SampleConfig
@@ -93,6 +102,23 @@ class ServerRuntime:
     gate: NegotiationGate
     executor: NegotiationAgentExecutor
     app: Starlette
+    trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None
+
+
+def build_trace_emitter() -> HttpTraceEmitter | FileTraceEmitter | None:
+    """Build the server trace emitter configured by the process environment.
+
+    ``A2AT_SAMPLE_TRACE_URL`` selects the cross-process HTTP transport to the Web UI (with
+    ``A2AT_SAMPLE_TRACE_TOKEN``); otherwise ``A2AT_SAMPLE_TRACE_DIR`` selects the CLI JSONL file
+    ``<dir>/<runId>/server-trace.jsonl``. Without either key the server emits no trace.
+    """
+    base_url = os.environ.get("A2AT_SAMPLE_TRACE_URL", "").strip()
+    if base_url:
+        return HttpTraceEmitter(base_url, os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
+    directory = os.environ.get("A2AT_SAMPLE_TRACE_DIR", "").strip()
+    if directory:
+        return FileTraceEmitter(Path(directory))
+    return None
 
 
 def build_agent_card(*, host: str, port: int) -> AgentCard:
@@ -167,6 +193,9 @@ def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> 
     Raises:
         FileNotFoundError: in live mode when the resolved file does not exist.
     """
+    # The generated file names a traced provider; a caller may build the facade right after this
+    # helper (as the tests do), so the registration belongs here as well (idempotent).
+    register_traced_providers()
     base_path = env_path or Path.cwd() / ".env"
     if not config.is_offline:
         if not base_path.exists():
@@ -185,7 +214,7 @@ def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> 
         }
     values.update(
         {
-            "A2AT_LLM_PROVIDER": "scripted",
+            "A2AT_LLM_PROVIDER": sdk_provider_name(offline=True),
             "A2AT_LLM_MODEL": "scripted",
             "A2AT_LLM_API_KEY": "not-needed",
             "A2AT_LANGUAGE": config.language,
@@ -200,11 +229,17 @@ def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> 
     return target
 
 
-def build_rest_app(*, agent_card: AgentCard, executor: NegotiationAgentExecutor) -> Starlette:
+def build_rest_app(
+    *,
+    agent_card: AgentCard,
+    executor: NegotiationAgentExecutor,
+    trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None,
+) -> Starlette:
     """Build the Starlette app with the AgentCard routes and the A2A REST routes.
 
     The push-notification machinery is assembled unconditionally: it idles in SSE mode and is used
-    when a client registers a webhook. The sender's HTTP client is closed by the app lifespan.
+    when a client registers a webhook. The sender's HTTP client is closed by the app lifespan; the
+    optional Run Explorer emitter is flushed and stopped there too.
     """
     task_store = InMemoryTaskStore()
     push_config_store = InMemoryPushNotificationConfigStore()
@@ -216,6 +251,8 @@ def build_rest_app(*, agent_card: AgentCard, executor: NegotiationAgentExecutor)
         del app
         yield
         await push_httpx_client.aclose()
+        if trace_emitter is not None:
+            trace_emitter.close()
 
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
@@ -253,17 +290,22 @@ def build_server_runtime(
     """
     resolved_logger = logger or _LOGGER
     resolved_config = config or load_config(env_path=env_path)
+    register_traced_providers()
     if resolved_config.is_offline:
         register_scripted_provider()
+    trace_emitter = build_trace_emitter()
+    if trace_emitter is not None:
+        set_global_sink(trace_emitter)
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
     gate = NegotiationGate(prompt_server, max_rounds=MAX_ROUNDS, logger=resolved_logger)
     executor = build_negotiation_executor(gate=gate, config=resolved_config, model=model)
     agent_card = build_agent_card(host=resolved_config.host, port=resolved_config.port)
-    app = build_rest_app(agent_card=agent_card, executor=executor)
+    app = build_rest_app(agent_card=agent_card, executor=executor, trace_emitter=trace_emitter)
     app.state.config = resolved_config
     app.state.prompt_server = prompt_server
     app.state.gate = gate
+    app.state.trace_emitter = trace_emitter
     return ServerRuntime(
         config=resolved_config,
         agent_card=agent_card,
@@ -271,6 +313,7 @@ def build_server_runtime(
         gate=gate,
         executor=executor,
         app=app,
+        trace_emitter=trace_emitter,
     )
 
 

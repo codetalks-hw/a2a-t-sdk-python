@@ -9,6 +9,8 @@ The Starlette app observes and steers the client flow, it never re-implements pr
 * ``POST /api/runs/{id}/decisions`` submits a :class:`~shared.models.NegotiationDecision` to the
   manual provider (404 for an unknown run, 409 when no decision is pending);
 * ``GET /api/runs/{id}`` returns the status, result and transcript;
+* ``POST /api/runs/{id}/trace`` ingests the cross-process server spans (local token, envelope
+  validation, broadcast; re-sent producer spans are deduplicated by original ``spanId``);
 * ``GET /api/runs/{id}/transcript.json`` / ``.md`` download the run transcript.
 
 The language is process-level and read-only: it comes from the sample configuration and is exposed
@@ -42,6 +44,7 @@ from shared.scenario import SUPPORTED_SCENARIO_NAMES, get_scenario, resolve_user
 from shared.trace import (
     PHASE_DISPATCH,
     PHASE_DONE,
+    PHASES,
     SCHEMA_VERSION,
     Span,
     TraceRecorder,
@@ -80,6 +83,7 @@ class ClientRuntimeLike(Protocol):
         on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
         on_decision_made: DecisionMadeCallback | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
+        run_id: str | None = None,
     ) -> ClientFlowResult: ...
 
     async def aclose(self) -> None: ...
@@ -140,6 +144,7 @@ class RunState:
     _seq: int = field(default=0, repr=False)
     _phase_steps: dict[str, int] = field(default_factory=dict, repr=False)
     _span_id_map: dict[str, str] = field(default_factory=dict, repr=False)
+    _producer_spans: dict[str, str] = field(default_factory=dict, repr=False)
     _recorder: TraceRecorder = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -270,8 +275,18 @@ class RunState:
 
         A producer id that is empty or already taken by another span is remapped to a fresh UI id;
         the parent reference follows the same mapping so nested spans stay connected.
+
+        A **re-sent** producer span (same original ``spanId``) is ignored: the first ingested copy
+        wins and the stored span is returned unchanged, so a retried server batch never duplicates
+        a timeline row. The server emitter retries whole batches, and ids are role-scoped
+        (``llm_server_*`` / ``tool_server_*``), so ignoring repeats is safe and idempotent.
         """
         candidate = Span.from_dict(span)
+        original_span_id = candidate.span_id
+        if original_span_id:
+            existing_span_id = self._producer_spans.get(original_span_id)
+            if existing_span_id is not None:
+                return self.spans.get(existing_span_id, {})
         phase = candidate.phase
         seq, step = self.allocate(phase)
         span_id: str | None = candidate.span_id or None
@@ -311,6 +326,7 @@ class RunState:
             ended_at=candidate.ended_at,
             duration_ms=candidate.duration_ms,
         )
+        self._producer_spans[original_span_id or built.span_id] = built.span_id
         return self._store_span(built, seq=seq, record=True)
 
     def _store_span(
@@ -624,6 +640,7 @@ class RunManager:
                 on_decision_requested=on_decision_requested,
                 on_decision_made=on_decision_made,
                 trace_sink=trace_sink,
+                run_id=run.run_id,
             )
             run.result = result
             # Decisions are normally recorded live by ``on_decision_made``; the late loop is only
@@ -929,9 +946,20 @@ def create_app(
         spans = _coerce_trace_payload(body)
         if spans is None:
             return JSONResponse({"error": "The body must be a JSON span or span list."}, status_code=400)
+        for index, span in enumerate(spans):
+            problem = _validate_trace_span(span, run.run_id)
+            if problem is not None:
+                return JSONResponse({"error": f"span[{index}]: {problem}"}, status_code=400)
+        created = 0
         for span in spans:
+            before = len(run.traces)
             run.record_trace(span)
-        return JSONResponse({"accepted": len(spans), "runId": run.run_id}, status_code=202)
+            if len(run.traces) > before:
+                created += 1
+        response: dict[str, object] = {"accepted": created, "runId": run.run_id}
+        if created < len(spans):
+            response["deduplicated"] = len(spans) - created
+        return JSONResponse(response, status_code=202)
 
     app = Starlette(
         routes=[
@@ -967,10 +995,15 @@ def _span_seq(span: Mapping[str, object]) -> int:
 
 
 def _trace_token_ok(request: Request) -> bool:
-    """Check the optional local trace token (``A2AT_SAMPLE_TRACE_TOKEN``)."""
+    """Check the local trace token (``A2AT_SAMPLE_TRACE_TOKEN``), failing closed.
+
+    The server process only posts server spans when ``run_demo.py --ui`` configured the same token
+    for both processes (design §4/§7). Without a configured token the ingestion route is disabled
+    instead of open, so a stray process cannot inject rows into a run timeline.
+    """
     expected = os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip()
     if not expected:
-        return True
+        return False
     supplied = request.headers.get("x-a2at-trace-token", "").strip()
     if supplied == expected:
         return True
@@ -989,6 +1022,38 @@ def _coerce_trace_payload(body: object) -> list[dict[str, object]] | None:
         if isinstance(nested, list):
             return _coerce_trace_payload(nested)
         return [dict(body)]
+    return None
+
+
+def _validate_trace_span(span: Mapping[str, object], run_id: str) -> str | None:
+    """Validate one ingested server span; return a readable problem, ``None`` when valid.
+
+    The UI is the single owner of the ordering and of the phase vocabulary, so it rejects a
+    malformed envelope early: an unknown phase or schema version, a non-string kind/title, a
+    ``detail`` that is not an object, or a ``runId`` pointing at another run.
+    """
+    schema_version = span.get("schemaVersion")
+    if schema_version is not None and schema_version != SCHEMA_VERSION:
+        return f"unsupported schemaVersion {schema_version!r}"
+    span_run_id = span.get("runId")
+    if span_run_id not in (None, "") and span_run_id != run_id:
+        return f"runId {span_run_id!r} does not match the run"
+    phase = span.get("phase")
+    if not isinstance(phase, str) or phase not in PHASES:
+        return f"unknown phase {phase!r}; expected one of {PHASES}"
+    kind = span.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        return "kind must be a non-empty string"
+    for field_name in ("spanId", "title", "stage", "actor", "side", "status"):
+        value = span.get(field_name)
+        if value is not None and not isinstance(value, str):
+            return f"{field_name} must be a string"
+    detail = span.get("detail")
+    if detail is not None and not isinstance(detail, Mapping):
+        return "detail must be an object"
+    duration = span.get("durationMs")
+    if duration is not None and not isinstance(duration, (int, float)):
+        return "durationMs must be a number"
     return None
 
 

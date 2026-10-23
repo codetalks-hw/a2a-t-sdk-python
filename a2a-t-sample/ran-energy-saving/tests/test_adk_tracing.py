@@ -1,0 +1,305 @@
+"""Tests of the ADK model/tool tracing (``shared.adk_tracing``)."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from typing import Any
+
+import pytest
+from agents.server_agent.agent import build_server_agent
+from google.adk.apps import App
+from google.adk.models._capabilities import LlmCapabilities
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.adk.runners import InMemoryRunner
+from google.genai import types
+from shared.adk_fake_model import build_fake_model
+from shared.adk_tracing import (
+    SHARED_LINKER,
+    SpanLinker,
+    TracePlugin,
+    TracingLlm,
+    json_safe,
+    serialize_llm_request,
+    serialize_llm_response,
+)
+from shared.trace import (
+    PHASE_EXECUTION,
+    emit_span,
+    set_global_sink,
+    trace_scope,
+)
+
+#: Model id of the deterministic fake model.
+_FAKE_MODEL_NAME = "fake-ran-energy-saving"
+
+#: ADK application name of the tool-plugin test.
+_APP_NAME = "ran_energy_tracing_test"
+
+
+class _NullContentModel(BaseLlm):
+    """Model returning a response without content (the ``None`` tolerance case)."""
+
+    model: str = "null-content-model"
+
+    @property
+    def capabilities(self) -> LlmCapabilities:
+        return LlmCapabilities()
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        del llm_request, stream
+        yield LlmResponse(content=None, partial=False)
+
+
+class _FailingModel(BaseLlm):
+    """Model raising on every call."""
+
+    model: str = "failing-model"
+
+    @property
+    def capabilities(self) -> LlmCapabilities:
+        return LlmCapabilities()
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        del llm_request, stream
+        raise RuntimeError("provider exploded")
+        yield LlmResponse()  # pragma: no cover - makes this an async generator
+
+
+@pytest.fixture
+def spans() -> list[dict[str, object]]:
+    """Spans emitted by the producer hook during one test."""
+    return []
+
+
+@pytest.fixture(autouse=True)
+def _sink(spans: list[dict[str, object]]) -> Any:
+    """Attach one recording sink and clear it afterwards."""
+    set_global_sink(spans.append)
+    try:
+        yield
+    finally:
+        set_global_sink(None)
+
+
+def _request(system_instruction: str = "You are an agent.") -> LlmRequest:
+    """Build one request routed to the fake model's default text."""
+    return LlmRequest(
+        model=_FAKE_MODEL_NAME,
+        contents=[types.Content(role="user", parts=[types.Part(text="Hello.")])],
+        config=types.GenerateContentConfig(system_instruction=system_instruction),
+    )
+
+
+async def _collect(model: BaseLlm, request: LlmRequest) -> list[LlmResponse]:
+    """Collect the responses of one model call."""
+    return [response async for response in model.generate_content_async(request)]
+
+
+def test_wrap_delegates_model_and_capabilities() -> None:
+    inner = build_fake_model()
+    traced = TracingLlm.wrap(inner)
+
+    assert isinstance(traced, TracingLlm)
+    assert traced.model == inner.model
+    assert traced.capabilities == inner.capabilities
+    assert traced.inner is inner
+
+
+@pytest.mark.asyncio
+async def test_llm_span_carries_the_full_request_and_response(spans: list[dict[str, object]]) -> None:
+    traced = TracingLlm.wrap(build_fake_model())
+
+    with trace_scope(run_id="run-adk", role="server", context_id="ctx-adk", stage="server_execution_agent"):
+        responses = await _collect(traced, _request())
+
+    assert responses and responses[0].content is not None
+    assert len(spans) == 1
+    span = spans[0]
+    assert span["kind"] == "llm"
+    assert span["runId"] == "run-adk"
+    assert span["side"] == "server"
+    assert span["contextId"] == "ctx-adk"
+    assert span["stage"] == "server_execution_agent"
+    assert span["phase"] == PHASE_EXECUTION
+    assert str(span["spanId"]).startswith("llm_server_adk_")
+    detail = span["detail"]
+    assert isinstance(detail, dict)
+    request = detail["request"]
+    assert isinstance(request, dict)
+    assert request["systemInstruction"] == "You are an agent."
+    assert request["contents"][0]["parts"][0]["text"] == "Hello."
+    response = detail["response"]
+    assert isinstance(response, dict)
+    assert "RAN energy-saving task completed." in str(response["text"])
+
+
+@pytest.mark.asyncio
+async def test_llm_span_tolerates_a_none_content_response(spans: list[dict[str, object]]) -> None:
+    traced = TracingLlm.wrap(_NullContentModel())
+
+    with trace_scope(run_id="run-null", role="client", stage="client_decision_agent"):
+        responses = await _collect(traced, _request())
+
+    assert len(responses) == 1
+    assert len(spans) == 1
+    span = spans[0]
+    assert span["status"] == "ok"
+    detail = span["detail"]
+    assert isinstance(detail, dict)
+    assert detail["response"]["text"] is None
+    assert detail["response"]["functionCalls"] == []
+    assert detail["response"]["usage"] is None
+
+
+@pytest.mark.asyncio
+async def test_llm_span_captures_an_error_and_reraises(spans: list[dict[str, object]]) -> None:
+    traced = TracingLlm.wrap(_FailingModel())
+
+    with trace_scope(run_id="run-err", role="server", stage="server_execution_agent"):
+        with pytest.raises(RuntimeError, match="provider exploded"):
+            await _collect(traced, _request())
+
+    assert len(spans) == 1
+    span = spans[0]
+    assert span["status"] == "error"
+    assert "RuntimeError" in str(span["error"])
+
+
+def test_serializers_tolerate_none_and_json_safe_objects() -> None:
+    assert serialize_llm_response(None) is None
+    assert json_safe(None) is None
+    nested = json_safe({"value": [1, None, {"a": "b"}]})
+    assert nested == {"value": [1, None, {"a": "b"}]}
+
+    request = _request()
+    serialized = serialize_llm_request(request)
+    assert serialized["tools"] == []
+    assert serialized["responseSchema"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_plugin_emits_spans_parented_to_the_llm_call(spans: list[dict[str, object]]) -> None:
+    """A real ADK runner over the fake server script produces LLM and tool spans."""
+    linker = SpanLinker()
+    model = TracingLlm.wrap(build_fake_model(), linker=linker)
+    agent = build_server_agent(model)
+    runner = InMemoryRunner(
+        app=App(name=_APP_NAME, root_agent=agent, plugins=[TracePlugin(linker=linker)]),
+        app_name=_APP_NAME,
+    )
+    await runner.session_service.create_session(app_name=_APP_NAME, user_id="user-1", session_id="ctx-tools")
+
+    with trace_scope(run_id="run-tools", role="server", context_id="ctx-tools", stage="server_execution_agent"):
+        async for _ in runner.run_async(
+            user_id="user-1",
+            session_id="ctx-tools",
+            new_message=types.Content(role="user", parts=[types.Part(text="Apply the energy-saving plan.")]),
+        ):
+            continue
+
+    llm_spans = [span for span in spans if span["kind"] == "llm"]
+    tool_spans = [span for span in spans if span["kind"] == "tool"]
+    assert llm_spans
+    tool_details: list[object] = []
+    for span in tool_spans:
+        detail = span["detail"]
+        assert isinstance(detail, dict)
+        tool_details.append(detail["toolName"])
+    assert tool_details == [
+        "get_cell_energy_profile",
+        "evaluate_energy_saving_plan",
+        "apply_energy_saving_plan",
+        "generate_energy_saving_report",
+    ]
+    llm_ids = {str(span["spanId"]) for span in llm_spans}
+    for span in tool_spans:
+        assert span["runId"] == "run-tools"
+        assert span["contextId"] == "ctx-tools"
+        assert span["side"] == "server"
+        assert span["status"] == "ok"
+        assert isinstance(span["durationMs"], float)
+        assert span["parentSpanId"] in llm_ids
+        detail = span["detail"]
+        assert isinstance(detail, dict)
+        assert detail["args"]
+        assert detail["result"] is not None
+    assert linker.last_llm("ctx-tools") in llm_ids
+
+
+@pytest.mark.asyncio
+async def test_tool_plugin_reports_a_failing_tool(spans: list[dict[str, object]]) -> None:
+    """A tool that raises is reported as an error span and its error still propagates."""
+
+    def broken_tool(value: str) -> dict[str, object]:
+        raise ValueError(f"cannot handle {value}")
+
+    from google.adk.agents import LlmAgent
+
+    class _CallingModel(BaseLlm):
+        model: str = "calling-model"
+
+        @property
+        def capabilities(self) -> LlmCapabilities:
+            return LlmCapabilities()
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[LlmResponse, None]:
+            del stream
+            if any(part.function_response for content in llm_request.contents for part in (content.parts or ())):
+                yield LlmResponse(
+                    content=types.Content(role="model", parts=[types.Part(text="done")]),
+                    partial=False,
+                )
+                return
+            yield LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(name="broken_tool", args={"value": "x"})
+                        )
+                    ],
+                ),
+                partial=False,
+            )
+
+    agent = LlmAgent(name="broken_agent", model=TracingLlm.wrap(_CallingModel()), tools=[broken_tool])
+    runner = InMemoryRunner(
+        app=App(name=_APP_NAME, root_agent=agent, plugins=[TracePlugin()]),
+        app_name=_APP_NAME,
+    )
+    await runner.session_service.create_session(app_name=_APP_NAME, user_id="user-2", session_id="ctx-broken")
+
+    with trace_scope(run_id="run-broken", role="client", context_id="ctx-broken", stage="client_decision_agent"):
+        with pytest.raises(ValueError):
+            async for _ in runner.run_async(
+                user_id="user-2",
+                session_id="ctx-broken",
+                new_message=types.Content(role="user", parts=[types.Part(text="call it")]),
+            ):
+                continue
+
+    tool_spans = [span for span in spans if span["kind"] == "tool"]
+    assert len(tool_spans) == 1
+    assert tool_spans[0]["status"] == "error"
+    assert "ValueError" in str(tool_spans[0]["error"])
+    broken_detail = tool_spans[0]["detail"]
+    assert isinstance(broken_detail, dict)
+    assert broken_detail["toolName"] == "broken_tool"
+
+
+@pytest.mark.asyncio
+async def test_no_sink_never_breaks_the_model() -> None:
+    set_global_sink(None)
+    traced = TracingLlm.wrap(build_fake_model())
+    responses = await _collect(traced, _request())
+    assert responses
+    assert SHARED_LINKER.last_llm("missing") is None
+    emit_span({"spanId": "ignored"})

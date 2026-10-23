@@ -22,6 +22,7 @@ from protocol.decision_provider import (
 from protocol.discovery import DiscoveredAgent
 from protocol.server_app import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION, build_agent_card
 from shared.adk_fake_model import CLIENT_AGENT_NAME, FakeLlm
+from shared.adk_tracing import TracingLlm
 from shared.config import MODEL_MODE_LIVE, SampleConfig
 from shared.scenario import SCENARIO_ABORT, SCENARIO_TARGET, get_scenario
 
@@ -78,7 +79,7 @@ async def test_manual_runtime_wires_scripted_env_and_streaming(
     assert runtime.manual_provider is runtime.provider
     assert runtime.transport_name == "sse"
     values = dotenv_values(runtime.sdk_env.path)
-    assert values["A2AT_LLM_PROVIDER"] == "scripted"
+    assert values["A2AT_LLM_PROVIDER"] == "scripted_traced"
     assert values["A2AT_LLM_MODEL"] == "scripted"
     assert values["A2AT_LLM_API_KEY"] == "not-needed"
     assert values["A2AT_LANGUAGE"] == "en-US"
@@ -170,13 +171,55 @@ async def test_auto_offline_mode_scripts_the_scenario_decisions(
         agent = runtime.provider.runner.agent
         assert isinstance(agent, LlmAgent)
         model = agent.model
-        assert isinstance(model, FakeLlm)
-        client_script = next(script for script in model.scripts if script.marker == CLIENT_AGENT_NAME)
+        assert isinstance(model, TracingLlm)
+        inner = model.inner
+        assert isinstance(inner, FakeLlm)
+        client_script = next(script for script in inner.scripts if script.marker == CLIENT_AGENT_NAME)
         actions = [json.loads(turn.text or "")["action"] for turn in client_script.turns]
         assert actions == expected_actions
         assert len(actions) == len(get_scenario(scenario_name).scripted_client_decisions)
     finally:
         await runtime.aclose()
+
+
+async def test_runtime_attaches_the_trace_sink_before_building_and_clears_it_on_close(
+    offline_config: SampleConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import protocol.client_runtime as client_runtime
+    from shared.trace import Span, emit_span
+
+    async def fake_discover(**kwargs: object) -> DiscoveredAgent:
+        del kwargs
+        return _card()
+
+    async def fake_create(agent: object, client_config: ClientConfig | None = None) -> _FakeA2AClient:
+        del agent, client_config
+        return _FakeA2AClient()
+
+    monkeypatch.setattr(client_runtime, "discover_agent", fake_discover)
+    monkeypatch.setattr(client_runtime, "create_client", fake_create)
+    monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
+
+    spans: list[dict[str, object]] = []
+    runtime = await build_client_runtime(
+        offline_config,
+        "information",
+        "auto",
+        "sse",
+        env_path=tmp_path / "missing.env",
+        trace_sink=spans.append,
+    )
+    try:
+        emit_span(Span(run_id="run-1", span_id="s1", kind="llm"))
+        assert [span["spanId"] for span in spans] == ["s1"]
+    finally:
+        await runtime.aclose()
+
+    # The sink is cleared on close: later producers are no-ops.
+    emit_span(Span(run_id="run-1", span_id="s2", kind="llm"))
+    assert [span["spanId"] for span in spans] == ["s1"]
 
 
 def test_prepare_client_sdk_env_does_not_mutate_the_source(
@@ -192,7 +235,7 @@ def test_prepare_client_sdk_env_does_not_mutate_the_source(
 
     assert source.read_text(encoding="utf-8") == original
     values = dotenv_values(sdk_env.path)
-    assert values["A2AT_LLM_PROVIDER"] == "openai"
+    assert values["A2AT_LLM_PROVIDER"] == "openai_traced"
     assert values["A2AT_LLM_MODEL"] == "my-model"
     assert values["A2AT_LLM_BASE_URL"] == "http://example.test/v1"
     assert values["A2AT_LANGUAGE"] == "en-US"

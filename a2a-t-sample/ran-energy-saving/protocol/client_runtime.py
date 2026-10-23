@@ -38,11 +38,13 @@ from shared.config import (
     TRANSPORT_SSE,
     TRANSPORT_WEBHOOK,
     SampleConfig,
-    build_adk_model,
+    build_traced_adk_model,
 )
 from shared.models import NegotiationProposeView
 from shared.scenario import Scenario, get_scenario, resolve_user_request
 from shared.scripted_llm import register_scripted_provider
+from shared.trace import set_global_sink, trace_scope
+from shared.traced_llm import register_traced_providers, sdk_provider_name
 from shared.webhook_receiver import WebhookReceiver
 
 from protocol.client_flow import (
@@ -129,13 +131,16 @@ def prepare_client_sdk_env(
     Returns:
         The generated file and the temporary directory owning it.
     """
+    # The generated file names a traced provider, so the matching registration is part of the
+    # contract of this helper (a caller may build the facade right after it, as the tests do).
+    register_traced_providers()
     source_path = env_path or Path.cwd() / ".env"
     values = _env_values(source_path)
     values["A2AT_LANGUAGE"] = config.language
     if config.model_mode == MODEL_MODE_OFFLINE:
         values.update(
             {
-                "A2AT_LLM_PROVIDER": "scripted",
+                "A2AT_LLM_PROVIDER": sdk_provider_name(offline=True),
                 "A2AT_LLM_MODEL": "scripted",
                 "A2AT_LLM_API_KEY": "not-needed",
                 "A2AT_LLM_BASE_URL": values.get("A2AT_LLM_BASE_URL") or config.adk_model_api_base,
@@ -144,7 +149,9 @@ def prepare_client_sdk_env(
     else:
         values.update(
             {
-                "A2AT_LLM_PROVIDER": values.get("A2AT_LLM_PROVIDER") or "openai",
+                # The traced provider is a drop-in replacement of the SDK OpenAI provider; the Run
+                # Explorer must see every structured call, so the source value never wins.
+                "A2AT_LLM_PROVIDER": sdk_provider_name(offline=False),
                 "A2AT_LLM_MODEL": values.get("A2AT_LLM_MODEL") or _sdk_model_name(config.adk_model_name),
                 "A2AT_LLM_API_KEY": values.get("A2AT_LLM_API_KEY") or config.adk_model_api_key,
                 "A2AT_LLM_BASE_URL": values.get("A2AT_LLM_BASE_URL") or config.adk_model_api_base,
@@ -185,8 +192,9 @@ def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> N
             # client decision script; no server script can match this agent's marker.
             model = build_fake_model((build_client_script(scenario.scripted_client_decisions),))
         else:
-            model = build_adk_model(config)
-        return AdkDecisionProvider(model=model, offline=config.is_offline)
+            model = None
+        # The traced wrapper keeps the ADK decision turns visible in the Run Explorer.
+        return AdkDecisionProvider(model=build_traced_adk_model(config, model=model), offline=config.is_offline)
     raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
 
 
@@ -222,6 +230,7 @@ class ClientRuntime:
     _httpx_client: httpx.AsyncClient
     _webhook_receiver: WebhookReceiver | None = None
     _closed: bool = False
+    trace_sink: Callable[[dict[str, object]], None] | None = None
 
     async def run(
         self,
@@ -230,32 +239,50 @@ class ClientRuntime:
         on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
         on_decision_made: DecisionMadeCallback | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
+        run_id: str | None = None,
     ) -> ClientFlowResult:
         """Run the full client flow of the configured scenario.
+
+        The optional trace sink is attached to the process-wide producer hook for the duration of
+        the run, and the run id is put into the trace context so the client spans, the LLM/tool
+        spans and the ``sampleRunId`` message metadata all agree.
 
         Args:
             event_sink: Optional live observer of the normalized events (Web UI timeline).
             on_decision_requested: Optional observer invoked before asking the provider.
             on_decision_made: Optional observer invoked immediately after the provider returns,
                 before the response is sent.
-            trace_sink: Optional observer of synthetic Run Explorer spans.
+            trace_sink: Optional observer of synthetic Run Explorer spans (LLM/tool producers
+                included); defaults to the sink the runtime was built with.
+            run_id: Optional Run Explorer run id (the Web UI and the CLI pass theirs).
 
         Returns:
             The collected events, decisions and terminal state.
         """
         if self._closed:
             raise ClientRuntimeError("The client runtime is already closed.")
-        return await run_client_flow(
-            prompt_client=self.prompt_client,
-            transport=self.transport,
-            user_request=resolve_user_request(self.scenario, self.config.language),
-            provider=self.provider,
-            language=self.config.language,
-            event_sink=event_sink,
-            on_decision_requested=on_decision_requested,
-            on_decision_made=on_decision_made,
-            trace_sink=trace_sink,
-        )
+        sink = trace_sink if trace_sink is not None else self.trace_sink
+        # A run-level sink is restored to the construction-time sink after the run; the
+        # construction-time sink stays attached until ``aclose``.
+        temporary_sink = trace_sink is not None and trace_sink is not self.trace_sink
+        if sink is not None:
+            set_global_sink(sink)
+        try:
+            with trace_scope(run_id=run_id, role="client"):
+                return await run_client_flow(
+                    prompt_client=self.prompt_client,
+                    transport=self.transport,
+                    user_request=resolve_user_request(self.scenario, self.config.language),
+                    provider=self.provider,
+                    language=self.config.language,
+                    event_sink=event_sink,
+                    on_decision_requested=on_decision_requested,
+                    on_decision_made=on_decision_made,
+                    trace_sink=sink,
+                )
+        finally:
+            if temporary_sink:
+                set_global_sink(self.trace_sink)
 
     async def aclose(self) -> None:
         """Stop the webhook receiver, close the HTTP clients and remove the temporary SDK env."""
@@ -268,6 +295,8 @@ class ClientRuntime:
         if callable(close_client):
             await close_client()
         await self._httpx_client.aclose()
+        if self.trace_sink is not None:
+            set_global_sink(None)
         shutil.rmtree(self.sdk_env.directory, ignore_errors=True)
 
 
@@ -279,6 +308,7 @@ async def build_client_runtime(
     *,
     env_path: Path | None = None,
     log_sink: Callable[[str], None] | None = None,
+    trace_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -289,6 +319,8 @@ async def build_client_runtime(
         transport: event transport (``sse`` / ``webhook``).
         env_path: source ``.env`` used for discovery and for the per-run SDK ``.env``.
         log_sink: optional log sink of the transports and the webhook receiver.
+        trace_sink: optional Run Explorer sink attached **before** the SDK and ADK clients are
+            built, so their LLM/tool producers are traced from the first call.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -304,8 +336,11 @@ async def build_client_runtime(
         raise ClientRuntimeError(f"Unsupported transport: {transport}; expected one of {SUPPORTED_TRANSPORTS}")
 
     scenario_spec = get_scenario(scenario)
+    register_traced_providers()
     if config.is_offline:
         register_scripted_provider()
+    if trace_sink is not None:
+        set_global_sink(trace_sink)
     sdk_env = prepare_client_sdk_env(config, env_path)
     prompt_client = A2ATClient(env_path=sdk_env.path, logger=None)
 
@@ -371,4 +406,5 @@ async def build_client_runtime(
         manual_provider=provider if isinstance(provider, ManualDecisionProvider) else None,
         _httpx_client=httpx_client,
         _webhook_receiver=receiver,
+        trace_sink=trace_sink,
     )

@@ -22,11 +22,15 @@ from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
+from google.adk.apps import App
 from google.adk.events import Event as AdkEvent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+from shared.adk_tracing import TracePlugin
+from shared.config import build_traced_adk_model
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import Scenario, get_scenario
+from shared.trace import trace_scope
 
 #: ADK application name of the client decision agent.
 CLIENT_APP_NAME = "ran_energy_client"
@@ -113,8 +117,11 @@ class AdkDecisionProvider:
         if agent is None:
             from agents.client_agent.agent import build_client_agent
 
-            agent = build_client_agent(model)
-        self._runner = InMemoryRunner(agent=agent, app_name=app_name)
+            agent = build_client_agent(build_traced_adk_model(model=model))
+        # The tool plugin is attached through the ``App`` (the ``plugins=`` runner argument is
+        # deprecated); it records one ``tool`` span per client-agent tool call.
+        app = App(name=app_name, root_agent=agent, plugins=[TracePlugin()])
+        self._runner = InMemoryRunner(app=app, app_name=app_name)
         self._user_id = user_id
         self._fallback = fallback_decision or (OFFLINE_FALLBACK_DECISION if offline else None)
         self._sessions: set[str] = set()
@@ -129,7 +136,24 @@ class AdkDecisionProvider:
         propose: NegotiationProposeView,
         session: NegotiationContext,
     ) -> NegotiationDecision:
-        """Run the ADK agent over one proposal and return its structured decision."""
+        """Run the ADK agent over one proposal and return its structured decision.
+
+        The run is executed under ``trace_scope`` (``client`` role, negotiation context, decision
+        agent stage) so its LLM/tool spans are tagged with the negotiation they belong to.
+        """
+        with trace_scope(
+            role="client",
+            context_id=propose.context_id or propose.negotiation_id,
+            stage="client_decision_agent",
+        ):
+            return await self._respond(propose, session)
+
+    async def _respond(
+        self,
+        propose: NegotiationProposeView,
+        session: NegotiationContext,
+    ) -> NegotiationDecision:
+        """Run the decision agent and parse its structured decision."""
         session_id = self._session_id(propose.negotiation_id)
         if session_id not in self._sessions:
             await self._runner.session_service.create_session(

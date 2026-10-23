@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -38,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import TextIO
 
@@ -112,7 +114,7 @@ def _ui_port_default(values: dict[str, str]) -> int:
     return _env_int(values, "A2AT_SAMPLE_UI_PORT", DEFAULT_UI_PORT)
 
 
-def _child_env(language: str) -> dict[str, str]:
+def _child_env(language: str, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Return the environment of the child processes (sample root on ``PYTHONPATH``)."""
     env = os.environ.copy()
     existing = env.get("PYTHONPATH", "")
@@ -121,7 +123,53 @@ def _child_env(language: str) -> dict[str, str]:
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
     env["A2AT_LANGUAGE"] = language
+    if extra:
+        env.update(extra)
     return env
+
+
+def _server_trace_env(*, ui: bool, ui_port: int) -> dict[str, str]:
+    """Return the Run Explorer environment of the server process.
+
+    ``--ui`` points the server at the Web UI trace endpoint with a per-run local token; the CLI
+    points it at ``runs/<runId>/server-trace.jsonl`` under the sample root.
+    """
+    if ui:
+        return {
+            "A2AT_SAMPLE_TRACE_URL": f"http://127.0.0.1:{ui_port}",
+            "A2AT_SAMPLE_TRACE_TOKEN": secrets.token_hex(16),
+        }
+    return {"A2AT_SAMPLE_TRACE_DIR": str(CASE_DIR / "runs")}
+
+
+def _trace_summary(spans: list[dict[str, object]]) -> str:
+    """Summarize the LLM/tool spans of one CLI client run (counts and token usage)."""
+    llm = [span for span in spans if span.get("kind") == "llm"]
+    tools = [span for span in spans if span.get("kind") == "tool"]
+    prompt = 0
+    completion = 0
+    total = 0
+    measured = False
+    for span in llm:
+        tokens = span.get("tokens")
+        if not isinstance(tokens, dict):
+            continue
+        prompt_value = tokens.get("prompt")
+        completion_value = tokens.get("completion")
+        total_value = tokens.get("total")
+        if isinstance(prompt_value, int):
+            prompt += prompt_value
+        if isinstance(completion_value, int):
+            completion += completion_value
+        if isinstance(total_value, int):
+            total += total_value
+            measured = True
+    usage = (
+        f"prompt={prompt} completion={completion} total={total}"
+        if measured
+        else "n/a (scripted)"
+    )
+    return f"llm={len(llm)} tool={len(tools)} tokens={usage}"
 
 
 def _write_run_env(
@@ -338,7 +386,11 @@ async def _run_client_foreground(
         )
         print(f"[client] decision-made action={decision.action} round={getattr(session, 'round', '?')}")
 
+    run_id = uuid.uuid4().hex
+    trace_spans: list[dict[str, object]] = []
+
     def trace_sink(span: dict[str, object]) -> None:
+        trace_spans.append(span)
         transcript.record_trace(span)
 
     runtime = None
@@ -356,6 +408,7 @@ async def _run_client_foreground(
             on_decision_requested=on_decision_requested,
             on_decision_made=on_decision_made,
             trace_sink=trace_sink,
+            run_id=run_id,
         )
         for index, decision in enumerate(result.decisions):
             if index < len(transcript.decisions):
@@ -364,6 +417,9 @@ async def _run_client_foreground(
             transcript.record_decision(decision, propose=propose)
         transcript.record_final(result)
         print(f"[client] final_state={result.final_state} task_id={result.task_id or '-'}")
+        print(f"[client] trace: {_trace_summary(trace_spans)}")
+        print(f"[client] run id: {run_id}")
+        print(f"[client] server trace: {CASE_DIR / 'runs' / run_id / 'server-trace.jsonl'}")
         if result.report:
             print(f"[client] report={json.dumps(result.report, ensure_ascii=False)}")
     except Exception as exc:  # noqa: BLE001 - the launcher reports the failure and exits non-zero
@@ -401,10 +457,12 @@ def _run_ui(
         default_mode=mode,
         default_transport=transport,
     )
+    trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(
         f"[run_demo] Web UI on http://{host}:{ui_port} "
         f"(language={config.language}, model_mode={config.model_label}, "
-        f"defaults: scenario={scenario}, mode={mode}, transport={transport})"
+        f"defaults: scenario={scenario}, mode={mode}, transport={transport}, "
+        f"server trace ingestion: {'enabled' if trace_enabled else 'disabled (no local token)'})"
     )
     try:
         uvicorn.run(app, host=host, port=ui_port, log_level="info")
@@ -556,7 +614,12 @@ def main() -> int:
         follower.start()
         followers.append(follower)
 
-    def start(name: str, module: str, port: int) -> str | None:
+    def start(
+        name: str,
+        module: str,
+        port: int,
+        extra_env: dict[str, str] | None = None,
+    ) -> str | None:
         """Return ``started``/``reused``, or ``None`` on failure."""
         if _port_open(port):
             if not existing:
@@ -574,7 +637,7 @@ def main() -> int:
             proc = subprocess.Popen(
                 [python, "-m", module],
                 cwd=str(RUN_DIR),
-                env=_child_env(args.language),
+                env=_child_env(args.language, extra_env),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -584,7 +647,7 @@ def main() -> int:
             proc = subprocess.Popen(
                 [python, "-m", module],
                 cwd=str(RUN_DIR),
-                env=_child_env(args.language),
+                env=_child_env(args.language, extra_env),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -612,7 +675,12 @@ def main() -> int:
     try:
         if start("registry", REGISTRY_MODULE, registry_port) is None:
             return 1
-        if start("server", SERVER_MODULE, server_port) is None:
+        server_trace_env = _server_trace_env(ui=args.ui, ui_port=args.ui_port)
+        if args.ui:
+            # The UI process checks the same token the server sends; the URL is only read by the
+            # server process, but keeping both keys together documents the paired configuration.
+            os.environ["A2AT_SAMPLE_TRACE_TOKEN"] = server_trace_env["A2AT_SAMPLE_TRACE_TOKEN"]
+        if start("server", SERVER_MODULE, server_port, server_trace_env) is None:
             return 1
         _save_pids(list(dict.fromkeys(managed)))
         persisted = True

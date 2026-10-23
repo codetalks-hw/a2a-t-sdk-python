@@ -422,7 +422,7 @@ def test_live_sdk_env_fills_empty_values_without_mutating_the_source(
 
     values = dotenv_values(sdk_env_path)
     assert sdk_env_path != source
-    assert values["A2AT_LLM_PROVIDER"] == "openai"
+    assert values["A2AT_LLM_PROVIDER"] == "openai_traced"
     assert values["A2AT_LLM_MODEL"] == "mass/volcengine/deepseek-v4.1-flash"
     assert values["A2AT_LLM_API_KEY"] == "not-needed"
     assert values["A2AT_LLM_BASE_URL"] == "http://127.0.0.1:31943/v1"

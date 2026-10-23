@@ -73,6 +73,7 @@ from shared.trace import (
     TraceRecorder,
     current_trace,
     infer_decision_phase,
+    trace_stage,
 )
 from shared.webhook_receiver import WebhookReceiver
 
@@ -80,6 +81,7 @@ from protocol.decision_provider import NegotiationDecisionProvider
 from protocol.messages import (
     END_MESSAGE_TEXT,
     SAMPLE_PROPOSAL_METADATA_KEY,
+    SAMPLE_RUN_ID_METADATA_KEY,
     TASK_TEMPLATE_URI,
     is_negotiation_message,
     metadata_to_dict,
@@ -504,7 +506,8 @@ async def run_client_flow(
             },
         )
 
-    prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
+    with trace_stage("task_t_slot_extraction"):
+        prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
     emit_trace(
         "task_prompt_rendered",
@@ -516,13 +519,15 @@ async def run_client_flow(
             "length": len(prompt_text),
         },
     )
-    initial_request = _build_message_request(
-        metadata={
-            prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
-            TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
-        },
-        label=label,
-    )
+    initial_metadata: dict[str, object] = {
+        prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
+        TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
+    }
+    run_id = current_trace().run_id
+    if run_id:
+        # Sample-only correlation of the server trace with this client run (design §4).
+        initial_metadata[SAMPLE_RUN_ID_METADATA_KEY] = run_id
+    initial_request = _build_message_request(metadata=initial_metadata, label=label)
     initial_context = _call_context((TASK_T_EXTENSION_URI,))
 
     result = ClientFlowResult()
@@ -748,16 +753,18 @@ def _build_accept_request(
     filled = accept_filled_params(kind.value, language)
     if decision.filled_params:
         filled.update(decision.filled_params)
-    task_content = prompt_client.generate_task_prompt_from_data_with_schema(
-        filled, TASK_PARAM_SCHEMA, task_template_uri
-    )
+    with trace_stage("task_t_slot_extraction_refill"):
+        task_content = prompt_client.generate_task_prompt_from_data_with_schema(
+            filled, TASK_PARAM_SCHEMA, task_template_uri
+        )
     task_text = _require_prompt_text(task_content, "the refilled Task-T prompt")
 
     accept_text = _accept_text(kind, filled, decision, language)
     accept_context = session.with_performative(NegotiationPerformative.ACCEPT)
-    content = prompt_client.generate_negotiation_accept_prompt_from_text(
-        accept_text, accept_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
-    )
+    with trace_stage("negotiation_accept_extraction"):
+        content = prompt_client.generate_negotiation_accept_prompt_from_text(
+            accept_text, accept_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
+        )
     metadata = {task_content.extension_uri or TASK_T_EXTENSION_URI: task_text}
     return _negotiation_request(
         prompt_client=prompt_client,
@@ -783,9 +790,10 @@ def _build_counter_request(
     if not text.strip():
         raise ClientFlowError("A counter decision carries neither a counter proposal nor a rationale.")
     propose_context = session.with_performative(NegotiationPerformative.PROPOSE)
-    content = prompt_client.generate_negotiation_propose_prompt_from_text(
-        text, propose_context, _PROPOSE_TEMPLATE_URI_BY_KIND[kind.value]
-    )
+    with trace_stage("negotiation_propose_extraction"):
+        content = prompt_client.generate_negotiation_propose_prompt_from_text(
+            text, propose_context, _PROPOSE_TEMPLATE_URI_BY_KIND[kind.value]
+        )
     extra: dict[str, object] = {}
     if decision.counter_params:
         extra[SAMPLE_PROPOSAL_METADATA_KEY] = dict(decision.counter_params)
@@ -814,14 +822,16 @@ def _build_terminal_request(
     terminal_context = session.with_performative(performative)
     if performative is NegotiationPerformative.REJECT:
         text = _reject_text(kind, propose_content, decision)
-        content = prompt_client.generate_negotiation_reject_prompt_from_text(
-            text, terminal_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
-        )
+        with trace_stage("negotiation_reject_extraction"):
+            content = prompt_client.generate_negotiation_reject_prompt_from_text(
+                text, terminal_context, _ACCEPT_REJECT_TEMPLATE_URI_BY_KIND[kind.value]
+            )
     else:
         text = decision.rationale or "The client aborted the negotiation."
-        content = prompt_client.generate_negotiation_abort_prompt_from_text(
-            text, terminal_context, NEGOTIATION_ABORT_URI
-        )
+        with trace_stage("negotiation_abort_extraction"):
+            content = prompt_client.generate_negotiation_abort_prompt_from_text(
+                text, terminal_context, NEGOTIATION_ABORT_URI
+            )
     return _negotiation_request(
         prompt_client=prompt_client,
         content=content,

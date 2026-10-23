@@ -19,6 +19,7 @@ Two ADK integration seams are configured explicitly:
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Final
 
@@ -41,15 +42,19 @@ from google.adk.a2a.converters.request_converter import (
 from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
 from google.adk.a2a.executor.config import A2aAgentExecutorConfig, ExecuteInterceptor
 from google.adk.a2a.executor.executor_context import ExecutorContext
+from google.adk.apps import App
 from google.adk.events.event import Event as AdkEvent
 from google.adk.models.base_llm import BaseLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
-from shared.config import SampleConfig, build_adk_model, load_config
+from shared.adk_tracing import TracePlugin
+from shared.config import SampleConfig, build_traced_adk_model, load_config
+from shared.trace import trace_scope
 
 from protocol.messages import (
     SAMPLE_PROPOSAL_METADATA_KEY,
+    SAMPLE_RUN_ID_METADATA_KEY,
     TASK_TEMPLATE_URI,
     metadata_to_dict,
     negotiation_context_metadata,
@@ -223,6 +228,11 @@ class NegotiationAgentExecutor(AgentExecutor):
         """
         self._gate = gate
         self._inner = inner
+        # Run Explorer: the client sends its run id once, on the initial Task-T message; the
+        # follow-up accept/reject/abort messages of the same context reuse it so their spans are
+        # still routed to the same UI run.
+        self._run_ids: dict[str, str] = {}
+        self._run_ids_lock = threading.Lock()
 
     @property
     def gate(self) -> NegotiationGate:
@@ -235,19 +245,42 @@ class NegotiationAgentExecutor(AgentExecutor):
         return self._inner
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Run the gate, then short-circuit or delegate to the inner executor."""
-        outcome = await self._gate.handle(context)
-        if outcome.short_circuit:
-            if outcome.terminal_task is not None:
-                await event_queue.enqueue_event(outcome.terminal_task)
+        """Run the gate, then short-circuit or delegate to the inner executor.
+
+        The whole invocation runs under one ``trace_scope`` (run id, ``server`` role, context id,
+        execution stage), so every SDK/ADK span produced while handling the request is tagged with
+        the client run it belongs to.
+        """
+        with trace_scope(
+            run_id=self._resolve_run_id(context),
+            role="server",
+            context_id=context.context_id,
+            stage="server_execution_agent",
+        ):
+            outcome = await self._gate.handle(context)
+            if outcome.short_circuit:
+                if outcome.terminal_task is not None:
+                    await event_queue.enqueue_event(outcome.terminal_task)
+                    return
+                if outcome.message is None:
+                    raise ValueError("The gate short-circuited without a message or a terminal task")
+                await event_queue.enqueue_event(outcome.message)
                 return
-            if outcome.message is None:
-                raise ValueError("The gate short-circuited without a message or a terminal task")
-            await event_queue.enqueue_event(outcome.message)
-            return
-        if outcome.task_request is None:
-            raise ValueError("The gate approved execution without a request context")
-        await self._inner.execute(outcome.task_request, event_queue)
+            if outcome.task_request is None:
+                raise ValueError("The gate approved execution without a request context")
+            await self._inner.execute(outcome.task_request, event_queue)
+
+    def _resolve_run_id(self, context: RequestContext) -> str | None:
+        """Return the client run id advertised on the initial message (sticky per context)."""
+        key = context.context_id or context.task_id or ""
+        metadata = metadata_to_dict(context.message.metadata) if context.message is not None else {}
+        advertised = metadata.get(SAMPLE_RUN_ID_METADATA_KEY)
+        if isinstance(advertised, str) and advertised.strip():
+            with self._run_ids_lock:
+                self._run_ids[key] = advertised.strip()
+            return advertised.strip()
+        with self._run_ids_lock:
+            return self._run_ids.get(key)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Delegate cancellation to the inner executor."""
@@ -269,10 +302,11 @@ def build_negotiation_executor(
             :func:`shared.config.build_adk_model`.
     """
     resolved_config = config or load_config()
-    resolved_model = model if model is not None else build_adk_model(resolved_config)
+    resolved_model = build_traced_adk_model(resolved_config, model=model)
+    # The plugin is attached through the ``App`` (the ``plugins=`` runner argument is deprecated).
+    app = App(name=SERVER_APP_NAME, root_agent=build_server_agent(resolved_model), plugins=[TracePlugin()])
     runner = Runner(
-        app_name=SERVER_APP_NAME,
-        agent=build_server_agent(resolved_model),
+        app=app,
         session_service=InMemorySessionService(),
     )
     interceptor = NegotiationArtifactInterceptor(task_template_uri=TASK_TEMPLATE_URI)

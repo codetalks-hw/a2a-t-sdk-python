@@ -1,0 +1,324 @@
+"""Traced SDK ``LLMClient`` providers of the RAN energy-saving sample (Run Explorer design §5.1).
+
+The A2A-T SDK resolves its provider through ``LLMClientFactory`` and calls ``structured`` for every
+LLM-assisted step (Task-T extraction, validations, Negotiation-T extraction). This module registers
+two drop-in providers:
+
+* :class:`TracedOpenAIClient` — live mode, captures the raw OpenAI response before the JSON
+  validation of :class:`~a2a_t.llm.providers.openai.OpenAIClient`;
+* :class:`TracedScriptedClient` — offline mode, captures the deterministic canned response.
+
+Both share one :class:`_TracedStructuredMixin` that emits one ``llm`` span per call (request,
+raw content, parsed JSON, usage, latency, error) and **never changes behavior**: the wrapped
+response and every exception are returned/raised unchanged, and a failing trace is swallowed.
+
+The stage of a call comes from :func:`~shared.trace.trace_stage` (preferred), then from the routed
+scripted stage, then from :func:`~shared.scripted_llm.route_structured_call`. Offline calls report
+``n/a (scripted)`` tokens instead of fabricating a zero usage.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from typing import Any, Final
+
+from a2a_t.llm.factory import LLMClientFactory
+from a2a_t.llm.models import LLMResponse
+from a2a_t.llm.providers.openai import OpenAIClient
+
+from shared.scripted_llm import SCRIPTED_PROVIDER_NAME, ScriptedLLMClient, route_structured_call
+from shared.trace import (
+    current_trace,
+    elapsed_ms,
+    phase_for_stage,
+    record_span,
+)
+
+#: Provider name of the traced OpenAI client (live mode).
+TRACED_OPENAI_PROVIDER: Final[str] = "openai_traced"
+
+#: Provider name of the traced scripted client (offline mode).
+TRACED_SCRIPTED_PROVIDER: Final[str] = "scripted_traced"
+
+#: Label reported instead of a fabricated token count in offline mode.
+SCRIPTED_TOKENS_LABEL: Final[str] = "n/a (scripted)"
+
+#: Per-call raw-response capture of :class:`TracedOpenAIClient` (no state on the client instance).
+_RAW_RESPONSE: ContextVar[dict[str, object] | None] = ContextVar("a2at_sample_llm_raw", default=None)
+
+
+def sdk_provider_name(*, offline: bool) -> str:
+    """Return the SDK provider name the sample writes into its temporary ``.env``."""
+    return TRACED_SCRIPTED_PROVIDER if offline else TRACED_OPENAI_PROVIDER
+
+
+def register_traced_providers() -> None:
+    """Register the traced providers with the SDK factory (idempotent)."""
+    available = set(LLMClientFactory.available_providers())
+    if TRACED_OPENAI_PROVIDER not in available:
+        LLMClientFactory.register(TRACED_OPENAI_PROVIDER, TracedOpenAIClient)
+    if TRACED_SCRIPTED_PROVIDER not in available:
+        LLMClientFactory.register(TRACED_SCRIPTED_PROVIDER, TracedScriptedClient)
+
+
+def is_traced_provider_registered(provider: str) -> bool:
+    """Return whether one traced provider name is registered."""
+    return provider in LLMClientFactory.available_providers()
+
+
+def _now_iso() -> str:
+    """Return the current UTC time in ISO 8601 form."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _metadata_stage(response: LLMResponse | None) -> str | None:
+    """Return the ``scripted_stage`` of one scripted response, ``None`` otherwise."""
+    if response is None:
+        return None
+    value = response.metadata.get("scripted_stage")
+    return value if isinstance(value, str) and value else None
+
+
+def _infer_stage(messages: list[dict[str, str]], json_schema: dict[str, Any]) -> str | None:
+    """Infer the stage of one call from its output schema, ``None`` when unroutable."""
+    try:
+        return route_structured_call(messages, json_schema)
+    except ValueError:
+        return None
+
+
+def _parse_json(content: str | None) -> tuple[object | None, str | None]:
+    """Return the parsed JSON object of one raw content and its parse error, if any."""
+    if not content:
+        return None, None
+    try:
+        return json.loads(content), None
+    except (TypeError, ValueError) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _token_map(response: LLMResponse) -> dict[str, object]:
+    """Render the token usage of one response; the scripted provider reports ``n/a``."""
+    if response.model == SCRIPTED_PROVIDER_NAME or "scripted_stage" in response.metadata:
+        return {
+            "prompt": None,
+            "completion": None,
+            "total": None,
+            "estimated": True,
+            "scripted": True,
+            "label": SCRIPTED_TOKENS_LABEL,
+        }
+    usage = response.usage or {}
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    total = usage.get("total_tokens")
+    if total is None and isinstance(prompt, int) and isinstance(completion, int):
+        total = prompt + completion
+    return {
+        "prompt": prompt,
+        "completion": completion,
+        "total": total,
+        "estimated": False,
+    }
+
+
+def _llm_span_prefix(provider_label: str) -> str:
+    """Return the producer id namespace of one SDK LLM span (role-scoped, cross-process safe)."""
+    return f"llm_{current_trace().role or 'client'}_{provider_label}"
+
+
+def _request_detail(
+    messages: list[dict[str, str]],
+    json_schema: dict[str, Any],
+    temperature: float | None,
+    max_tokens: int | None,
+) -> dict[str, object]:
+    """Render the request side of one structured call."""
+    return {
+        "messages": [dict(message) for message in messages],
+        "jsonSchema": json_schema,
+        "temperature": temperature,
+        "maxTokens": max_tokens,
+        "messageCount": len(messages),
+    }
+
+
+class _TracedStructuredMixin:
+    """``structured`` wrapper shared by the traced providers.
+
+    Subclasses implement :meth:`_call_structured` by delegating to their provider implementation
+    explicitly (no ``super()`` chain through this mixin) and declare :attr:`_provider_label`.
+    """
+
+    _provider_label: str = ""
+
+    def _call_structured(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any],
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> LLMResponse:
+        """Call the wrapped provider implementation (implemented by the subclasses)."""
+        raise NotImplementedError
+
+    def structured(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Call the wrapped provider and emit one ``llm`` span; behavior is never changed."""
+        started = time.perf_counter()
+        started_at = _now_iso()
+        capture: dict[str, object] = {}
+        token = _RAW_RESPONSE.set(capture)
+        try:
+            response = self._call_structured(
+                messages=messages,
+                json_schema=json_schema,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            _RAW_RESPONSE.reset(token)
+            stage = current_trace().stage or _infer_stage(messages, json_schema)
+            record_span(
+                kind="llm",
+                phase=phase_for_stage(stage),
+                title=f"LLM call · {stage or 'structured'}",
+                purpose=f"Structured LLM call of stage {stage or 'unknown'}",
+                prefix=_llm_span_prefix(self._provider_label),
+                stage=stage,
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
+                detail={
+                    "provider": self._provider_label,
+                    "request": _request_detail(messages, json_schema, temperature, max_tokens),
+                    "response": dict(capture) or None,
+                },
+                started_at=started_at,
+                ended_at=_now_iso(),
+                duration_ms=elapsed_ms(started),
+            )
+            raise
+        _RAW_RESPONSE.reset(token)
+
+        stage = current_trace().stage or _metadata_stage(response) or _infer_stage(messages, json_schema)
+        raw_content = capture.get("rawContent")
+        if not isinstance(raw_content, str):
+            raw_content = response.content
+        parsed, parse_error = _parse_json(raw_content)
+        response_detail: dict[str, object] = {
+            "rawContent": raw_content,
+            "parsed": parsed,
+            "parseError": parse_error,
+            "model": response.model,
+            "usage": dict(response.usage or {}),
+        }
+        if capture.get("responseId") is not None:
+            response_detail["responseId"] = capture["responseId"]
+        if capture.get("finishReason") is not None:
+            response_detail["finishReason"] = capture["finishReason"]
+        record_span(
+            kind="llm",
+            phase=phase_for_stage(stage),
+            title=f"LLM call · {stage or 'structured'}",
+            purpose=f"Structured LLM call of stage {stage or 'unknown'}",
+            prefix=_llm_span_prefix(self._provider_label),
+            stage=stage,
+            status="ok",
+            model=response.model,
+            tokens=_token_map(response),
+            detail={
+                "provider": self._provider_label,
+                "request": _request_detail(messages, json_schema, temperature, max_tokens),
+                "response": response_detail,
+            },
+            started_at=started_at,
+            ended_at=_now_iso(),
+            duration_ms=elapsed_ms(started),
+        )
+        return response
+
+
+class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
+    """Live ``OpenAIClient`` that captures the raw response before JSON validation."""
+
+    _provider_label = TRACED_OPENAI_PROVIDER
+
+    def _call_structured(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any],
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> LLMResponse:
+        """Delegate to the SDK OpenAI implementation."""
+        return OpenAIClient.structured(
+            self,
+            messages=messages,
+            json_schema=json_schema,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def _parse_response(self, response: Any) -> LLMResponse:
+        """Stash the raw response content before the SDK validates its JSON object."""
+        capture = _RAW_RESPONSE.get()
+        if capture is not None:
+            try:
+                capture["rawContent"] = self._extract_message_text(response)
+            except Exception as exc:  # noqa: BLE001 - capture must never break the call
+                capture["rawTextError"] = str(exc)
+            response_id = getattr(response, "id", None)
+            if response_id is not None:
+                capture["responseId"] = str(response_id)
+            choices = getattr(response, "choices", None) or []
+            if choices:
+                finish_reason = getattr(choices[0], "finish_reason", None)
+                if finish_reason is not None:
+                    capture["finishReason"] = str(finish_reason)
+        return OpenAIClient._parse_response(self, response)
+
+
+class TracedScriptedClient(_TracedStructuredMixin, ScriptedLLMClient):
+    """Offline ``ScriptedLLMClient`` that captures the canned response it served."""
+
+    _provider_label = TRACED_SCRIPTED_PROVIDER
+
+    def _call_structured(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any],
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> LLMResponse:
+        """Delegate to the deterministic scripted implementation."""
+        return ScriptedLLMClient.structured(
+            self,
+            messages=messages,
+            json_schema=json_schema,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+
+__all__ = [
+    "SCRIPTED_TOKENS_LABEL",
+    "TRACED_OPENAI_PROVIDER",
+    "TRACED_SCRIPTED_PROVIDER",
+    "TracedOpenAIClient",
+    "TracedScriptedClient",
+    "is_traced_provider_registered",
+    "register_traced_providers",
+    "sdk_provider_name",
+]

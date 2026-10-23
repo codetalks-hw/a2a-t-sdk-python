@@ -28,6 +28,16 @@ from web.app import create_app
 
 CONTEXT_ID = "ctx-web"
 
+#: Local trace token configured for every app instance of this module (design §4).
+TRACE_TOKEN = "test-trace-token"
+
+
+@pytest.fixture(autouse=True)
+def trace_token(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Configure the local token the trace ingestion endpoint requires."""
+    monkeypatch.setenv("A2AT_SAMPLE_TRACE_TOKEN", TRACE_TOKEN)
+    return TRACE_TOKEN
+
 
 def _propose_view() -> NegotiationProposeView:
     return NegotiationProposeView(
@@ -123,6 +133,7 @@ class FakeRuntime:
         self.manual_provider = ManualDecisionProvider(timeout_seconds=5.0) if manual else None
         self.fail = fail
         self.closed = False
+        self.run_id: str | None = None
 
     async def run(
         self,
@@ -134,7 +145,9 @@ class FakeRuntime:
         ]
         | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
+        run_id: str | None = None,
     ) -> ClientFlowResult:
+        self.run_id = run_id
         if trace_sink is not None:
             trace_sink(
                 _trace_span(
@@ -584,7 +597,11 @@ async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -
         "status": "ok",
         "detail": {"model": "fake-model"},
     }
-    accepted = await client.post(f"/api/runs/{run_id}/trace", json=[remote])
+    accepted = await client.post(
+        f"/api/runs/{run_id}/trace",
+        json=[remote],
+        headers={"x-a2at-trace-token": TRACE_TOKEN},
+    )
     assert accepted.status_code == 202
     assert accepted.json() == {"accepted": 1, "runId": run_id}
 
@@ -605,9 +622,30 @@ async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -
     wrapped = await client.post(
         f"/api/runs/{run_id}/trace",
         json={"spans": [{"spanId": "server-span-2", "kind": "tool", "phase": "execution"}]},
+        headers={"x-a2at-trace-token": TRACE_TOKEN},
     )
     assert wrapped.status_code == 202
     assert (await client.get(f"/api/runs/{run_id}/spans/server-span-2")).status_code == 200
+
+    # A retried batch is deduplicated by the original span id: no new row, no new SSE frame.
+    repeat = await client.post(
+        f"/api/runs/{run_id}/trace",
+        json=[remote],
+        headers={"x-a2at-trace-token": TRACE_TOKEN},
+    )
+    assert repeat.status_code == 202
+    assert repeat.json() == {"accepted": 0, "runId": run_id, "deduplicated": 1}
+    replay_after = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    assert (
+        len(
+            [
+                payload
+                for payload in replay_after
+                if payload["type"] == "trace" and payload["event"]["spanId"] == "server-span-1"
+            ]
+        )
+        == 1
+    )
 
 
 async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.AsyncClient) -> None:
@@ -618,14 +656,50 @@ async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.Async
     await _wait_status(client, run_id, lambda data: data["status"] == "finished")
 
     assert (await client.post("/api/runs/missing/trace", json=[])).status_code == 404
-    assert (await client.post(f"/api/runs/{run_id}/trace", json=42)).status_code == 400
-    assert (await client.post(f"/api/runs/{run_id}/trace", json=[1, 2])).status_code == 400
+    trace_headers = {"x-a2at-trace-token": TRACE_TOKEN}
+    assert (await client.post(f"/api/runs/{run_id}/trace", json=42, headers=trace_headers)).status_code == 400
+    assert (await client.post(f"/api/runs/{run_id}/trace", json=[1, 2], headers=trace_headers)).status_code == 400
     malformed = await client.post(
         f"/api/runs/{run_id}/trace",
         content=b"not-json",
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", "x-a2at-trace-token": TRACE_TOKEN},
     )
     assert malformed.status_code == 400
+
+    assert (
+        await client.post(
+            f"/api/runs/{run_id}/trace",
+            json=[{"spanId": "s", "kind": "llm", "phase": "execution"}],
+        )
+    ).status_code == 403
+    assert (
+        await client.post(
+            f"/api/runs/{run_id}/trace",
+            json=[{"spanId": "s", "kind": "llm", "phase": "execution"}],
+            headers={"x-a2at-trace-token": "wrong"},
+        )
+    ).status_code == 403
+    assert (
+        await client.post(
+            f"/api/runs/{run_id}/trace",
+            json=[{"spanId": "s", "kind": "llm", "phase": "nope"}],
+            headers={"x-a2at-trace-token": TRACE_TOKEN},
+        )
+    ).status_code == 400
+    assert (
+        await client.post(
+            f"/api/runs/{run_id}/trace",
+            json=[{"spanId": "s", "phase": "execution"}],
+            headers={"x-a2at-trace-token": TRACE_TOKEN},
+        )
+    ).status_code == 400
+    assert (
+        await client.post(
+            f"/api/runs/{run_id}/trace",
+            json=[{"spanId": "s", "kind": "llm", "phase": "execution", "runId": "other"}],
+            headers={"x-a2at-trace-token": TRACE_TOKEN},
+        )
+    ).status_code == 400
 
 
 async def test_real_offline_information_run_has_unique_spans_and_all_phases(
@@ -691,6 +765,31 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
                 grouped.setdefault(str(span["phase"]), []).append(span["phaseStep"])
             for steps in grouped.values():
                 assert steps == list(range(1, len(steps) + 1))
+
+            # The SDK and ADK producers are traced on both sides of the in-process run.
+            llm_spans = [span for span in spans if span["kind"] == "llm"]
+            tool_spans = [span for span in spans if span["kind"] == "tool"]
+            assert llm_spans and tool_spans
+            assert {span["side"] for span in llm_spans} >= {"client", "server"}
+            for span in llm_spans:
+                assert span["stage"]
+                assert isinstance(span["durationMs"], (int, float))
+                detail = span["detail"]
+                assert isinstance(detail, dict)
+                assert detail.get("request")
+                assert detail.get("response") is not None
+                request = detail["request"]
+                assert isinstance(request, dict)
+                # SDK spans carry the provider; ADK spans carry the model contents.
+                assert detail.get("provider") or "contents" in request
+            scripted = [span for span in llm_spans if span["model"] == "scripted"]
+            assert scripted
+            assert all(span["tokens"]["label"] == "n/a (scripted)" for span in scripted)
+            for span in tool_spans:
+                detail = span["detail"]
+                assert isinstance(detail, dict)
+                assert detail.get("toolName")
+                assert "args" in detail and "result" in detail
 
 
 async def test_start_accepts_discovery_and_rejects_unknown_values(client: httpx.AsyncClient) -> None:

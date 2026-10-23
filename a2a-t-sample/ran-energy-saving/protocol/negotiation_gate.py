@@ -37,6 +37,7 @@ from a2a_t.core.metadata import (
 from a2a_t.core.validation_pipeline import FilledParamData
 from shared.scenario import MAX_ROUNDS
 from shared.task_schema import TASK_PARAM_SCHEMA
+from shared.trace import trace_stage
 
 from protocol.messages import (
     ABORT_MESSAGE_TEXT,
@@ -239,6 +240,7 @@ class NegotiationGate:
                 prompt,
                 self._task_schema,
                 self._task_template_uri,
+                stage="task_t_server_validation",
             )
         except ContentValidationError as exc:
             kind = negotiation_kind_for_errors(exc.errors)
@@ -302,6 +304,7 @@ class NegotiationGate:
                 session,
                 NEGOTIATION_PARAM_SCHEMA,
                 template_uri,
+                stage="negotiation_accept_validation",
             )
         except (A2ATError, ValueError) as exc:
             return await self._negotiation_failure(context_id, session, f"Accept validation failed: {exc}")
@@ -317,6 +320,7 @@ class NegotiationGate:
                 task_prompt,
                 self._task_schema,
                 self._task_template_uri,
+                stage="task_t_server_validation",
             )
         except (A2ATError, ValueError) as exc:
             return await self._negotiation_failure(
@@ -334,16 +338,20 @@ class NegotiationGate:
         session: NegotiationContext,
     ) -> GateOutcome:
         """End a rejected/aborted negotiation with a plain message and no Task."""
+        is_reject = session.performative is NegotiationPerformative.REJECT
         validator = (
             self._prompt_server.validate_reject_prompt_and_data_filling
-            if session.performative is NegotiationPerformative.REJECT
+            if is_reject
             else self._prompt_server.validate_abort_prompt_and_data_filling
         )
+        stage = "negotiation_reject_validation" if is_reject else "negotiation_abort_validation"
         template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
         prompt = negotiation_prompt_from_metadata(metadata)
         if isinstance(template_uri, str) and prompt.strip():
             try:
-                await self._call(validator, prompt, session, NEGOTIATION_PARAM_SCHEMA, template_uri)
+                await self._call(
+                    validator, prompt, session, NEGOTIATION_PARAM_SCHEMA, template_uri, stage=stage
+                )
             except (A2ATError, ValueError) as exc:
                 self._logger.warning("terminal negotiation message failed validation: %s", exc)
         self._logger.info(
@@ -374,6 +382,7 @@ class NegotiationGate:
                 session,
                 NEGOTIATION_PARAM_SCHEMA,
                 template_uri,
+                stage="negotiation_propose_validation",
             )
         except (A2ATError, ValueError) as exc:
             return await self._negotiation_failure(
@@ -445,6 +454,7 @@ class NegotiationGate:
                 content.text,
                 session,
                 content.template_uri,
+                stage="negotiation_propose_extraction",
             )
             self._logger.info(
                 "server propose generated: kind=%s round=%s", content.kind.value, content.round
@@ -465,6 +475,7 @@ class NegotiationGate:
                     content.text,
                     session,
                     content.template_uri,
+                    stage="negotiation_abort_extraction",
                 )
             except (A2ATError, ValueError) as exc:
                 return GateOutcome.short(
@@ -499,9 +510,18 @@ class NegotiationGate:
         return await self._emit_policy_decision(context_id, decision)
 
     @staticmethod
-    async def _call(function: Callable[..., _ResultT], *args: object) -> _ResultT:
-        """Run one synchronous SDK call in a worker thread."""
-        return await asyncio.to_thread(function, *args)
+    async def _call(
+        function: Callable[..., _ResultT], *args: object, stage: str | None = None
+    ) -> _ResultT:
+        """Run one synchronous SDK call in a worker thread under its capture stage.
+
+        ``asyncio.to_thread`` copies the current context, so the ``trace_stage`` label reaches the
+        traced SDK provider running in the worker thread.
+        """
+        if stage is None:
+            return await asyncio.to_thread(function, *args)
+        with trace_stage(stage):
+            return await asyncio.to_thread(function, *args)
 
     def _rewrite_task_prompt(self, context: RequestContext, prompt: str) -> None:
         """Replace the request body with the agreed Task-T prompt.
