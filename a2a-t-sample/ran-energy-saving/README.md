@@ -253,7 +253,7 @@ and model mode are process-level and read-only (see `GET /api/meta`).
 
 ```bash
 curl http://127.0.0.1:8080/api/meta
-{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse"}
+{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"discoveries":["registry","direct"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse","defaultDiscovery":"registry","finishedGraceMs":2000}
 ```
 
 ### Run Explorer
@@ -331,18 +331,27 @@ Keep this endpoint on localhost: spans carry model prompts, tool arguments and r
 #### `--keep-alive` and PID reuse
 
 `--keep-alive` leaves the registry and server running after the client exits; stop them with
-`python run_demo.py --stop`. The PID file also records the model mode, language and trace token of
-those processes. A later launch reuses them only when all three match the requested run. On a
-mismatch (for example an `offline` UI after a `live` keep-alive server) the launcher stops the
-recorded processes, prints the reason and starts fresh, so an offline UI can never silently make
-live model calls. A listening port with no PID record belongs to another process: the launcher
-refuses to reuse it and asks you to free the port.
+`python run_demo.py --stop`. The PID file (written `0600`, because it carries the local trace token)
+also records the model mode, language, trace token and trace URL/UI port of those processes. A later
+launch reuses them only when all of them match the requested run. On a mismatch (for example an
+`offline` UI after a `live` keep-alive server, or a UI on a new `--ui-port` whose server still posts
+to the old port) the launcher stops the recorded processes, prints the reason and starts fresh, so
+an offline UI can never silently make live model calls and server spans never go to the wrong
+process. A listening port with no PID record belongs to another process: the launcher refuses to
+reuse it and asks you to free the port.
 
 #### Limitations
 
 - One active run per UI instance; traces and run state are in memory, so a UI restart loses them.
 - Reloading `#run=<id>` replays the recorded stream; it does not resume a run lost with the process.
 - Live output depends on the model's extraction/validation; use offline for acceptance.
+- Server trace delivery is best-effort: the server batches spans (0.5 s flush) and the UI keeps the
+  stream open for a grace window (`finishedGraceMs` in `GET /api/meta`, 2 s by default) after
+  `finished` so the last batch arrives. If a batch is still late, the client merges
+  `GET /api/runs/{id}/trace.json` on finalize; a batch that never reached the UI is absent from the
+  timeline (the transcript and trace files remain the source of truth).
+- LLM token usage is only shown when the provider reports it; live calls without usage render `n/a`,
+  while offline (scripted) runs render `n/a (scripted)`.
 
 ### Manual decision mode
 
@@ -632,7 +641,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `ADK_MODEL_NAME` | default `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm model id (provider prefix required). |
 | `ADK_MODEL_API_BASE` | default `http://127.0.0.1:31943/v1` | OpenAI-compatible endpoint. |
 | `ADK_MODEL_API_KEY` | default `not-needed` | Endpoint key. |
-| `A2AT_LLM_PROVIDER` | `openai` in live mode; overridden to `scripted` offline | SDK provider. |
+| `A2AT_LLM_PROVIDER` | `openai_traced` in live mode; overridden to `scripted_traced` offline | SDK provider (traced wrappers of `openai` / `scripted`; the trace capture never changes behavior). |
 | `A2AT_LLM_MODEL` | default `mass/volcengine/deepseek-v4.1-flash` | SDK model id (no LiteLlm prefix). |
 | `A2AT_LLM_API_KEY` | default `not-needed`; overridden offline | SDK endpoint key. |
 | `A2AT_LLM_BASE_URL` | default `http://127.0.0.1:31943/v1` | SDK endpoint base URL. |
@@ -640,11 +649,11 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false` (default) | Print full LLM payloads (debug; may expose sensitive content). |
 | `A2AT_SAMPLE_DEBUG` | `false` (default) | Extra sample debug logging. |
 
-**Offline mode.** Before constructing `A2ATClient` / `A2ATServer`, the runtimes register the
-official `scripted` provider and build a temporary SDK `.env` with
-`A2AT_LLM_PROVIDER=scripted`, `A2AT_LLM_MODEL=scripted`, `A2AT_LLM_API_KEY=not-needed`. The source
-`.env` is never modified. The ADK side uses `shared/adk_fake_model.py`. Logs and the Web UI label
-the run `offline (scripted)`.
+**Offline mode.** Before constructing `A2ATClient` / `A2ATServer`, the runtimes register the traced
+wrappers (`scripted_traced`, live `openai_traced`) and build a temporary SDK `.env` with
+`A2AT_LLM_PROVIDER=scripted_traced`, `A2AT_LLM_MODEL=scripted`, `A2AT_LLM_API_KEY=not-needed`. The
+source `.env` is never modified. The ADK side uses `shared/adk_fake_model.py`. Logs and the Web UI
+label the run `offline (scripted)`.
 
 **Live mode.** Both SDK and ADK use the configured endpoint. On Windows, keep `PYTHONUTF8=1`
 (`run_demo.py` sets it for its children). Live output depends on the model's extraction and
@@ -665,7 +674,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (316 tests). What it covers:
+The suite is fully offline and deterministic (331 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

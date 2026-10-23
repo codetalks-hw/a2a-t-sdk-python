@@ -7,7 +7,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from shared.trace import FileTraceEmitter, HttpTraceEmitter
+import httpx
+import pytest
+from shared.trace import FileTraceEmitter, HttpTraceEmitter, _default_trace_post
 
 
 def _span(
@@ -185,3 +187,30 @@ def test_http_emitter_batches_reach_the_batch_size_without_waiting() -> None:
     assert poster.calls
     body: Any = poster.calls[0][1]
     assert [span["spanId"] for span in body] == ["s1", "s2"]
+
+
+def test_default_trace_post_never_uses_proxy_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spans carry prompts/tool data, so a corporate proxy must never receive them."""
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:9")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:9")
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 202
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_post(url: str, **kwargs: object) -> _Response:
+        captured["url"] = url
+        captured.update(kwargs)
+        return _Response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert _default_trace_post("http://127.0.0.1:8080/api/x", {"spans": []}, {"a": "b"}) == 202
+    assert captured["trust_env"] is False
+    assert captured["url"] == "http://127.0.0.1:8080/api/x"

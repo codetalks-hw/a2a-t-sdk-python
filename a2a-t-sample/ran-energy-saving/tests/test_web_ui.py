@@ -180,7 +180,11 @@ class FakeRuntime:
         decision = NegotiationDecision(action="accept", rationale="The proposal is acceptable.")
         if self.manual_provider is not None:
             decision = await self.manual_provider.respond(_propose_view(), _session())
-        if trace_sink is not None:
+        if on_decision_made is not None:
+            on_decision_made(decision, _propose_view(), _session())
+        elif trace_sink is not None:
+            # Mirrors the production flow: the callback owns the decision row, so only a consumer
+            # without a callback sees the synthetic span.
             trace_sink(
                 _trace_span(
                     "decision_made",
@@ -189,8 +193,6 @@ class FakeRuntime:
                     round_number=1,
                 )
             )
-        if on_decision_made is not None:
-            on_decision_made(decision, _propose_view(), _session())
         if event_sink is not None:
             event_sink(_status_event())
         if self.fail:
@@ -300,6 +302,9 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     assert meta["defaultMode"] == "auto"
     assert meta["defaultTransport"] == "sse"
     assert meta["defaultDiscovery"] == "registry"
+    # The UI's stream grace is served by the backend, never hard-coded client-side. This fixture
+    # disables the grace so streaming tests finish immediately.
+    assert meta["finishedGraceMs"] == 0
 
 
 async def test_cli_defaults_are_exposed_and_used_when_the_body_omits_them(
@@ -388,6 +393,7 @@ async def test_run_lifecycle_streams_sse_events(client: httpx.AsyncClient, runti
     assert "decision_requested" not in types
     assert types[-1] == "finished"
     assert payloads[-1]["finalState"] == FINAL_STATE_TASK_COMPLETED
+    assert payloads[-1]["startedAt"], "the Done phase needs a start to render a duration"
     assert [payload["seq"] for payload in payloads] == list(range(1, len(payloads) + 1))
 
     status = await _wait_status(client, run_id, lambda data: data["status"] == "finished")
@@ -424,6 +430,61 @@ async def test_manual_decision_submission_advances_the_run(
     assert finished["transcript"]["decisions"][0]["action"] == "accept"
     assert finished["transcript"]["decisions"][0]["rationale"] == decision["rationale"]
     assert runtimes[0].closed is True
+
+
+async def test_each_decision_produces_exactly_one_timeline_row(
+    client: httpx.AsyncClient,
+) -> None:
+    """The consumer callback owns the decision row; no adjacent ``decision_made`` span remains."""
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "auto", "transport": "sse"},
+    )
+    run_id = start.json()["runId"]
+    payloads = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+
+    decision_entries = [
+        payload["event"]
+        for payload in payloads
+        if payload["type"] == "event" and payload["event"].get("entryType") == "decision"
+    ]
+    decision_spans = [
+        payload["event"]
+        for payload in payloads
+        if payload["type"] == "trace" and payload["event"].get("kind") == "decision_made"
+    ]
+    assert len(decision_entries) == 1
+    assert decision_spans == []
+    assert decision_entries[0]["action"] == "accept"
+
+
+async def test_manual_decision_row_is_attributed_to_the_human(
+    client: httpx.AsyncClient,
+) -> None:
+    """A manual decision is the operator's, not the client's."""
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "manual", "transport": "sse"},
+    )
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["pendingDecision"] is True)
+    response = await client.post(
+        f"/api/runs/{run_id}/decisions",
+        json={"action": "accept", "rationale": "The operator accepts the proposal."},
+    )
+    assert response.status_code == 200
+    await _wait_status(client, run_id, lambda data: data["status"] != "running")
+
+    payloads = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    decisions = [
+        payload["event"]
+        for payload in payloads
+        if payload["type"] == "event" and payload["event"].get("entryType") == "decision"
+    ]
+    assert len(decisions) == 1
+    span = await client.get(f"/api/runs/{run_id}/spans/{decisions[0]['spanId']}")
+    assert span.status_code == 200
+    assert span.json()["actor"] == "human"
 
 
 async def test_auto_run_does_not_expose_a_pending_manual_decision(
@@ -700,6 +761,38 @@ async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -
     )
 
 
+async def test_late_span_batch_is_recoverable_from_trace_json(
+    client: httpx.AsyncClient,
+) -> None:
+    """When the stream grace expires first, the late batch is still in ``trace.json``.
+
+    This is the contract behind the finalize merge: the client re-reads the trace document and
+    merges by ``seq``/``spanId`` instead of assuming the SSE stream carried every server span.
+    """
+    start = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
+    )
+    run_id = start.json()["runId"]
+    await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+
+    frames = _sse_payloads((await client.get(f"/api/runs/{run_id}/events")).text)
+    assert frames[-1]["type"] == "finished"
+
+    late_span = _trace_span("llm", phase="execution", title="Late server LLM call")
+    late_span.update({"spanId": "server-late-2", "side": "server", "actor": "llm"})
+    posted = await client.post(
+        f"/api/runs/{run_id}/trace",
+        json=[late_span],
+        headers={"x-a2at-trace-token": TRACE_TOKEN},
+    )
+    assert posted.status_code == 202
+
+    document = (await client.get(f"/api/runs/{run_id}/trace.json")).json()
+    late = next(span for span in document["spans"] if span["spanId"] == "server-late-2")
+    assert late["seq"] > frames[-1]["seq"]
+    assert late["phase"] == "execution"
+
+
 async def test_events_stream_keeps_forwarding_spans_posted_after_finished(
     offline_config: SampleConfig,
     factory: Callable[..., Any],
@@ -895,6 +988,16 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
                 grouped.setdefault(str(span["phase"]), []).append(span["phaseStep"])
             for steps in grouped.values():
                 assert steps == list(range(1, len(steps) + 1))
+
+            # Report is the final artifact plus the COMPLETED status; ADK per-tool artifacts are
+            # execution rows, not report rows.
+            report_spans = [span for span in spans if span["phase"] == "report"]
+            assert len(report_spans) == 2
+            report_kinds = sorted(str(span["kind"]) for span in report_spans)
+            assert report_kinds == ["artifact", "status"]
+            artifact_spans = [span for span in spans if span["kind"] == "artifact"]
+            assert any(span["phase"] == "execution" for span in artifact_spans)
+            assert all(span["phase"] in {"execution", "report"} for span in artifact_spans)
 
             # The SDK and ADK producers are traced on both sides of the in-process run.
             llm_spans = [span for span in spans if span["kind"] == "llm"]

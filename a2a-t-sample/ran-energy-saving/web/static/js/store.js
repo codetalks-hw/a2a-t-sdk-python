@@ -111,6 +111,41 @@ export class RunStore extends EventTarget {
     this.emit("change", { reason: "snapshot" });
   }
 
+  /** Merge spans of one ``trace.json`` document (late server batch after the stream closed).
+   *
+   * When the UI's grace window ends before the server posts its final batch, those spans are still
+   * in ``/trace.json``. Merging by ``seq`` *and* ``spanId`` keeps a replay or a second merge from
+   * duplicating a row. Returns the number of newly ingested spans.
+   */
+  mergeSpans(spans) {
+    if (!Array.isArray(spans) || spans.length === 0) return 0;
+    const knownSeq = new Set(this.frames.keys());
+    const knownSpans = new Set();
+    for (const existing of this.frames.values()) {
+      if (existing.type === "trace" && existing.event?.spanId) knownSpans.add(existing.event.spanId);
+    }
+    let merged = 0;
+    for (const span of spans) {
+      if (!span || typeof span !== "object") continue;
+      const spanId = typeof span.spanId === "string" ? span.spanId : null;
+      if (spanId !== null && knownSpans.has(spanId)) continue;
+      let seq = Number.isInteger(span.seq) ? span.seq : null;
+      if (seq !== null && knownSeq.has(seq)) continue;
+      if (seq === null) {
+        seq = this.frames.size === 0 ? 1 : Math.max(...this.frames.keys()) + 1;
+      }
+      this.frames.set(seq, { type: "trace", event: { ...span, seq }, seq });
+      knownSeq.add(seq);
+      if (spanId !== null) knownSpans.add(spanId);
+      merged += 1;
+    }
+    if (merged > 0) {
+      this._rebuild();
+      this.emit("change", { reason: "merge", merged });
+    }
+    return merged;
+  }
+
   /** Ingest one SSE frame. Returns ``true`` when the frame was new. */
   applyFrame(frame) {
     if (!frame || typeof frame !== "object" || typeof frame.type !== "string") return false;
@@ -639,15 +674,22 @@ export class RunStore extends EventTarget {
   _analysis() {
     const llmItems = this.items.filter(isLlm);
     const toolItems = this.items.filter(isTool);
+    const offline = this.runMeta().modelMode === "offline";
     let prompt = 0;
     let completion = 0;
     let total = 0;
     let numeric = 0;
     let scripted = 0;
+    let missing = 0;
     for (const item of llmItems) {
       const tokens = numericTokens(item.tokens);
       if (tokens === null) {
-        scripted += 1;
+        // Only an offline (scripted) run may label absent usage as scripted; a live call without
+        // usage metadata is simply missing, never fabricated.
+        const labeled =
+          offline || item.tokens?.scripted === true || typeof item.tokens?.label === "string";
+        if (labeled) scripted += 1;
+        else missing += 1;
         continue;
       }
       prompt += tokens.prompt;
@@ -664,6 +706,7 @@ export class RunStore extends EventTarget {
     return {
       llmCalls: llmItems.length,
       scriptedCalls: scripted,
+      missingCalls: missing,
       numericCalls: numeric,
       promptTokens: prompt,
       completionTokens: completion,
@@ -777,8 +820,15 @@ export class RunStore extends EventTarget {
   tokenTotal() {
     const analysis = this._analysis();
     if (analysis.llmCalls === 0) return null;
-    if (analysis.numericCalls === 0) return { scripted: analysis.scriptedCalls };
-    return { total: analysis.totalTokens, scripted: analysis.scriptedCalls };
+    if (analysis.numericCalls === 0) {
+      if (analysis.scriptedCalls > 0) return { scripted: analysis.scriptedCalls };
+      return { missing: analysis.missingCalls };
+    }
+    return {
+      total: analysis.totalTokens,
+      scripted: analysis.scriptedCalls,
+      missing: analysis.missingCalls,
+    };
   }
 
   /** Return a short run label for the header. */

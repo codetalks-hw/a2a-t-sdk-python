@@ -255,6 +255,9 @@ def test_phase_mapping_covers_every_documented_stage_family() -> None:
     assert phase_for_stage("task_t_server_validation") == "task_validation"
     assert phase_for_stage("negotiation_propose_validation") == PHASE_NEGOTIATION
     assert phase_for_stage("negotiation_accept_extraction") == PHASE_RESOLUTION
+    # Accept-time Task-T work happens after the decision: Story puts it in Resolution.
+    assert phase_for_stage("task_t_slot_extraction_refill") == PHASE_RESOLUTION
+    assert phase_for_stage("task_t_accept_validation") == PHASE_RESOLUTION
     assert phase_for_stage("client_decision_agent") == PHASE_NEGOTIATION
     assert phase_for_stage("server_execution_agent") == "execution"
     assert phase_for_stage(None) == PHASE_NEGOTIATION

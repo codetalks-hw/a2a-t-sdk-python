@@ -320,7 +320,7 @@ class NegotiationGate:
                 task_prompt,
                 self._task_schema,
                 self._task_template_uri,
-                stage="task_t_server_validation",
+                stage="task_t_accept_validation",
             )
         except (A2ATError, ValueError) as exc:
             return await self._negotiation_failure(

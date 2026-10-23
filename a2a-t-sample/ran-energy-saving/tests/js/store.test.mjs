@@ -212,4 +212,68 @@ assert.equal(filterItems(store.list(), filters.with({ filter: "protocol" })).len
 assert.equal(filterItems(store.list(), filters.with({ search: "accept it" })).length, 1);
 assert.deepEqual(availableRounds(store.list()), [1]);
 
+// A live LLM call without usage metadata is missing ("n/a"), never "n/a (scripted)".
+const live = new RunStore();
+live.setMeta({ language: "en-US", modelMode: "live", modelLabel: "live" });
+live.beginRun("r-live");
+live.applyFrame({
+  type: "run_started",
+  seq: 1,
+  runId: "r-live",
+  scenario: "information",
+  mode: "auto",
+  transport: "sse",
+  discovery: "direct",
+  modelMode: "live",
+  modelLabel: "live",
+  phase: "dispatch",
+  phaseStep: 1,
+  spanId: "ui_live_1",
+  startedAt: "2026-10-23T00:00:00.000Z",
+});
+live.applyFrame({
+  type: "trace",
+  seq: 2,
+  event: {
+    seq: 2,
+    spanId: "llm_live_1",
+    phase: "execution",
+    phaseStep: 1,
+    actor: "llm",
+    side: "client",
+    kind: "llm",
+    title: "LLM call",
+    status: "ok",
+    model: "gpt",
+    tokens: null,
+    detail: {},
+  },
+});
+const liveAnalysis = live.derived().analysis;
+assert.equal(liveAnalysis.numericCalls, 0);
+assert.equal(liveAnalysis.scriptedCalls, 0);
+assert.equal(liveAnalysis.missingCalls, 1);
+assert.deepEqual(live.tokenTotal(), { missing: 1 });
+
+// A late server span batch (fetched from trace.json after finalize) merges without duplicating.
+const late = {
+  seq: 7,
+  spanId: "tool_s_late",
+  phase: "execution",
+  phaseStep: 3,
+  actor: "tool",
+  side: "server",
+  kind: "tool",
+  title: "Late tool call",
+  status: "ok",
+  startedAt: "2026-10-23T00:00:04.000Z",
+  detail: { toolName: "late", args: {}, result: {} },
+};
+assert.equal(store.mergeSpans([late]), 1);
+assert.equal(store.list().length, 7);
+assert.equal(store.list().at(-1).title, "Late tool call");
+assert.equal(store.mergeSpans([late]), 0, "the same span must not merge twice");
+assert.equal(store.mergeSpans([{ ...late, seq: 5, spanId: "span_on_taken_seq" }]), 0);
+assert.equal(store.list().length, 7);
+
 console.log("store/filters runtime checks passed");

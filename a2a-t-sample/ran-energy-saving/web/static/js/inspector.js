@@ -1005,8 +1005,14 @@ function findTextMetadata(metadata, marker) {
 /** Summarize the token analysis of the rail. */
 function tokenSummary(analysis) {
   if (analysis.llmCalls === 0) return EM_DASH;
-  if (analysis.numericCalls === 0) return "n/a (scripted)";
-  return `${formatNumber(analysis.promptTokens)} in / ${formatNumber(analysis.completionTokens)} out`;
+  if (analysis.numericCalls === 0) {
+    return analysis.scriptedCalls > 0 ? "n/a (scripted)" : "n/a";
+  }
+  const base = `${formatNumber(analysis.promptTokens)} in / ${formatNumber(analysis.completionTokens)} out`;
+  const extras = [];
+  if (analysis.scriptedCalls > 0) extras.push(`${analysis.scriptedCalls} scripted`);
+  if (analysis.missingCalls > 0) extras.push(`${analysis.missingCalls} no usage`);
+  return extras.length > 0 ? `${base} (+${extras.join(", ")})` : base;
 }
 
 /** Render the phase duration bars of the rail. */

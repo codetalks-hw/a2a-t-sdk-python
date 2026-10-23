@@ -220,7 +220,7 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 
 ```bash
 curl http://127.0.0.1:8080/api/meta
-{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse"}
+{"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"discoveries":["registry","direct"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse","defaultDiscovery":"registry","finishedGraceMs":2000}
 ```
 
 ### Run Explorer（运行探索器）
@@ -278,13 +278,19 @@ python run_demo.py --ui --scenario information --mode auto --model-mode live
 
 #### `--keep-alive` 与 PID 复用
 
-`--keep-alive` 在客户端退出后保留注册中心与服务端；用 `python run_demo.py --stop` 停止。PID 文件同时记录这些进程的模型模式、语言与 trace token；后续启动只有在三者都与请求一致时才复用。不一致时（例如 `live` keep-alive 服务端之后启动 `offline` UI），启动器会停止已记录的进程、打印原因并重新启动，避免离线 UI 静默发起 live 模型调用。端口被监听但没有 PID 记录时，说明进程不属于启动器：启动器拒绝复用并要求先释放端口。
+`--keep-alive` 在客户端退出后保留注册中心与服务端；用 `python run_demo.py --stop` 停止。PID 文件（以 `0600` 写入，因为包含本地 trace token）同时记录这些进程的模型模式、语言、trace token 与 trace URL/UI 端口；后续启动只有在这些都和请求一致时才复用。不一致时（例如 `live` keep-alive 服务端之后启动 `offline` UI，或换了 `--ui-port` 但服务端仍向旧端口发 span），启动器会停止已记录的进程、打印原因并重新启动，避免离线 UI 静默发起 live 模型调用，也避免服务端 span 发到错误进程。端口被监听但没有 PID 记录时，说明进程不属于启动器：启动器拒绝复用并要求先释放端口。
 
 #### 限制
 
 - 每个 UI 实例同时只允许一个运行；trace 与运行状态保存在内存中，UI 重启即丢失。
 - 重新加载 `#run=<id>` 会重放已记录的流，但无法恢复随进程丢失的运行。
 - 在线输出依赖模型的抽取/校验结果；验收请使用离线模式。
+- 服务端 trace 投递是尽力而为：服务端按批发送（0.5 秒刷新间隔），UI 在 `finished` 后保留一段
+  宽限窗口（`GET /api/meta` 的 `finishedGraceMs`，默认 2 秒）以接收最后一批 span。若仍有批次
+  晚到，客户端在 finalize 时合并 `GET /api/runs/{id}/trace.json`；从未到达 UI 的批次不会出现在
+  时间线中（transcript 与 trace 文件仍是事实来源）。
+- 只有 Provider 返回了用量时才显示 LLM token；在线调用缺失用量显示 `n/a`，离线（scripted）运行
+  显示 `n/a (scripted)`。
 
 ### 人工决策模式
 
@@ -518,7 +524,7 @@ root_agent = LlmAgent(
 | `ADK_MODEL_NAME` | 默认 `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm 模型 id（需要 provider 前缀）。 |
 | `ADK_MODEL_API_BASE` | 默认 `http://127.0.0.1:31943/v1` | OpenAI-compatible 端点。 |
 | `ADK_MODEL_API_KEY` | 默认 `not-needed` | 端点 key。 |
-| `A2AT_LLM_PROVIDER` | 在线为 `openai`；离线被覆盖为 `scripted` | SDK Provider。 |
+| `A2AT_LLM_PROVIDER` | 在线为 `openai_traced`；离线被覆盖为 `scripted_traced` | SDK Provider（`openai` / `scripted` 的 traced 包装；trace 捕获不改变行为）。 |
 | `A2AT_LLM_MODEL` | 默认 `mass/volcengine/deepseek-v4.1-flash` | SDK 模型 id（不带 LiteLlm 前缀）。 |
 | `A2AT_LLM_API_KEY` | 默认 `not-needed`；离线被覆盖 | SDK 端点 key。 |
 | `A2AT_LLM_BASE_URL` | 默认 `http://127.0.0.1:31943/v1` | SDK 端点基础 URL。 |
@@ -526,7 +532,7 @@ root_agent = LlmAgent(
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false`（默认） | 打印完整 LLM 载荷（调试；可能暴露敏感内容）。 |
 | `A2AT_SAMPLE_DEBUG` | `false`（默认） | 额外样例调试日志。 |
 
-**离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册官方 `scripted` Provider，并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。ADK 侧使用 `shared/adk_fake_model.py`。日志与 Web UI 标注为 `offline (scripted)`。
+**离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册 traced 包装（离线 `scripted_traced`、在线 `openai_traced`），并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted_traced`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。ADK 侧使用 `shared/adk_fake_model.py`。日志与 Web UI 标注为 `offline (scripted)`。
 
 **在线模式。** SDK 与 ADK 都使用配置端点。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取与语义校验，见 §3。
 
@@ -543,7 +549,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（316 个测试）。覆盖范围：
+测试套件完全离线且确定性（331 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

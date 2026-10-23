@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import run_demo
@@ -52,7 +53,14 @@ def test_state_round_trip_records_the_run_metadata(monkeypatch: pytest.MonkeyPat
     pid_file = tmp_path / "pids.json"
     monkeypatch.setattr(run_demo, "PID_FILE", pid_file)
 
-    run_demo._save_state([11, 12], model_mode="offline", language="en-US", trace_token="tok")
+    run_demo._save_state(
+        [11, 12],
+        model_mode="offline",
+        language="en-US",
+        trace_token="tok",
+        trace_url="http://127.0.0.1:8080",
+        ui_port=8080,
+    )
 
     state = run_demo._load_state()
     assert state == {
@@ -60,8 +68,27 @@ def test_state_round_trip_records_the_run_metadata(monkeypatch: pytest.MonkeyPat
         "model_mode": "offline",
         "language": "en-US",
         "trace_token": "tok",
+        "trace_url": "http://127.0.0.1:8080",
+        "ui_port": 8080,
     }
     assert run_demo._load_pids() == [11, 12]
+
+
+def test_state_file_is_written_owner_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The PID file carries the local trace token, so it must be ``0600`` like the SDK ``.env``."""
+    pid_file = tmp_path / "pids.json"
+    monkeypatch.setattr(run_demo, "PID_FILE", pid_file)
+    chmod_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        run_demo.os, "chmod", lambda path, mode: chmod_calls.append((str(path), mode))
+    )
+
+    run_demo._save_state([1], model_mode="offline", language="en-US", trace_token="tok")
+
+    assert chmod_calls == [(str(pid_file), 0o600)]
 
 
 def test_state_loader_accepts_the_legacy_pid_only_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -92,107 +119,69 @@ class TestServerReuseDecision:
         "model_mode": "offline",
         "language": "en-US",
         "trace_token": "tok",
+        "trace_url": "http://127.0.0.1:8080",
+        "ui_port": 8080,
     }
 
+    def decide(self, **overrides: Any) -> str:
+        """Call the reuse decision with a compatible UI-mode request by default."""
+        params: dict[str, Any] = {
+            "port_open": True,
+            "state": self.STATE,
+            "model_mode": "offline",
+            "language": "en-US",
+            "ui": True,
+            "trace_url": "http://127.0.0.1:8080",
+            "ui_port": 8080,
+        }
+        params.update(overrides)
+        return run_demo._server_reuse_decision(**params)
+
     def test_nothing_listening_starts(self) -> None:
-        assert (
-            run_demo._server_reuse_decision(
-                port_open=False,
-                state=self.STATE,
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_START
-        )
+        assert self.decide(port_open=False) == run_demo.REUSE_START
 
     def test_matching_metadata_reuses_the_process(self) -> None:
-        assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state=self.STATE,
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_REUSE
-        )
+        assert self.decide() == run_demo.REUSE_REUSE
 
     def test_model_mode_mismatch_restarts(self) -> None:
         """The offline-UI/live-server bug: the recorded live server must not be reused."""
         assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state={**self.STATE, "model_mode": "live"},
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_RESTART
+            self.decide(state={**self.STATE, "model_mode": "live"}) == run_demo.REUSE_RESTART
         )
 
     def test_language_mismatch_restarts(self) -> None:
+        assert self.decide(state={**self.STATE, "language": "zh-CN"}) == run_demo.REUSE_RESTART
+
+    def test_trace_url_mismatch_restarts(self) -> None:
+        """A server pointed at another UI port would post its spans to the wrong process."""
         assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state={**self.STATE, "language": "zh-CN"},
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
+            self.decide(trace_url="http://127.0.0.1:9090", ui_port=8080)
             == run_demo.REUSE_RESTART
         )
 
+    def test_ui_port_mismatch_restarts(self) -> None:
+        assert self.decide(ui_port=9090) == run_demo.REUSE_RESTART
+
+    def test_legacy_record_without_a_trace_url_restarts(self) -> None:
+        legacy = {key: value for key, value in self.STATE.items() if key != "trace_url"}
+        assert self.decide(state=legacy) == run_demo.REUSE_RESTART
+
     def test_ui_run_restarts_a_cli_keep_alive_server(self) -> None:
         """A CLI server records spans to a file; the UI would get no server trace."""
-        assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state={**self.STATE, "trace_token": ""},
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_RESTART
-        )
+        assert self.decide(state={**self.STATE, "trace_token": ""}) == run_demo.REUSE_RESTART
 
     def test_cli_run_restarts_a_ui_keep_alive_server(self) -> None:
         """A UI server posts spans to its UI; the CLI runs cannot consume them."""
         assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state=self.STATE,
-                model_mode="offline",
-                language="en-US",
-                ui=False,
-            )
-            == run_demo.REUSE_RESTART
+            self.decide(ui=False, trace_url="", ui_port=None) == run_demo.REUSE_RESTART
         )
 
     def test_legacy_record_without_metadata_restarts(self) -> None:
-        assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state={"pids": [11]},
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_RESTART
-        )
+        assert self.decide(state={"pids": [11]}) == run_demo.REUSE_RESTART
 
     def test_foreign_listener_is_refused(self) -> None:
         """A port with no PID record is not ours: refuse instead of assuming a mode."""
-        assert (
-            run_demo._server_reuse_decision(
-                port_open=True,
-                state={},
-                model_mode="offline",
-                language="en-US",
-                ui=True,
-            )
-            == run_demo.REUSE_REFUSE
-        )
+        assert self.decide(state={}) == run_demo.REUSE_REFUSE
 
 
 def test_trace_summary_reports_llm_and_tool_counts() -> None:

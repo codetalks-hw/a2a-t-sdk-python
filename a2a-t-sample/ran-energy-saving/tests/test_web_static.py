@@ -369,6 +369,21 @@ def test_run_summary_only_enables_the_summary_tab() -> None:
     assert 'if (!this.item) return ["summary"];' in source
 
 
+def test_finished_grace_comes_from_the_backend_and_late_spans_merge_on_finalize() -> None:
+    """The client grace must cover the server window, and finalize must not lose a late batch."""
+    source = _module_source("main")
+    grace = _function_source(source, "finishedGraceMs")
+    assert "finishedGraceMs" in grace
+    assert "Math.max" in grace
+    finalize = _function_source(source, "finalizeRun")
+    assert "api.getTrace" in finalize
+    assert "store.mergeSpans" in finalize
+    store = _module_source("store")
+    merge = _method_source(store, "mergeSpans")
+    assert "knownSpans.has" in merge
+    assert "knownSeq.has" in merge
+
+
 def test_offline_llm_rows_label_absent_tokens_as_scripted() -> None:
     timeline = _module_source("timeline")
     assert 'scripted: store.runMeta().modelMode === "offline"' in timeline

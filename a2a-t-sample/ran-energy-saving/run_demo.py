@@ -154,10 +154,15 @@ def _server_trace_env(
     """
     if ui:
         return {
-            "A2AT_SAMPLE_TRACE_URL": f"http://127.0.0.1:{ui_port}",
+            "A2AT_SAMPLE_TRACE_URL": _trace_url(ui_port),
             "A2AT_SAMPLE_TRACE_TOKEN": trace_token or secrets.token_hex(16),
         }
     return {"A2AT_SAMPLE_TRACE_DIR": str(CASE_DIR / "runs")}
+
+
+def _trace_url(ui_port: int) -> str:
+    """Return the local trace endpoint the server targets for one UI port."""
+    return f"http://127.0.0.1:{ui_port}"
 
 
 def _trace_summary(spans: list[dict[str, object]]) -> str:
@@ -291,21 +296,30 @@ def _save_state(
     model_mode: str,
     language: str,
     trace_token: str = "",
+    trace_url: str = "",
+    ui_port: int | None = None,
 ) -> None:
     """Persist the managed PIDs and their run metadata atomically.
 
     A concurrent ``--stop`` never reads a partial file; a later launcher can tell whether a
-    listening server was started with the requested model mode/language and trace token.
+    listening server was started with the requested model mode/language and trace target. The file
+    carries the local trace token, so it is owner-only like the SDK ``.env``.
     """
     state: dict[str, object] = {
         "pids": pids,
         "model_mode": model_mode,
         "language": language,
         "trace_token": trace_token,
+        "trace_url": trace_url,
+        "ui_port": ui_port,
     }
     tmp_path = PID_FILE.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(state), encoding="utf-8")
     os.replace(tmp_path, PID_FILE)
+    try:  # best effort: the state carries the local trace token
+        os.chmod(PID_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def _server_reuse_decision(
@@ -315,6 +329,8 @@ def _server_reuse_decision(
     model_mode: str,
     language: str,
     ui: bool,
+    trace_url: str = "",
+    ui_port: int | None = None,
 ) -> str:
     """Decide whether a listening A2A server may be reused for the requested run.
 
@@ -322,7 +338,8 @@ def _server_reuse_decision(
     reused server keeps its own client/ADK provider, so an offline UI talking to a live server would
     silently make live LiteLlm calls (and the UI would report ``offline``). The trace token pairs
     the server with this UI, so a UI run cannot reuse a server recording server spans to a file
-    (CLI keep-alive), and vice versa.
+    (CLI keep-alive), and vice versa. A UI run must also post to the same trace URL/UI port: a
+    server launched for another port would send its spans to a UI that is not serving this run.
 
     Args:
         port_open: whether the configured server port already accepts connections.
@@ -330,6 +347,8 @@ def _server_reuse_decision(
         model_mode: requested model mode (``offline`` / ``live``).
         language: requested process-level language.
         ui: whether this launch serves the Web UI.
+        trace_url: trace endpoint requested for this launch (UI mode).
+        ui_port: UI port requested for this launch (UI mode).
 
     Returns:
         ``REUSE_START`` (nothing listening), ``REUSE_REUSE`` (compatible),
@@ -347,6 +366,13 @@ def _server_reuse_decision(
         return REUSE_RESTART
     if not ui and recorded_token:
         return REUSE_RESTART
+    if ui:
+        recorded_url = str(state.get("trace_url") or "")
+        if recorded_url != trace_url:
+            return REUSE_RESTART
+        recorded_port = state.get("ui_port")
+        if isinstance(recorded_port, int) and ui_port is not None and recorded_port != ui_port:
+            return REUSE_RESTART
     return REUSE_REUSE
 
 
@@ -720,6 +746,8 @@ def main() -> int:
         model_mode=args.model_mode,
         language=args.language,
         ui=args.ui,
+        trace_url=_trace_url(args.ui_port) if args.ui else "",
+        ui_port=args.ui_port if args.ui else None,
     )
     if reuse == REUSE_REFUSE:
         print(
@@ -731,10 +759,13 @@ def main() -> int:
     if reuse == REUSE_RESTART:
         recorded_mode = state.get("model_mode", "unknown")
         recorded_language = state.get("language", "unknown")
+        recorded_target = state.get("trace_url") or "CLI file"
+        requested_target = _trace_url(args.ui_port) if args.ui else "CLI file"
         print(
             f"[run_demo] recorded server configuration does not match this run "
-            f"(recorded model_mode={recorded_mode}, language={recorded_language}; requested "
-            f"model_mode={args.model_mode}, language={args.language}); stopping the recorded "
+            f"(recorded model_mode={recorded_mode}, language={recorded_language}, "
+            f"trace={recorded_target}; requested model_mode={args.model_mode}, "
+            f"language={args.language}, trace={requested_target}); stopping the recorded "
             f"processes and starting fresh"
         )
         _stop_pids(existing)
@@ -846,6 +877,8 @@ def main() -> int:
             model_mode=args.model_mode,
             language=args.language,
             trace_token=server_trace_env.get("A2AT_SAMPLE_TRACE_TOKEN", ""),
+            trace_url=_trace_url(args.ui_port) if args.ui else "",
+            ui_port=args.ui_port if args.ui else None,
         )
         persisted = True
 

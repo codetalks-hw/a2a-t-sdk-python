@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
+import shared.adk_tracing as adk_tracing
 from agents.server_agent.agent import build_server_agent
 from google.adk.apps import App
 from google.adk.models._capabilities import LlmCapabilities
@@ -169,6 +170,46 @@ async def test_llm_span_captures_an_error_and_reraises(spans: list[dict[str, obj
     span = spans[0]
     assert span["status"] == "error"
     assert "RuntimeError" in str(span["error"])
+
+
+@pytest.mark.asyncio
+async def test_request_serializer_failure_drops_the_span_without_changing_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+    spans: list[dict[str, object]],
+) -> None:
+    """A broken request serializer must not raise into ADK: the span is dropped, the model runs."""
+
+    def explode(_request: LlmRequest) -> dict[str, object]:
+        raise RuntimeError("serializer exploded")
+
+    monkeypatch.setattr(adk_tracing, "serialize_llm_request", explode)
+    traced = TracingLlm.wrap(build_fake_model())
+
+    with trace_scope(run_id="run-ser", role="server", stage="server_execution_agent"):
+        responses = await _collect(traced, _request())
+
+    assert responses and responses[0].content is not None
+    assert spans == []
+
+
+@pytest.mark.asyncio
+async def test_response_serializer_failure_drops_the_span_without_changing_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+    spans: list[dict[str, object]],
+) -> None:
+    """The guarded emit also covers the final response (and error) serialization."""
+
+    def explode(_response: LlmResponse | None) -> dict[str, object] | None:
+        raise RuntimeError("response serializer exploded")
+
+    monkeypatch.setattr(adk_tracing, "serialize_llm_response", explode)
+    traced = TracingLlm.wrap(build_fake_model())
+
+    with trace_scope(run_id="run-ser-2", role="server", stage="server_execution_agent"):
+        responses = await _collect(traced, _request())
+
+    assert responses and responses[0].content is not None
+    assert spans == []
 
 
 def test_serializers_tolerate_none_and_json_safe_objects() -> None:

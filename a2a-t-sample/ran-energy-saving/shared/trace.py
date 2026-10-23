@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from a2a_t.core.metadata import NEGOTIATION_CONTEXT_METADATA_KEY
+from a2a_t.core.metadata import NEGOTIATION_CONTEXT_METADATA_KEY, TASK_T_EXTENSION_URI
 
 #: Version of the span envelope written by this module.
 SCHEMA_VERSION: Final[int] = 1
@@ -583,11 +583,32 @@ def emit_span(span: Span | Mapping[str, object]) -> None:
         return
 
 
+def is_report_artifact(event: Mapping[str, object]) -> bool:
+    """Report whether one normalized artifact event is the final Task-T report.
+
+    The ADK executor emits one artifact per tool call (tool arguments/results) before the final
+    report. Only the report artifact belongs to the Report phase: it is either named ``report`` or
+    stamped with the Task-T extension metadata by the server executor. Every other artifact is an
+    intermediate execution artifact.
+
+    This is the one predicate shared by the webhook transport's stop condition and the Run Explorer
+    phase mapping, so both agree on which artifact ends the run.
+    """
+    if _as_str(event.get("kind")) != "artifact":
+        return False
+    name = _as_str(event.get("name"))
+    if "report" in name.lower():
+        return True
+    metadata = event.get("metadata")
+    return isinstance(metadata, Mapping) and TASK_T_EXTENSION_URI in metadata
+
+
 def infer_event_phase(event: Mapping[str, object]) -> str:
     """Infer the Run Explorer phase of one normalized A2A event."""
     kind = _as_str(event.get("kind"))
     if kind == "artifact":
-        return PHASE_REPORT
+        # Per-tool artifacts (args/response) are execution steps; only the report ends in Report.
+        return PHASE_REPORT if is_report_artifact(event) else PHASE_EXECUTION
     if kind == "status":
         if _as_str(event.get("state")) == "TASK_STATE_COMPLETED":
             return PHASE_REPORT
@@ -611,7 +632,14 @@ def infer_decision_phase(action: str) -> str:
 
 
 #: Capture stage prefix -> Run Explorer phase (design §5.3), most specific prefix first.
+#:
+#: Story view groups rows by these phases; Waterfall keeps the global ``seq`` order. The ordering
+#: matters: the accept-time Task-T refill and its revalidation happen *after* the accept decision,
+#: so they belong to Resolution even though they carry a ``task_t_`` prefix. The initial generation
+#: and validation keep their own Task-T/Validation phases.
 _STAGE_PHASE_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
+    ("task_t_accept_validation", PHASE_RESOLUTION),
+    ("task_t_slot_extraction_refill", PHASE_RESOLUTION),
     ("task_t_server_validation", PHASE_TASK_VALIDATION),
     ("content_validation", PHASE_TASK_VALIDATION),
     ("task_t_", PHASE_TASK_PROMPT),
@@ -626,6 +654,11 @@ _STAGE_PHASE_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
 
 def phase_for_stage(stage: str | None, default: str = PHASE_NEGOTIATION) -> str:
     """Return the Run Explorer phase of one capture stage label.
+
+    Story rows are grouped by phase; Waterfall rows keep the global ``seq`` order, so a stage only
+    decides its card, never its chronological position. Accept-time Task-T work
+    (``task_t_slot_extraction_refill`` / ``task_t_accept_validation``) therefore maps to Resolution:
+    it runs after the accept decision, even though it renders Task-T content.
 
     Args:
         stage: Capture stage of the call (``task_t_slot_extraction``, ...), or ``None``.
@@ -810,10 +843,21 @@ TracePoster = Callable[[str, object, Mapping[str, str]], object]
 
 
 def _default_trace_post(url: str, body: object, headers: Mapping[str, str]) -> object:
-    """POST one trace batch with ``httpx`` (imported lazily to keep the module import cheap)."""
+    """POST one trace batch with ``httpx`` (imported lazily to keep the module import cheap).
+
+    ``trust_env=False`` is deliberate: spans carry prompts, tool arguments and results, so a
+    corporate ``HTTP(S)_PROXY`` must never receive them. Every other sample HTTP client is local-only
+    for the same reason.
+    """
     import httpx
 
-    response = httpx.post(url, json=body, headers=dict(headers), timeout=DEFAULT_TRACE_TIMEOUT)
+    response = httpx.post(
+        url,
+        json=body,
+        headers=dict(headers),
+        timeout=DEFAULT_TRACE_TIMEOUT,
+        trust_env=False,
+    )
     response.raise_for_status()
     return response.status_code
 
@@ -962,6 +1006,7 @@ __all__ = [
     "emit_span",
     "infer_decision_phase",
     "infer_event_phase",
+    "is_report_artifact",
     "phase_for_stage",
     "producer_span_id",
     "record_span",

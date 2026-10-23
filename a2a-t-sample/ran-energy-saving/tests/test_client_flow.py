@@ -671,11 +671,11 @@ async def test_decision_hook_fires_before_the_response_is_sent() -> None:
 
     assert order == ["send:TASK_T", "decision:accept:R1", "send:ACCEPT"]
     assert result.decisions[0].action == "accept"
+    # The callback owns the decision row, so the flow must not emit an adjacent duplicate span.
     assert [span["kind"] for span in spans] == [
         "task_prompt_rendered",
         "message_sent",
         "decision_requested",
-        "decision_made",
         "message_sent",
     ]
     assert [span["phase"] for span in spans] == [
@@ -683,13 +683,45 @@ async def test_decision_hook_fires_before_the_response_is_sent() -> None:
         "task_validation",
         "negotiation",
         "resolution",
-        "resolution",
     ]
     assert spans[1]["direction"] == "client->server"
     assert spans[2]["round"] == 1
-    decision_detail = spans[3]["detail"]
-    assert isinstance(decision_detail, dict)
-    assert decision_detail["action"] == "accept"
+
+
+async def test_decision_span_is_emitted_only_without_a_consumer_callback() -> None:
+    """CLI mode (no callback) still gets one decision row; callback consumers get exactly one."""
+    spans: list[dict[str, object]] = []
+    decisions: list[NegotiationDecision] = []
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()]),
+        user_request="request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        on_decision_made=lambda decision, propose, session: decisions.append(decision),
+        trace_sink=spans.append,
+    )
+
+    assert [decision.action for decision in decisions] == ["accept"]
+    assert [span["kind"] for span in spans].count("decision_made") == 0
+
+    cli_spans: list[dict[str, object]] = []
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()]),
+        user_request="request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        trace_sink=cli_spans.append,
+    )
+
+    decision_spans = [span for span in cli_spans if span["kind"] == "decision_made"]
+    assert len(decision_spans) == 1
+    assert decision_spans[0]["phase"] == "resolution"
+    detail = decision_spans[0]["detail"]
+    assert isinstance(detail, dict)
+    assert detail["action"] == "accept"
 
 
 def _scenario_batches(scenario_name: str) -> list[list[dict[str, object]]]:

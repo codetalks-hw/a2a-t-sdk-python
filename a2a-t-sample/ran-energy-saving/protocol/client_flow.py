@@ -73,6 +73,7 @@ from shared.trace import (
     TraceRecorder,
     current_trace,
     infer_decision_phase,
+    is_report_artifact,
     trace_stage,
 )
 from shared.webhook_receiver import WebhookReceiver
@@ -367,7 +368,7 @@ class WebhookClientTransport:
             # long-running and stays WORKING after it (design §7.1 / old webhook parity). The ADK
             # executor also emits one artifact per tool call, so only the named/stamped report
             # artifact ends the phase; stopping at the first tool artifact would lose the report.
-            if is_stop_event(event) or _is_report_artifact(event):
+            if is_stop_event(event) or is_report_artifact(event):
                 return events
 
 
@@ -591,25 +592,29 @@ async def run_client_flow(
         if on_decision_requested is not None:
             on_decision_requested(propose, session)
         decision = await provider.respond(propose, session)
+        # Exactly one timeline row per decision: a consumer callback (Web UI/transcript) records
+        # the decision itself, so the synthetic span would be an adjacent duplicate. Without a
+        # callback (CLI), the flow emits the span so the decision still reaches the trace.
         if on_decision_made is not None:
             on_decision_made(decision, propose, session)
+        else:
+            emit_trace(
+                "decision_made",
+                phase=infer_decision_phase(decision.action),
+                title=f"Decision made · {decision.action}",
+                round_number=session.round,
+                context_id=context_id,
+                detail={
+                    "action": decision.action,
+                    "rationale": decision.rationale,
+                    "filledParams": dict(decision.filled_params) if decision.filled_params else None,
+                    "counterProposal": decision.counter_proposal,
+                    "counterParams": dict(decision.counter_params) if decision.counter_params else None,
+                    "confirmedIntent": decision.confirmed_intent,
+                    "feasibilitySummary": decision.feasibility_summary,
+                },
+            )
         result.decisions.append(decision)
-        emit_trace(
-            "decision_made",
-            phase=infer_decision_phase(decision.action),
-            title=f"Decision made · {decision.action}",
-            round_number=session.round,
-            context_id=context_id,
-            detail={
-                "action": decision.action,
-                "rationale": decision.rationale,
-                "filledParams": dict(decision.filled_params) if decision.filled_params else None,
-                "counterProposal": decision.counter_proposal,
-                "counterParams": dict(decision.counter_params) if decision.counter_params else None,
-                "confirmedIntent": decision.confirmed_intent,
-                "feasibilitySummary": decision.feasibility_summary,
-            },
-        )
 
         if exchanges >= max_exchanges:
             raise ClientFlowError(f"The client flow exceeded {max_exchanges} exchanges.")
@@ -858,17 +863,6 @@ def _string_field(event: Mapping[str, object], key: str) -> str | None:
     """Return one string field of a normalized event, ``None`` when absent or not a string."""
     value = event.get(key)
     return value if isinstance(value, str) and value else None
-
-
-def _is_report_artifact(event: Mapping[str, object]) -> bool:
-    """Report whether one artifact event is the Task-T report (not a tool-call artifact)."""
-    if event.get("kind") != "artifact":
-        return False
-    name = _string_field(event, "name") or ""
-    if "report" in name.lower():
-        return True
-    metadata = event.get("metadata")
-    return isinstance(metadata, Mapping) and TASK_T_EXTENSION_URI in metadata
 
 
 def _context_id_of(events: list[dict[str, object]]) -> str | None:

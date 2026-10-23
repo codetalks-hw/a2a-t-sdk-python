@@ -455,7 +455,16 @@ class RunState:
         )
         self._store_span(span, seq=seq, record=True, broadcast_frame=False)
         message = self._finished_message()
-        message.update({"phase": PHASE_DONE, "phaseStep": step, "spanId": span.span_id})
+        message.update(
+            {
+                "phase": PHASE_DONE,
+                "phaseStep": step,
+                "spanId": span.span_id,
+                # The finished row starts when the terminal frame is built, which is what lets the
+                # Done phase render a duration instead of a null one.
+                "startedAt": span.started_at,
+            }
+        )
         self.finished_at = time.monotonic()
         return self.broadcast(message, seq=seq)
 
@@ -815,6 +824,9 @@ def create_app(
                 "defaultMode": resolved_default_mode,
                 "defaultTransport": resolved_default_transport,
                 "defaultDiscovery": resolved_default_discovery,
+                # The UI must keep its stream open at least as long as the backend grace window,
+                # otherwise the server's last trace batch is posted to a closed subscriber.
+                "finishedGraceMs": int(round(finished_grace_seconds * 1000)),
             }
         )
 

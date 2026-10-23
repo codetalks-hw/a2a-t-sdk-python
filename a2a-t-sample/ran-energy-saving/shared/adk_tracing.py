@@ -195,6 +195,14 @@ def serialize_llm_request(llm_request: LlmRequest) -> dict[str, object]:
     }
 
 
+def _safe_serialize_request(llm_request: LlmRequest) -> dict[str, object] | None:
+    """Serialize one request, returning ``None`` (span dropped) when serialization fails."""
+    try:
+        return serialize_llm_request(llm_request)
+    except Exception:  # noqa: BLE001 - tracing must never change model behavior
+        return None
+
+
 def _content_tokens(usage: types.GenerateContentResponseUsageMetadata | None) -> dict[str, object] | None:
     """Render the token usage of one ADK response."""
     if usage is None:
@@ -293,22 +301,26 @@ class TracingLlm(BaseLlm):
     async def generate_content_async(
         self, llm_request: LlmRequest, stream: bool = False
     ) -> AsyncGenerator[LlmResponse, None]:
-        """Delegate to the wrapped model and emit one span per complete response."""
+        """Delegate to the wrapped model and emit one span per complete response.
+
+        Tracing is an observer: serialization and emission are guarded, so a broken serializer drops
+        the span instead of changing what the model returns to ADK.
+        """
         started = time.perf_counter()
         started_at = _now_iso()
         stage = current_trace().stage
-        request_detail = serialize_llm_request(llm_request)
+        request_detail = _safe_serialize_request(llm_request)
         last: LlmResponse | None = None
         emitted = False
         try:
             async for response in self.inner.generate_content_async(llm_request, stream=stream):
                 last = response
                 if not response.partial:
-                    self._emit(stage, request_detail, response, started, started_at)
+                    self._emit_guarded(stage, request_detail, response, started, started_at)
                     emitted = True
                 yield response
         except Exception as exc:
-            self._emit(
+            self._emit_guarded(
                 stage,
                 request_detail,
                 None,
@@ -318,7 +330,25 @@ class TracingLlm(BaseLlm):
             )
             raise
         if not emitted and last is not None:
-            self._emit(stage, request_detail, last, started, started_at)
+            self._emit_guarded(stage, request_detail, last, started, started_at)
+
+    def _emit_guarded(
+        self,
+        stage: str | None,
+        request_detail: Mapping[str, object] | None,
+        response: LlmResponse | None,
+        started: float,
+        started_at: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Emit one span; a failed request serialization or emission drops it silently."""
+        if request_detail is None:
+            return
+        try:
+            self._emit(stage, request_detail, response, started, started_at, error=error)
+        except Exception:  # noqa: BLE001 - tracing must never change model behavior
+            return
 
     def _emit(
         self,

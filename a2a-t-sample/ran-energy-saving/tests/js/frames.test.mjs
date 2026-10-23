@@ -50,6 +50,19 @@ const derived = store.derived();
 assert.equal(derived.groups.length, 8);
 for (const group of derived.groups) assert.ok(group.items.length > 0, `${group.key} must have items`);
 
+// The report card holds only the report artifact and the COMPLETED status; per-tool artifacts
+// belong to Execution.
+const reportGroup = derived.groups.find((group) => group.key === "report");
+assert.equal(reportGroup.items.length, 2, "report phase must have exactly two rows");
+assert.deepEqual(
+  reportGroup.items.map((item) => item.kind).sort(),
+  ["artifact", "status"],
+);
+const executionArtifacts = derived.groups
+  .find((group) => group.key === "execution")
+  .items.filter((item) => item.kind === "artifact");
+assert.ok(executionArtifacts.length > 0, "tool artifacts must be execution rows");
+
 const llm = items.filter((item) => item.kind === "llm");
 const tools = items.filter((item) => item.kind === "tool");
 assert.ok(llm.length > 0, "the run must contain LLM spans");

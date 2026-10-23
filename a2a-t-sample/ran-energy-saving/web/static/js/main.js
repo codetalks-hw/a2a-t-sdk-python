@@ -23,8 +23,8 @@ import { TimelineView } from "./timeline.js";
 
 const $ = (id) => document.getElementById(id);
 
-/** Delay before closing a finished run's stream: the server posts its last spans just after it. */
-const FINISHED_GRACE_MS = 1500;
+/** Minimum delay before closing a finished run's stream: the server posts its last spans late. */
+const DEFAULT_FINISHED_GRACE_MS = 1500;
 
 const api = new ApiClient();
 const store = new RunStore();
@@ -150,7 +150,11 @@ function renderHeader() {
   $("token-total").textContent = token
     ? token.total !== undefined && token.total > 0
       ? `${formatNumber(token.total)} tok`
-      : "n/a (scripted)"
+      : token.scripted
+        ? "n/a (scripted)"
+        : token.missing
+          ? "n/a"
+          : EM_DASH
     : EM_DASH;
   $("start-button").disabled = !app.meta || store.running || store.pendingDecision;
 
@@ -576,9 +580,15 @@ function showStartError(message) {
 /** Summarize LLM token usage for the rail (scripted runs never show a zero). */
 function tokenAnalysisText(analysis) {
   if (analysis.llmCalls === 0) return EM_DASH;
-  if (analysis.numericCalls === 0) return "n/a (scripted)";
+  if (analysis.numericCalls === 0) {
+    // "scripted" only labels the offline provider; a live call without usage is just missing.
+    return analysis.scriptedCalls > 0 ? "n/a (scripted)" : "n/a";
+  }
   const base = `${formatNumber(analysis.promptTokens)} in / ${formatNumber(analysis.completionTokens)} out`;
-  return analysis.scriptedCalls > 0 ? `${base} (+${analysis.scriptedCalls} scripted)` : base;
+  const extras = [];
+  if (analysis.scriptedCalls > 0) extras.push(`${analysis.scriptedCalls} scripted`);
+  if (analysis.missingCalls > 0) extras.push(`${analysis.missingCalls} no usage`);
+  return extras.length > 0 ? `${base} (+${extras.join(", ")})` : base;
 }
 
 /** Open the event stream of one run. */
@@ -643,16 +653,24 @@ function handleFrame(frame) {
   scheduleRender();
 }
 
+/** Return the stream grace: the backend's window, never shorter than the local fallback. */
+function finishedGraceMs() {
+  const server = Number(app.meta?.finishedGraceMs);
+  return Number.isFinite(server) && server > 0
+    ? Math.max(DEFAULT_FINISHED_GRACE_MS, server)
+    : DEFAULT_FINISHED_GRACE_MS;
+}
+
 /** Close a finished run after the grace window that admits late cross-process server spans. */
 function scheduleFinalize() {
   if (app.finishTimer) return;
   app.finishTimer = window.setTimeout(() => {
     app.finishTimer = null;
     finalizeRun();
-  }, FINISHED_GRACE_MS);
+  }, finishedGraceMs());
 }
 
-/** Fetch the terminal snapshot and close the stream bookkeeping (once per run). */
+/** Fetch the terminal snapshot/trace and close the stream bookkeeping (once per run). */
 async function finalizeRun() {
   if (app.finalizing) return;
   app.finalizing = true;
@@ -666,6 +684,14 @@ async function finalizeRun() {
     // The frames already carry the outcome; the snapshot only enriches it.
     app.disconnected = false;
     app.fatalStream = false;
+  }
+  try {
+    // A server batch posted after the subscriber detached is still in the trace document; merge it
+    // by seq/spanId so the final page never misses the run's last LLM/tool rows.
+    const trace = await api.getTrace(app.runId);
+    if (trace && Array.isArray(trace.spans)) store.mergeSpans(trace.spans);
+  } catch {
+    // The stream already carried every span it could; a missing trace document is not an error.
   }
   scheduleRender();
 }

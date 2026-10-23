@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from a2a_t.core.metadata import TASK_T_EXTENSION_URI
 from shared.trace import (
     MAX_PAYLOAD_CHARS,
     PHASE_DISPATCH,
+    PHASE_EXECUTION,
     PHASE_NEGOTIATION,
+    PHASE_REPORT,
+    PHASE_RESOLUTION,
+    PHASE_TASK_PROMPT,
+    PHASE_TASK_VALIDATION,
     TRUNCATED_MARKER,
     Span,
     TraceRecorder,
     current_trace,
     emit_span,
+    infer_decision_phase,
+    infer_event_phase,
+    is_report_artifact,
+    phase_for_stage,
     set_global_sink,
     trace_scope,
     trace_stage,
@@ -169,3 +179,45 @@ def test_global_sink_receives_spans_and_is_noop_when_unset() -> None:
         emit_span(Span(run_id="run-1", seq=4, span_id="s4"))
     finally:
         set_global_sink(None)
+
+
+def test_report_artifact_predicate_matches_only_the_final_report() -> None:
+    """Only the named/stamped report artifact ends the run (ADK tool artifacts do not)."""
+    report = {"kind": "artifact", "name": "report", "artifact_id": "a1"}
+    stamped = {
+        "kind": "artifact",
+        "name": "",
+        "metadata": {TASK_T_EXTENSION_URI: "Task-T report text"},
+    }
+    tool_artifact = {"kind": "artifact", "name": "apply_energy_saving_plan", "artifact_id": "a2"}
+    unnamed = {"kind": "artifact", "name": None, "artifact_id": "a3"}
+
+    assert is_report_artifact(report) is True
+    assert is_report_artifact(stamped) is True
+    assert is_report_artifact(tool_artifact) is False
+    assert is_report_artifact(unnamed) is False
+    assert is_report_artifact({"kind": "status", "name": "report"}) is False
+
+
+def test_artifact_events_map_to_report_only_when_they_are_the_report() -> None:
+    """Intermediate agent artifacts are execution rows, not report rows."""
+    report = {"kind": "artifact", "name": "report"}
+    stamped = {"kind": "artifact", "metadata": {TASK_T_EXTENSION_URI: "report body"}}
+    intermediate = {"kind": "artifact", "name": "get_cell_energy_profile", "artifact_id": "a2"}
+
+    assert infer_event_phase(report) == PHASE_REPORT
+    assert infer_event_phase(stamped) == PHASE_REPORT
+    assert infer_event_phase(intermediate) == PHASE_EXECUTION
+    assert infer_event_phase({"kind": "status", "state": "TASK_STATE_COMPLETED"}) == PHASE_REPORT
+    assert infer_event_phase({"kind": "status", "state": "TASK_STATE_WORKING"}) == PHASE_EXECUTION
+
+
+def test_accept_time_task_t_stages_belong_to_the_resolution_phase() -> None:
+    """The refill and its revalidation run after the decision, so Story puts them in Resolution."""
+    assert phase_for_stage("task_t_slot_extraction_refill") == PHASE_RESOLUTION
+    assert phase_for_stage("task_t_accept_validation") == PHASE_RESOLUTION
+    # The initial generation/validation keep their own phases.
+    assert phase_for_stage("task_t_slot_extraction") == PHASE_TASK_PROMPT
+    assert phase_for_stage("task_t_server_validation") == PHASE_TASK_VALIDATION
+    assert infer_decision_phase("accept") == PHASE_RESOLUTION
+    assert infer_decision_phase("counter") == PHASE_NEGOTIATION
