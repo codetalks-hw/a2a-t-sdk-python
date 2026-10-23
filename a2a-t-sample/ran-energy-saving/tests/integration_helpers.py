@@ -136,6 +136,36 @@ def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]
             path.rmdir()
 
 
+@contextmanager
+def running_http_app(app: Any, *, host: str = "127.0.0.1") -> Generator[str, None, None]:
+    """Serve one ASGI app on an ephemeral port and yield its base URL.
+
+    ``httpx.ASGITransport`` buffers a response body before the caller sees it, which hides whether
+    an SSE stream forwards frames produced after the caller consumed ``finished``. A real uvicorn
+    server keeps the stream interactive (the Run Explorer's live behavior).
+    """
+    port = free_tcp_port(host)
+    uvicorn_server = uvicorn.Server(
+        uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+    )
+    thread = threading.Thread(target=uvicorn_server.run, name=f"ran-test-ui-{port}", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
+    try:
+        while not uvicorn_server.started:
+            if not thread.is_alive():
+                raise RuntimeError("The in-process Web UI exited before listening")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"The in-process Web UI did not start within {SERVER_START_TIMEOUT_SECONDS:g}s"
+                )
+            time.sleep(0.01)
+        yield f"http://{host}:{port}"
+    finally:
+        uvicorn_server.should_exit = True
+        thread.join(timeout=SERVER_STOP_TIMEOUT_SECONDS)
+
+
 @dataclass
 class RecordedExchange:
     """One captured protocol exchange of a client flow.

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -43,41 +42,30 @@ from a2a.types import (
 from a2a.utils.constants import TransportProtocol
 from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from a2a_t.server.a2at_server import A2ATServer
-from dotenv import dotenv_values
 from google.adk.models.base_llm import BaseLlm
 from google.protobuf.json_format import MessageToDict
+from shared.agent_card import (
+    AGENT_CARD_DESCRIPTION,
+    AGENT_CARD_EXAMPLE,
+    AGENT_CARD_NAME,
+    AGENT_CARD_ORGANIZATION,
+    AGENT_CARD_PROVIDER_URL,
+    AGENT_CARD_SKILL_ID,
+)
 from shared.config import SampleConfig, load_config
 from shared.registry_client import register_agentcard
 from shared.scenario import MAX_ROUNDS
 from shared.scripted_llm import register_scripted_provider
+from shared.sdk_env import prepare_sdk_env
 from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
-from shared.traced_llm import register_traced_providers, sdk_provider_name
+from shared.traced_llm import register_traced_providers
 from starlette.applications import Starlette
 
 from protocol.negotiation_gate import NegotiationGate
 from protocol.server_executor import NegotiationAgentExecutor, build_negotiation_executor
 
-#: AgentCard name registered in the registry.
-AGENT_CARD_NAME: Final[str] = "RAN Domain Agent"
-
-#: AgentCard description.
-AGENT_CARD_DESCRIPTION: Final[str] = "RAN Domain Agent"
-
-#: Provider organization of the sample card.
-AGENT_CARD_ORGANIZATION: Final[str] = "Huawei"
-
-#: Provider URL of the sample card.
-AGENT_CARD_PROVIDER_URL: Final[str] = "https://www.huawei.com"
-
-#: Skill id of the card.
-AGENT_CARD_SKILL_ID: Final[str] = "energy-saving"
-
-#: Sample negotiation example advertised by the card.
-AGENT_CARD_EXAMPLE: Final[str] = (
-    "Create a RAN energy-saving task for XX Region to maximize energy savings. The "
-    "time-segment-based guaranteed throughput target is {00:00~07:00,2Mbps}, "
-    "{07:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~24:00,2Mbps}."
-)
+#: Temporary SDK ``.env`` directory prefix of the server runtime.
+SERVER_ENV_PREFIX: Final[str] = "a2at-ran-energy-saving-env-"
 
 _LOGGER = logging.getLogger("ran_energy_saving.server_app")
 
@@ -193,40 +181,10 @@ def prepare_sdk_env_path(config: SampleConfig, env_path: Path | None = None) -> 
     Raises:
         FileNotFoundError: in live mode when the resolved file does not exist.
     """
-    # The generated file names a traced provider; a caller may build the facade right after this
-    # helper (as the tests do), so the registration belongs here as well (idempotent).
-    register_traced_providers()
     base_path = env_path or Path.cwd() / ".env"
-    if not config.is_offline:
-        if not base_path.exists():
-            raise FileNotFoundError(f"Live mode requires an SDK .env file at {base_path}")
-        # Deferred import: ``protocol.client_runtime`` imports this module at load time.
-        from protocol.client_runtime import prepare_client_sdk_env
-
-        return prepare_client_sdk_env(config, base_path).path
-
-    values: dict[str, str] = {}
-    if base_path.exists():
-        values = {
-            str(key): str(value)
-            for key, value in dotenv_values(base_path).items()
-            if key is not None and value is not None
-        }
-    values.update(
-        {
-            "A2AT_LLM_PROVIDER": sdk_provider_name(offline=True),
-            "A2AT_LLM_MODEL": "scripted",
-            "A2AT_LLM_API_KEY": "not-needed",
-            "A2AT_LANGUAGE": config.language,
-        }
-    )
-    temp_dir = Path(tempfile.mkdtemp(prefix="a2at-ran-energy-saving-env-"))
-    target = temp_dir / ".env"
-    target.write_text(
-        "\n".join(f"{key}={value}" for key, value in values.items()) + "\n",
-        encoding="utf-8",
-    )
-    return target
+    if not config.is_offline and not base_path.exists():
+        raise FileNotFoundError(f"Live mode requires an SDK .env file at {base_path}")
+    return prepare_sdk_env(config, base_path, prefix=SERVER_ENV_PREFIX).path
 
 
 def build_rest_app(
@@ -380,10 +338,13 @@ def main() -> None:
         )
     )
     _LOGGER.info(
-        "starting RAN energy-saving server on %s:%s (model_mode=%s)",
+        "starting RAN energy-saving server on %s:%s (model_mode=%s, model=%s, language=%s, provider=%s)",
         runtime.config.host,
         runtime.config.port,
+        runtime.config.model_mode,
         runtime.config.model_label,
+        runtime.config.language,
+        runtime.config.adk_model_provider,
     )
     uvicorn.run(runtime.app, host=runtime.config.host, port=runtime.config.port)
 

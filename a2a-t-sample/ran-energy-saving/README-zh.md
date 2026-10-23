@@ -89,6 +89,8 @@ flowchart LR
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T 元数据助手：扩展 URI、`templateUri`、`negotiationContext`、结束消息、样例专用元数据。 |
 | [`protocol/transcript.py`](protocol/transcript.py) | 结构化运行记录，写入 `runs/<timestamp>-<scenario>.json` 与 `.md`。 |
 | [`shared/config.py`](shared/config.py) | 读取 `.env` 并构建 ADK 模型（离线 fake model，在线 `LiteLlm`）。 |
+| [`shared/agent_card.py`](shared/agent_card.py) | 客户端（服务发现）与服务端（构建 AgentCard）共享的身份常量。 |
+| [`shared/sdk_env.py`](shared/sdk_env.py) | 两个运行时共用的每次运行 SDK `.env` 构建器（消除 client↔server 导入）。 |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision`（客户端 `output_schema`）与 Provider 视角的提议视图。 |
 | [`shared/scenario.py`](shared/scenario.py) | 五个场景定义：请求、期望 performative/round 序列、终态、离线决策。 |
 | [`shared/task_schema.py`](shared/task_schema.py) | 服务端校验与客户端 accept 重填共用的调用方参数 schema。 |
@@ -100,7 +102,7 @@ flowchart LR
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | 将 A2A 流事件归一化为统一事件结构。 |
 | [`registry/`](registry) | Mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
 | [`web/`](web) | Starlette Web UI（`app.py`）与单页前端（`static/index.html`）。 |
-| [`tests/`](tests) | 单元、集成、传输、Web UI 与五场景离线验收测试。 |
+| [`tests/`](tests) | 单元、集成、传输、Web UI 与五场景离线验收测试；`tests/js/` 为 pytest 驱动的 Node harness。 |
 
 ## 3. 快速开始
 
@@ -220,6 +222,69 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 curl http://127.0.0.1:8080/api/meta
 {"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse"}
 ```
+
+### Run Explorer（运行探索器）
+
+`--ui` 页面是运行探索器，而不只是结果页：它从浏览器发起运行，展示从下发到报告的完整链路，并包含客户端与服务端两个进程的 LLM 请求/响应。离线模式是确定性基准，在线模式为尽力而为。
+
+```bash
+# 离线（无需 key，确定性）
+python run_demo.py --ui --scenario information --mode auto --model-mode offline
+# 打开 http://127.0.0.1:8080
+
+# 在线（尽力而为；SDK 与 ADK 都使用配置的 OpenAI-compatible 端点）
+python run_demo.py --ui --scenario information --mode auto --model-mode live
+```
+
+在左侧栏选择场景与 `auto`/`manual` 模式，然后点击 **Start run**。上下文条与 `GET /api/meta` 展示只读的进程级语言与模型模式。
+
+#### 八个阶段
+
+| # | 阶段 | 展示内容 |
+| ---: | --- | --- |
+| 1 | Dispatch（下发） | 运行被接受、客户端运行时构建、discovery 与 transport 就绪、期望序列。 |
+| 2 | Task-T generation（Task-T 生成） | 客户端 SDK 槽位抽取、内容校验、渲染后的 Task-T 提示词。 |
+| 3 | Task validation（Task 校验） | 首次 A2A 发送、服务端网关校验、开启协商或直接接受任务。 |
+| 4 | Negotiation（协商） | 每轮：服务端 propose、决策请求、决策、响应、服务端校验。 |
+| 5 | Resolution（终态） | Accepted/Rejected/Aborted/Ended、重填的 Task-T 与达成参数。 |
+| 6 | Execution（执行） | ADK 轮次、工具调用、中间 artifact 与 `WORKING` 状态。 |
+| 7 | Report（报告） | 报告 artifact 载荷与 `COMPLETED`。 |
+| 8 | Done（结束） | 最终状态、运行记录与摘要。 |
+
+每个事件行带有全局编号、actor（client/server/LLM/tool/human/system）、标题、耗时、token、轮次与状态。LLM 与 tool span 嵌套在触发它的协议步骤下。决策在 provider 返回时立即记录，因此出现在它所导致的任务事件**之前**。协商阶段显示 `R1 ✓ R2 ◐` 轮次标签；Resolution 显示 `Accepted`、`Rejected`、`Aborted` 或 `Ended`。时间线可在 **Story**（阶段卡片）与 **Waterfall**（扁平耗时条）间切换，并支持 All/Protocol/LLM/Tools/Errors、actor、轮次与全文搜索过滤。
+
+#### 检查器（Inspector）
+
+选中一行后打开检查器，包含以下标签页（不适用的标签页会禁用）：
+
+- **Summary**：一句话说明、关键事实、前后因果与关联决策。
+- **Protocol**：方向、message/task/context id、模板 URI、协商上下文、Task-T/Negotiation-T 文本与原始 parts。
+- **LLM request**：阶段、目的、system instruction、messages、JSON schema、tools 与生成参数。
+- **LLM response**：状态、耗时、token、原始与解析结果、function calls、解析错误与重试。
+- **Tool call**：工具名、参数、结果、耗时与错误。
+- **Raw JSON**：完整 span envelope；复制/下载始终导出完整载荷。
+
+离线 LLM 调用不报告 token 用量，UI 显示 `n/a (scripted)`，而不是虚构的 `0`。
+
+#### Trace、隐私与限制
+
+`run_demo.py --ui` 会生成本次运行的本地 token，并把服务端指向 UI（`A2AT_SAMPLE_TRACE_URL=http://127.0.0.1:<ui_port>`、`A2AT_SAMPLE_TRACE_TOKEN=<random>`）；服务端把 span POST 到 `POST /api/runs/{runId}/trace`，UI 校验 run id 与 token。该端点只应绑定 localhost：span 中可能包含模型提示词、工具参数与结果。
+
+- 未配置 token 时 ingest 路由默认拒绝（失败关闭），不会接受未认证 span；复用的 keep-alive 服务端必须携带相同 token。
+- `Authorization`、`api_key`、`X-API-Key` 会被脱敏，API key 永不记录。
+- 每条 LLM 请求/响应载荷上限 256 KB：保留头尾并标记 `truncated`。
+- `GET /api/runs/{id}/trace.json` 返回完整 span 列表（`spanId` 唯一、`seq` 单调）与运行记录；`transcript.json` / `transcript.md` 也可下载。
+- CLI 运行（不带 `--ui`）把服务端 trace 写入 `runs/<runId>/server-trace.jsonl`，并打印 LLM/tool/token 摘要。
+
+#### `--keep-alive` 与 PID 复用
+
+`--keep-alive` 在客户端退出后保留注册中心与服务端；用 `python run_demo.py --stop` 停止。PID 文件同时记录这些进程的模型模式、语言与 trace token；后续启动只有在三者都与请求一致时才复用。不一致时（例如 `live` keep-alive 服务端之后启动 `offline` UI），启动器会停止已记录的进程、打印原因并重新启动，避免离线 UI 静默发起 live 模型调用。端口被监听但没有 PID 记录时，说明进程不属于启动器：启动器拒绝复用并要求先释放端口。
+
+#### 限制
+
+- 每个 UI 实例同时只允许一个运行；trace 与运行状态保存在内存中，UI 重启即丢失。
+- 重新加载 `#run=<id>` 会重放已记录的流，但无法恢复随进程丢失的运行。
+- 在线输出依赖模型的抽取/校验结果；验收请使用离线模式。
 
 ### 人工决策模式
 
@@ -446,6 +511,9 @@ root_agent = LlmAgent(
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | 默认 `demo-webhook-token` | 与 `X-A2A-Notification-Token` 比对的静态推送 token。 |
 | `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | 默认 `30` | 无推送多少秒后结束 webhook 阶段。 |
 | `A2AT_SAMPLE_UI_PORT` | 默认 `8080` | Web UI 的默认绑定端口；`run_demo.py` 将其作为 `--ui-port` 的默认值读取。 |
+| `A2AT_SAMPLE_TRACE_URL` | 默认未设置；`--ui` 设为 `http://127.0.0.1:<ui_port>` | 服务端 trace 端点（Web UI）。仅用于本地演示；服务端把 span POST 到这里。 |
+| `A2AT_SAMPLE_TRACE_TOKEN` | 默认未设置；`--ui` 生成随机 token | 服务端出示、UI 校验的本地 token；未设置时 ingest 路由关闭（失败关闭）。 |
+| `A2AT_SAMPLE_TRACE_DIR` | 默认未设置；CLI 设为 `<sample>/runs` | CLI 服务端 trace 目录（`<dir>/<runId>/server-trace.jsonl`）。 |
 | `ADK_MODEL_PROVIDER` | `litellm` | ADK 模型 Provider（本样例只实现 LiteLlm）。 |
 | `ADK_MODEL_NAME` | 默认 `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm 模型 id（需要 provider 前缀）。 |
 | `ADK_MODEL_API_BASE` | 默认 `http://127.0.0.1:31943/v1` | OpenAI-compatible 端点。 |
@@ -475,7 +543,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（227 个测试）。覆盖范围：
+测试套件完全离线且确定性（316 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -485,12 +553,15 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + ADK fake model，断言精确 performative/round 序列与终态。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
-| `test_web_ui.py` | `/api/meta`、运行生命周期、SSE 事件、人工决策、下载、错误状态码。 |
+| `test_web_ui.py` | `/api/meta`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端/服务端 LLM/tool span、`trace.json`）与真实人工决策流程。 |
+| `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页、CSS token；`node --check` 全部 JS，并运行仓库内 `tests/js` store 与真实帧 harness（无 Node 时跳过）。 |
 | `test_server_executor.py` | request converter、artifact interceptor、executor 委托、AgentCard 扩展、注册载荷。 |
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
 | `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性 ADK 模型。 |
-| `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置、场景定义、运行记录、运行时装配。 |
-| `test_run_demo.py` | 启动器默认值：`--ui-port` 从 `A2AT_SAMPLE_UI_PORT` 解析以及显式覆盖。 |
+| `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置、场景定义、运行记录、运行时装配（含客户端导入不构建服务端模型）。 |
+| `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，外来监听则拒绝。 |
+
+JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
 
 ### 五场景离线 smoke
 

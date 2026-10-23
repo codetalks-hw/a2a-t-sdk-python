@@ -54,4 +54,17 @@ def build_server_agent(model: BaseLlm | None = None) -> LlmAgent:
     )
 
 
-root_agent = build_server_agent()
+def __getattr__(name: str) -> LlmAgent:
+    """Build ``root_agent`` lazily for ``adk run`` / ``adk web``.
+
+    Importing this module (the server assembly does, for :func:`build_server_agent`) must not create
+    an ADK model: in live mode that reads the ambient ``.env`` and would build a second, unused
+    ``LiteLlm`` while the executor builds the traced one. ADK's loader only needs the attribute when
+    it actually loads the agent, so module ``__getattr__`` (PEP 562) keeps both entry points working
+    and the value is cached after the first access.
+    """
+    if name != "root_agent":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    agent = build_server_agent()
+    globals()["root_agent"] = agent
+    return agent

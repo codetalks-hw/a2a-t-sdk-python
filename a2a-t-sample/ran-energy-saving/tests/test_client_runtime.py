@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -239,3 +242,34 @@ def test_prepare_client_sdk_env_does_not_mutate_the_source(
     assert values["A2AT_LLM_MODEL"] == "my-model"
     assert values["A2AT_LLM_BASE_URL"] == "http://example.test/v1"
     assert values["A2AT_LANGUAGE"] == "en-US"
+
+
+def test_importing_the_client_runtime_does_not_build_a_server_model() -> None:
+    """The client process must not import the server assembly (which used to build LiteLlm).
+
+    A fresh interpreter is required: every other test module of this process already imported
+    ``protocol.server_app`` for its AgentCard tests.
+    """
+    sample_root = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys\n"
+        "import protocol.client_runtime\n"
+        "assert 'protocol.server_app' not in sys.modules, 'server assembly imported'\n"
+        "assert 'agents.server_agent.agent' not in sys.modules, 'server agent imported'\n"
+        "assert 'agents.client_agent.agent' not in sys.modules, 'client agent imported'\n"
+        "print('client-import-ok')\n"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(sample_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["A2AT_LANGUAGE"] = "en-US"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(sample_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "client-import-ok" in result.stdout

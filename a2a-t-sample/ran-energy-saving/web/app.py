@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
@@ -70,6 +71,13 @@ STATUS_FAILED: Final[RunStatus] = "failed"
 
 #: Modes the Web UI may start; the scripted mode is a CLI/test seam only.
 UI_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL)
+
+#: Seconds an SSE stream stays open after ``finished`` so late cross-process server spans arrive.
+#:
+#: The server trace emitter batches spans with a 0.5 s flush interval, so its last batch is posted
+#: just after the client finishes. Closing the stream on ``finished`` would hide every server LLM
+#: and tool span of a fresh run, so the handler forwards those frames during a short grace window.
+FINISHED_GRACE_SECONDS: Final[float] = 2.0
 
 
 class ClientRuntimeLike(Protocol):
@@ -121,6 +129,7 @@ class RunState:
         traces: every trace span produced/ingested for the run.
         spans: span lookup by id.
         task: background task of the run.
+        finished_at: monotonic time the terminal frame was broadcast, when it is known.
     """
 
     run_id: str
@@ -142,6 +151,7 @@ class RunState:
     traces: list[dict[str, object]] = field(default_factory=list)
     spans: dict[str, dict[str, object]] = field(default_factory=dict)
     task: asyncio.Task[None] | None = None
+    finished_at: float | None = None
     _seq: int = field(default=0, repr=False)
     _phase_steps: dict[str, int] = field(default_factory=dict, repr=False)
     _span_id_map: dict[str, str] = field(default_factory=dict, repr=False)
@@ -446,6 +456,7 @@ class RunState:
         self._store_span(span, seq=seq, record=True, broadcast_frame=False)
         message = self._finished_message()
         message.update({"phase": PHASE_DONE, "phaseStep": step, "spanId": span.span_id})
+        self.finished_at = time.monotonic()
         return self.broadcast(message, seq=seq)
 
     def subscribe(self) -> tuple[list[dict[str, object]], asyncio.Queue[dict[str, object]]]:
@@ -716,6 +727,7 @@ def create_app(
     default_mode: str | None = None,
     default_transport: str | None = None,
     default_discovery: str | None = None,
+    finished_grace_seconds: float = FINISHED_GRACE_SECONDS,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -731,6 +743,9 @@ def create_app(
             ``A2AT_SAMPLE_TRANSPORT`` value.
         default_discovery: discovery preselected/used by default; defaults to the process-level
             ``A2AT_SAMPLE_DISCOVERY`` value.
+        finished_grace_seconds: seconds an event stream stays open after ``finished`` to forward
+            the server spans that a cross-process run posts just after completion; ``0`` closes
+            immediately (tests that do not exercise the race).
 
     Returns:
         The assembled Starlette application.
@@ -862,18 +877,40 @@ def create_app(
         snapshot, queue = run.subscribe()
 
         async def stream() -> AsyncIterator[dict[str, str]]:
-            """Replay recorded messages, then forward live ones until the run finishes."""
+            """Replay recorded messages, then forward live ones (including post-``finished`` spans).
+
+            The stream does not return the moment ``finished`` is seen: the server process posts its
+            last trace batch a flush interval later, and those spans belong to this run. A short
+            grace window keeps the subscriber attached so the browser sees the server LLM/tool
+            rows of a fresh run (design §8: reconnect must not lose events).
+            """
             try:
-                seen_finished = any(message.get("type") == "finished" for message in snapshot)
                 for message in snapshot:
                     yield _sse_data(message)
-                if run.finished() and seen_finished:
-                    return
+                deadline: float | None = None
+                finished_at = run.finished_at
+                if run.finished() and finished_at is not None:
+                    deadline = finished_at + finished_grace_seconds
                 while True:
-                    message = await queue.get()
+                    # Frames broadcast between ``subscribe`` and the first iteration are already
+                    # queued; drain them before the deadline can end the stream.
+                    try:
+                        message = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        if deadline is not None:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                return
+                            try:
+                                message = await asyncio.wait_for(queue.get(), timeout=remaining)
+                            except TimeoutError:
+                                return
+                        else:
+                            message = await queue.get()
                     yield _sse_data(message)
                     if message.get("type") == "finished":
-                        return
+                        finished_at = run.finished_at or time.monotonic()
+                        deadline = finished_at + finished_grace_seconds
             finally:
                 run.unsubscribe(queue)
 

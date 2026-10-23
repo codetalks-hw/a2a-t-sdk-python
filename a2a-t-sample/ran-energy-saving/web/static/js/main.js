@@ -23,6 +23,9 @@ import { TimelineView } from "./timeline.js";
 
 const $ = (id) => document.getElementById(id);
 
+/** Delay before closing a finished run's stream: the server posts its last spans just after it. */
+const FINISHED_GRACE_MS = 1500;
+
 const api = new ApiClient();
 const store = new RunStore();
 const filters = new FilterState();
@@ -44,6 +47,7 @@ const app = {
   disconnected: false,
   fatalStream: false,
   finalizing: false,
+  finishTimer: null,
   pendingScrollKey: null,
 };
 
@@ -511,6 +515,10 @@ function resetFilters() {
 
 /** Reset every per-run UI value (manual decision, stream and scroll state). */
 function resetRunUiState() {
+  if (app.finishTimer) {
+    clearTimeout(app.finishTimer);
+    app.finishTimer = null;
+  }
   app.decisionSeq = null;
   app.decisionAt = null;
   app.decisionTimeout = null;
@@ -627,12 +635,21 @@ function handleFrame(frame) {
     app.decisionTimedOut = false;
     app.disconnected = false;
     app.fatalStream = false;
-    finalizeRun();
+    scheduleFinalize();
   } else if (follow.paused) {
     follow.noteNew();
   }
   announce(frame);
   scheduleRender();
+}
+
+/** Close a finished run after the grace window that admits late cross-process server spans. */
+function scheduleFinalize() {
+  if (app.finishTimer) return;
+  app.finishTimer = window.setTimeout(() => {
+    app.finishTimer = null;
+    finalizeRun();
+  }, FINISHED_GRACE_MS);
 }
 
 /** Fetch the terminal snapshot and close the stream bookkeeping (once per run). */

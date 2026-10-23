@@ -106,6 +106,8 @@ Task, which the inner ADK `A2aAgentExecutor` creates and drives to `COMPLETED`.
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T metadata helpers: extension URIs, `templateUri`, `negotiationContext`, end message, sample-only metadata. |
 | [`protocol/transcript.py`](protocol/transcript.py) | Structured run transcript written to `runs/<timestamp>-<scenario>.json` and `.md`. |
 | [`shared/config.py`](shared/config.py) | Reads `.env` and builds the ADK model (fake model offline, `LiteLlm` live). |
+| [`shared/agent_card.py`](shared/agent_card.py) | AgentCard identity constants shared by the client (discovery) and the server (card build). |
+| [`shared/sdk_env.py`](shared/sdk_env.py) | Per-run SDK `.env` builder shared by both runtimes (no client↔server import). |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision` (client `output_schema`) and the provider-facing proposal view. |
 | [`shared/scenario.py`](shared/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
@@ -117,7 +119,7 @@ Task, which the inner ADK `A2aAgentExecutor` creates and drives to `COMPLETED`.
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
 | [`registry/`](registry) | Mock registry center (AgentCard register/query, port 5001). |
 | [`web/`](web) | Starlette Web UI (`app.py`) and the single-page front end (`static/index.html`). |
-| [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests. |
+| [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
 
 ## 3. Quickstart
 
@@ -253,6 +255,94 @@ and model mode are process-level and read-only (see `GET /api/meta`).
 curl http://127.0.0.1:8080/api/meta
 {"language":"en-US","modelMode":"offline","modelLabel":"offline (scripted)","scenarios":["information","target","feasibility","reject","abort"],"modes":["auto","manual"],"transports":["sse","webhook"],"defaultScenario":"information","defaultMode":"auto","defaultTransport":"sse"}
 ```
+
+### Run Explorer
+
+The `--ui` page is a run explorer, not just a result page: it starts a run from the browser and
+shows the whole chain from dispatch to report, including the LLM requests/responses of both
+processes. Offline is the deterministic reference; live is best-effort.
+
+```bash
+# Offline (no key, deterministic)
+python run_demo.py --ui --scenario information --mode auto --model-mode offline
+# open http://127.0.0.1:8080
+
+# Live (best-effort; both SDK and ADK use the configured OpenAI-compatible endpoint)
+python run_demo.py --ui --scenario information --mode auto --model-mode live
+```
+
+Use the left rail to pick a scenario and `auto`/`manual` mode, then **Start run**. The context
+strip and `GET /api/meta` show the read-only process language and model mode.
+
+#### The eight phases
+
+| # | Phase | What it shows |
+| ---: | --- | --- |
+| 1 | Dispatch | Run accepted, client runtime built, discovery and transport ready, expected sequence. |
+| 2 | Task-T generation | Client SDK slot extraction, content validation, rendered Task-T prompt. |
+| 3 | Task validation | First A2A send, server gate validation, negotiation opened or task accepted directly. |
+| 4 | Negotiation | Per round: server propose, decision request, decision, response, server validation. |
+| 5 | Resolution | Accepted/rejected/aborted/ended, refilled Task-T and agreed parameters. |
+| 6 | Execution | ADK turns, tool calls, intermediate artifacts and `WORKING` status. |
+| 7 | Report | Report artifact payload and `COMPLETED`. |
+| 8 | Done | Final state, transcript and summary. |
+
+Each event row carries a global number, actor (client/server/LLM/tool/human/system), title,
+latency, tokens, round and status. LLM and tool spans nest under the protocol step that caused
+them. A decision is recorded when the provider returns, so it appears **before** the task events it
+causes. The negotiation phase shows `R1 ✓ R2 ◐` chips; Resolution reads `Accepted`, `Rejected`,
+`Aborted` or `Ended`. The timeline switches between **Story** (phase cards) and **Waterfall**
+(flat durations) and filters by All/Protocol/LLM/Tools/Errors, actor, round and free-text search.
+
+#### Inspector
+
+Selecting a row opens the inspector with these tabs (not applicable tabs are disabled):
+
+- **Summary** — what/why, key facts, causal links and the associated decision.
+- **Protocol** — direction, message/task/context ids, template URI, negotiation context,
+  Task-T/Negotiation-T text and raw parts.
+- **LLM request** — stage, purpose, system instruction, messages, JSON schema, tools and
+  generation parameters.
+- **LLM response** — status, latency, tokens, raw and parsed output, function calls, parse errors,
+  retries.
+- **Tool call** — tool name, arguments, result, duration and error.
+- **Raw JSON** — the full span envelope; copy/download always exports the complete payload.
+
+Offline LLM calls do not report token usage; the UI shows `n/a (scripted)` rather than a made-up
+`0`.
+
+#### Trace, privacy and limits
+
+`run_demo.py --ui` mints a per-run local token and points the server at the UI
+(`A2AT_SAMPLE_TRACE_URL=http://127.0.0.1:<ui_port>`, `A2AT_SAMPLE_TRACE_TOKEN=<random>`); the
+server POSTs its spans to `POST /api/runs/{runId}/trace` and the UI validates the run id and token.
+Keep this endpoint on localhost: spans carry model prompts, tool arguments and results.
+
+- Without a configured token the ingestion route fails closed (it never accepts unauthenticated
+  spans), and a reused keep-alive server must carry the same recorded token.
+- `Authorization`, `api_key` and `X-API-Key` are redacted and API keys are never recorded.
+- Each LLM request/response payload is capped at 256 KB: the head and tail are kept and the span
+  is marked `truncated`.
+- `GET /api/runs/{id}/trace.json` returns the complete span list (unique `spanId`, monotonic `seq`)
+  plus the transcript; `transcript.json` / `transcript.md` are also downloadable.
+- CLI runs (no `--ui`) write the server side to `runs/<runId>/server-trace.jsonl` and print an
+  LLM/tool/token summary.
+
+#### `--keep-alive` and PID reuse
+
+`--keep-alive` leaves the registry and server running after the client exits; stop them with
+`python run_demo.py --stop`. The PID file also records the model mode, language and trace token of
+those processes. A later launch reuses them only when all three match the requested run. On a
+mismatch (for example an `offline` UI after a `live` keep-alive server) the launcher stops the
+recorded processes, prints the reason and starts fresh, so an offline UI can never silently make
+live model calls. A listening port with no PID record belongs to another process: the launcher
+refuses to reuse it and asks you to free the port.
+
+#### Limitations
+
+- One active run per UI instance; traces and run state are in memory, so a UI restart loses them.
+- Reloading `#run=<id>` replays the recorded stream; it does not resume a run lost with the process.
+- Live output depends on the model's extraction/validation; use offline for acceptance.
 
 ### Manual decision mode
 
@@ -535,6 +625,9 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_WEBHOOK_TOKEN` | default `demo-webhook-token` | Static push token checked against `X-A2A-Notification-Token`. |
 | `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT` | default `30` | Seconds without a push before a webhook phase ends. |
 | `A2AT_SAMPLE_UI_PORT` | default `8080` | Default bind port of the Web UI; read by `run_demo.py` as the default of `--ui-port`. |
+| `A2AT_SAMPLE_TRACE_URL` | unset; `--ui` sets `http://127.0.0.1:<ui_port>` | Server trace endpoint (Web UI). Local demo only; the server POSTs spans there. |
+| `A2AT_SAMPLE_TRACE_TOKEN` | unset; `--ui` mints a random token | Local token the server presents and the UI requires; unset disables ingestion (fails closed). |
+| `A2AT_SAMPLE_TRACE_DIR` | unset; CLI sets `<sample>/runs` | Directory of the CLI server trace (`<dir>/<runId>/server-trace.jsonl`). |
 | `ADK_MODEL_PROVIDER` | `litellm` | ADK model provider (only LiteLlm is implemented by this sample). |
 | `ADK_MODEL_NAME` | default `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm model id (provider prefix required). |
 | `ADK_MODEL_API_BASE` | default `http://127.0.0.1:31943/v1` | OpenAI-compatible endpoint. |
@@ -572,7 +665,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (227 tests). What it covers:
+The suite is fully offline and deterministic (316 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -582,12 +675,17 @@ The suite is fully offline and deterministic (227 tests). What it covers:
 | `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout. |
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + ADK fake model, asserting the exact performative/round sequence and final state. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
-| `test_web_ui.py` | `/api/meta`, run lifecycle, SSE events, manual decisions, downloads, error statuses. |
+| `test_web_ui.py` | `/api/meta`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client/server LLM and tool spans, `trace.json`) and a real manual decision flow. |
+| `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs, CSS tokens; runs `node --check` on every JS module and the in-repo `tests/js` store and real-frame harnesses (skipped without Node). |
 | `test_server_executor.py` | Request converter, artifact interceptor, executor delegation, AgentCard extensions, registry payload. |
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
 | `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic ADK model. |
-| `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration, scenario definitions, transcripts, runtime assembly. |
-| `test_run_demo.py` | Launcher defaults: `--ui-port` resolution from `A2AT_SAMPLE_UI_PORT` and explicit overrides. |
+| `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration, scenario definitions, transcripts, runtime assembly (including the client import that must not build a server model). |
+| `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
+
+The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
+`frames.test.mjs` replays the real SSE frames of the offline integration run. Both run from
+`pytest` and skip cleanly when `node` is not installed.
 
 ### Five-scenario offline smoke
 

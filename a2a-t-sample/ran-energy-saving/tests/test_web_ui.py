@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -17,7 +19,12 @@ from a2a_t.core.metadata import (
     NegotiationContext,
     NegotiationPerformative,
 )
-from integration_helpers import free_tcp_port, offline_direct_config, running_server
+from integration_helpers import (
+    free_tcp_port,
+    offline_direct_config,
+    running_http_app,
+    running_server,
+)
 from protocol.client_flow import ClientFlowResult
 from protocol.decision_provider import ManualDecisionProvider
 from shared.config import SampleConfig
@@ -232,7 +239,12 @@ async def client(
     tmp_path: Path,
 ) -> Any:
     """HTTP client bound to the ASGI app."""
-    app = create_app(offline_config, runs_dir=tmp_path, runtime_factory=factory)
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        runtime_factory=factory,
+        finished_grace_seconds=0.0,
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client
@@ -265,6 +277,12 @@ def _sse_payloads(body: str) -> list[dict[str, Any]]:
         if line.startswith("data:"):
             payloads.append(json.loads(line[len("data:") :].strip()))
     return payloads
+
+
+def _assert_seq_order(payloads: list[dict[str, Any]]) -> None:
+    """Every frame carries a strictly increasing ``seq`` starting at 1 (design §3)."""
+    seqs = [payload["seq"] for payload in payloads]
+    assert seqs == list(range(1, len(payloads) + 1))
 
 
 async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncClient) -> None:
@@ -682,6 +700,60 @@ async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -
     )
 
 
+async def test_events_stream_keeps_forwarding_spans_posted_after_finished(
+    offline_config: SampleConfig,
+    factory: Callable[..., Any],
+    tmp_path: Path,
+) -> None:
+    """A server trace batch that lands after ``finished`` still reaches the live subscriber."""
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        runtime_factory=factory,
+        finished_grace_seconds=2.0,
+    )
+    late_span = _trace_span("llm", phase="execution", title="Late server LLM call")
+    late_span.update({"spanId": "server-late-1", "side": "server", "actor": "llm"})
+    frames: list[dict[str, Any]] = []
+
+    with running_http_app(app) as base_url:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as http_client:
+            start = await http_client.post(
+                "/api/runs",
+                json={"scenario": "information", "mode": "auto", "transport": "sse"},
+            )
+            run_id = start.json()["runId"]
+            await _wait_status(http_client, run_id, lambda data: data["status"] == "finished")
+
+            async with http_client.stream("GET", f"/api/runs/{run_id}/events") as response:
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    frame = json.loads(line[len("data:") :].strip())
+                    frames.append(frame)
+                    if frame.get("type") == "finished":
+                        # The real cross-process path: the server process posts its last batch.
+                        posted = await http_client.post(
+                            f"/api/runs/{run_id}/trace",
+                            json=[late_span],
+                            headers={"x-a2at-trace-token": TRACE_TOKEN},
+                        )
+                        assert posted.status_code == 202
+                    if frame.get("type") == "trace" and frame["event"]["spanId"] == "server-late-1":
+                        break
+
+    types = [frame["type"] for frame in frames]
+    assert types[0] == "run_started"
+    finished_index = types.index("finished")
+    late_index = next(
+        index
+        for index, frame in enumerate(frames)
+        if frame["type"] == "trace" and frame["event"]["spanId"] == "server-late-1"
+    )
+    assert finished_index < late_index
+    assert frames[late_index]["seq"] > frames[finished_index]["seq"]
+
+
 async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.AsyncClient) -> None:
     start = await client.post(
         "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
@@ -744,7 +816,7 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
     del english_language  # fixture side effect: pin the scripted SDK language
     config = offline_direct_config(free_tcp_port())
     with running_server(config):
-        app = create_app(config, runs_dir=tmp_path)
+        app = create_app(config, runs_dir=tmp_path, finished_grace_seconds=0.0)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             start = await http_client.post(
@@ -770,6 +842,27 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
             payloads = _sse_payloads((await http_client.get(f"/api/runs/{run_id}/events")).text)
             run_started = payloads[0]
             assert run_started["type"] == "run_started"
+            _assert_seq_order(payloads)
+            assert payloads[-1]["type"] == "finished"
+            assert payloads[-1]["finalState"] == FINAL_STATE_TASK_COMPLETED
+
+            # The decision is recorded when the provider returns, before the task events it causes.
+            event_entries = [
+                payload["event"] for payload in payloads if payload["type"] == "event"
+            ]
+            decision_index = next(
+                index
+                for index, entry in enumerate(event_entries)
+                if entry.get("eventKind") == "decision"
+            )
+            later_task_index = next(
+                index
+                for index, entry in enumerate(event_entries)
+                if index > decision_index and entry.get("kind") in {"status", "artifact"}
+            )
+            assert decision_index < later_task_index
+            assert event_entries[decision_index]["action"] == "accept"
+            assert event_entries[decision_index]["spanId"]
 
             looked_up = await http_client.get(
                 f"/api/runs/{run_id}/spans/{run_started['spanId']}"
@@ -778,6 +871,9 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
             assert looked_up.json()["kind"] == "run_started"
 
             document = (await http_client.get(f"/api/runs/{run_id}/trace.json")).json()
+            assert document["status"] == "finished"
+            assert document["transcript"]["report"] == status["report"]
+            assert status["report"]
             spans = document["spans"]
             span_ids = [span["spanId"] for span in spans]
             assert len(span_ids) == len(set(span_ids))
@@ -824,6 +920,83 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
                 assert isinstance(detail, dict)
                 assert detail.get("toolName")
                 assert "args" in detail and "result" in detail
+
+            # The real frame stream drives the in-repo JS store harness (skipped without Node).
+            node = shutil.which("node")
+            if node is not None:
+                frames_path = tmp_path / "frames.json"
+                frames_path.write_text(json.dumps(payloads, ensure_ascii=False), encoding="utf-8")
+                harness = Path(__file__).resolve().parent / "js" / "frames.test.mjs"
+                result = subprocess.run(
+                    [node, str(harness), str(frames_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                assert result.returncode == 0, result.stderr or result.stdout
+                assert "real-frame store checks passed" in result.stdout
+
+
+async def test_real_offline_manual_run_waits_then_records_a_human_decision(
+    english_language: None,
+    tmp_path: Path,
+) -> None:
+    """A real manual run blocks on the UI, then the submitted decision becomes a human row."""
+    del english_language  # fixture side effect: pin the scripted SDK language
+    config = offline_direct_config(free_tcp_port())
+    with running_server(config):
+        app = create_app(config, runs_dir=tmp_path, finished_grace_seconds=0.0)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            start = await http_client.post(
+                "/api/runs",
+                json={"scenario": "information", "mode": "manual", "transport": "sse", "discovery": "direct"},
+            )
+            assert start.status_code == 202
+            run_id = start.json()["runId"]
+
+            pending = await _wait_status(
+                http_client,
+                run_id,
+                lambda data: data["pendingDecision"] is True,
+                timeout=30.0,
+            )
+            assert pending["status"] == "running"
+            assert pending["mode"] == "manual"
+
+            submitted = await http_client.post(
+                f"/api/runs/{run_id}/decisions",
+                json={
+                    "action": "accept",
+                    "rationale": "The operator accepts the default Task-T parameters.",
+                },
+            )
+            assert submitted.status_code == 200
+
+            finished = await _wait_status(
+                http_client,
+                run_id,
+                lambda data: data["status"] != "running",
+                timeout=30.0,
+            )
+            assert finished["status"] == "finished"
+            assert finished["finalState"] == FINAL_STATE_TASK_COMPLETED
+            assert finished["transcript"]["decisions"][0]["action"] == "accept"
+
+            payloads = _sse_payloads((await http_client.get(f"/api/runs/{run_id}/events")).text)
+            assert payloads[0]["type"] == "run_started"
+            _assert_seq_order(payloads)
+            requests = [
+                payload for payload in payloads if payload["type"] == "decision_requested"
+            ]
+            assert len(requests) == 1
+            assert requests[0]["mode"] == "manual"
+            assert requests[0]["timeoutSeconds"] == 300.0
+
+            spans = (await http_client.get(f"/api/runs/{run_id}/trace.json")).json()["spans"]
+            decisions = [span for span in spans if span["kind"] == "accept"]
+            assert decisions and decisions[0]["actor"] == "human"
 
 
 async def test_start_accepts_discovery_and_rejects_unknown_values(client: httpx.AsyncClient) -> None:

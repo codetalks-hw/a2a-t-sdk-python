@@ -51,7 +51,7 @@ async def static_client(
     tmp_path: Path,
 ) -> AsyncIterator[httpx.AsyncClient]:
     """HTTP client bound to the ASGI app (no run is started)."""
-    app = create_app(offline_config, runs_dir=tmp_path)
+    app = create_app(offline_config, runs_dir=tmp_path, finished_grace_seconds=0.0)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -264,11 +264,51 @@ def test_raw_json_copy_and_download_keep_the_full_payload() -> None:
     assert inspector_source.count('const text = typeof value === "string" ? value : formatJson(value);') == 2
 
 
-def test_format_module_behavior_for_large_payloads_and_offline_tokens() -> None:
-    """Run the pure formatters in Node when it is available (no browser or DOM needed)."""
+def _node_binary() -> str:
+    """Return the Node.js executable, skipping the test cleanly when it is absent."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
+    return node
+
+
+def test_every_js_module_passes_node_syntax_check() -> None:
+    """``node --check`` parses every served module (the only syntax gate of a build-free app)."""
+    node = _node_binary()
+    modules = sorted(path for path in STATIC_DIR.joinpath("js").glob("*.js"))
+    assert modules
+    for module in modules:
+        result = subprocess.run(
+            [node, "--check", str(module)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, f"{module.name}: {result.stderr or result.stdout}"
+
+
+def test_in_repo_store_harness_runs_in_node() -> None:
+    """The store/filter harness lives in the repo and runs against the real modules."""
+    node = _node_binary()
+    harness = Path(__file__).resolve().parent / "js" / "store.test.mjs"
+    assert harness.is_file()
+
+    result = subprocess.run(
+        [node, str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "store/filters runtime checks passed" in result.stdout
+
+
+def test_format_module_behavior_for_large_payloads_and_offline_tokens() -> None:
+    """Run the pure formatters in Node when it is available (no browser or DOM needed)."""
+    node = _node_binary()
     module_url = json.dumps((STATIC_DIR / "js" / "format.js").as_uri())
     script = "\n".join(
         [

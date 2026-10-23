@@ -49,4 +49,16 @@ def build_client_agent(model: BaseLlm | None = None) -> LlmAgent:
     )
 
 
-root_agent = build_client_agent()
+def __getattr__(name: str) -> LlmAgent:
+    """Build ``root_agent`` lazily for ``adk run`` / ``adk web``.
+
+    Importing this module must not create an ADK model: the client runtime builds its own traced
+    model, and in live mode the eager top-level construction read the ambient ``.env`` for a second,
+    unused ``LiteLlm``. ADK's loader only needs the attribute when it actually loads the agent, so
+    module ``__getattr__`` (PEP 562) keeps both entry points working; the value is cached.
+    """
+    if name != "root_agent":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    agent = build_client_agent()
+    globals()["root_agent"] = agent
+    return agent

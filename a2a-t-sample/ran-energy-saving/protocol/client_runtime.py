@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,8 +31,8 @@ from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.metadata import NegotiationContext
 from dotenv import dotenv_values
 from shared.adk_fake_model import build_client_script, build_fake_model
+from shared.agent_card import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION
 from shared.config import (
-    MODEL_MODE_OFFLINE,
     SUPPORTED_TRANSPORTS,
     TRANSPORT_SSE,
     TRANSPORT_WEBHOOK,
@@ -43,8 +42,9 @@ from shared.config import (
 from shared.models import NegotiationProposeView
 from shared.scenario import Scenario, get_scenario, resolve_user_request
 from shared.scripted_llm import register_scripted_provider
+from shared.sdk_env import SdkEnvFile, prepare_sdk_env
 from shared.trace import set_global_sink, trace_scope
-from shared.traced_llm import register_traced_providers, sdk_provider_name
+from shared.traced_llm import register_traced_providers
 from shared.webhook_receiver import WebhookReceiver
 
 from protocol.client_flow import (
@@ -63,7 +63,6 @@ from protocol.decision_provider import (
     ScriptedDecisionProvider,
 )
 from protocol.discovery import DiscoveredAgent, discover_agent
-from protocol.server_app import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION
 
 #: Client decision modes.
 MODE_AUTO: Final[str] = "auto"
@@ -85,19 +84,6 @@ class ClientRuntimeError(RuntimeError):
     """Raised when the client runtime cannot be assembled."""
 
 
-@dataclass(frozen=True)
-class SdkEnvFile:
-    """Per-run SDK ``.env`` built for one A2ATClient.
-
-    Attributes:
-        path: Path of the generated ``.env`` file.
-        directory: Temporary directory owning the file (removed by the runtime).
-    """
-
-    path: Path
-    directory: Path
-
-
 def _env_values(env_path: Path | None) -> dict[str, str]:
     """Read the source ``.env`` values as plain strings (empty when the file is missing)."""
     if env_path is None or not env_path.exists():
@@ -109,20 +95,14 @@ def _env_values(env_path: Path | None) -> dict[str, str]:
     }
 
 
-def _sdk_model_name(adk_model_name: str) -> str:
-    """Return the SDK model id matching one LiteLlm model id (drops the litellm provider prefix)."""
-    return adk_model_name.removeprefix("openai/") if adk_model_name else ""
-
-
 def prepare_client_sdk_env(
     config: SampleConfig,
     env_path: Path | None = None,
 ) -> SdkEnvFile:
     """Build a per-run SDK ``.env`` without mutating the caller's file.
 
-    ``A2AT_LANGUAGE`` always follows the process-level configuration. Offline mode pins the
-    scripted provider; live mode keeps the SDK endpoint values of the source file and fills any
-    missing one from the ADK model configuration, so both SDK and ADK address the same endpoint.
+    The builder lives in :mod:`shared.sdk_env` so the server runtime can use it without importing
+    this module; this wrapper keeps the historical client entry point and its directory prefix.
 
     Args:
         config: resolved sample configuration.
@@ -131,39 +111,7 @@ def prepare_client_sdk_env(
     Returns:
         The generated file and the temporary directory owning it.
     """
-    # The generated file names a traced provider, so the matching registration is part of the
-    # contract of this helper (a caller may build the facade right after it, as the tests do).
-    register_traced_providers()
-    source_path = env_path or Path.cwd() / ".env"
-    values = _env_values(source_path)
-    values["A2AT_LANGUAGE"] = config.language
-    if config.model_mode == MODEL_MODE_OFFLINE:
-        values.update(
-            {
-                "A2AT_LLM_PROVIDER": sdk_provider_name(offline=True),
-                "A2AT_LLM_MODEL": "scripted",
-                "A2AT_LLM_API_KEY": "not-needed",
-                "A2AT_LLM_BASE_URL": values.get("A2AT_LLM_BASE_URL") or config.adk_model_api_base,
-            }
-        )
-    else:
-        values.update(
-            {
-                # The traced provider is a drop-in replacement of the SDK OpenAI provider; the Run
-                # Explorer must see every structured call, so the source value never wins.
-                "A2AT_LLM_PROVIDER": sdk_provider_name(offline=False),
-                "A2AT_LLM_MODEL": values.get("A2AT_LLM_MODEL") or _sdk_model_name(config.adk_model_name),
-                "A2AT_LLM_API_KEY": values.get("A2AT_LLM_API_KEY") or config.adk_model_api_key,
-                "A2AT_LLM_BASE_URL": values.get("A2AT_LLM_BASE_URL") or config.adk_model_api_base,
-            }
-        )
-    temp_dir = Path(tempfile.mkdtemp(prefix=_SDK_ENV_PREFIX))
-    target = temp_dir / ".env"
-    target.write_text(
-        "\n".join(f"{key}={value}" for key, value in values.items()) + "\n",
-        encoding="utf-8",
-    )
-    return SdkEnvFile(path=target, directory=temp_dir)
+    return prepare_sdk_env(config, env_path, prefix=_SDK_ENV_PREFIX)
 
 
 def _direct_base_url(config: SampleConfig, env_path: Path | None) -> str:

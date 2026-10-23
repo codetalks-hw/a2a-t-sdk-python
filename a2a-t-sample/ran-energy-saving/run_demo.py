@@ -16,6 +16,11 @@ run-level keys overridden) in a temporary run directory, so the shared configura
 mutated. Language and model mode are process-level: they are written into the run ``.env`` and into
 the child environment (design D18).
 
+With ``--keep-alive``, the PID file also records the model mode, language and trace token of the
+background processes. A later launch reuses them only when the record matches the requested run; a
+mismatch stops them and starts fresh, so an offline UI can never talk to a server still running live
+LiteLlm. A listening port with no PID record is refused instead of reused.
+
 Usage:
     python run_demo.py --scenario information
     python run_demo.py --scenario target --mode manual --ui
@@ -58,6 +63,13 @@ SERVER_MODULE = "protocol.server_app"
 DEFAULT_REGISTRY_PORT = 5001
 DEFAULT_SERVER_PORT = 8000
 DEFAULT_UI_PORT = 8080
+
+#: Decisions of the launcher when a background port is already listening.
+REUSE_START = "start"
+REUSE_REUSE = "reuse"
+REUSE_RESTART = "restart"
+REUSE_REFUSE = "refuse"
+
 
 def _port_open(port: int, host: str = "127.0.0.1") -> bool:
     """Return whether a TCP port accepts a connection."""
@@ -128,16 +140,22 @@ def _child_env(language: str, extra: dict[str, str] | None = None) -> dict[str, 
     return env
 
 
-def _server_trace_env(*, ui: bool, ui_port: int) -> dict[str, str]:
+def _server_trace_env(
+    *,
+    ui: bool,
+    ui_port: int,
+    trace_token: str | None = None,
+) -> dict[str, str]:
     """Return the Run Explorer environment of the server process.
 
-    ``--ui`` points the server at the Web UI trace endpoint with a per-run local token; the CLI
-    points it at ``runs/<runId>/server-trace.jsonl`` under the sample root.
+    ``--ui`` points the server at the Web UI trace endpoint with a per-run local token (a reused
+    keep-alive server passes its recorded token back so both processes agree); the CLI points it at
+    ``runs/<runId>/server-trace.jsonl`` under the sample root.
     """
     if ui:
         return {
             "A2AT_SAMPLE_TRACE_URL": f"http://127.0.0.1:{ui_port}",
-            "A2AT_SAMPLE_TRACE_TOKEN": secrets.token_hex(16),
+            "A2AT_SAMPLE_TRACE_TOKEN": trace_token or secrets.token_hex(16),
         }
     return {"A2AT_SAMPLE_TRACE_DIR": str(CASE_DIR / "runs")}
 
@@ -233,27 +251,113 @@ def _stop_pids(pids: list[int]) -> int:
     return stopped
 
 
-def _load_pids() -> list[int]:
-    """Load the persisted background PIDs."""
+def _load_state() -> dict[str, object]:
+    """Load the persisted launcher state (``pids`` plus the run metadata).
+
+    A PID file written by an older launcher only carries ``pids``; the missing metadata is what
+    makes a reuse unsafe, so :func:`_server_reuse_decision` restarts in that case.
+    """
     if not PID_FILE.exists():
-        return []
+        return {}
     try:
         data = json.loads(PID_FILE.read_text(encoding="utf-8"))
     except (ValueError, OSError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    try:
-        return [int(pid) for pid in data.get("pids", [])]
-    except (TypeError, ValueError):
-        return []
+        return {}
+    return dict(data) if isinstance(data, dict) else {}
 
 
-def _save_pids(pids: list[int]) -> None:
-    """Persist the managed PIDs atomically so a concurrent ``--stop`` never reads a partial file."""
+def _state_pids(state: dict[str, object]) -> list[int]:
+    """Return the managed PIDs of one launcher state record."""
+    raw_pids = state.get("pids", [])
+    if not isinstance(raw_pids, list):
+        return []
+    pids: list[int] = []
+    for raw_pid in raw_pids:
+        try:
+            pids.append(int(raw_pid))
+        except (TypeError, ValueError):
+            continue
+    return pids
+
+
+def _load_pids() -> list[int]:
+    """Load the persisted background PIDs."""
+    return _state_pids(_load_state())
+
+
+def _save_state(
+    pids: list[int],
+    *,
+    model_mode: str,
+    language: str,
+    trace_token: str = "",
+) -> None:
+    """Persist the managed PIDs and their run metadata atomically.
+
+    A concurrent ``--stop`` never reads a partial file; a later launcher can tell whether a
+    listening server was started with the requested model mode/language and trace token.
+    """
+    state: dict[str, object] = {
+        "pids": pids,
+        "model_mode": model_mode,
+        "language": language,
+        "trace_token": trace_token,
+    }
     tmp_path = PID_FILE.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps({"pids": pids}), encoding="utf-8")
+    tmp_path.write_text(json.dumps(state), encoding="utf-8")
     os.replace(tmp_path, PID_FILE)
+
+
+def _server_reuse_decision(
+    *,
+    port_open: bool,
+    state: dict[str, object],
+    model_mode: str,
+    language: str,
+    ui: bool,
+) -> str:
+    """Decide whether a listening A2A server may be reused for the requested run.
+
+    PID reuse is only safe when the recorded process is demonstrably the same configuration: a
+    reused server keeps its own client/ADK provider, so an offline UI talking to a live server would
+    silently make live LiteLlm calls (and the UI would report ``offline``). The trace token pairs
+    the server with this UI, so a UI run cannot reuse a server recording server spans to a file
+    (CLI keep-alive), and vice versa.
+
+    Args:
+        port_open: whether the configured server port already accepts connections.
+        state: persisted launcher state (empty when no PID file exists).
+        model_mode: requested model mode (``offline`` / ``live``).
+        language: requested process-level language.
+        ui: whether this launch serves the Web UI.
+
+    Returns:
+        ``REUSE_START`` (nothing listening), ``REUSE_REUSE`` (compatible),
+        ``REUSE_RESTART`` (our processes, incompatible configuration) or ``REUSE_REFUSE``
+        (a process the launcher does not own).
+    """
+    if not port_open:
+        return REUSE_START
+    if not _state_pids(state):
+        return REUSE_REFUSE
+    if state.get("model_mode") != model_mode or state.get("language") != language:
+        return REUSE_RESTART
+    recorded_token = str(state.get("trace_token") or "")
+    if ui and not recorded_token:
+        return REUSE_RESTART
+    if not ui and recorded_token:
+        return REUSE_RESTART
+    return REUSE_REUSE
+
+
+def _wait_ports_closed(ports: list[int], timeout: float = 10.0) -> bool:
+    """Wait until every port stops accepting connections (after stopping reused processes)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(_port_open(port) for port in ports):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _show_tail(path: Path) -> None:
@@ -460,7 +564,8 @@ def _run_ui(
     trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(
         f"[run_demo] Web UI on http://{host}:{ui_port} "
-        f"(language={config.language}, model_mode={config.model_label}, "
+        f"(language={config.language}, model_mode={config.model_mode} [{config.model_label}], "
+        f"provider={config.adk_model_provider}, "
         f"defaults: scenario={scenario}, mode={mode}, transport={transport}, "
         f"server trace ingestion: {'enabled' if trace_enabled else 'disabled (no local token)'})"
     )
@@ -568,7 +673,8 @@ def main() -> int:
 
     os.environ["A2AT_LANGUAGE"] = args.language
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    existing = _load_pids()
+    state = _load_state()
+    existing = _state_pids(state)
     registry_host = source_values.get("REGISTRY_CENTER_HOST") or "127.0.0.1"
     registry_port = _env_int(source_values, "REGISTRY_CENTER_PORT", DEFAULT_REGISTRY_PORT)
     server_host = source_values.get("A2AT_SAMPLE_HOST") or "127.0.0.1"
@@ -589,9 +695,55 @@ def main() -> int:
         ui_port=args.ui_port,
     )
 
+    from shared.config import load_config
+
+    resolved_config = load_config(env_path=env_path)
+    print(
+        f"[run_demo] resolved: model_mode={resolved_config.model_mode}, "
+        f"model={resolved_config.model_label}, language={resolved_config.language}, "
+        f"provider={resolved_config.adk_model_provider}, discovery={resolved_config.discovery}, "
+        f"transport={resolved_config.transport}"
+    )
+
     # Drop a stale PID file only when its processes are gone (both ports closed).
     if existing and not _port_open(registry_port) and not _port_open(server_port):
         PID_FILE.unlink(missing_ok=True)
+        state = {}
+        existing = []
+
+    # A followed run is only reusable when its recorded configuration matches the request; the
+    # server owns the model mode and language, so a mismatch stops it instead of silently keeping
+    # live LiteLlm behind an offline UI.
+    reuse = _server_reuse_decision(
+        port_open=_port_open(server_port),
+        state=state,
+        model_mode=args.model_mode,
+        language=args.language,
+        ui=args.ui,
+    )
+    if reuse == REUSE_REFUSE:
+        print(
+            f"[run_demo] port {server_port} is already in use by a process this launcher does not "
+            f"manage (no PID record); cannot verify its model_mode/language. Free the port or run "
+            f"--stop, then retry."
+        )
+        return 1
+    if reuse == REUSE_RESTART:
+        recorded_mode = state.get("model_mode", "unknown")
+        recorded_language = state.get("language", "unknown")
+        print(
+            f"[run_demo] recorded server configuration does not match this run "
+            f"(recorded model_mode={recorded_mode}, language={recorded_language}; requested "
+            f"model_mode={args.model_mode}, language={args.language}); stopping the recorded "
+            f"processes and starting fresh"
+        )
+        _stop_pids(existing)
+        if not _wait_ports_closed([registry_port, server_port]):
+            print("[run_demo] recorded processes did not release their ports; free them and retry")
+            PID_FILE.unlink(missing_ok=True)
+            return 1
+        PID_FILE.unlink(missing_ok=True)
+        state = {}
         existing = []
 
     managed: list[int] = list(existing)
@@ -622,7 +774,7 @@ def main() -> int:
     ) -> str | None:
         """Return ``started``/``reused``, or ``None`` on failure."""
         if _port_open(port):
-            if not existing:
+            if not managed:
                 print(f"[run_demo] port {port} is already in use by another process; free it first")
                 return None
             print(f"[run_demo] {name} already listening on {port} (reusing recorded process)")
@@ -675,14 +827,26 @@ def main() -> int:
     try:
         if start("registry", REGISTRY_MODULE, registry_port) is None:
             return 1
-        server_trace_env = _server_trace_env(ui=args.ui, ui_port=args.ui_port)
+        # Reusing a compatible keep-alive server must also reuse its trace token: the UI validates
+        # that token, so a fresh one would silently drop every server span.
+        recorded_token = str(state.get("trace_token") or "") if reuse == REUSE_REUSE else ""
+        server_trace_env = _server_trace_env(
+            ui=args.ui,
+            ui_port=args.ui_port,
+            trace_token=recorded_token or None,
+        )
         if args.ui:
             # The UI process checks the same token the server sends; the URL is only read by the
             # server process, but keeping both keys together documents the paired configuration.
             os.environ["A2AT_SAMPLE_TRACE_TOKEN"] = server_trace_env["A2AT_SAMPLE_TRACE_TOKEN"]
         if start("server", SERVER_MODULE, server_port, server_trace_env) is None:
             return 1
-        _save_pids(list(dict.fromkeys(managed)))
+        _save_state(
+            list(dict.fromkeys(managed)),
+            model_mode=args.model_mode,
+            language=args.language,
+            trace_token=server_trace_env.get("A2AT_SAMPLE_TRACE_TOKEN", ""),
+        )
         persisted = True
 
         if args.ui:

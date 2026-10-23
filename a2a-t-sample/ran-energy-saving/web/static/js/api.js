@@ -103,8 +103,8 @@ export class ApiClient {
    * Subscribe to one run's SSE stream.
    *
    * @param {string} runId run identifier.
-   * @param {object} handlers callbacks: ``onFrame``, ``onOpen``, ``onError``, ``onClose``,
-   *   ``onDuplicate``.
+   * @param {object} handlers callbacks: ``onFrame``, ``onOpen``, ``onError``, ``onFinished``,
+   *   ``onClose``, ``onDuplicate``.
    * @returns {{close: () => void, isOpen: () => boolean, seen: Set<number>}}
    */
   subscribe(runId, handlers = {}) {
@@ -147,9 +147,12 @@ export class ApiClient {
         }
         handlers.onFrame?.(frame);
         if (frame.type === "finished") {
+          // Keep listening during the server's post-finish grace window: the server process posts
+          // its final LLM/tool spans a flush interval after the client finishes, and closing here
+          // would drop the whole server side of the run from the timeline. The caller closes the
+          // stream once its own grace timer fires (main.js) or the server ends the stream.
           finished = true;
-          close();
-          handlers.onClose?.({ finished: true, frame });
+          handlers.onFinished?.(frame);
         }
       };
       source.onerror = () => {
