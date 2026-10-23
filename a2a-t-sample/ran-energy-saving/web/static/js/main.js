@@ -42,7 +42,9 @@ const app = {
   theme: "auto",
   lastSnapshotAt: 0,
   disconnected: false,
+  fatalStream: false,
   finalizing: false,
+  pendingScrollKey: null,
 };
 
 const timeline = new TimelineView({
@@ -72,7 +74,7 @@ const inspector = new Inspector({
   callbacks: {
     onStep: (offset) => stepInspector(offset),
     onClose: () => closeInspector(),
-    onSelectKey: (key) => selectItem(key),
+    onSelectKey: (key) => selectItem(key, { scroll: true }),
     fetchSpan: (spanId) => api.getSpan(app.runId, spanId),
     notify: (message) => notify(message),
   },
@@ -178,21 +180,15 @@ function renderStepper() {
     const item = button.closest(".phase-step");
     item.className = `phase-step phase-${state}`;
     button.setAttribute("aria-current", state === "active" ? "step" : "false");
+    // A glyph plus a word keeps the state readable without relying on colour.
+    const marker = { pending: "○", skipped: "–", failed: "✕", done: "✓", active: "●" }[state] || "•";
     const meta = button.querySelector(".phase-step-meta");
     meta.replaceChildren();
-    if (state === "pending") {
-      meta.textContent = "pending";
+    if (state === "pending" || state === "skipped" || state === "failed") {
+      meta.textContent = `${marker} ${state}`;
       continue;
     }
-    if (state === "skipped") {
-      meta.textContent = "skipped";
-      continue;
-    }
-    if (state === "failed") {
-      meta.textContent = "failed";
-      continue;
-    }
-    const parts = [];
+    const parts = [state];
     if (group?.stats.durationMs !== null && group?.stats.durationMs !== undefined) {
       parts.push(formatDuration(group.stats.durationMs));
     } else {
@@ -202,7 +198,7 @@ function renderStepper() {
       const label = store.resolutionLabel();
       if (label) parts.push(label);
     }
-    meta.textContent = parts.join(" · ");
+    meta.textContent = `${marker} ${parts.join(" · ")}`;
     if (key === "negotiation" && group?.rounds?.length) {
       for (const round of group.rounds) {
         const chip = el(
@@ -244,7 +240,7 @@ function renderRail() {
       if (anomaly.key) {
         const button = el("button", "anomaly-button", anomaly.message);
         button.type = "button";
-        button.addEventListener("click", () => selectItem(anomaly.key));
+        button.addEventListener("click", () => selectItem(anomaly.key, { scroll: true }));
         row.appendChild(button);
       } else {
         row.textContent = anomaly.message;
@@ -267,7 +263,7 @@ function renderRail() {
         el("span", "decision-head", `${entry.round ? `R${entry.round} ` : ""}${String(entry.action).toUpperCase()} · ${entry.source}`),
         el("span", "decision-rationale", truncate(entry.rationale, 120)),
       );
-      button.addEventListener("click", () => selectItem(entry.key));
+      button.addEventListener("click", () => selectItem(entry.key, { scroll: true }));
       row.appendChild(button);
       decisionLog.appendChild(row);
     }
@@ -330,6 +326,9 @@ function renderTimeline() {
   } else {
     scroll.scrollTop = previousTop;
   }
+  const pendingKey = app.pendingScrollKey;
+  app.pendingScrollKey = null;
+  if (pendingKey) timeline.scrollToItem(pendingKey);
 }
 
 /** Render the manual decision panels (manual mode only). */
@@ -366,7 +365,10 @@ function renderFooter() {
     ? `#${String(last.number).padStart(2, "0")} · ${truncate(last.title, 80)}`
     : "No events yet";
   const banner = $("connection-banner");
-  banner.hidden = !(app.disconnected && store.running);
+  banner.hidden = !((app.disconnected || app.fatalStream) && store.running);
+  $("connection-banner-text").textContent = app.fatalStream
+    ? "The event stream closed permanently. Retry, or reload the run from its URL."
+    : "Event stream disconnected; retrying…";
   syncConnection();
 }
 
@@ -408,7 +410,10 @@ function syncConnection() {
   const node = $("connection-state");
   let state = "idle";
   let label = "idle";
-  if (app.disconnected) {
+  if (app.fatalStream) {
+    state = "closed";
+    label = "stream closed";
+  } else if (app.disconnected) {
     state = "reconnecting";
     label = "reconnecting";
   } else if (store.pendingDecision) {
@@ -453,11 +458,12 @@ function renderRoundFilter() {
 }
 
 /** Open the inspector for one selection. */
-function selectItem(key) {
+function selectItem(key, { scroll = false } = {}) {
   store.select(key);
   const item = store.getItem(key);
   // An LLM row is first-class: opening it lands directly on its request payload.
   if (item?.kind === "llm") inspector.tab = "llm-request";
+  if (scroll && key) app.pendingScrollKey = key;
   app.inspectorOpen = true;
   follow.pauseForReader();
   applyInspectorLayout();
@@ -472,11 +478,12 @@ function closeInspector() {
   scheduleRender();
 }
 
-/** Move the inspector selection by one row. */
+/** Move the inspector selection by one row and bring it into view. */
 function stepInspector(offset) {
   const keys = timeline.orderedKeys.length > 0 ? timeline.orderedKeys : store.list().map(itemKey);
   store.selectByOffset(offset, keys);
   if (store.selectedKey) {
+    app.pendingScrollKey = store.selectedKey;
     app.inspectorOpen = true;
     follow.pauseForReader();
     applyInspectorLayout();
@@ -502,6 +509,20 @@ function resetFilters() {
   scheduleRender();
 }
 
+/** Reset every per-run UI value (manual decision, stream and scroll state). */
+function resetRunUiState() {
+  app.decisionSeq = null;
+  app.decisionAt = null;
+  app.decisionTimeout = null;
+  app.decisionTimedOut = false;
+  app.decisionSubmitting = false;
+  app.disconnected = false;
+  app.fatalStream = false;
+  app.finalizing = false;
+  app.pendingScrollKey = null;
+  resetDecisionForms();
+}
+
 /** Start one run from the rail form. */
 async function startRun(event) {
   event.preventDefault();
@@ -523,15 +544,8 @@ async function startRun(event) {
       discovery: $("discovery-select").value,
     });
     app.runId = payload.runId;
+    resetRunUiState();
     store.beginRun(payload.runId, app.meta);
-    app.decisionSeq = null;
-    app.decisionAt = null;
-    app.decisionTimeout = null;
-    app.decisionTimedOut = false;
-    app.decisionSubmitting = false;
-    app.disconnected = false;
-    app.finalizing = false;
-    resetDecisionForms();
     history.replaceState(null, "", `#run=${payload.runId}`);
     connect(payload.runId);
     scheduleRender();
@@ -566,16 +580,25 @@ function connect(runId) {
   app.subscription = api.subscribe(runId, {
     onOpen: () => {
       app.disconnected = false;
+      app.fatalStream = false;
       scheduleRender();
     },
     onFrame: (frame) => handleFrame(frame),
-    onError: () => {
-      if (!store.running) return;
-      app.disconnected = true;
+    onError: (error, fatal) => {
+      if (!store.running) {
+        app.disconnected = false;
+        app.fatalStream = false;
+        scheduleRender();
+        return;
+      }
+      // A temporary drop makes EventSource retry; a closed stream is terminal for this page.
+      app.disconnected = !fatal;
+      app.fatalStream = Boolean(fatal);
       scheduleRender();
     },
     onClose: () => {
       app.disconnected = false;
+      app.fatalStream = false;
       finalizeRun();
     },
   });
@@ -602,6 +625,8 @@ function handleFrame(frame) {
   if (frame.type === "finished") {
     app.decisionAt = null;
     app.decisionTimedOut = false;
+    app.disconnected = false;
+    app.fatalStream = false;
     finalizeRun();
   } else if (follow.paused) {
     follow.noteNew();
@@ -619,10 +644,21 @@ async function finalizeRun() {
   try {
     const snapshot = await api.getRun(app.runId);
     store.applySnapshot(snapshot);
+    clearStreamStateIfTerminal(snapshot);
   } catch {
     // The frames already carry the outcome; the snapshot only enriches it.
+    app.disconnected = false;
+    app.fatalStream = false;
   }
   scheduleRender();
+}
+
+/** A terminal snapshot means any stream warning is stale. */
+function clearStreamStateIfTerminal(snapshot) {
+  if (snapshot && typeof snapshot.status === "string" && snapshot.status !== "running") {
+    app.disconnected = false;
+    app.fatalStream = false;
+  }
 }
 
 /** Announce one new frame in the polite live region. */
@@ -655,15 +691,18 @@ function notify(message) {
 
 /** Resume a run from the URL hash after a reload. */
 async function resumeRun(runId) {
+  // Close the previous run's stream before resetting the store: otherwise its late frames could
+  // still be applied to the new run (and keep the old manual-decision form state alive).
+  stopSubscription();
+  resetRunUiState();
   app.loading = false;
   app.runId = runId;
   store.beginRun(runId, app.meta);
   api.clearSpanCache();
-  app.subscription = null;
-  app.finalizing = false;
   try {
     const snapshot = await api.getRun(runId);
     store.applySnapshot(snapshot);
+    clearStreamStateIfTerminal(snapshot);
   } catch (error) {
     app.startError = `Run ${shortId(runId)} could not be loaded: ${String(error?.message ?? error)}`;
     history.replaceState(null, "", location.pathname);
@@ -827,6 +866,12 @@ function showDecisionError(node, message) {
   node.textContent = message || "";
 }
 
+/** Open or close the header menu, keeping ``aria-expanded`` in sync. */
+function setMenuOpen(open) {
+  $("menu-panel").hidden = !open;
+  $("menu-button").setAttribute("aria-expanded", String(open));
+}
+
 /** Open the shortcuts dialog. */
 function openShortcuts() {
   const dialog = $("shortcuts-dialog");
@@ -913,6 +958,7 @@ function bindControls() {
   $("connection-retry").addEventListener("click", () => {
     app.subscription?.reopen?.();
     app.disconnected = false;
+    app.fatalStream = false;
     scheduleRender();
   });
 
@@ -938,21 +984,16 @@ function bindControls() {
 
   $("menu-button").addEventListener("click", (event) => {
     event.stopPropagation();
-    const panel = $("menu-panel");
-    const open = panel.hidden;
-    panel.hidden = !open;
-    $("menu-button").setAttribute("aria-expanded", String(open));
+    setMenuOpen($("menu-panel").hidden);
   });
   document.addEventListener("click", (event) => {
-    const panel = $("menu-panel");
-    if (panel.hidden) return;
+    if ($("menu-panel").hidden) return;
     if (event.target.closest("#menu-panel") || event.target.closest("#menu-button")) return;
-    panel.hidden = true;
-    $("menu-button").setAttribute("aria-expanded", "false");
+    setMenuOpen(false);
   });
   $("theme-toggle").addEventListener("click", cycleTheme);
   $("menu-shortcuts").addEventListener("click", () => {
-    $("menu-panel").hidden = true;
+    setMenuOpen(false);
     openShortcuts();
   });
   $("shortcuts-close").addEventListener("click", closeShortcuts);
@@ -983,7 +1024,7 @@ function bindControls() {
         applyInspectorLayout();
         scheduleRender();
       } else if (timeline.orderedKeys.length > 0) {
-        selectItem(timeline.orderedKeys[0]);
+        selectItem(timeline.orderedKeys[0], { scroll: true });
       }
     },
     escape: () => {
@@ -992,7 +1033,7 @@ function bindControls() {
         return;
       }
       if (!$("menu-panel").hidden) {
-        $("menu-panel").hidden = true;
+        setMenuOpen(false);
         return;
       }
       if (document.activeElement === $("search-input")) {
@@ -1036,7 +1077,10 @@ function startPolling() {
     app.lastSnapshotAt = now;
     try {
       const snapshot = await api.getRun(app.runId);
-      if (snapshot.runId === app.runId) store.applySnapshot(snapshot);
+      if (snapshot.runId === app.runId) {
+        store.applySnapshot(snapshot);
+        clearStreamStateIfTerminal(snapshot);
+      }
       scheduleRender();
     } catch {
       // The SSE stream is authoritative for live state; a failed poll is not an error.

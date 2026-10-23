@@ -51,14 +51,18 @@ export function scriptedLabel(tokens) {
   return null;
 }
 
-/** Format prompt → completion token usage of one span. */
-export function formatTokens(tokens) {
-  if (!tokens || typeof tokens !== "object") return EM_DASH;
+/** Format prompt → completion token usage of one span.
+ *
+ * ``scripted`` makes an absent token map read ``n/a (scripted)`` instead of an em dash: offline ADK
+ * spans have no usage metadata, and a zero would misrepresent a deterministic model.
+ */
+export function formatTokens(tokens, { scripted = false } = {}) {
+  if (!tokens || typeof tokens !== "object") return scripted ? "n/a (scripted)" : EM_DASH;
   const label = scriptedLabel(tokens);
   if (label) return label;
   const prompt = asNumber(tokens.prompt);
   const completion = asNumber(tokens.completion);
-  if (prompt === null && completion === null) return EM_DASH;
+  if (prompt === null && completion === null) return scripted ? "n/a (scripted)" : EM_DASH;
   return `${formatNumber(prompt ?? 0)}→${formatNumber(completion ?? 0)} tok`;
 }
 
@@ -96,7 +100,11 @@ export function elapsedBetween(startIso, endIso) {
   return Math.max(0, end - start);
 }
 
-/** Pretty-print one JSON-ish value, tolerating cycles and unsupported values. */
+/** Pretty-print one JSON-ish value in full, tolerating cycles and unsupported values.
+ *
+ * This is the serializer used by copy and download: payload strings are never capped, because the
+ * backend allows 256 KB request/response payloads and a silently shortened export would be wrong.
+ */
 export function formatJson(value, indent = 2) {
   if (value === undefined) return "undefined";
   try {
@@ -106,13 +114,29 @@ export function formatJson(value, indent = 2) {
   }
 }
 
-/** Build a safe replacer that caps very long strings inside raw payloads. */
+/** Pretty-print one JSON-ish value for on-screen display.
+ *
+ * Strings inside the payload stay intact (the JSON tree already marks its own string cut-offs);
+ * only the whole rendered document is capped, with a visible marker explaining that copy/download
+ * returns the complete payload.
+ */
+export function formatJsonForDisplay(value, { indent = 2, maxChars = 120000 } = {}) {
+  const text = formatJson(value, indent);
+  if (text.length <= maxChars) return text;
+  const headLength = Math.floor(maxChars * 0.6);
+  const tailLength = Math.max(0, maxChars - headLength);
+  const omitted = text.length - headLength - tailLength;
+  return (
+    `${text.slice(0, headLength)}\n` +
+    `… [display truncated ${formatNumber(omitted)} characters; copy/download returns the full payload] …\n` +
+    text.slice(text.length - tailLength)
+  );
+}
+
+/** Build a cycle-safe replacer (long strings are intentionally kept intact). */
 function jsonReplacer() {
   const seen = new WeakSet();
   return (key, value) => {
-    if (typeof value === "string" && value.length > 20000) {
-      return `${value.slice(0, 20000)}… [truncated ${value.length - 20000} chars]`;
-    }
     if (value && typeof value === "object") {
       if (seen.has(value)) return "[circular]";
       seen.add(value);

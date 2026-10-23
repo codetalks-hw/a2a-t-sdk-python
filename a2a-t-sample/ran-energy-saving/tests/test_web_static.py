@@ -7,7 +7,10 @@ guarantee: every module is served, the import graph is complete, payload renderi
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -62,6 +65,25 @@ def _module_source(name: str) -> str:
 def _imports(source: str) -> set[str]:
     """Return the module names imported by one ES module source."""
     return set(re.findall(r'from\s+"\./([\w-]+)\.js"', source))
+
+
+def _function_source(source: str, name: str) -> str:
+    """Return the text of one top-level JavaScript function."""
+    marker = f"function {name}("
+    start = source.index(marker)
+    end = len(source)
+    for next_marker in ("\nfunction ", "\nasync function "):
+        index = source.find(next_marker, start + len(marker))
+        if index != -1:
+            end = min(end, index)
+    return source[start:end]
+
+
+def _method_source(source: str, name: str) -> str:
+    """Return the text of one two-space-indented JavaScript class method."""
+    start = source.index(f"{name}(")
+    end = source.find("\n  }", start)
+    return source[start : end + len("\n  }")]
 
 
 async def test_every_asset_is_served(static_client: httpx.AsyncClient) -> None:
@@ -228,3 +250,127 @@ def test_css_implements_the_visual_spec() -> None:
         assert breakpoint in css, breakpoint
     for anatomy in (".tl-row", ".tl-node", ".actor-badge", ".round-chip", ".status-pill", ".inspector-tabs"):
         assert anatomy in css, anatomy
+    assert '.connection-state[data-state="closed"]' in css
+
+
+def test_raw_json_copy_and_download_keep_the_full_payload() -> None:
+    format_source = _module_source("format")
+    assert "value.length > 20000" not in format_source
+    assert "truncated ${value.length" not in format_source
+    assert "formatJsonForDisplay" in format_source
+    assert "display truncated" in format_source
+    inspector_source = _module_source("inspector")
+    assert "formatJsonForDisplay(raw)" in inspector_source
+    assert inspector_source.count('const text = typeof value === "string" ? value : formatJson(value);') == 2
+
+
+def test_format_module_behavior_for_large_payloads_and_offline_tokens() -> None:
+    """Run the pure formatters in Node when it is available (no browser or DOM needed)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    module_url = json.dumps((STATIC_DIR / "js" / "format.js").as_uri())
+    script = "\n".join(
+        [
+            "import assert from 'node:assert/strict';",
+            f"import {{ formatJson, formatJsonForDisplay, formatTokens }} from {module_url};",
+            "const big = 'x'.repeat(30000);",
+            "const full = formatJson({ prompt: big });",
+            "assert.ok(full.length > 30000);",
+            "assert.ok(!full.includes('truncated'));",
+            "assert.equal(JSON.parse(full).prompt.length, 30000);",
+            "const shown = formatJsonForDisplay({ prompt: big }, { maxChars: 2000 });",
+            "assert.ok(shown.includes('display truncated'));",
+            "assert.ok(shown.length < 3000);",
+            "assert.equal(formatTokens(null, { scripted: true }), 'n/a (scripted)');",
+            "assert.equal(formatTokens(null), '\\u2014');",
+            "assert.equal(formatTokens({ prompt: 1, completion: 2, total: 3 }), '1\\u21922 tok');",
+            "console.log('format-ok');",
+        ]
+    )
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "format-ok" in result.stdout
+
+
+def test_switching_hash_runs_closes_the_previous_stream_and_resets_decision_state() -> None:
+    source = _module_source("main")
+    resume = _function_source(source, "resumeRun")
+    assert resume.index("stopSubscription()") < resume.index("store.beginRun")
+    assert "resetRunUiState()" in resume
+    for name in ("startRun", "resumeRun"):
+        assert "resetRunUiState()" in _function_source(source, name), name
+    reset = _function_source(source, "resetRunUiState")
+    for key in (
+        "decisionSeq",
+        "decisionAt",
+        "decisionTimeout",
+        "decisionTimedOut",
+        "decisionSubmitting",
+        "disconnected",
+        "fatalStream",
+        "finalizing",
+        "pendingScrollKey",
+    ):
+        assert key in reset, key
+    # connect() must close anything left over before subscribing.
+    connect = _function_source(source, "connect")
+    assert connect.index("stopSubscription()") < connect.index("api.subscribe")
+
+
+def test_run_summary_only_enables_the_summary_tab() -> None:
+    source = _module_source("inspector")
+    assert 'if (!this.item) return ["summary"];' in source
+
+
+def test_offline_llm_rows_label_absent_tokens_as_scripted() -> None:
+    timeline = _module_source("timeline")
+    assert 'scripted: store.runMeta().modelMode === "offline"' in timeline
+    inspector = _module_source("inspector")
+    tokens = _method_source(inspector, "_tokens")
+    assert 'modelMode === "offline"' in tokens
+    assert "formatTokens(item.tokens, { scripted })" in tokens
+
+
+def test_programmatic_selection_scrolls_the_timeline() -> None:
+    source = _module_source("main")
+    assert "pendingScrollKey" in source
+    assert "timeline.scrollToItem(pendingKey)" in source
+    assert "selectItem(entry.key, { scroll: true })" in source
+    assert "selectItem(anomaly.key, { scroll: true })" in source
+    assert "onSelectKey: (key) => selectItem(key, { scroll: true })" in source
+    assert "app.pendingScrollKey = store.selectedKey;" in source
+    timeline = _module_source("timeline")
+    assert "this.collapsed.delete(item.phase)" in timeline
+
+
+def test_stepper_states_are_not_colour_only() -> None:
+    source = _module_source("main")
+    assert 'const marker = { pending: "○", skipped: "–", failed: "✕", done: "✓", active: "●" }' in source
+    assert "meta.textContent = `${marker} ${state}`" in source
+    assert "meta.textContent = `${marker} ${parts.join(\" · \")}`" in source
+
+
+def test_menu_aria_expanded_is_reset_on_every_close_path() -> None:
+    source = _module_source("main")
+    assert "function setMenuOpen(open)" in source
+    assert 'setMenuOpen($("menu-panel").hidden)' in source
+    assert source.count("setMenuOpen(false)") >= 3
+
+
+def test_closed_stream_has_a_distinct_fatal_state() -> None:
+    source = _module_source("main")
+    assert "fatalStream" in source
+    assert 'state = "closed"' in source
+    assert "clearStreamStateIfTerminal" in source
+    finalize = _function_source(source, "finalizeRun")
+    assert "clearStreamStateIfTerminal(snapshot)" in finalize
+    assert '"The event stream closed permanently.' in source
+    api = _module_source("api")
+    assert "handlers.onError?.(new Error(\"The event stream is closed.\"), true)" in api

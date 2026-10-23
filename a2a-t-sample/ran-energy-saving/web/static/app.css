@@ -1943,6 +1943,10 @@ body.inspector-closed .inspector {
   background: var(--text-muted);
 }
 
+.connection-state[data-state="closed"] .conn-dot {
+  background: var(--tone-error);
+}
+
 .last-event {
   flex: 1;
   min-width: 0;

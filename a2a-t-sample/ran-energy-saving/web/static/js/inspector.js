@@ -24,6 +24,7 @@ import {
   formatClock,
   formatDuration,
   formatJson,
+  formatJsonForDisplay,
   formatNumber,
   formatTokens,
   parseJsonText,
@@ -143,7 +144,8 @@ export class Inspector {
 
   /** Return the tabs available for the current item. */
   availableTabs() {
-    if (!this.item) return ["summary", "raw"];
+    // The run summary owns the Summary tab only; Raw JSON needs a real step envelope.
+    if (!this.item) return ["summary"];
     const tabs = ["summary"];
     if (this._hasProtocol(this.item)) tabs.push("protocol");
     if (this.item.kind === "llm") tabs.push("llm-request", "llm-response");
@@ -241,6 +243,12 @@ export class Inspector {
     if (!item.spanId || item.source === "trace") return false;
     if (item.detailLoaded) return false;
     return true;
+  }
+
+  /** Format one item's tokens, labeling absent offline usage as scripted. */
+  _tokens(item) {
+    const scripted = this.store?.runMeta().modelMode === "offline";
+    return formatTokens(item.tokens, { scripted });
   }
 
   /** Whether one item exposes the Protocol tab. */
@@ -402,7 +410,7 @@ export class Inspector {
       item.stage ? fact("Stage", item.stage) : null,
       item.durationMs !== null ? fact("Duration", formatDuration(item.durationMs)) : null,
       item.kind === "llm" ? fact("Model", item.model || EM_DASH) : null,
-      item.kind === "llm" ? fact("Tokens", formatTokens(item.tokens)) : null,
+      item.kind === "llm" ? fact("Tokens", this._tokens(item)) : null,
       item.direction ? fact("Direction", item.direction) : null,
       item.round !== null && item.round !== undefined ? fact("Round", String(item.round)) : null,
       item.contextId ? fact("Context", item.contextId) : null,
@@ -642,7 +650,7 @@ export class Inspector {
       fact("Status", item.status || EM_DASH),
       fact("Model", response.model || response.modelVersion || item.model || EM_DASH),
       fact("Latency", formatDuration(item.durationMs)),
-      fact("Tokens", formatTokens(item.tokens)),
+      fact("Tokens", this._tokens(item)),
       response.finishReason ? fact("Finish reason", String(response.finishReason)) : null,
     );
     root.appendChild(facts);
@@ -760,7 +768,7 @@ export class Inspector {
     if (this.payloadState === "error") {
       root.appendChild(callout("Payload unavailable", this.payloadError || "The span could not be read.", "warn"));
     }
-    root.appendChild(this._pre(formatJson(raw)));
+    root.appendChild(this._pre(formatJsonForDisplay(raw)));
     return root;
   }
 
@@ -774,7 +782,7 @@ export class Inspector {
       fact("Provider", item.detail?.provider || (request && request.model) || EM_DASH),
       fact("Side / round", `${item.side || EM_DASH}${Number.isInteger(item.round) ? ` · R${item.round}` : ""}`),
       fact("Latency", formatDuration(item.durationMs)),
-      fact("Tokens", formatTokens(item.tokens)),
+      fact("Tokens", this._tokens(item)),
     );
     return facts;
   }

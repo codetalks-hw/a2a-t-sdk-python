@@ -64,8 +64,13 @@ export class TimelineView {
     if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  /** Scroll to one row. */
+  /** Scroll to one row, expanding its phase when a programmatic jump targets a collapsed card. */
   scrollToItem(key) {
+    const item = this.lastStore?.getItem(key);
+    if (item && this.collapsed.has(item.phase)) {
+      this.collapsed.delete(item.phase);
+      if (this.lastModel) this.render(this.lastModel);
+    }
     const row = this.timeline.querySelector(`[data-key="${cssEscape(key)}"]`);
     if (row) row.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
@@ -285,7 +290,13 @@ export class TimelineView {
     append(
       metrics,
       el("span", "metric metric-duration", formatDuration(item.durationMs)),
-      item.kind === "llm" ? el("span", "metric metric-tokens", formatTokens(item.tokens)) : null,
+      item.kind === "llm"
+        ? el(
+            "span",
+            "metric metric-tokens",
+            formatTokens(item.tokens, { scripted: store.runMeta().modelMode === "offline" }),
+          )
+        : null,
       item.kind === "llm" ? el("span", "metric metric-model", shortModel(item.model)) : null,
     );
     row.appendChild(metrics);
