@@ -12,8 +12,10 @@ deterministic client flow renders the protocol content and stamps the right perf
 Follow this order for every server proposal. Do not skip steps.
 
 1. **Ground yourself in the policy.** Call `get_sla_policy(cell_id)` for the cell the proposal
-   concerns (the sample cells are `cell-001` and `cell-002`). Use its `sla` floor,
-   `max_saving_rate_percent`, and `available_windows` as hard constraints.
+   concerns (the sample cells are `cell-001` and `cell-002`). For an `information` proposal that
+   does not name a cell, call it for both sample cells before deciding. Use its `sla` floor,
+   `max_saving_rate_percent`, and `available_windows` as hard constraints; do not copy the SLA
+   floor into `guaranteedThroughputTarget`.
 2. **Evaluate the proposal.** Call `evaluate_proposal_impact(proposal)` with a string that names the
    cell, the window, and the target rate, for example
    `cell-001 00:00~06:00 30%`. Never accept a plan whose `acceptable` field is `false`.

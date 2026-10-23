@@ -80,6 +80,17 @@ def build_decision_prompt(
     cannot propose a corrected, non-overlapping target and tends to loop through the tools.
     """
     original = f"Original user request:\n{user_request}\n\n" if user_request else ""
+    if propose.kind == "information":
+        tool_rule = (
+            "This information proposal does not name a concrete plan. Before deciding, call "
+            "get_sla_policy for cell-001 and cell-002 to ground the missing value; never use their "
+            "SLA floors as guaranteedThroughputTarget. "
+        )
+    else:
+        tool_rule = (
+            "Use the tools only when the proposal names a concrete cell, window, or rate; "
+            "otherwise decide from the original request and the proposal. "
+        )
     return (
         "Answer the following A2A-T negotiation proposal.\n"
         f"Negotiation type: {propose.kind}\n"
@@ -88,8 +99,7 @@ def build_decision_prompt(
         f"{original}"
         "Proposal content:\n"
         f"{propose.content}\n\n"
-        "Use the tools only when the proposal names a concrete cell, window, or rate; otherwise "
-        "decide from the original request and the proposal. "
+        f"{tool_rule}"
         "Return exactly one NegotiationDecision JSON object and nothing else: no reasoning, "
         "markdown, or prose outside the JSON."
     )

@@ -615,7 +615,7 @@ root_agent = LlmAgent(
 
 [`protocol/decision_provider.py`](protocol/decision_provider.py) 通过 `InMemoryRunner` 运行智能体，每个协商 id 保留一个 ADK 会话（后续轮次可见之前的提议），仅在离线模式下回退到安全的 `accept` 决策。
 
-当提议包含具体小区、时间窗或速率时，决策智能体会调用 `get_sla_policy` / `evaluate_proposal_impact`。在 Web UI 中运行 **`target`** 场景可以看到客户端 ADK 工具 span；`information` 提议可能不需要工具调用，而如果根本没有开启协商，客户端决策智能体不会被调用。
+当提议包含具体小区、时间窗或速率时，决策智能体会调用 `get_sla_policy` / `evaluate_proposal_impact`。在 `information` 场景中，提示词会要求它在决策前对两个样例小区调用 `get_sla_policy`，因此那里也会出现工具行。`target` 仍是最直观的多轮示例。如果根本没有开启协商，客户端决策智能体不会被调用，自然也没有工具调用。
 
 ### 执行器与持久化集成
 

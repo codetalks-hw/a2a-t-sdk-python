@@ -756,9 +756,10 @@ parse the model's structured answer; the client flow never parses free text.
 and falls back to a safe `accept` decision only in offline mode.
 
 The decision agent calls `get_sla_policy` / `evaluate_proposal_impact` when the proposal names a
-concrete cell, window, or rate. In the Web UI, run the **`target`** scenario to see client ADK tool
-spans; the `information` proposal may be answered without a tool call, and if no negotiation opens
-at all the client decision agent is never invoked.
+concrete cell, window, or rate. For the `information` scenario the prompt asks it to call
+`get_sla_policy` for both sample cells before deciding, so the tool rows appear there too. The
+`target` scenario remains the clearest multi-round example. If no negotiation opens, the client
+decision agent is never invoked and therefore has no tool calls.
 
 ### Executor and persistence integration
 
