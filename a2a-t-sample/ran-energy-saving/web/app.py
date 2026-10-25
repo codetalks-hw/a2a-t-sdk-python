@@ -216,9 +216,15 @@ def create_app(
         try:
             limit = int(raw_limit)
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer."}, status_code=400)
+            return JSONResponse(
+                {"error": "limit must be an integer.", "code": "limit_not_integer"},
+                status_code=400,
+            )
         if not 1 <= limit <= 500:
-            return JSONResponse({"error": "limit must be between 1 and 500."}, status_code=400)
+            return JSONResponse(
+                {"error": "limit must be between 1 and 500.", "code": "limit_out_of_range"},
+                status_code=400,
+            )
         path = config.task_db_path
         enabled = path is not None and Path(path).is_file()
         if not enabled:
@@ -232,9 +238,15 @@ def create_app(
         try:
             limit = int(raw_limit)
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer."}, status_code=400)
+            return JSONResponse(
+                {"error": "limit must be an integer.", "code": "limit_not_integer"},
+                status_code=400,
+            )
         if not 1 <= limit <= 500:
-            return JSONResponse({"error": "limit must be between 1 and 500."}, status_code=400)
+            return JSONResponse(
+                {"error": "limit must be between 1 and 500.", "code": "limit_out_of_range"},
+                status_code=400,
+            )
         return limit
 
     async def client_runs(request: Request) -> Response:
@@ -253,12 +265,15 @@ def create_app(
         """Return one persisted client run with turns and negotiation events."""
         path = config.client_db_path
         if path is None:
-            return JSONResponse({"error": "The client database is disabled."}, status_code=404)
+            return JSONResponse(
+                {"error": "The client database is disabled.", "code": "client_db_disabled"},
+                status_code=404,
+            )
         detail = await asyncio.to_thread(
             read_client_run_detail, path, request.path_params["run_id"]
         )
         if detail is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         live = manager.get(request.path_params["run_id"])
         if live is not None:
             detail["live"] = live.snapshot()
@@ -280,21 +295,33 @@ def create_app(
         """Return one conversation with its turns and runs."""
         path = config.client_db_path
         if path is None:
-            return JSONResponse({"error": "The client database is disabled."}, status_code=404)
+            return JSONResponse(
+                {"error": "The client database is disabled.", "code": "client_db_disabled"},
+                status_code=404,
+            )
         detail = await asyncio.to_thread(
             read_conversation_detail, path, request.path_params["conversation_id"]
         )
         if detail is None:
-            return JSONResponse({"error": "Unknown conversation."}, status_code=404)
+            return JSONResponse(
+                {"error": "Unknown conversation.", "code": "unknown_conversation"},
+                status_code=404,
+            )
         return JSONResponse(detail)
 
     async def start_run(request: Request) -> Response:
         try:
             body = await request.json()
         except ValueError:
-            return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
+            return JSONResponse(
+                {"error": "The request body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
         if not isinstance(body, dict):
-            return JSONResponse({"error": "The request body must be a JSON object."}, status_code=400)
+            return JSONResponse(
+                {"error": "The request body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
         scenario = body.get("scenario", resolved_default_scenario)
         mode = body.get("mode", resolved_default_mode)
         transport = body.get("transport", resolved_default_transport)
@@ -355,7 +382,7 @@ def create_app(
                 idempotency_key=optional_strings["idempotencyKey"],
             )
         except RunConflictError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
+            return JSONResponse({"error": str(exc), "code": "run_conflict"}, status_code=409)
         reused = run.task is None
         return JSONResponse(
             {
@@ -373,13 +400,13 @@ def create_app(
     async def run_status(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         return JSONResponse(run.snapshot())
 
     async def run_events(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         snapshot, queue = run.subscribe()
 
         async def stream() -> AsyncIterator[dict[str, str]]:
@@ -425,12 +452,18 @@ def create_app(
     async def submit_decision(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         try:
             body = await request.json()
             decision = NegotiationDecision.model_validate(body)
         except (ValueError, TypeError):
-            return JSONResponse({"error": "The body must be a NegotiationDecision JSON object."}, status_code=400)
+            return JSONResponse(
+                {
+                    "error": "The body must be a NegotiationDecision JSON object.",
+                    "code": "decision_body_invalid",
+                },
+                status_code=400,
+            )
         provider = run.manual_provider
         if run.status != STATUS_RUNNING or not run.pending_decision or provider is None:
             return JSONResponse(
@@ -464,7 +497,7 @@ def create_app(
         else:
             text = await _stored_transcript(request, "transcriptJson")
         if text is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         return Response(
             text,
             media_type="application/json",
@@ -482,7 +515,7 @@ def create_app(
         else:
             text = await _stored_transcript(request, "transcriptMarkdown")
         if text is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         return Response(
             text,
             media_type="text/markdown",
@@ -496,16 +529,16 @@ def create_app(
     async def run_span(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         span = run.spans.get(request.path_params["span_id"])
         if span is None:
-            return JSONResponse({"error": "Unknown span."}, status_code=404)
+            return JSONResponse({"error": "Unknown span.", "code": "unknown_span"}, status_code=404)
         return JSONResponse(span)
 
     async def run_trace_json(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         spans = sorted(run.spans.values(), key=_span_seq)
         return JSONResponse(
             {
@@ -521,20 +554,32 @@ def create_app(
     async def ingest_trace(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
         if run is None:
-            return JSONResponse({"error": "Unknown run."}, status_code=404)
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         if not _trace_token_ok(request):
-            return JSONResponse({"error": "Invalid trace token."}, status_code=403)
+            return JSONResponse(
+                {"error": "Invalid trace token.", "code": "trace_token_invalid"},
+                status_code=403,
+            )
         try:
             body = await request.json()
         except ValueError:
-            return JSONResponse({"error": "The body must be a JSON span or span list."}, status_code=400)
+            return JSONResponse(
+                {"error": "The body must be a JSON span or span list.", "code": "trace_body_invalid"},
+                status_code=400,
+            )
         spans = _coerce_trace_payload(body)
         if spans is None:
-            return JSONResponse({"error": "The body must be a JSON span or span list."}, status_code=400)
+            return JSONResponse(
+                {"error": "The body must be a JSON span or span list.", "code": "trace_body_invalid"},
+                status_code=400,
+            )
         for index, span in enumerate(spans):
             problem = _validate_trace_span(span, run.run_id)
             if problem is not None:
-                return JSONResponse({"error": f"span[{index}]: {problem}"}, status_code=400)
+                return JSONResponse(
+                    {"error": f"span[{index}]: {problem}", "code": "span_invalid"},
+                    status_code=400,
+                )
         created = 0
         for span in spans:
             before = len(run.traces)
