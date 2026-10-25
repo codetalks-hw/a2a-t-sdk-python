@@ -4,18 +4,18 @@
  * suppresses the single-key shortcuts; ``Esc`` and ``Cmd/Ctrl+Enter`` always work.
  */
 
-/** Every shortcut, in help-dialog order. */
+/** Every shortcut, in help-dialog order. ``descriptionKey`` resolves through ``i18n.t``. */
 export const SHORTCUTS = [
-  { keys: "j", description: "Next timeline row" },
-  { keys: "k", description: "Previous timeline row" },
-  { keys: "Enter", description: "Open the focused/selected row" },
-  { keys: "Esc", description: "Close the inspector, dialog or search" },
-  { keys: "/", description: "Focus the timeline search" },
-  { keys: "f", description: "Toggle follow-new-events" },
-  { keys: "1 – 6", description: "Inspector tab (Summary, Protocol, LLM request, LLM response, Tool, Raw JSON)" },
-  { keys: "[ / ]", description: "Previous / next step in the inspector" },
-  { keys: "?", description: "Show this shortcut list" },
-  { keys: "Cmd/Ctrl + Enter", description: "Submit the pending manual decision" },
+  { keys: "j", descriptionKey: "shortcuts.nextRow" },
+  { keys: "k", descriptionKey: "shortcuts.previousRow" },
+  { keys: "Enter", descriptionKey: "shortcuts.openRow" },
+  { keys: "Esc", descriptionKey: "shortcuts.escape" },
+  { keys: "/", descriptionKey: "shortcuts.search" },
+  { keys: "f", descriptionKey: "shortcuts.follow" },
+  { keys: "1 – 6", descriptionKey: "shortcuts.tabs" },
+  { keys: "[ / ]", descriptionKey: "shortcuts.step" },
+  { keys: "?", descriptionKey: "shortcuts.help" },
+  { keys: "Cmd/Ctrl + Enter", descriptionKey: "shortcuts.submit" },
 ];
 
 /** Install the keyboard handlers; returns an uninstall function. */

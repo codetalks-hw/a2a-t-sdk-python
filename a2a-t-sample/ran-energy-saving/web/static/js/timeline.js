@@ -24,6 +24,7 @@ import {
   truncate,
 } from "./format.js";
 import { filterPhaseItems, filterItems } from "./filters.js";
+import { t } from "./i18n/index.js";
 import { PHASE_INDEX, phaseLabel } from "./store.js";
 
 /** Timeline renderer. */
@@ -91,21 +92,24 @@ export class TimelineView {
     this._renderStates(store, activeFilter, viewState);
 
     if (items.length === 0) {
-      this.stats.textContent = "0 steps";
+      this.stats.textContent = t("toolbar.step", { count: 0 });
       return;
     }
 
     const visible = filterItems(items, filters);
     const visibleCount = visible.length;
     const phaseCount = derived.groups.filter((group) => filterPhaseItems(group, filters).length > 0).length;
-    this.stats.textContent = `${countLabel(visibleCount, "step")} · ${countLabel(phaseCount, "phase")}`;
+    this.stats.textContent = t("toolbar.stats", {
+      steps: countLabel(visibleCount, t("units.stepOne"), t("units.step")),
+      phases: countLabel(phaseCount, t("units.phaseOne"), t("units.phase")),
+    });
 
     if (visibleCount === 0) {
       const empty = el("div", "timeline-filter-empty");
       append(
         empty,
-        el("p", "", "No timeline row matches the active filters or search."),
-        this._button("Clear filters", "link-button", () => {
+        el("p", "", t("toolbar.noMatch")),
+        this._button(t("toolbar.clearFilters"), "link-button", () => {
           model.onClearFilters?.();
         }),
       );
@@ -155,8 +159,12 @@ export class TimelineView {
     const title = el("span", "phase-title");
     append(
       title,
-      el("span", "phase-index", `PHASE ${String(PHASE_INDEX[group.key]).padStart(2, "0")}`),
-      el("span", "phase-name", group.label.toUpperCase()),
+      el(
+        "span",
+        "phase-index",
+        t("timeline.phaseIndex", { index: String(PHASE_INDEX[group.key]).padStart(2, "0") }),
+      ),
+      el("span", "phase-name", phaseLabel(group.key).toUpperCase()),
       resolution ? el("span", "phase-resolution", `· ${resolution}`) : null,
     );
     const meta = el("span", "phase-meta", this._phaseMeta(group));
@@ -178,7 +186,7 @@ export class TimelineView {
           el(
             "p",
             "phase-empty",
-            note || (state === "skipped" ? "Skipped in this run." : "No steps recorded yet."),
+            note || (state === "skipped" ? t("timeline.emptySkipped") : t("timeline.empty")),
           ),
         );
       } else {
@@ -193,11 +201,13 @@ export class TimelineView {
   /** Return the summary meta of one phase card. */
   _phaseMeta(group) {
     const stats = group.stats;
-    const parts = [countLabel(stats.steps, "step")];
+    const parts = [countLabel(stats.steps, t("units.stepOne"), t("units.step"))];
     if (stats.durationMs !== null) parts.push(formatDuration(stats.durationMs));
-    if (stats.llm > 0) parts.push(`${stats.llm} LLM`);
-    if (stats.tools > 0) parts.push(`${stats.tools} tool${stats.tools === 1 ? "" : "s"}`);
-    if (stats.errors > 0) parts.push(`${stats.errors} error${stats.errors === 1 ? "" : "s"}`);
+    if (stats.llm > 0) parts.push(countLabel(stats.llm, t("units.llmOne"), t("units.llm")));
+    if (stats.tools > 0) parts.push(countLabel(stats.tools, t("units.toolOne"), t("units.tool")));
+    if (stats.errors > 0) {
+      parts.push(countLabel(stats.errors, t("units.errorOne"), t("units.error")));
+    }
     return parts.join(" · ");
   }
 
@@ -208,8 +218,9 @@ export class TimelineView {
     for (const entry of rounds) {
       const state = store.derived().rounds.find((round) => round.round === entry.round)?.state || "done";
       const chip = el("span", `round-chip round-${state}`, `R${entry.round}`);
-      chip.title =
-        entry.terminal ? `Round ${entry.round}: resolved` : `Round ${entry.round}: ${state}`;
+      chip.title = entry.terminal
+        ? t("timeline.roundResolved", { round: entry.round })
+        : t("timeline.roundState", { round: entry.round, state });
       wrap.appendChild(chip);
     }
     return wrap;
@@ -262,7 +273,12 @@ export class TimelineView {
     row.setAttribute("aria-selected", String(item.key === selectedKey));
     row.setAttribute(
       "aria-label",
-      `Step ${item.number}: ${item.title}, ${item.actor}, ${item.status}`,
+      t("timeline.rowAria", {
+        number: item.number,
+        title: item.title,
+        actor: item.actor,
+        status: item.status,
+      }),
     );
     onActivate(row, () => this.onSelect?.(item.key));
 
@@ -318,7 +334,11 @@ export class TimelineView {
       return el("span", "kind-badge kind-llm", `LLM${item.stage ? ` · ${item.stage}` : ""}`);
     }
     if (item.kind === "tool") {
-      return el("span", "kind-badge kind-tool", `TOOL${item.stage ? ` · ${item.stage}` : ""}`);
+      return el(
+        "span",
+        "kind-badge kind-tool",
+        `${t("timeline.toolBadge")}${item.stage ? ` · ${item.stage}` : ""}`,
+      );
     }
     const label = item.performative || item.negotiationType || item.kind;
     return label ? el("span", "kind-badge kind-protocol", String(label).toUpperCase()) : null;
@@ -330,7 +350,12 @@ export class TimelineView {
       return item.rationale ? truncate(item.rationale, 180) : null;
     }
     if (item.kind === "llm" && item.purpose) return truncate(item.purpose, 180);
-    if (item.detail?.toolName) return truncate(`args ${JSON.stringify(item.detail.args ?? {})}`, 160);
+    if (item.detail?.toolName) {
+      return truncate(
+        t("timeline.args", { json: JSON.stringify(item.detail.args ?? {}) }),
+        160,
+      );
+    }
     if (item.kind === "event" && item.detail?.event?.text) return truncate(item.detail.event.text, 180);
     if (item.summary && item.summary !== item.title) return truncate(item.summary, 180);
     if (item.templateUri) return truncate(item.templateUri, 160);
@@ -341,11 +366,11 @@ export class TimelineView {
   _rowMeta(item, store) {
     const meta = el("div", "tl-meta");
     const parts = [];
-    if (item.stage) parts.push(`stage ${item.stage}`);
+    if (item.stage) parts.push(t("timeline.stageLabel", { stage: item.stage }));
     if (item.side) parts.push(item.side);
     if (Number.isInteger(item.round)) parts.push(`R${item.round}`);
     if (Number.isInteger(item.phaseStep)) parts.push(`P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep}`);
-    if (item.contextId) parts.push(`ctx ${shortId(item.contextId)}`);
+    if (item.contextId) parts.push(t("timeline.contextLabel", { id: shortId(item.contextId) }));
     if (item.kind === "tool" && item.detail?.toolName) parts.push(item.detail.toolName);
     if (item.direction && item.direction !== "internal") parts.push(item.direction);
     const text = parts.join(" · ");
@@ -361,8 +386,8 @@ export class TimelineView {
     const head = el("div", "waterfall-head");
     append(
       head,
-      el("span", "", "STEPS"),
-      el("span", "", "DURATION"),
+      el("span", "", t("timeline.waterfallSteps")),
+      el("span", "", t("timeline.waterfallDuration")),
     );
     section.appendChild(head);
     const max = this._maxDuration(store);

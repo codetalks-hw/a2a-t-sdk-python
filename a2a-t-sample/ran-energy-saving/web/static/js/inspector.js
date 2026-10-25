@@ -31,16 +31,17 @@ import {
   shortId,
   truncate,
 } from "./format.js";
-import { FINAL_STATE_LABELS, PHASE_INDEX } from "./store.js";
+import { t } from "./i18n/index.js";
+import { PHASE_INDEX, finalStateLabel, phaseLabel, phaseShort } from "./store.js";
 
 /** Tabs of the inspector, in keyboard order. */
 export const INSPECTOR_TABS = [
-  { key: "summary", label: "Summary" },
-  { key: "protocol", label: "Protocol" },
-  { key: "llm-request", label: "LLM request" },
-  { key: "llm-response", label: "LLM response" },
-  { key: "tool", label: "Tool call" },
-  { key: "raw", label: "Raw JSON" },
+  { key: "summary" },
+  { key: "protocol" },
+  { key: "llm-request" },
+  { key: "llm-response" },
+  { key: "tool" },
+  { key: "raw" },
 ];
 
 /** One-step inspector. */
@@ -164,7 +165,9 @@ export class Inspector {
       const enabled = available.has(button.dataset.tab);
       button.disabled = !enabled;
       button.setAttribute("aria-selected", String(button.dataset.tab === this.tab));
-      button.title = enabled ? button.textContent : `${button.textContent} is not recorded for this step`;
+      button.title = enabled
+        ? button.textContent
+        : t("inspector.tabDisabled", { tab: button.textContent });
     }
     prevButton.disabled = this.index <= 0;
     nextButton.disabled = this.index < 0 || this.index >= this.total - 1;
@@ -173,8 +176,10 @@ export class Inspector {
       root.classList.remove(`actor-${actor}`);
     }
     if (!item) {
-      stepLabel.textContent = "RUN SUMMARY";
-      kindLabel.textContent = this.store?.runId ? `Run ${shortId(this.store.runId)}` : "No run selected";
+      stepLabel.textContent = t("inspector.runSummary");
+      kindLabel.textContent = this.store?.runId
+        ? t("header.run", { id: shortId(this.store.runId) })
+        : t("inspector.noRunSelected");
       root.dataset.kind = "run";
       clear(body);
       body.appendChild(this._runSummary());
@@ -183,7 +188,12 @@ export class Inspector {
       return;
     }
 
-    stepLabel.textContent = `STEP ${String(item.number).padStart(2, "0")} / ${this.total || "?"} · P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep ?? "—"}`;
+    stepLabel.textContent = t("inspector.step", {
+      step: String(item.number).padStart(2, "0"),
+      total: this.total || "?",
+      phase: PHASE_INDEX[item.phase] || "?",
+      phaseStep: item.phaseStep ?? "—",
+    });
     const kindParts = [actorLabel(item.actor), item.kind || "event"];
     if (Number.isInteger(item.round)) kindParts.push(`R${item.round}`);
     kindLabel.textContent = kindParts.join(" · ");
@@ -274,10 +284,7 @@ export class Inspector {
     const root = el("div", "inspector-run");
     if (!store || !store.runId) {
       root.appendChild(
-        callout(
-          "No run loaded",
-          "Start a run from the left rail. Every phase, protocol message, LLM call and tool call is numbered here in causal order.",
-        ),
+        callout(t("state.runNotLoaded"), t("state.runNotLoadedBody")),
       );
       return root;
     }
@@ -287,12 +294,22 @@ export class Inspector {
     const decisionLog = store.derived().decisionLog;
     const pulses = this._milestones(store);
 
-    root.appendChild(el("h2", "inspector-title", meta.scenario ? `Run · ${meta.scenario}` : "Run summary"));
+    root.appendChild(
+      el(
+        "h2",
+        "inspector-title",
+        meta.scenario
+          ? t("inspector.runTitle", { scenario: meta.scenario })
+          : t("inspector.runSummaryTitle"),
+      ),
+    );
     if (meta.description) root.appendChild(el("p", "inspector-lede", meta.description));
-    if (meta.userRequest) root.appendChild(this._textBlock("User request", meta.userRequest));
+    if (meta.userRequest) {
+      root.appendChild(this._textBlock(t("inspector.userRequest"), meta.userRequest));
+    }
 
     const story = el("section", "inspector-section");
-    story.appendChild(el("h3", "inspector-section-title", "Story"));
+    story.appendChild(el("h3", "inspector-section-title", t("inspector.story")));
     const list = el("ol", "story-list");
     for (const item of pulses) {
       const row = el("li", "story-row");
@@ -313,28 +330,46 @@ export class Inspector {
     const facts = el("dl", "facts-grid");
     append(
       facts,
-      fact("Outcome", FINAL_STATE_LABELS[store.finishedFrame?.finalState] || store.finishedFrame?.finalState || EM_DASH),
-      fact("Status", store.status),
-      fact("Context", shortId(ids.contextId)),
-      fact("Task", shortId(ids.taskId)),
-      fact("Wall clock", formatClock(runElapsed(store))),
-      fact("LLM", `${countLabel(analysis.llmCalls, "call")}${analysis.scriptedCalls ? ` · ${analysis.scriptedCalls} scripted` : ""}`),
-      fact("Tokens", tokenSummary(analysis)),
-      fact("Tools", `${countLabel(analysis.tools, "call")} · ${analysis.toolErrors} errors`),
-      fact("Errors / retries", `${analysis.errors} / ${analysis.retries}`),
-      fact("Decisions", formatNumber(analysis.decisions)),
+      fact(
+        t("inspector.outcome"),
+        finalStateLabel(store.finishedFrame?.finalState) ||
+          store.finishedFrame?.finalState ||
+          EM_DASH,
+      ),
+      fact(t("inspector.status"), store.status),
+      fact(t("inspector.context"), shortId(ids.contextId)),
+      fact(t("inspector.task"), shortId(ids.taskId)),
+      fact(t("inspector.wallClock"), formatClock(runElapsed(store))),
+      fact(
+        t("inspector.llm"),
+        `${countLabel(analysis.llmCalls, t("units.callOne"), t("units.call"))}${
+          analysis.scriptedCalls
+            ? ` · ${t("analysis.scriptedExtra", { count: analysis.scriptedCalls })}`
+            : ""
+        }`,
+      ),
+      fact(t("inspector.tokens"), tokenSummary(analysis)),
+      fact(
+        t("inspector.tools"),
+        t("analysis.toolsAndErrors", {
+          tools: countLabel(analysis.tools, t("units.callOne"), t("units.call")),
+          errors: analysis.toolErrors,
+        }),
+      ),
+      fact(t("inspector.errorsRetries"), `${analysis.errors} / ${analysis.retries}`),
+      fact(t("inspector.decisions"), formatNumber(analysis.decisions)),
     );
     root.appendChild(facts);
 
     const phases = el("section", "inspector-section");
-    phases.appendChild(el("h3", "inspector-section-title", "Phase durations"));
+    phases.appendChild(el("h3", "inspector-section-title", t("inspector.phaseDurations")));
     phases.appendChild(phaseDurationList(store));
     root.appendChild(phases);
 
     const decisions = el("section", "inspector-section");
-    decisions.appendChild(el("h3", "inspector-section-title", "Decision log"));
+    decisions.appendChild(el("h3", "inspector-section-title", t("inspector.decisionLog")));
     if (decisionLog.length === 0) {
-      decisions.appendChild(el("p", "placeholder", "No decisions recorded."));
+      decisions.appendChild(el("p", "placeholder", t("inspector.noDecisions")));
     } else {
       const log = el("ol", "inspector-decisions");
       for (const entry of decisionLog) {
@@ -394,45 +429,51 @@ export class Inspector {
     root.appendChild(heading);
 
     if (item.summary && item.summary !== item.title) root.appendChild(el("p", "inspector-lede", item.summary));
-    if (item.purpose) root.appendChild(this._textBlock("Why this step", item.purpose));
+    if (item.purpose) root.appendChild(this._textBlock(t("inspector.why"), item.purpose));
     if (item.rationale && item.rationale !== item.summary) {
-      root.appendChild(this._textBlock("Rationale", item.rationale));
+      root.appendChild(this._textBlock(t("inspector.rationale"), item.rationale));
     }
 
     const facts = el("dl", "facts-grid");
     append(
       facts,
-      fact("Global step", `#${String(item.number).padStart(2, "0")}`),
-      fact("Phase-local", `P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep ?? EM_DASH}`),
-      fact("Phase", item.phase),
-      fact("Actor / side", `${item.actor}${item.side ? ` · ${item.side}` : ""}`),
-      fact("Kind", item.kind),
-      item.stage ? fact("Stage", item.stage) : null,
-      item.durationMs !== null ? fact("Duration", formatDuration(item.durationMs)) : null,
-      item.kind === "llm" ? fact("Model", item.model || EM_DASH) : null,
-      item.kind === "llm" ? fact("Tokens", this._tokens(item)) : null,
-      item.direction ? fact("Direction", item.direction) : null,
-      item.round !== null && item.round !== undefined ? fact("Round", String(item.round)) : null,
-      item.contextId ? fact("Context", item.contextId) : null,
-      item.taskId ? fact("Task", item.taskId) : null,
-      item.templateUri ? fact("Template", item.templateUri) : null,
-      item.startedAt ? fact("Started", item.startedAt) : null,
-      item.endedAt ? fact("Ended", item.endedAt) : null,
+      fact(t("inspector.globalStep"), `#${String(item.number).padStart(2, "0")}`),
+      fact(t("inspector.phaseLocal"), `P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep ?? EM_DASH}`),
+      fact(t("inspector.phase"), phaseLabel(item.phase)),
+      fact(t("inspector.actorSide"), `${item.actor}${item.side ? ` · ${item.side}` : ""}`),
+      fact(t("inspector.kind"), item.kind),
+      item.stage ? fact(t("inspector.stage"), item.stage) : null,
+      item.durationMs !== null ? fact(t("inspector.duration"), formatDuration(item.durationMs)) : null,
+      item.kind === "llm" ? fact(t("inspector.model"), item.model || EM_DASH) : null,
+      item.kind === "llm" ? fact(t("inspector.tokens"), this._tokens(item)) : null,
+      item.direction ? fact(t("inspector.direction"), item.direction) : null,
+      item.round !== null && item.round !== undefined
+        ? fact(t("inspector.round"), String(item.round))
+        : null,
+      item.contextId ? fact(t("inspector.context"), item.contextId) : null,
+      item.taskId ? fact(t("inspector.task"), item.taskId) : null,
+      item.templateUri ? fact(t("inspector.template"), item.templateUri) : null,
+      item.startedAt ? fact(t("inspector.started"), item.startedAt) : null,
+      item.endedAt ? fact(t("inspector.ended"), item.endedAt) : null,
     );
     root.appendChild(facts);
 
     if (item.entryType === "decision" || item.action) {
       const decision = el("section", "inspector-section");
-      decision.appendChild(el("h3", "inspector-section-title", "Decision"));
+      decision.appendChild(el("h3", "inspector-section-title", t("inspector.decision")));
       const decisionFacts = el("dl", "facts-grid");
       append(
         decisionFacts,
-        fact("Action", item.action || item.kind),
-        item.filledParams ? fact("Filled params", JSON.stringify(item.filledParams)) : null,
-        item.counterProposal ? fact("Counter proposal", item.counterProposal) : null,
-        item.counterParams ? fact("Counter params", JSON.stringify(item.counterParams)) : null,
-        item.confirmedIntent ? fact("Confirmed intent", item.confirmedIntent) : null,
-        item.feasibilitySummary ? fact("Feasibility", item.feasibilitySummary) : null,
+        fact(t("inspector.action"), item.action || item.kind),
+        item.filledParams
+          ? fact(t("inspector.filledParams"), JSON.stringify(item.filledParams))
+          : null,
+        item.counterProposal ? fact(t("inspector.counterProposal"), item.counterProposal) : null,
+        item.counterParams
+          ? fact(t("inspector.counterParams"), JSON.stringify(item.counterParams))
+          : null,
+        item.confirmedIntent ? fact(t("inspector.confirmedIntent"), item.confirmedIntent) : null,
+        item.feasibilitySummary ? fact(t("inspector.feasibility"), item.feasibilitySummary) : null,
       );
       decision.appendChild(decisionFacts);
       root.appendChild(decision);
@@ -441,11 +482,13 @@ export class Inspector {
     if (item.source === "run_started" || item.source === "finished") {
       const detail = this.remoteSpan?.detail ?? item.detail ?? {};
       const run = detail.runStarted || item.payload || {};
-      if (run.description) root.appendChild(this._textBlock("Scenario", run.description));
-      if (run.userRequest) root.appendChild(this._textBlock("User request", run.userRequest));
+      if (run.description) root.appendChild(this._textBlock(t("inspector.scenario"), run.description));
+      if (run.userRequest) {
+        root.appendChild(this._textBlock(t("inspector.userRequest"), run.userRequest));
+      }
       if (Array.isArray(run.expectedSequence) && run.expectedSequence.length > 0) {
         const expected = el("section", "inspector-section");
-        expected.appendChild(el("h3", "inspector-section-title", "Expected sequence"));
+        expected.appendChild(el("h3", "inspector-section-title", t("inspector.expectedSequence")));
         const list = el("ol", "expected-list");
         for (const step of run.expectedSequence) {
           list.appendChild(
@@ -458,10 +501,14 @@ export class Inspector {
       const finished = detail.finished || (item.source === "finished" ? item.payload : null);
       if (finished) {
         if (finished.finalState) {
-          root.appendChild(this._textBlock("Final state", String(finished.finalState)));
+          root.appendChild(this._textBlock(t("inspector.finalState"), String(finished.finalState)));
         }
-        if (finished.report) root.appendChild(this._jsonSection("Report", finished.report, true));
-        if (finished.error) root.appendChild(callout("Run error", String(finished.error), "error"));
+        if (finished.report) {
+          root.appendChild(this._jsonSection(t("inspector.report"), finished.report, true));
+        }
+        if (finished.error) {
+          root.appendChild(callout(t("inspector.runError"), String(finished.error), "error"));
+        }
       }
     }
 
@@ -477,9 +524,12 @@ export class Inspector {
     const position = items.findIndex((candidate) => candidate.key === item.key);
     if (position < 0) return null;
     const section = el("section", "inspector-section");
-    section.appendChild(el("h3", "inspector-section-title", "Causal order"));
+    section.appendChild(el("h3", "inspector-section-title", t("inspector.causalOrder")));
     const list = el("div", "causal-links");
-    for (const [label, offset] of [["Previous", -1], ["Next", 1]]) {
+    for (const [label, offset] of [
+      [t("inspector.previous"), -1],
+      [t("inspector.next"), 1],
+    ]) {
       const neighbour = items[position + offset];
       if (!neighbour) continue;
       const button = el("button", "causal-button");
@@ -505,27 +555,37 @@ export class Inspector {
     const facts = el("dl", "facts-grid");
     append(
       facts,
-      fact("Direction", item.direction || EM_DASH),
-      fact("Phase", item.phase),
-      fact("Actor", item.actor),
-      item.performative ? fact("Performative", item.performative) : null,
-      item.negotiationType ? fact("Negotiation", item.negotiationType) : null,
-      item.templateUri ? fact("Template URI", item.templateUri) : null,
-      event?.message_id ? fact("Message id", event.message_id) : null,
-      event?.task_id || item.taskId ? fact("Task id", event?.task_id || item.taskId) : null,
-      event?.context_id || item.contextId ? fact("Context id", event?.context_id || item.contextId) : null,
-      event?.kind ? fact("A2A kind", event.kind) : null,
-      event?.state ? fact("Task state", event.state) : null,
-      event?.name ? fact("Artifact", event.name) : null,
-      event?.artifact_id ? fact("Artifact id", event.artifact_id) : null,
+      fact(t("inspector.direction"), item.direction || EM_DASH),
+      fact(t("inspector.phase"), phaseLabel(item.phase)),
+      fact(t("inspector.actorSide"), item.actor),
+      item.performative ? fact(t("inspector.performative"), item.performative) : null,
+      item.negotiationType ? fact(t("inspector.negotiation"), item.negotiationType) : null,
+      item.templateUri ? fact(t("inspector.templateUri"), item.templateUri) : null,
+      event?.message_id ? fact(t("inspector.messageId"), event.message_id) : null,
+      event?.task_id || item.taskId
+        ? fact(t("inspector.taskId"), event?.task_id || item.taskId)
+        : null,
+      event?.context_id || item.contextId
+        ? fact(t("inspector.contextId"), event?.context_id || item.contextId)
+        : null,
+      event?.kind ? fact(t("inspector.a2aKind"), event.kind) : null,
+      event?.state ? fact(t("inspector.taskState"), event.state) : null,
+      event?.name ? fact(t("inspector.artifact"), event.name) : null,
+      event?.artifact_id ? fact(t("inspector.artifactId"), event.artifact_id) : null,
     );
     root.appendChild(facts);
 
     if (this.payloadState === "loading") {
-      root.appendChild(callout("Loading payload…", "Reading the stored span envelope.", "muted"));
+      root.appendChild(
+        callout(t("inspector.payloadLoading"), t("inspector.readingEnvelope"), "muted"),
+      );
     } else if (this.payloadState === "error") {
       root.appendChild(
-        callout("Payload unavailable", this.payloadError || "The span could not be read.", "warn"),
+        callout(
+          t("inspector.payloadUnavailable"),
+          this.payloadError || t("inspector.spanReadFailed"),
+          "warn",
+        ),
       );
     }
 
@@ -539,27 +599,37 @@ export class Inspector {
         confirmed_intent: item.confirmedIntent || null,
         feasibility_summary: item.feasibilitySummary || null,
       };
-      root.appendChild(this._jsonSection("Decision payload", decision, true));
+      root.appendChild(this._jsonSection(t("inspector.decisionPayload"), decision, true));
     }
 
     if (event) {
       const negotiationContext = metadata ? findKey(metadata, "negotiationContext") : null;
       if (negotiationContext !== null) {
-        root.appendChild(this._jsonSection("Negotiation context", negotiationContext, true));
+        root.appendChild(
+          this._jsonSection(t("inspector.negotiationContext"), negotiationContext, true),
+        );
       }
       const negotiationText = metadata ? findTextMetadata(metadata, "Negotiation-T") : null;
-      if (negotiationText) root.appendChild(this._textBlock("Negotiation-T text", negotiationText));
+      if (negotiationText) {
+        root.appendChild(this._textBlock(t("inspector.negotiationText"), negotiationText));
+      }
       const taskText = metadata ? findTextMetadata(metadata, "Task-T") : null;
-      if (taskText) root.appendChild(this._textBlock("Task-T text", taskText));
-      if (event.text) root.appendChild(this._textBlock("Message text", event.text));
-      if (event.data) root.appendChild(this._jsonSection("Artifact data", event.data, true));
-      if (event.metadata) root.appendChild(this._jsonSection("Metadata", event.metadata));
-      if (event.parts) root.appendChild(this._jsonSection("Raw parts", event.parts));
-      root.appendChild(this._jsonSection("Raw event", event));
+      if (taskText) root.appendChild(this._textBlock(t("inspector.taskText"), taskText));
+      if (event.text) root.appendChild(this._textBlock(t("inspector.messageText"), event.text));
+      if (event.data) {
+        root.appendChild(this._jsonSection(t("inspector.artifactData"), event.data, true));
+      }
+      if (event.metadata) {
+        root.appendChild(this._jsonSection(t("inspector.metadata"), event.metadata));
+      }
+      if (event.parts) root.appendChild(this._jsonSection(t("inspector.rawParts"), event.parts));
+      root.appendChild(this._jsonSection(t("inspector.rawEvent"), event));
     } else if (item.source === "run_started" || detail.runStarted) {
-      root.appendChild(this._jsonSection("Run started", detail.runStarted || detail, true));
+      root.appendChild(
+        this._jsonSection(t("inspector.runStarted"), detail.runStarted || detail, true),
+      );
     } else if (item.source === "finished" || detail.finished) {
-      root.appendChild(this._jsonSection("Finished", detail.finished || detail, true));
+      root.appendChild(this._jsonSection(t("inspector.finished"), detail.finished || detail, true));
     } else {
       const summary = {
         direction: item.direction,
@@ -567,11 +637,13 @@ export class Inspector {
         templateUri: item.templateUri,
         detail,
       };
-      root.appendChild(this._jsonSection("Protocol detail", summary));
+      root.appendChild(this._jsonSection(t("inspector.protocolDetail"), summary));
     }
 
     if (detail._traceTruncated) {
-      root.appendChild(callout("Payload truncated", "The backend truncated this payload to keep the trace small.", "warn"));
+      root.appendChild(
+        callout(t("inspector.payloadTruncated"), t("inspector.payloadTruncatedBody"), "warn"),
+      );
     }
     return root;
   }
@@ -584,30 +656,32 @@ export class Inspector {
     root.appendChild(this._llmIdentity(item, request));
 
     if (this.payloadState === "loading") {
-      root.appendChild(callout("Loading payload…", "Reading the stored LLM span.", "muted"));
+      root.appendChild(callout(t("inspector.payloadLoading"), t("inspector.readingLlm"), "muted"));
       return root;
     }
     if (!request || typeof request !== "object") {
-      root.appendChild(callout("No LLM request captured", "This span does not carry a request payload.", "muted"));
+      root.appendChild(
+        callout(t("inspector.noRequest"), t("inspector.noRequestBody"), "muted"),
+      );
       return root;
     }
 
     const system = systemInstructionText(request);
-    if (system) root.appendChild(this._collapsibleText("System instruction", system));
+    if (system) root.appendChild(this._collapsibleText(t("inspector.system"), system));
 
     const messages = request.messages;
     const contents = request.contents;
     if (Array.isArray(messages) && messages.length > 0) {
-      root.appendChild(this._messageList(messages, "Messages"));
+      root.appendChild(this._messageList(messages, t("inspector.messages")));
     } else if (Array.isArray(contents) && contents.length > 0) {
-      root.appendChild(this._messageList(contents, "Contents"));
+      root.appendChild(this._messageList(contents, t("inspector.contents")));
     } else {
-      root.appendChild(el("p", "placeholder", "No messages or contents were recorded."));
+      root.appendChild(el("p", "placeholder", t("inspector.noMessages")));
     }
 
     const schema = request.jsonSchema ?? request.responseSchema;
     if (schema !== null && schema !== undefined) {
-      root.appendChild(this._jsonSection("JSON schema", schema));
+      root.appendChild(this._jsonSection(t("inspector.jsonSchema"), schema));
     }
     if (Array.isArray(request.tools) && request.tools.length > 0) {
       root.appendChild(this._toolDeclarations(request.tools));
@@ -616,7 +690,9 @@ export class Inspector {
 
     const actions = el("div", "inspector-actions");
     actions.appendChild(
-      this._actionButton("Copy request JSON", () => this._copy(request, "LLM request copied.")),
+      this._actionButton(t("inspector.copyRequest"), () =>
+        this._copy(request, t("inspector.requestCopied")),
+      ),
     );
     root.appendChild(actions);
     return root;
@@ -630,14 +706,14 @@ export class Inspector {
     root.appendChild(this._llmIdentity(item, detail.request));
 
     if (this.payloadState === "loading") {
-      root.appendChild(callout("Loading payload…", "Reading the stored LLM span.", "muted"));
+      root.appendChild(callout(t("inspector.payloadLoading"), t("inspector.readingLlm"), "muted"));
       return root;
     }
     if (!response || typeof response !== "object") {
       root.appendChild(
         callout(
-          item.error ? "LLM call failed" : "No LLM response captured",
-          item.error || "The provider returned no response payload for this call.",
+          item.error ? t("inspector.callFailed") : t("inspector.noResponse"),
+          item.error || t("inspector.noResponseBody"),
           item.error ? "error" : "muted",
         ),
       );
@@ -647,11 +723,16 @@ export class Inspector {
     const facts = el("dl", "facts-grid");
     append(
       facts,
-      fact("Status", item.status || EM_DASH),
-      fact("Model", response.model || response.modelVersion || item.model || EM_DASH),
-      fact("Latency", formatDuration(item.durationMs)),
-      fact("Tokens", this._tokens(item)),
-      response.finishReason ? fact("Finish reason", String(response.finishReason)) : null,
+      fact(t("inspector.status"), item.status || EM_DASH),
+      fact(
+        t("inspector.model"),
+        response.model || response.modelVersion || item.model || EM_DASH,
+      ),
+      fact(t("inspector.latency"), formatDuration(item.durationMs)),
+      fact(t("inspector.tokens"), this._tokens(item)),
+      response.finishReason
+        ? fact(t("inspector.finishReason"), String(response.finishReason))
+        : null,
     );
     root.appendChild(facts);
 
@@ -663,7 +744,10 @@ export class Inspector {
     if (hasPayload) {
       const rawMode = this.rawMode ?? "parsed";
       const toggle = el("div", "segmented small");
-      for (const [key, label] of [["raw", "Raw"], ["parsed", "Parsed"]]) {
+      for (const [key, label] of [
+        ["raw", t("inspector.raw")],
+        ["parsed", t("inspector.parsed")],
+      ]) {
         const button = el("button", `segment${key === rawMode ? " is-active" : ""}`, label);
         button.type = "button";
         button.setAttribute("aria-pressed", String(key === rawMode));
@@ -677,36 +761,42 @@ export class Inspector {
       if (rawMode === "raw") {
         root.appendChild(this._pre(raw || text || formatJson(response.content)));
       } else if (parsed !== null && parsed !== undefined) {
-        root.appendChild(this._jsonTreeSection("Parsed response", parsed));
+        root.appendChild(this._jsonTreeSection(t("inspector.parsedResponse"), parsed));
       } else if (response.content) {
-        root.appendChild(this._jsonTreeSection("Response content", response.content));
+        root.appendChild(this._jsonTreeSection(t("inspector.responseContent"), response.content));
       } else {
-        root.appendChild(el("p", "placeholder", "The response is not valid JSON."));
+        root.appendChild(el("p", "placeholder", t("inspector.invalidJson")));
       }
     }
 
     const calls = Array.isArray(response.functionCalls) ? response.functionCalls : [];
     if (calls.length > 0) {
       const section = el("section", "inspector-section");
-      section.appendChild(el("h3", "inspector-section-title", "Function calls"));
+      section.appendChild(el("h3", "inspector-section-title", t("inspector.functionCalls")));
       for (const call of calls) {
-        section.appendChild(this._jsonTreeSection(call.name || "function call", call));
+        section.appendChild(
+          this._jsonTreeSection(call.name || t("inspector.functionCall"), call),
+        );
       }
       root.appendChild(section);
     }
 
     if (response.parseError) {
-      root.appendChild(callout("JSON parse failure", response.parseError, "error"));
+      root.appendChild(callout(t("inspector.parseFailure"), response.parseError, "error"));
     }
     if (response.errorMessage) {
-      root.appendChild(callout("Provider error", response.errorMessage, "error"));
+      root.appendChild(callout(t("inspector.providerError"), response.errorMessage, "error"));
     }
-    if (item.error) root.appendChild(callout("Call error", item.error, "error"));
-    if (response.usage) root.appendChild(this._jsonSection("Usage", response.usage, true));
+    if (item.error) root.appendChild(callout(t("inspector.callError"), item.error, "error"));
+    if (response.usage) {
+      root.appendChild(this._jsonSection(t("inspector.usage"), response.usage, true));
+    }
 
     const actions = el("div", "inspector-actions");
     actions.appendChild(
-      this._actionButton("Copy response JSON", () => this._copy(response, "LLM response copied.")),
+      this._actionButton(t("inspector.copyResponse"), () =>
+        this._copy(response, t("inspector.responseCopied")),
+      ),
     );
     root.appendChild(actions);
     return root;
@@ -716,38 +806,38 @@ export class Inspector {
   _toolTab(item) {
     const root = el("div", "inspector-tab inspector-tool");
     const detail = this.remoteSpan?.detail ?? item.detail ?? {};
-    const toolName = detail.toolName || item.title.replace(/^Tool call · /, "");
+    const toolName = detail.toolName || item.detail?.toolName || item.title.replace(/^.*? · /, "");
     if (this.payloadState === "loading") {
-      root.appendChild(callout("Loading payload…", "Reading the stored tool span.", "muted"));
+      root.appendChild(callout(t("inspector.payloadLoading"), t("inspector.readingTool"), "muted"));
     }
     const facts = el("dl", "facts-grid");
     append(
       facts,
-      fact("Tool", toolName || EM_DASH),
-      fact("Stage", detail.stage || item.stage || EM_DASH),
-      fact("Side", item.side || EM_DASH),
-      fact("Duration", formatDuration(item.durationMs)),
-      fact("Status", item.status || EM_DASH),
-      item.error ? fact("Error", item.error) : null,
-      detail.agent ? fact("Agent", detail.agent) : null,
+      fact(t("inspector.tool"), toolName || EM_DASH),
+      fact(t("inspector.stage"), detail.stage || item.stage || EM_DASH),
+      fact(t("inspector.side"), item.side || EM_DASH),
+      fact(t("inspector.duration"), formatDuration(item.durationMs)),
+      fact(t("inspector.status"), item.status || EM_DASH),
+      item.error ? fact(t("inspector.error"), item.error) : null,
+      detail.agent ? fact(t("inspector.agent"), detail.agent) : null,
     );
     root.appendChild(facts);
-    root.appendChild(this._jsonSection("Arguments", detail.args ?? null, true));
-    root.appendChild(this._jsonSection("Result", detail.result ?? null, true));
+    root.appendChild(this._jsonSection(t("inspector.arguments"), detail.args ?? null, true));
+    root.appendChild(this._jsonSection(t("inspector.result"), detail.result ?? null, true));
 
     if (item.parentSpanId) {
       const parent = this.store?.getItemBySpan(item.parentSpanId);
       if (parent) {
         const actions = el("div", "inspector-actions");
         const button = this._actionButton(
-          `Open the calling LLM (#${String(parent.number).padStart(2, "0")})`,
+          t("inspector.openCaller", { number: String(parent.number).padStart(2, "0") }),
           () => this.callbacks.onSelectKey?.(parent.key),
         );
         actions.appendChild(button);
         root.appendChild(actions);
       }
     }
-    if (item.error) root.appendChild(callout("Tool error", item.error, "error"));
+    if (item.error) root.appendChild(callout(t("inspector.toolError"), item.error, "error"));
     return root;
   }
 
@@ -758,15 +848,27 @@ export class Inspector {
     const actions = el("div", "inspector-actions");
     append(
       actions,
-      this._actionButton("Copy JSON", () => this._copy(raw, "Span JSON copied.")),
-      this._actionButton("Download JSON", () => this._download(`${item.spanId || item.key}.json`, raw)),
+      this._actionButton(t("inspector.copyJson"), () =>
+        this._copy(raw, t("inspector.spanCopied")),
+      ),
+      this._actionButton(t("inspector.downloadJson"), () =>
+        this._download(`${item.spanId || item.key}.json`, raw),
+      ),
     );
     root.appendChild(actions);
     if (this.payloadState === "loading") {
-      root.appendChild(callout("Loading payload…", "Reading the stored span envelope.", "muted"));
+      root.appendChild(
+        callout(t("inspector.payloadLoading"), t("inspector.readingEnvelope"), "muted"),
+      );
     }
     if (this.payloadState === "error") {
-      root.appendChild(callout("Payload unavailable", this.payloadError || "The span could not be read.", "warn"));
+      root.appendChild(
+        callout(
+          t("inspector.payloadUnavailable"),
+          this.payloadError || t("inspector.spanReadFailed"),
+          "warn",
+        ),
+      );
     }
     root.appendChild(this._pre(formatJsonForDisplay(raw)));
     return root;
@@ -777,12 +879,15 @@ export class Inspector {
     const facts = el("dl", "facts-grid identity-strip");
     append(
       facts,
-      fact("Stage", item.stage || EM_DASH),
-      fact("Purpose", item.purpose || (request && request.model) || EM_DASH),
-      fact("Provider", item.detail?.provider || (request && request.model) || EM_DASH),
-      fact("Side / round", `${item.side || EM_DASH}${Number.isInteger(item.round) ? ` · R${item.round}` : ""}`),
-      fact("Latency", formatDuration(item.durationMs)),
-      fact("Tokens", this._tokens(item)),
+      fact(t("inspector.stage"), item.stage || EM_DASH),
+      fact(t("inspector.purpose"), item.purpose || (request && request.model) || EM_DASH),
+      fact(t("inspector.provider"), item.detail?.provider || (request && request.model) || EM_DASH),
+      fact(
+        t("inspector.sideRound"),
+        `${item.side || EM_DASH}${Number.isInteger(item.round) ? ` · R${item.round}` : ""}`,
+      ),
+      fact(t("inspector.latency"), formatDuration(item.durationMs)),
+      fact(t("inspector.tokens"), this._tokens(item)),
     );
     return facts;
   }
@@ -793,7 +898,7 @@ export class Inspector {
     section.appendChild(el("h3", "inspector-section-title", title));
     for (const message of messages) {
       const block = el("div", "message-block");
-      const role = message.role || "unknown";
+      const role = message.role || t("inspector.unknownRole");
       block.appendChild(el("span", `role-chip role-${role}`, role));
       if (typeof message.content === "string") {
         block.appendChild(this._pre(message.content));
@@ -813,12 +918,16 @@ export class Inspector {
   /** Render the tool declarations of one LLM request. */
   _toolDeclarations(tools) {
     const section = el("section", "inspector-section");
-    section.appendChild(el("h3", "inspector-section-title", `Tools (${tools.length})`));
+    section.appendChild(
+      el("h3", "inspector-section-title", t("inspector.toolsTitle", { count: tools.length })),
+    );
     for (const tool of tools) {
       const block = el("div", "tool-declaration");
-      block.appendChild(el("h4", "tool-name", tool.name || tool.tool || "tool"));
+      block.appendChild(el("h4", "tool-name", tool.name || tool.tool || t("inspector.toolItem")));
       if (tool.description) block.appendChild(el("p", "tool-description", tool.description));
-      if (tool.parameters !== undefined) block.appendChild(this._jsonTreeSection("Parameters", tool.parameters));
+      if (tool.parameters !== undefined) {
+        block.appendChild(this._jsonTreeSection(t("inspector.parameters"), tool.parameters));
+      }
       section.appendChild(block);
     }
     return section;
@@ -837,9 +946,11 @@ export class Inspector {
     for (const [key, value] of Object.entries(params)) {
       facts.appendChild(fact(key, typeof value === "object" ? JSON.stringify(value) : String(value)));
     }
-    if (facts.childElementCount === 0) return el("p", "placeholder", "No generation parameters were recorded.");
+    if (facts.childElementCount === 0) {
+      return el("p", "placeholder", t("inspector.noGeneration"));
+    }
     const section = el("section", "inspector-section");
-    section.appendChild(el("h3", "inspector-section-title", "Generation parameters"));
+    section.appendChild(el("h3", "inspector-section-title", t("inspector.generation")));
     section.appendChild(facts);
     return section;
   }
@@ -889,7 +1000,9 @@ export class Inspector {
       if (value.length === 0) return el("span", "json-empty", "[]");
       const details = el("details", "json-tree");
       details.open = open || depth < 1;
-      details.appendChild(el("summary", "json-summary", `Array(${value.length})`));
+      details.appendChild(
+        el("summary", "json-summary", t("inspector.arraySummary", { count: value.length })),
+      );
       const list = el("ol", "json-array");
       const limit = Math.min(value.length, 200);
       for (let index = 0; index < limit; index += 1) {
@@ -897,7 +1010,11 @@ export class Inspector {
         append(row, el("span", "json-key", String(index)), this._jsonTree(value[index], false, depth + 1));
         list.appendChild(row);
       }
-      if (value.length > limit) list.appendChild(el("li", "json-more", `… ${value.length - limit} more items`));
+      if (value.length > limit) {
+        list.appendChild(
+          el("li", "json-more", t("inspector.moreItems", { count: value.length - limit })),
+        );
+      }
       details.appendChild(list);
       return details;
     }
@@ -906,7 +1023,9 @@ export class Inspector {
       if (keys.length === 0) return el("span", "json-empty", "{}");
       const details = el("details", "json-tree");
       details.open = open || depth < 1;
-      details.appendChild(el("summary", "json-summary", `Object(${keys.length})`));
+      details.appendChild(
+        el("summary", "json-summary", t("inspector.objectSummary", { count: keys.length })),
+      );
       const list = el("dl", "json-object");
       for (const key of keys) {
         const row = el("div", "json-row");
@@ -964,7 +1083,7 @@ export class Inspector {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    this.callbacks.notify?.("Download started.");
+    this.callbacks.notify?.(t("inspector.downloadStarted"));
   }
 }
 
@@ -1006,13 +1125,22 @@ function findTextMetadata(metadata, marker) {
 function tokenSummary(analysis) {
   if (analysis.llmCalls === 0) return EM_DASH;
   if (analysis.numericCalls === 0) {
-    return analysis.scriptedCalls > 0 ? "n/a (scripted)" : "n/a";
+    return analysis.scriptedCalls > 0 ? t("value.notAvailableScripted") : t("value.notAvailable");
   }
-  const base = `${formatNumber(analysis.promptTokens)} in / ${formatNumber(analysis.completionTokens)} out`;
+  const base = t("analysis.tokensInOut", {
+    prompt: formatNumber(analysis.promptTokens),
+    completion: formatNumber(analysis.completionTokens),
+  });
   const extras = [];
-  if (analysis.scriptedCalls > 0) extras.push(`${analysis.scriptedCalls} scripted`);
-  if (analysis.missingCalls > 0) extras.push(`${analysis.missingCalls} no usage`);
-  return extras.length > 0 ? `${base} (+${extras.join(", ")})` : base;
+  if (analysis.scriptedCalls > 0) {
+    extras.push(t("analysis.scriptedExtra", { count: analysis.scriptedCalls }));
+  }
+  if (analysis.missingCalls > 0) {
+    extras.push(t("analysis.noUsageExtra", { count: analysis.missingCalls }));
+  }
+  return extras.length > 0
+    ? `${base}${t("analysis.extraSuffix", { extras: extras.join(", ") })}`
+    : base;
 }
 
 /** Render the phase duration bars of the rail. */
@@ -1030,7 +1158,7 @@ export function phaseDurationList(store) {
     bar.style.width = `${width}%`;
     append(
       row,
-      el("span", "phase-duration-label", group.short),
+      el("span", "phase-duration-label", phaseShort(group.key)),
       bar,
       el("span", "phase-duration-value", group.stats.durationMs ? formatDuration(group.stats.durationMs) : "—"),
     );

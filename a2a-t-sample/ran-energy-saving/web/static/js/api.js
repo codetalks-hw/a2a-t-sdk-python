@@ -5,13 +5,31 @@
  * already-seen sequences here means the store never sees the same frame twice.
  */
 
+import { t } from "./i18n/index.js";
+
 /** Error raised for a non-2xx API response. */
 export class ApiError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, code = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
+}
+
+/**
+ * Localize one backend error code, falling back to its recorded English message.
+ *
+ * Codes whose copy needs runtime values (``span_invalid``) keep the backend text: a half-filled
+ * template would be worse than the original sentence.
+ */
+export function localizedError(code, fallback) {
+  if (typeof code === "string" && code) {
+    const key = `error.${code}`;
+    const text = t(key);
+    if (text !== key && !text.includes("{")) return text;
+  }
+  return fallback;
 }
 
 /** Fetch JSON and translate the backend error document into an ``ApiError``. */
@@ -23,8 +41,10 @@ async function requestJson(url, options = {}) {
     payload = await response.json().catch(() => null);
   }
   if (!response.ok) {
-    const message = payload && typeof payload.error === "string" ? payload.error : `HTTP ${response.status}`;
-    throw new ApiError(message, response.status);
+    const recorded =
+      payload && typeof payload.error === "string" ? payload.error : t("error.http", { status: response.status });
+    const code = payload && typeof payload.code === "string" ? payload.code : null;
+    throw new ApiError(localizedError(code, recorded), response.status, code);
   }
   return payload;
 }
@@ -161,7 +181,10 @@ export class ApiClient {
         try {
           frame = JSON.parse(event.data);
         } catch (error) {
-          handlers.onError?.(new Error(`Invalid SSE payload: ${String(error?.message ?? error)}`), true);
+          handlers.onError?.(
+            new Error(t("notify.invalidSse", { error: String(error?.message ?? error) })),
+            true,
+          );
           return;
         }
         if (!frame || typeof frame !== "object") return;
@@ -187,10 +210,10 @@ export class ApiClient {
         // EventSource reconnects by itself (readyState CONNECTING); the replay is deduplicated by
         // the seq set. CLOSED means the browser gave up (for example an unknown run id).
         if (source.readyState === EventSource.CLOSED) {
-          handlers.onError?.(new Error("The event stream is closed."), true);
+          handlers.onError?.(new Error(t("notify.eventStreamClosed")), true);
           return;
         }
-        handlers.onError?.(new Error("The event stream was interrupted."), false);
+        handlers.onError?.(new Error(t("notify.eventStreamInterrupted")), false);
       };
     };
 

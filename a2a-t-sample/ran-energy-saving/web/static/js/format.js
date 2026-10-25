@@ -5,6 +5,8 @@
  * in particular must read ``n/a (scripted)``).
  */
 
+import { t } from "./i18n/index.js";
+
 export const EM_DASH = "—";
 
 /** Return a finite number, `null` otherwise. */
@@ -47,7 +49,7 @@ export function formatCountdown(seconds) {
 export function scriptedLabel(tokens) {
   if (!tokens || typeof tokens !== "object") return null;
   if (typeof tokens.label === "string" && tokens.label) return tokens.label;
-  if (tokens.scripted) return "n/a (scripted)";
+  if (tokens.scripted) return t("value.notAvailableScripted");
   return null;
 }
 
@@ -57,12 +59,16 @@ export function scriptedLabel(tokens) {
  * spans have no usage metadata, and a zero would misrepresent a deterministic model.
  */
 export function formatTokens(tokens, { scripted = false } = {}) {
-  if (!tokens || typeof tokens !== "object") return scripted ? "n/a (scripted)" : EM_DASH;
+  if (!tokens || typeof tokens !== "object") {
+    return scripted ? t("value.notAvailableScripted") : EM_DASH;
+  }
   const label = scriptedLabel(tokens);
   if (label) return label;
   const prompt = asNumber(tokens.prompt);
   const completion = asNumber(tokens.completion);
-  if (prompt === null && completion === null) return scripted ? "n/a (scripted)" : EM_DASH;
+  if (prompt === null && completion === null) {
+    return scripted ? t("value.notAvailableScripted") : EM_DASH;
+  }
   return `${formatNumber(prompt ?? 0)}→${formatNumber(completion ?? 0)} tok`;
 }
 
@@ -128,7 +134,7 @@ export function formatJsonForDisplay(value, { indent = 2, maxChars = 120000 } = 
   const omitted = text.length - headLength - tailLength;
   return (
     `${text.slice(0, headLength)}\n` +
-    `… [display truncated ${formatNumber(omitted)} characters; copy/download returns the full payload] …\n` +
+    `${t("format.displayTruncated", { count: formatNumber(omitted) })}\n` +
     text.slice(text.length - tailLength)
   );
 }
@@ -151,8 +157,13 @@ export function formatValue(value) {
   if (typeof value === "string") return value;
   if (typeof value === "number") return formatNumber(value);
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
-  return `${Object.keys(value).length} keys`;
+  if (Array.isArray(value)) {
+    return value.length === 1
+      ? t("format.itemOne", { count: formatNumber(1) })
+      : t("format.item", { count: formatNumber(value.length) });
+  }
+  const keys = Object.keys(value).length;
+  return keys === 1 ? t("format.keyOne", { count: formatNumber(1) }) : t("format.key", { count: formatNumber(keys) });
 }
 
 /** Truncate one string on a word-ish boundary. */

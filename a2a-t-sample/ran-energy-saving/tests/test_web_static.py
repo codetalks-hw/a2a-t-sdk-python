@@ -25,6 +25,9 @@ MODULES: tuple[str, ...] = (
     "dom",
     "filters",
     "format",
+    "i18n/en",
+    "i18n/index",
+    "i18n/zh-CN",
     "inspector",
     "main",
     "shortcuts",
@@ -65,9 +68,17 @@ def _module_source(name: str) -> str:
     return (STATIC_DIR / "js" / f"{name}.js").read_text(encoding="utf-8")
 
 
-def _imports(source: str) -> set[str]:
-    """Return the module names imported by one ES module source."""
-    return set(re.findall(r'from\s+"\./([\w-]+)\.js"', source))
+def _imports(source: str, module: str = "") -> set[str]:
+    """Return the module names imported by one ES module source.
+
+    ``i18n/index.js`` imports its dictionaries relatively, so a module inside a sub-directory
+    resolves bare targets against that directory.
+    """
+    directory = f"{module.rsplit('/', 1)[0]}/" if "/" in module else ""
+    found: set[str] = set()
+    for target in re.findall(r'from\s+"\./([\w/-]+)\.js"', source):
+        found.add(target if "/" in target or not directory else f"{directory}{target}")
+    return found
 
 
 def _function_source(source: str, name: str) -> str:
@@ -110,7 +121,7 @@ async def test_the_module_graph_is_complete(static_client: httpx.AsyncClient) ->
     pending = ["main"]
     while pending:
         name = pending.pop()
-        for imported in _imports(_module_source(name)):
+        for imported in _imports(_module_source(name), name):
             if imported not in reached:
                 reached.add(imported)
                 pending.append(imported)
@@ -169,7 +180,7 @@ def test_store_module_deduplicates_and_exposes_the_phase_model() -> None:
     assert "phaseStates" in source
     assert "decisionLog" in source
     assert "anomalies" in source
-    assert "n/a (scripted)" in _module_source("format")
+    assert "value.notAvailableScripted" in _module_source("format")
 
 
 def test_inspector_declares_all_tabs_and_lazy_lookup() -> None:
@@ -211,7 +222,7 @@ def test_filters_cover_the_five_chips_and_follow_states() -> None:
     for chip in ("all", "protocol", "llm", "tools", "errors"):
         assert f'key: "{chip}"' in source, chip
     assert "class FollowController" in source
-    assert "Paused ·" in source
+    assert "header.pausedNew" in source
 
 
 async def test_index_shell_is_accessible_and_complete(static_client: httpx.AsyncClient) -> None:
@@ -228,13 +239,20 @@ async def test_index_shell_is_accessible_and_complete(static_client: httpx.Async
     assert page.count("data-field=") == 10  # both manual panels carry all five fields
     assert 'data-role="countdown"' in page
     assert 'data-role="error"' in page
+    assert 'id="history"' in page
+    assert 'id="history-toggle"' in page
+    assert "data-history-tab=" in page
+    assert page.count("data-history-tab=") == 3
     assert 'id="task-table"' in page
     assert 'id="task-table-body"' in page
-    assert "Persisted OSS tasks" in page
     assert 'id="client-run-table"' in page
     assert 'id="client-run-table-body"' in page
     assert 'id="client-run-detail"' in page
+    assert 'id="conversation-table"' in page
+    assert 'id="conversation-table-body"' in page
+    assert 'id="conversation-detail"' in page
     assert "Client runs" in page
+    assert 'id="locale-select"' in page
     for phase in (
         "dispatch",
         "task_prompt",
@@ -246,6 +264,16 @@ async def test_index_shell_is_accessible_and_complete(static_client: httpx.Async
         "done",
     ):
         assert f'data-phase="{phase}"' in page, phase
+
+
+def test_every_element_id_used_by_main_exists_in_the_shell() -> None:
+    """The page is wiring-only: a missing id would only surface as a runtime TypeError."""
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    source = _module_source("main")
+    used = set(re.findall(r'\$\("([\w-]+)"\)', source))
+    assert used
+    missing = sorted(name for name in used if f'id="{name}"' not in page)
+    assert not missing, missing
 
 
 def test_css_implements_the_visual_spec() -> None:
@@ -289,7 +317,7 @@ def test_raw_json_copy_and_download_keep_the_full_payload() -> None:
     assert "value.length > 20000" not in format_source
     assert "truncated ${value.length" not in format_source
     assert "formatJsonForDisplay" in format_source
-    assert "display truncated" in format_source
+    assert "format.displayTruncated" in format_source
     inspector_source = _module_source("inspector")
     assert "formatJsonForDisplay(raw)" in inspector_source
     assert inspector_source.count('const text = typeof value === "string" ? value : formatJson(value);') == 2
@@ -306,7 +334,7 @@ def _node_binary() -> str:
 def test_every_js_module_passes_node_syntax_check() -> None:
     """``node --check`` parses every served module (the only syntax gate of a build-free app)."""
     node = _node_binary()
-    modules = sorted(path for path in STATIC_DIR.joinpath("js").glob("*.js"))
+    modules = sorted(path for path in STATIC_DIR.joinpath("js").rglob("*.js"))
     assert modules
     for module in modules:
         result = subprocess.run(
@@ -335,6 +363,24 @@ def test_in_repo_store_harness_runs_in_node() -> None:
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert "store/filters runtime checks passed" in result.stdout
+
+
+def test_i18n_harness_runs_in_node() -> None:
+    """The copy harness proves key parity and that every referenced key exists."""
+    node = _node_binary()
+    harness = Path(__file__).resolve().parent / "js" / "i18n.test.mjs"
+    assert harness.is_file()
+
+    result = subprocess.run(
+        [node, str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "i18n runtime checks passed" in result.stdout
 
 
 def test_format_module_behavior_for_large_payloads_and_offline_tokens() -> None:
@@ -450,7 +496,7 @@ def test_programmatic_selection_scrolls_the_timeline() -> None:
 def test_stepper_states_are_not_colour_only() -> None:
     source = _module_source("main")
     assert 'const marker = { pending: "○", skipped: "–", failed: "✕", done: "✓", active: "●" }' in source
-    assert "meta.textContent = `${marker} ${state}`" in source
+    assert "meta.textContent = `${marker} ${t(`phaseState.${state}`)}`" in source
     assert "meta.textContent = `${marker} ${parts.join(\" · \")}`" in source
 
 
@@ -468,6 +514,6 @@ def test_closed_stream_has_a_distinct_fatal_state() -> None:
     assert "clearStreamStateIfTerminal" in source
     finalize = _function_source(source, "finalizeRun")
     assert "clearStreamStateIfTerminal(snapshot)" in finalize
-    assert '"The event stream closed permanently.' in source
+    assert 't("connection.closed")' in source
     api = _module_source("api")
-    assert "handlers.onError?.(new Error(\"The event stream is closed.\"), true)" in api
+    assert "handlers.onError?.(new Error(t(\"notify.eventStreamClosed\")), true)" in api

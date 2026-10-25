@@ -36,7 +36,8 @@
   --tone-success-tint: #e9f7ef;
   --tone-warning: #92400e;
   --tone-warning-tint: #fff6e5;
-  --font-sans: Inter, "Segoe UI", system-ui, sans-serif;
+  --font-sans: Inter, "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   --radius: 10px;
   --header-height: 56px;
@@ -143,6 +144,19 @@ body {
   flex-direction: column;
   min-height: 100vh;
   overflow: hidden;
+}
+
+/* Chinese copy sits a little tighter in a 22px line box; the CJK fallbacks above keep it crisp. */
+html[lang="zh-CN"] body {
+  line-height: 24px;
+  letter-spacing: 0.01em;
+}
+
+html[lang="zh-CN"] .tl-title,
+html[lang="zh-CN"] .panel-title,
+html[lang="zh-CN"] .phase-step-label,
+html[lang="zh-CN"] .brand-title {
+  letter-spacing: 0;
 }
 
 h1,
@@ -442,6 +456,24 @@ a {
   background: var(--bg-hover);
 }
 
+.menu-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: default;
+}
+
+.menu-field select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 4px;
+}
+
 [aria-disabled="true"] {
   opacity: 0.5;
   pointer-events: none;
@@ -671,6 +703,97 @@ body.inspector-closed .inspector {
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 10px;
+}
+
+/* ---------- History panel (tasks / client runs / conversations) ---------- */
+
+.history {
+  flex: 0 0 auto;
+  margin: 0 24px 8px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.history-toggle .panel-title {
+  margin: 0;
+}
+
+.history-chevron {
+  color: var(--text-muted);
+  font-size: 10px;
+  width: 10px;
+}
+
+.history-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.history-tabs button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  background: var(--actor-client-tint);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.history-body {
+  max-height: 42vh;
+  overflow: auto;
+  padding: 0 12px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.history-panel {
+  padding-top: 10px;
+}
+
+@media (max-width: 899px) {
+  .history {
+    margin: 0 12px 8px;
+  }
+
+  .history-body {
+    max-height: none;
+  }
 }
 
 /* ---------- Persisted OSS task table ---------- */
@@ -2449,7 +2572,7 @@ body.inspector-closed .inspector {
     min-width: 760px;
   }
 
-  .task-history {
+  .history {
     margin: 8px 12px 0;
   }
 

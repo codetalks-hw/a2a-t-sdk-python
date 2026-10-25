@@ -4,15 +4,16 @@
  * so a large LLM request never slows down typing in the search box.
  */
 
+import { t } from "./i18n/index.js";
 import { hasError, isLlm, isTool } from "./store.js";
 
 /** The filter chips, in display order. */
 export const FILTERS = [
-  { key: "all", label: "All" },
-  { key: "protocol", label: "Protocol" },
-  { key: "llm", label: "LLM" },
-  { key: "tools", label: "Tools" },
-  { key: "errors", label: "Errors" },
+  { key: "all", labelKey: "toolbar.filterAll" },
+  { key: "protocol", labelKey: "toolbar.filterProtocol" },
+  { key: "llm", labelKey: "toolbar.filterLlm" },
+  { key: "tools", labelKey: "toolbar.filterTools" },
+  { key: "errors", labelKey: "toolbar.filterErrors" },
 ];
 
 /** One immutable filter state. */
@@ -149,9 +150,11 @@ export class FollowController extends EventTarget {
   /** Return the label shown next to the follow toggle. */
   label() {
     if (this.paused) {
-      return this.newCount > 0 ? `Paused · ${this.newCount} new` : "Paused";
+      return this.newCount > 0
+        ? t("header.pausedNew", { count: this.newCount })
+        : t("header.paused");
     }
-    return "Following";
+    return t("header.following");
   }
 
   /** Emit one change event. */

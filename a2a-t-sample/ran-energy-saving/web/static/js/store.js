@@ -6,29 +6,30 @@
  */
 
 import { numericTokens, shortId } from "./format.js";
+import { t, translateTraceTitle } from "./i18n/index.js";
 
-/** The eight Run Explorer phases, in display order. */
+/** The eight Run Explorer phases, in display order. Labels resolve through ``i18n.t``. */
 export const PHASES = [
-  { key: "dispatch", label: "Dispatch", short: "Dispatch" },
-  { key: "task_prompt", label: "Task-T generation", short: "Task-T" },
-  { key: "task_validation", label: "Task validation", short: "Validation" },
-  { key: "negotiation", label: "Negotiation", short: "Negotiation" },
-  { key: "resolution", label: "Resolution", short: "Resolution" },
-  { key: "execution", label: "Task execution", short: "Execution" },
-  { key: "report", label: "Report", short: "Report" },
-  { key: "done", label: "Done", short: "Done" },
+  { key: "dispatch" },
+  { key: "task_prompt" },
+  { key: "task_validation" },
+  { key: "negotiation" },
+  { key: "resolution" },
+  { key: "execution" },
+  { key: "report" },
+  { key: "done" },
 ];
 
 /** Phase key → one-based display index. */
 export const PHASE_INDEX = Object.fromEntries(PHASES.map((phase, index) => [phase.key, index + 1]));
 
-/** Human labels of the terminal outcomes. */
-export const FINAL_STATE_LABELS = {
-  task_completed: "Completed",
-  no_task_negotiation_ended: "Negotiation ended",
-  no_task_negotiation_aborted: "Negotiation aborted",
-  failed: "Failed",
-};
+/** Return the human label of one terminal outcome. */
+export function finalStateLabel(state) {
+  if (typeof state !== "string" || !state) return null;
+  const key = `finalState.${state}`;
+  const text = t(key);
+  return text === key ? state : text;
+}
 
 const DECISION_ACTIONS = new Set(["accept", "reject", "abort", "counter"]);
 const TERMINAL_ACTIONS = new Set(["accept", "reject", "abort"]);
@@ -407,7 +408,7 @@ export class RunStore extends EventTarget {
         side: "client",
         kind: "run_started",
         stage: null,
-        title: "Run started",
+        title: t("trace.runStarted"),
         summary: frame.description || "",
         purpose: frame.userRequest || null,
         rationale: null,
@@ -445,8 +446,8 @@ export class RunStore extends EventTarget {
         side: "client",
         kind: "finished",
         stage: null,
-        title: failed ? "Run failed" : "Run finished",
-        summary: frame.error || FINAL_STATE_LABELS[frame.finalState] || frame.finalState || "",
+        title: failed ? t("trace.runFailed") : t("trace.runFinished"),
+        summary: frame.error || finalStateLabel(frame.finalState) || "",
         purpose: null,
         rationale: null,
         status: failed ? "error" : "ok",
@@ -488,7 +489,7 @@ export class RunStore extends EventTarget {
       side: span.side || null,
       kind: span.kind || "trace",
       stage: span.stage || null,
-      title: span.title || span.kind || "trace",
+      title: translateTraceTitle(span.title || span.kind || "trace"),
       summary: span.purpose || "",
       purpose: span.purpose || null,
       rationale: null,
@@ -518,7 +519,7 @@ export class RunStore extends EventTarget {
     const mode = this.runMeta().mode;
     const actor = decision ? (mode === "manual" ? "human" : "client") : "server";
     const title = decision
-      ? `Decision · ${entry.action || entry.kind || "decision"}`
+      ? t("trace.decisionEntry", { action: entry.action || entry.kind || "decision" })
       : entry.summary || entry.kind || "event";
     return {
       seq: entry.seq,
@@ -663,27 +664,27 @@ export class RunStore extends EventTarget {
     if (key === "negotiation") {
       if (this.status === "failed") {
         return this.error
-          ? `Run failed before a negotiation was opened: ${this.error}`
-          : "Run failed before a negotiation was opened.";
+          ? t("phaseNote.negotiationFailedWithError", { error: this.error })
+          : t("phaseNote.negotiationFailed");
       }
       if (finalState === "task_completed") {
-        return "Task-T validation passed; no negotiation was required.";
+        return t("phaseNote.negotiationNotNeeded");
       }
       if (finalState === "task_rejected") {
-        return "The server rejected the Task-T before opening a negotiation.";
+        return t("phaseNote.negotiationRejected");
       }
-      return "No Negotiation-T proposal was received.";
+      return t("phaseNote.negotiationNone");
     }
     if (key === "resolution") {
       if (finalState === "no_task_negotiation_aborted") {
-        return "The negotiation was aborted; no accept/reject resolution was sent.";
+        return t("phaseNote.resolutionAborted");
       }
       if (finalState === "no_task_negotiation_ended") {
-        return "The negotiation ended without an accept/reject resolution.";
+        return t("phaseNote.resolutionEnded");
       }
-      return "No resolution message was sent.";
+      return t("phaseNote.resolutionNone");
     }
-    return "No steps were recorded for this phase.";
+    return t("phaseNote.noSteps");
   }
 
   /** Return the label shown next to the Resolution phase. */
@@ -693,13 +694,13 @@ export class RunStore extends EventTarget {
     );
     const last = decisions[decisions.length - 1];
     if (last?.action) {
-      return { accept: "Accepted", reject: "Rejected", abort: "Aborted", counter: "Countered" }[
-        last.action
-      ] || last.action;
+      const key = `resolution.${last.action}`;
+      const text = t(key);
+      return text === key ? last.action : text;
     }
     const state = this.finishedFrame?.finalState || this.snapshot?.finalState;
-    if (state === "no_task_negotiation_aborted") return "Aborted";
-    if (state === "no_task_negotiation_ended") return "Ended";
+    if (state === "no_task_negotiation_aborted") return t("resolution.aborted");
+    if (state === "no_task_negotiation_ended") return t("resolution.ended");
     return null;
   }
 
@@ -767,10 +768,10 @@ export class RunStore extends EventTarget {
         rationale: item.rationale || item.summary || "",
         source:
           item.actor === "human"
-            ? "human"
+            ? t("decisionSource.human")
             : modelMode === "offline"
-              ? "scripted"
-              : "client LLM",
+              ? t("decisionSource.scripted")
+              : t("decisionSource.clientLlm"),
         actor: item.actor,
         ts: item.startedAt,
       }));
@@ -785,7 +786,11 @@ export class RunStore extends EventTarget {
       }
       const response = item.detail?.response;
       if (response?.parseError) {
-        anomalies.push({ kind: "parse", key: item.key, message: `JSON parse failure: ${response.parseError}` });
+        anomalies.push({
+          kind: "parse",
+          key: item.key,
+          message: t("anomaly.parse", { error: response.parseError }),
+        });
       }
       if (response?.errorMessage) {
         anomalies.push({ kind: "error", key: item.key, message: response.errorMessage });
@@ -794,18 +799,22 @@ export class RunStore extends EventTarget {
         const text = typeof response?.text === "string" ? response.text : response?.rawContent;
         const calls = Array.isArray(response?.functionCalls) ? response.functionCalls.length : 0;
         if (typeof text === "string" && !text.trim() && calls === 0) {
-          anomalies.push({ kind: "empty", key: item.key, message: "LLM response is empty." });
+          anomalies.push({ kind: "empty", key: item.key, message: t("anomaly.empty") });
         }
       }
       if (typeof item.durationMs === "number" && item.durationMs > 10000) {
-        anomalies.push({ kind: "slow", key: item.key, message: `Slow step: ${Math.round(item.durationMs)} ms` });
+        anomalies.push({
+          kind: "slow",
+          key: item.key,
+          message: t("anomaly.slow", { ms: Math.round(item.durationMs) }),
+        });
       }
       const tokens = numericTokens(item.tokens);
       if (tokens && tokens.prompt + tokens.completion !== tokens.total) {
         anomalies.push({
           kind: "tokens",
           key: item.key,
-          message: "Token usage does not add up (prompt + completion ≠ total).",
+          message: t("anomaly.tokens"),
         });
       }
     }
@@ -816,7 +825,7 @@ export class RunStore extends EventTarget {
       anomalies.push({
         kind: "max-rounds",
         key: null,
-        message: `Reached the negotiation round budget (${maxRounds}).`,
+        message: t("anomaly.maxRounds", { max: maxRounds }),
       });
     }
     return anomalies;
@@ -835,18 +844,18 @@ export class RunStore extends EventTarget {
   _activity() {
     const meta = this.runMeta();
     if (this.pendingDecision && this.decisionRequest) {
-      return `Waiting for manual decision · R${this.decisionRequest.round ?? "?"}`;
+      return t("activity.waitingDecision", { round: this.decisionRequest.round ?? "?" });
     }
-    if (this.status === "failed") return this.error || "Run failed";
+    if (this.status === "failed") return this.error || t("trace.runFailed");
     if (this.status === "finished") {
       const state = this.finishedFrame?.finalState || this.snapshot?.finalState;
-      return FINAL_STATE_LABELS[state] || state || "Finished";
+      return finalStateLabel(state) || t("value.finished");
     }
     if (this.status === "running") {
       const last = this.items[this.items.length - 1];
-      return last ? last.title : `Starting ${meta.scenario || "run"}…`;
+      return last ? last.title : t("value.starting", { scenario: meta.scenario || "run" });
     }
-    return "Idle";
+    return t("value.idle");
   }
 
   /** Return the global token total of the header. */
@@ -870,7 +879,14 @@ export class RunStore extends EventTarget {
   }
 }
 
-/** Module-level helper for tests and views. */
+/** Return the full label of one phase key. */
 export function phaseLabel(key) {
-  return PHASES.find((phase) => phase.key === key)?.label || key;
+  const text = t(`phase.${key}`);
+  return text === `phase.${key}` ? key : text;
+}
+
+/** Return the compact label used by dense rows and duration bars. */
+export function phaseShort(key) {
+  const text = t(`phaseShort.${key}`);
+  return text === `phaseShort.${key}` ? key : text;
 }

@@ -5,6 +5,8 @@
  * payload rendering always builds nodes.
  */
 
+import { t } from "./i18n/index.js";
+
 /** Create an element with an optional class and text. */
 export function el(tag, className = "", text = null) {
   const node = document.createElement(tag);
@@ -45,27 +47,29 @@ export function statusBadge(status = "ok") {
 export function statusInfo(status) {
   const key = typeof status === "string" && status ? status : "ok";
   const table = {
-    ok: { glyph: "✓", label: "ok" },
-    completed: { glyph: "✓", label: "completed" },
-    finished: { glyph: "✓", label: "finished" },
-    error: { glyph: "✕", label: "failed" },
-    failed: { glyph: "✕", label: "failed" },
-    pending: { glyph: "○", label: "pending" },
-    skipped: { glyph: "–", label: "skipped" },
-    running: { glyph: "●", label: "running" },
-    active: { glyph: "●", label: "active" },
-    waiting: { glyph: "◷", label: "waiting" },
-    retry: { glyph: "↻", label: "retry" },
-    paused: { glyph: "Ⅱ", label: "paused" },
+    ok: { glyph: "✓", label: "status.ok" },
+    completed: { glyph: "✓", label: "status.completed" },
+    finished: { glyph: "✓", label: "status.finished" },
+    error: { glyph: "✕", label: "status.failed" },
+    failed: { glyph: "✕", label: "status.failed" },
+    pending: { glyph: "○", label: "status.pending" },
+    skipped: { glyph: "–", label: "status.skipped" },
+    running: { glyph: "●", label: "status.running" },
+    active: { glyph: "●", label: "status.active" },
+    waiting: { glyph: "◷", label: "status.waiting" },
+    retry: { glyph: "↻", label: "status.retry" },
+    paused: { glyph: "Ⅱ", label: "status.paused" },
   };
-  const entry = table[key] || { glyph: "•", label: key };
-  return { key, glyph: entry.glyph, label: entry.label };
+  const entry = table[key];
+  return { key, glyph: entry?.glyph ?? "•", label: entry ? t(entry.label) : key };
 }
+
+const ACTORS = new Set(["client", "server", "llm", "tool", "human", "system"]);
 
 /** Return the visible UPPERCASE actor label. */
 export function actorLabel(actor) {
-  if (typeof actor !== "string" || !actor) return "SYSTEM";
-  return actor.toUpperCase();
+  if (typeof actor !== "string" || !actor) return t("actor.system").toUpperCase();
+  return ACTORS.has(actor) ? t(`actor.${actor}`).toUpperCase() : actor.toUpperCase();
 }
 
 /** Return the CSS actor class of one normalized item. */

@@ -16,6 +16,18 @@ import {
   truncate,
 } from "./format.js";
 import { FilterState, FollowController, availableRounds, isAtBottom } from "./filters.js";
+import {
+  applyStatic,
+  getLocale,
+  getLocaleMode,
+  initLocale,
+  localeLabel,
+  normalizeLocale,
+  onLocaleChange,
+  setLocaleMode,
+  setProcessLanguage,
+  t,
+} from "./i18n/index.js";
 import { Inspector, phaseDurationList, runElapsed } from "./inspector.js";
 import { SHORTCUTS, installShortcuts } from "./shortcuts.js";
 import { RunStore, itemKey } from "./store.js";
@@ -58,6 +70,13 @@ const app = {
   clientRunFetching: false,
   clientRunTimer: null,
   clientRunDetailId: null,
+  conversations: [],
+  conversationsEnabled: false,
+  conversationFetching: false,
+  conversationTimer: null,
+  conversationDetailId: null,
+  historyOpen: false,
+  historyTab: "tasks",
 };
 
 const timeline = new TimelineView({
@@ -116,6 +135,7 @@ function renderAll() {
   renderFooter();
   renderInspector();
   syncFollow();
+  updateHistoryCount();
 }
 
 /** Render the header identity/status row. */
@@ -123,8 +143,8 @@ function renderHeader() {
   const runId = store.runId;
   const runButton = $("run-id");
   runButton.disabled = !runId;
-  runButton.textContent = runId ? `Run ${shortId(runId)}` : "No run";
-  runButton.title = runId || "No run started";
+  runButton.textContent = runId ? t("header.run", { id: shortId(runId) }) : t("header.noRun");
+  runButton.title = runId || t("header.noRunStarted");
 
   const waiting = store.pendingDecision;
   const status = waiting ? "waiting" : store.status;
@@ -139,10 +159,7 @@ function renderHeader() {
             ? "waiting"
             : "pending",
   );
-  const pill = $("status-pill");
-  pill.dataset.status = status;
-  pill.className = `status-pill status-${status}`;
-  pill.textContent = `${info.glyph} ${
+  const label =
     status === "running"
       ? "running"
       : status === "finished"
@@ -151,8 +168,11 @@ function renderHeader() {
           ? "failed"
           : status === "waiting"
             ? "waiting"
-            : "idle"
-  }`;
+            : "idle";
+  const pill = $("status-pill");
+  pill.dataset.status = status;
+  pill.className = `status-pill status-${status}`;
+  pill.textContent = `${info.glyph} ${t(`header.status.${label}`)}`;
 
   $("elapsed").textContent = formatClock(runElapsed(store));
   const token = store.tokenTotal();
@@ -160,15 +180,17 @@ function renderHeader() {
     ? token.total !== undefined && token.total > 0
       ? `${formatNumber(token.total)} tok`
       : token.scripted
-        ? "n/a (scripted)"
+        ? t("value.notAvailableScripted")
         : token.missing
-          ? "n/a"
+          ? t("value.notAvailable")
           : EM_DASH
     : EM_DASH;
   $("start-button").disabled = !app.meta || store.running || store.pendingDecision;
 
   const themeButton = $("theme-toggle");
-  if (themeButton) themeButton.textContent = `Theme: ${app.theme}`;
+  if (themeButton) {
+    themeButton.textContent = t("header.theme", { theme: t(`theme.${app.theme}`) });
+  }
 }
 
 /** Render the context strip. */
@@ -183,8 +205,34 @@ function renderContext() {
   $("ctx-model").textContent = meta.modelLabel || meta.modelMode || EM_DASH;
   $("context-id").textContent = ids.contextId || EM_DASH;
   $("task-id").textContent = ids.taskId || EM_DASH;
-  $("current-activity").textContent = store.derived().activity || "Idle";
+  $("current-activity").textContent = store.derived().activity || t("context.idle");
   $("rail-language").textContent = app.meta?.language || EM_DASH;
+  updateLocaleHint();
+}
+
+/** Show a quiet hint when the interface language differs from the process language. */
+function updateLocaleHint() {
+  const hint = $("locale-hint");
+  const text = $("locale-hint-text");
+  if (!hint || !text) return;
+  const dataLanguage = store.runMeta().language || app.meta?.language || null;
+  const dataLocale = normalizeLocale(dataLanguage);
+  if (dataLocale && dataLocale !== getLocale()) {
+    hint.hidden = false;
+    text.textContent = t("context.localeMismatch", {
+      ui: localeLabel(getLocale()),
+      data: dataLanguage,
+    });
+  } else {
+    hint.hidden = true;
+    text.textContent = "";
+  }
+}
+
+/** Sync the language select with the stored preference. */
+function renderLocaleSelect() {
+  const select = $("locale-select");
+  if (select) select.value = getLocaleMode();
 }
 
 /** Render the eight-phase stepper. */
@@ -205,14 +253,14 @@ function renderStepper() {
     const meta = button.querySelector(".phase-step-meta");
     meta.replaceChildren();
     if (state === "pending" || state === "skipped" || state === "failed") {
-      meta.textContent = `${marker} ${state}`;
+      meta.textContent = `${marker} ${t(`phaseState.${state}`)}`;
       continue;
     }
-    const parts = [state];
+    const parts = [t(`phaseState.${state}`)];
     if (group?.stats.durationMs !== null && group?.stats.durationMs !== undefined) {
       parts.push(formatDuration(group.stats.durationMs));
     } else {
-      parts.push(`${group?.stats.steps ?? 0} steps`);
+      parts.push(t("toolbar.step", { count: group?.stats.steps ?? 0 }));
     }
     if (key === "resolution") {
       const label = store.resolutionLabel();
@@ -239,10 +287,15 @@ function renderRail() {
   const analysis = derived.analysis;
   $("analysis-wall").textContent = formatClock(runElapsed(store));
   $("analysis-llm").textContent = `${formatNumber(analysis.llmCalls)}${
-    analysis.scriptedCalls ? ` (${analysis.scriptedCalls} scripted)` : ""
+    analysis.scriptedCalls
+      ? t("analysis.scriptedSuffix", { count: analysis.scriptedCalls })
+      : ""
   }`;
   $("analysis-tokens").textContent = tokenAnalysisText(analysis);
-  $("analysis-tools").textContent = `${formatNumber(analysis.tools)} · ${analysis.toolErrors} errors`;
+  $("analysis-tools").textContent = t("analysis.toolsAndErrors", {
+    tools: formatNumber(analysis.tools),
+    errors: analysis.toolErrors,
+  });
   $("analysis-errors").textContent = `${analysis.errors} / ${analysis.retries}`;
   $("analysis-parse").textContent = formatNumber(analysis.parseFailures);
   $("analysis-decisions").textContent = formatNumber(analysis.decisions);
@@ -253,7 +306,7 @@ function renderRail() {
   const anomalies = $("anomalies-list");
   anomalies.replaceChildren();
   if (derived.anomalies.length === 0) {
-    anomalies.appendChild(el("li", "placeholder", "None detected."));
+    anomalies.appendChild(el("li", "placeholder", t("analysis.none")));
   } else {
     for (const anomaly of derived.anomalies) {
       const row = el("li", `anomaly anomaly-${anomaly.kind}`);
@@ -272,7 +325,7 @@ function renderRail() {
   const decisionLog = $("decision-log");
   decisionLog.replaceChildren();
   if (derived.decisionLog.length === 0) {
-    decisionLog.appendChild(el("li", "placeholder", "No decisions yet."));
+    decisionLog.appendChild(el("li", "placeholder", t("analysis.noDecisions")));
   } else {
     for (const entry of derived.decisionLog) {
       const row = el("li", "decision-entry");
@@ -280,7 +333,11 @@ function renderRail() {
       button.type = "button";
       append(
         button,
-        el("span", "decision-head", `${entry.round ? `R${entry.round} ` : ""}${String(entry.action).toUpperCase()} · ${entry.source}`),
+        el(
+          "span",
+          "decision-head",
+          `${entry.round ? `R${entry.round} ` : ""}${String(entry.action).toUpperCase()} · ${entry.source}`,
+        ),
         el("span", "decision-rationale", truncate(entry.rationale, 120)),
       );
       button.addEventListener("click", () => selectItem(entry.key, { scroll: true }));
@@ -382,13 +439,16 @@ function renderManual() {
 function renderFooter() {
   const last = store.list()[store.list().length - 1];
   $("last-event").textContent = last
-    ? `#${String(last.number).padStart(2, "0")} · ${truncate(last.title, 80)}`
-    : "No events yet";
+    ? t("connection.lastEvent", {
+        number: String(last.number).padStart(2, "0"),
+        title: truncate(last.title, 80),
+      })
+    : t("connection.noEvents");
   const banner = $("connection-banner");
   banner.hidden = !((app.disconnected || app.fatalStream) && store.running);
   $("connection-banner-text").textContent = app.fatalStream
-    ? "The event stream closed permanently. Retry, or reload the run from its URL."
-    : "Event stream disconnected; retrying…";
+    ? t("connection.closed")
+    : t("connection.disconnected");
   syncConnection();
 }
 
@@ -418,10 +478,10 @@ function syncFollow() {
   const toolbar = $("timeline-follow");
   const label = follow.label();
   header.setAttribute("aria-pressed", String(!follow.paused));
-  $("follow-label").textContent = follow.paused ? label : "Follow";
+  $("follow-label").textContent = follow.paused ? label : t("header.follow");
   header.classList.toggle("is-paused", follow.paused);
   toolbar.setAttribute("aria-pressed", String(!follow.paused));
-  toolbar.textContent = follow.paused ? label : "Following";
+  toolbar.textContent = follow.paused ? label : t("toolbar.follow");
   toolbar.classList.toggle("is-paused", follow.paused);
 }
 
@@ -429,25 +489,25 @@ function syncFollow() {
 function syncConnection() {
   const node = $("connection-state");
   let state = "idle";
-  let label = "idle";
+  let label = t("connection.idle");
   if (app.fatalStream) {
     state = "closed";
-    label = "stream closed";
+    label = t("connection.streamClosed");
   } else if (app.disconnected) {
     state = "reconnecting";
-    label = "reconnecting";
+    label = t("connection.reconnecting");
   } else if (store.pendingDecision) {
     state = "waiting";
-    label = "waiting for decision";
+    label = t("connection.waiting");
   } else if (store.status === "running") {
     state = "live";
-    label = "live";
+    label = t("connection.live");
   } else if (store.status === "finished") {
     state = "finished";
-    label = "stream closed";
+    label = t("connection.streamClosed");
   } else if (store.status === "failed") {
     state = "failed";
-    label = "failed";
+    label = t("connection.failed");
   }
   node.dataset.state = state;
   $("connection-label").textContent = label;
@@ -461,7 +521,7 @@ function renderRoundFilter() {
   const signature = rounds.join(",");
   if (select.dataset.signature !== signature) {
     select.replaceChildren();
-    const all = el("option", "", "All rounds");
+    const all = el("option", "", t("toolbar.allRounds"));
     all.value = "all";
     select.appendChild(all);
     for (const round of rounds) {
@@ -551,7 +611,7 @@ function resetRunUiState() {
 async function startRun(event) {
   event.preventDefault();
   if (!app.meta) {
-    showStartError("Process metadata is unavailable; the server is not ready.");
+    showStartError(t("notify.metadataUnavailable"));
     return;
   }
   app.startError = null;
@@ -573,6 +633,7 @@ async function startRun(event) {
       // The request repeated an idempotency key: the existing run is already terminal. Show its
       // persisted detail instead of opening an empty live stream.
       history.replaceState(null, "", `#run=${payload.runId}`);
+      openHistory("runs");
       await refreshClientRuns();
       await showClientRunDetail(payload.runId);
       $("start-button").disabled = false;
@@ -584,6 +645,7 @@ async function startRun(event) {
     connect(payload.runId);
     refreshTasks();
     refreshClientRuns();
+    refreshConversations();
     scheduleRender();
   } catch (error) {
     showStartError(String(error?.message ?? error));
@@ -606,13 +668,22 @@ function tokenAnalysisText(analysis) {
   if (analysis.llmCalls === 0) return EM_DASH;
   if (analysis.numericCalls === 0) {
     // "scripted" only labels the offline provider; a live call without usage is just missing.
-    return analysis.scriptedCalls > 0 ? "n/a (scripted)" : "n/a";
+    return analysis.scriptedCalls > 0 ? t("value.notAvailableScripted") : t("value.notAvailable");
   }
-  const base = `${formatNumber(analysis.promptTokens)} in / ${formatNumber(analysis.completionTokens)} out`;
+  const base = t("analysis.tokensInOut", {
+    prompt: formatNumber(analysis.promptTokens),
+    completion: formatNumber(analysis.completionTokens),
+  });
   const extras = [];
-  if (analysis.scriptedCalls > 0) extras.push(`${analysis.scriptedCalls} scripted`);
-  if (analysis.missingCalls > 0) extras.push(`${analysis.missingCalls} no usage`);
-  return extras.length > 0 ? `${base} (+${extras.join(", ")})` : base;
+  if (analysis.scriptedCalls > 0) {
+    extras.push(t("analysis.scriptedExtra", { count: analysis.scriptedCalls }));
+  }
+  if (analysis.missingCalls > 0) {
+    extras.push(t("analysis.noUsageExtra", { count: analysis.missingCalls }));
+  }
+  return extras.length > 0
+    ? `${base}${t("analysis.extraSuffix", { extras: extras.join(", ") })}`
+    : base;
 }
 
 /** Open the event stream of one run. */
@@ -719,6 +790,7 @@ async function finalizeRun() {
   }
   await refreshTasks();
   await refreshClientRuns();
+  await refreshConversations();
   scheduleRender();
 }
 
@@ -733,14 +805,20 @@ function clearStreamStateIfTerminal(snapshot) {
 /** Announce one new frame in the polite live region. */
 function announce(frame) {
   let message = "";
-  if (frame.type === "run_started") message = `Run started: ${frame.scenario || "run"}`;
-  else if (frame.type === "finished") {
-    message = frame.status === "failed" ? `Run failed: ${frame.error || "unknown error"}` : "Run finished.";
+  if (frame.type === "run_started") {
+    message = t("announce.runStarted", { scenario: frame.scenario || "run" });
+  } else if (frame.type === "finished") {
+    message =
+      frame.status === "failed"
+        ? t("announce.runFailed", { error: frame.error || t("value.unknown") })
+        : t("announce.runFinished");
   } else if (frame.type === "decision_requested") {
-    message = `Manual decision requested for round ${frame.round ?? "?"}.`;
+    message = t("announce.decisionRequested", { round: frame.round ?? "?" });
   } else if (frame.type === "event" || frame.type === "trace") {
     const last = store.list()[store.list().length - 1];
-    message = last ? `New step ${last.number}: ${last.title}` : "New step.";
+    message = last
+      ? t("announce.newStep", { number: last.number, title: last.title })
+      : t("announce.newStepGeneric");
   }
   if (message) $("live-region").textContent = message;
 }
@@ -773,7 +851,10 @@ async function resumeRun(runId) {
     store.applySnapshot(snapshot);
     clearStreamStateIfTerminal(snapshot);
   } catch (error) {
-    app.startError = `Run ${shortId(runId)} could not be loaded: ${String(error?.message ?? error)}`;
+    app.startError = t("notify.runLoadFailed", {
+      id: shortId(runId),
+      error: String(error?.message ?? error),
+    });
     history.replaceState(null, "", location.pathname);
     app.runId = null;
     store.reset();
@@ -851,19 +932,19 @@ function toggleFollow() {
 /** Render or update the manual decision countdown. */
 function updateCountdown() {
   if (!store.pendingDecision) return;
-  let text = "waiting";
+  let text = t("header.status.waiting");
   if (app.decisionAt && !Number.isNaN(app.decisionAt)) {
     const elapsed = Math.max(0, (Date.now() - app.decisionAt) / 1000);
     if (app.decisionTimeout !== null) {
       const remaining = app.decisionTimeout - elapsed;
       text = formatCountdown(remaining);
       if (remaining <= 0) {
-        text = "0:00 · timed out";
+        text = `0:00 · ${t("value.finished")}`;
         app.decisionTimedOut = true;
         for (const button of document.querySelectorAll(".decision-submit")) button.disabled = true;
       }
     } else {
-      text = `waiting ${Math.floor(elapsed)}s`;
+      text = `${t("header.status.waiting")} ${Math.floor(elapsed)}s`;
     }
   }
   for (const node of document.querySelectorAll('[data-role="countdown"]')) node.textContent = text;
@@ -898,8 +979,8 @@ async function submitDecision(button) {
   let filled;
   let counterParams;
   try {
-    filled = parseOptionalJson(read("filled"), "Filled params");
-    counterParams = parseOptionalJson(read("counterParams"), "Counter params");
+    filled = parseOptionalJson(read("filled"), t("rail.filled"));
+    counterParams = parseOptionalJson(read("counterParams"), t("rail.counterParams"));
   } catch (error) {
     showDecisionError(errorNode, String(error.message));
     return;
@@ -918,7 +999,7 @@ async function submitDecision(button) {
   try {
     await api.submitDecision(app.runId, decision);
     showDecisionError(errorNode, null);
-    notify("Decision submitted.");
+    notify(t("notify.decisionSubmitted"));
   } catch (error) {
     showDecisionError(errorNode, String(error?.message ?? error));
     app.decisionSubmitting = false;
@@ -932,7 +1013,7 @@ function parseOptionalJson(text, label) {
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new Error(`${label}: invalid JSON (${error.message})`);
+    throw new Error(t("notify.jsonInvalid", { label, error: error.message }));
   }
 }
 
@@ -969,7 +1050,11 @@ function renderShortcuts() {
   list.replaceChildren();
   for (const entry of SHORTCUTS) {
     const row = el("div", "shortcut-row");
-    append(row, el("dt", "shortcut-keys", entry.keys), el("dd", "shortcut-description", entry.description));
+    append(
+      row,
+      el("dt", "shortcut-keys", entry.keys),
+      el("dd", "shortcut-description", t(entry.descriptionKey)),
+    );
     list.appendChild(row);
   }
 }
@@ -984,13 +1069,68 @@ function applyTheme(theme) {
   } catch {
     // Private-browsing storage failures are irrelevant to the explorer.
   }
-  $("theme-toggle").textContent = `Theme: ${theme}`;
+  $("theme-toggle").textContent = t("header.theme", { theme: t(`theme.${theme}`) });
 }
 
 /** Cycle auto → light → dark. */
 function cycleTheme() {
   const order = ["auto", "light", "dark"];
   applyTheme(order[(order.indexOf(app.theme) + 1) % order.length]);
+}
+
+/** Open the history panel on one tab. */
+function openHistory(tab) {
+  if (tab) app.historyTab = tab;
+  setHistoryOpen(true);
+  selectHistoryTab(app.historyTab);
+}
+
+/** Expand or collapse the history panel. */
+function setHistoryOpen(open) {
+  app.historyOpen = Boolean(open);
+  $("history-body").hidden = !app.historyOpen;
+  $("history-toggle").setAttribute("aria-expanded", String(app.historyOpen));
+  const chevron = $("history-toggle").querySelector(".history-chevron");
+  if (chevron) chevron.textContent = app.historyOpen ? "▾" : "▸";
+  updateHistoryCount();
+}
+
+/** Show one history tab and load its rows. */
+function selectHistoryTab(tab) {
+  app.historyTab = tab;
+  for (const button of document.querySelectorAll("#history-tabs [data-history-tab]")) {
+    button.setAttribute("aria-selected", String(button.dataset.historyTab === tab));
+  }
+  for (const panel of document.querySelectorAll("[data-history-panel]")) {
+    panel.hidden = panel.dataset.historyPanel !== tab;
+  }
+  if (!app.historyOpen) setHistoryOpen(true);
+  if (tab === "tasks") refreshTasks();
+  else if (tab === "runs") refreshClientRuns();
+  else refreshConversations();
+  updateHistoryCount();
+}
+
+/** Show the active tab's row count in the collapsed header. */
+function updateHistoryCount() {
+  const node = $("history-count");
+  if (!node) return;
+  if (app.historyTab === "runs") {
+    node.textContent = countOf(app.clientRuns.length, "history.runCountOne", "history.runCount");
+  } else if (app.historyTab === "conversations") {
+    node.textContent = countOf(
+      app.conversations.length,
+      "history.conversationCountOne",
+      "history.conversationCount",
+    );
+  } else {
+    node.textContent = countOf(app.tasks.length, "history.taskCountOne", "history.taskCount");
+  }
+}
+
+/** Localize one count with its singular/plural key pair. */
+function countOf(count, oneKey, manyKey) {
+  return t(count === 1 ? oneKey : manyKey, { count });
 }
 
 /** Wire the static toolbar, form and dialog controls. */
@@ -1001,7 +1141,7 @@ function bindControls() {
   $("run-id").addEventListener("click", () => {
     if (!store.runId) return;
     navigator.clipboard?.writeText(store.runId).then(
-      () => notify("Run id copied."),
+      () => notify(t("notify.runIdCopied")),
       () => notify(store.runId),
     );
   });
@@ -1010,6 +1150,16 @@ function bindControls() {
   $("expand-all").addEventListener("click", () => timeline.expandAll());
   $("collapse-all").addEventListener("click", () => timeline.collapseAll());
   $("client-run-detail-close")?.addEventListener("click", closeClientRunDetail);
+  $("conversation-detail-close")?.addEventListener("click", closeConversationDetail);
+
+  $("locale-select")?.addEventListener("change", (event) => {
+    setLocaleMode(event.target.value);
+  });
+
+  $("history-toggle")?.addEventListener("click", () => setHistoryOpen(!app.historyOpen));
+  for (const button of document.querySelectorAll("#history-tabs [data-history-tab]")) {
+    button.addEventListener("click", () => selectHistoryTab(button.dataset.historyTab));
+  }
 
   for (const chip of document.querySelectorAll("#filter-chips [data-filter]")) {
     chip.addEventListener("click", () => {
@@ -1179,8 +1329,11 @@ function startTicker() {
 
 /** Human label of one A2A task state. */
 function taskStateLabel(state) {
-  const value = typeof state === "string" ? state.replace(/^TASK_STATE_/, "") : "";
-  return value ? value.toLowerCase() : "unknown";
+  const value = typeof state === "string" ? state.replace(/^TASK_STATE_/, "").toLowerCase() : "";
+  if (!value) return t("taskState.unknown");
+  const key = `taskState.${value}`;
+  const text = t(key);
+  return text === key ? value : text;
 }
 
 /** Format one ISO timestamp of the task table. */
@@ -1196,20 +1349,22 @@ function renderTaskTable() {
   if (!body) return;
   body.replaceChildren();
   const count = app.tasks.length;
-  $("task-history-count").textContent = `${count} ${count === 1 ? "task" : "tasks"}`;
+  $("task-history-count").textContent = countOf(count, "history.taskCountOne", "history.taskCount");
 
   const note = $("task-table-note");
   const scroll = body.closest(".task-table-scroll");
   if (!app.tasksEnabled) {
     note.hidden = false;
-    note.textContent = "Task persistence is disabled (A2AT_SAMPLE_TASK_DB is unset).";
+    note.textContent = t("history.tasksDisabled");
     if (scroll) scroll.hidden = true;
+    updateHistoryCount();
     return;
   }
   if (count === 0) {
     note.hidden = false;
-    note.textContent = "No persisted tasks yet. Start a run to create one.";
+    note.textContent = t("history.tasksEmpty");
     if (scroll) scroll.hidden = true;
+    updateHistoryCount();
     return;
   }
   note.hidden = true;
@@ -1228,6 +1383,7 @@ function renderTaskTable() {
     );
     body.appendChild(row);
   }
+  updateHistoryCount();
 }
 
 /** Fetch the persisted task summaries without overlapping requests. */
@@ -1257,7 +1413,18 @@ function startTaskPolling() {
 /** Return the display label of one client run status. */
 function clientRunStatusLabel(status) {
   const value = typeof status === "string" ? status : "";
-  return value || "unknown";
+  if (!value) return t("value.unknown");
+  const key = `runStatus.${value}`;
+  const text = t(key);
+  return text === key ? value : text;
+}
+
+/** Return the display label of one final state. */
+function finalStateText(state) {
+  if (typeof state !== "string" || !state) return EM_DASH;
+  const key = `finalState.${state}`;
+  const text = t(key);
+  return text === key ? state : text;
 }
 
 /** Render the persisted client run table from ``app.clientRuns``. */
@@ -1266,20 +1433,26 @@ function renderClientRunTable() {
   if (!body) return;
   body.replaceChildren();
   const count = app.clientRuns.length;
-  $("client-history-count").textContent = `${count} ${count === 1 ? "run" : "runs"}`;
+  $("client-history-count").textContent = countOf(
+    count,
+    "history.runCountOne",
+    "history.runCount",
+  );
 
   const note = $("client-history-note");
   const scroll = body.closest(".task-table-scroll");
   if (!app.clientRunsEnabled) {
     note.hidden = false;
-    note.textContent = "Client persistence is disabled (A2AT_SAMPLE_CLIENT_DB is unset).";
+    note.textContent = t("history.runsDisabled");
     if (scroll) scroll.hidden = true;
+    updateHistoryCount();
     return;
   }
   if (count === 0) {
     note.hidden = false;
-    note.textContent = "No persisted client runs yet. Start a run to create one.";
+    note.textContent = t("history.runsEmpty");
     if (scroll) scroll.hidden = true;
+    updateHistoryCount();
     return;
   }
   note.hidden = true;
@@ -1287,7 +1460,7 @@ function renderClientRunTable() {
 
   for (const run of app.clientRuns) {
     const row = el("tr");
-    const detailButton = el("button", "secondary-button client-run-view", "View");
+    const detailButton = el("button", "secondary-button client-run-view", t("history.view"));
     detailButton.type = "button";
     detailButton.addEventListener("click", () => showClientRunDetail(run.runId));
     const detailCell = el("td", "client-run-detail-cell");
@@ -1298,13 +1471,14 @@ function renderClientRunTable() {
       el("td", "task-context-cell", run.conversationId ? shortId(run.conversationId) : EM_DASH),
       el("td", "", run.scenario || EM_DASH),
       el("td", "task-state-cell", clientRunStatusLabel(run.status)),
-      el("td", "", run.finalState || EM_DASH),
+      el("td", "", finalStateText(run.finalState)),
       el("td", "task-time-cell", taskTime(run.createdAt)),
       el("td", "task-summary-cell", truncate(run.userRequest, 160) || EM_DASH),
       detailCell,
     );
     body.appendChild(row);
   }
+  updateHistoryCount();
 }
 
 /** Fetch the persisted client runs without overlapping requests. */
@@ -1351,23 +1525,28 @@ function renderClientRunDetail(detail) {
   const body = $("client-run-detail-body");
   if (!body) return;
   body.replaceChildren();
-  $("client-run-detail-title").textContent = `Run ${shortId(detail.runId)}`;
+  $("client-run-detail-title").textContent = t("header.run", { id: shortId(detail.runId) });
 
   const facts = el("dl", "client-run-meta");
   append(
     facts,
-    factRow("Conversation", detail.conversationId || EM_DASH),
-    factRow("Status", detail.status || EM_DASH),
-    factRow("Final state", detail.finalState || EM_DASH),
-    factRow("Scenario", detail.scenario || EM_DASH),
-    factRow("Context", detail.serverContextId ? shortId(detail.serverContextId) : EM_DASH),
-    factRow("Task", detail.serverTaskId ? shortId(detail.serverTaskId) : EM_DASH),
-    factRow("Error", detail.error || EM_DASH),
+    factRow(t("history.conversation"), detail.conversationId || EM_DASH),
+    factRow(t("history.status"), clientRunStatusLabel(detail.status)),
+    factRow(t("history.finalState"), finalStateText(detail.finalState)),
+    factRow(t("history.scenario"), detail.scenario || EM_DASH),
+    factRow(
+      t("history.context"),
+      detail.serverContextId ? shortId(detail.serverContextId) : EM_DASH,
+    ),
+    factRow(t("history.task"), detail.serverTaskId ? shortId(detail.serverTaskId) : EM_DASH),
+    factRow(t("history.error"), detail.error || EM_DASH),
   );
   body.appendChild(facts);
 
   const turns = Array.isArray(detail.turns) ? detail.turns : [];
-  body.appendChild(el("h4", "client-run-subtitle", `Turns (${turns.length})`));
+  body.appendChild(
+    el("h4", "client-run-subtitle", t("history.turns", { count: turns.length })),
+  );
   const turnList = el("ol", "client-turn-list");
   for (const turn of turns) {
     const item = el("li", "client-turn");
@@ -1381,14 +1560,23 @@ function renderClientRunDetail(detail) {
   body.appendChild(turnList);
 
   const events = Array.isArray(detail.negotiationEvents) ? detail.negotiationEvents : [];
-  body.appendChild(el("h4", "client-run-subtitle", `Negotiation events (${events.length})`));
+  body.appendChild(
+    el("h4", "client-run-subtitle", t("history.negotiationEvents", { count: events.length })),
+  );
   if (events.length === 0) {
-    body.appendChild(el("p", "task-history-note", "No negotiation was opened for this run."));
+    body.appendChild(el("p", "task-history-note", t("history.noNegotiation")));
   } else {
     const table = el("table", "client-event-table");
     const head = el("thead");
     const headRow = el("tr");
-    for (const label of ["#", "Direction", "Round", "Performative", "Decision", "Rationale"]) {
+    for (const label of [
+      t("history.eventIndex"),
+      t("history.eventDirection"),
+      t("history.eventRound"),
+      t("history.eventPerformative"),
+      t("history.eventDecision"),
+      t("history.eventRationale"),
+    ]) {
       headRow.appendChild(el("th", "", label));
     }
     append(head, headRow);
@@ -1412,14 +1600,14 @@ function renderClientRunDetail(detail) {
 
   const links = el("p", "client-run-links");
   if (detail.transcriptJson) {
-    const link = el("a", "", "Transcript JSON");
+    const link = el("a", "", t("history.transcriptJson"));
     link.href = `/api/runs/${encodeURIComponent(detail.runId)}/transcript.json`;
     link.target = "_blank";
     link.rel = "noreferrer";
     links.appendChild(link);
   }
   if (detail.transcriptMarkdown) {
-    const link = el("a", "", "Transcript Markdown");
+    const link = el("a", "", t("history.transcriptMarkdown"));
     link.href = `/api/runs/${encodeURIComponent(detail.runId)}/transcript.md`;
     link.target = "_blank";
     link.rel = "noreferrer";
@@ -1442,10 +1630,187 @@ function closeClientRunDetail() {
   $("client-run-detail-body").replaceChildren();
 }
 
+/** Render the persisted conversation table from ``app.conversations``. */
+function renderConversationTable() {
+  const body = $("conversation-table-body");
+  if (!body) return;
+  body.replaceChildren();
+  const count = app.conversations.length;
+  $("conversation-history-count").textContent = countOf(
+    count,
+    "history.conversationCountOne",
+    "history.conversationCount",
+  );
+
+  const note = $("conversation-history-note");
+  const scroll = body.closest(".task-table-scroll");
+  if (!app.conversationsEnabled) {
+    note.hidden = false;
+    note.textContent = t("history.conversationsDisabled");
+    if (scroll) scroll.hidden = true;
+    updateHistoryCount();
+    return;
+  }
+  if (count === 0) {
+    note.hidden = false;
+    note.textContent = t("history.conversationsEmpty");
+    if (scroll) scroll.hidden = true;
+    updateHistoryCount();
+    return;
+  }
+  note.hidden = true;
+  if (scroll) scroll.hidden = false;
+
+  for (const conversation of app.conversations) {
+    const row = el("tr");
+    const detailButton = el("button", "secondary-button client-run-view", t("history.view"));
+    detailButton.type = "button";
+    detailButton.addEventListener("click", () =>
+      showConversationDetail(conversation.conversationId),
+    );
+    const detailCell = el("td", "client-run-detail-cell");
+    detailCell.appendChild(detailButton);
+    append(
+      row,
+      el("td", "task-id-cell", shortId(conversation.conversationId)),
+      el("td", "", String(conversation.turnCount ?? 0)),
+      el("td", "", String(conversation.runCount ?? 0)),
+      el("td", "task-time-cell", taskTime(conversation.updatedAt)),
+      detailCell,
+    );
+    body.appendChild(row);
+  }
+  updateHistoryCount();
+}
+
+/** Fetch the persisted conversations without overlapping requests. */
+async function refreshConversations() {
+  if (app.conversationFetching) return;
+  app.conversationFetching = true;
+  try {
+    const payload = await api.getConversations(50);
+    app.conversations = Array.isArray(payload?.conversations) ? payload.conversations : [];
+    app.conversationsEnabled = Boolean(payload?.enabled);
+    renderConversationTable();
+    if (app.conversationDetailId) {
+      await showConversationDetail(app.conversationDetailId, { reload: true });
+    }
+  } catch {
+    // The conversation history is diagnostic; a transient API failure must not disturb the run UI.
+  } finally {
+    app.conversationFetching = false;
+  }
+}
+
+/** Poll the conversation table while a run is active. */
+function startConversationPolling() {
+  if (app.conversationTimer) return;
+  app.conversationTimer = window.setInterval(() => {
+    if (store.running) refreshConversations();
+  }, 3000);
+}
+
+/** Load and show one persisted conversation. */
+async function showConversationDetail(conversationId, options = {}) {
+  try {
+    const detail = await api.getConversation(conversationId);
+    if (!detail) return;
+    app.conversationDetailId = conversationId;
+    renderConversationDetail(detail);
+    $("conversation-detail").hidden = false;
+    if (!options.reload) $("conversation-detail").scrollIntoView({ block: "nearest" });
+  } catch {
+    // A conversation removed between the list and the detail request keeps the old panel.
+  }
+}
+
+/** Render one conversation: metadata, turns and runs. */
+function renderConversationDetail(detail) {
+  const body = $("conversation-detail-body");
+  if (!body) return;
+  body.replaceChildren();
+  $("conversation-detail-title").textContent = t("history.conversationTitleId", {
+    id: shortId(detail.conversationId),
+  });
+
+  const facts = el("dl", "client-run-meta");
+  append(
+    facts,
+    factRow(t("history.conversation"), detail.conversationId || EM_DASH),
+    factRow(t("history.externalId"), detail.externalId || EM_DASH),
+    factRow(t("history.userId"), detail.userId || EM_DASH),
+    factRow(t("history.columnUpdated"), taskTime(detail.updatedAt)),
+  );
+  body.appendChild(facts);
+
+  const turns = Array.isArray(detail.turns) ? detail.turns : [];
+  body.appendChild(
+    el("h4", "client-run-subtitle", t("history.turns", { count: turns.length })),
+  );
+  if (turns.length === 0) {
+    body.appendChild(el("p", "task-history-note", t("history.noTurns")));
+  } else {
+    const turnList = el("ol", "client-turn-list");
+    for (const turn of turns) {
+      const item = el("li", "client-turn");
+      append(
+        item,
+        el("span", `client-turn-role role-${turn.role || "system"}`, turn.role || "system"),
+        el("span", "client-turn-content", turn.content || EM_DASH),
+      );
+      turnList.appendChild(item);
+    }
+    body.appendChild(turnList);
+  }
+
+  const runs = Array.isArray(detail.runs) ? detail.runs : [];
+  body.appendChild(el("h4", "client-run-subtitle", t("history.runsTitle")));
+  if (runs.length === 0) {
+    body.appendChild(el("p", "task-history-note", t("history.runsEmpty")));
+  } else {
+    const table = el("table", "client-event-table");
+    const head = el("thead");
+    const headRow = el("tr");
+    for (const label of [
+      t("history.columnRun"),
+      t("history.columnScenario"),
+      t("history.columnStatus"),
+      t("history.columnStarted"),
+    ]) {
+      headRow.appendChild(el("th", "", label));
+    }
+    append(head, headRow);
+    const rows = el("tbody");
+    for (const run of runs) {
+      const row = el("tr");
+      append(
+        row,
+        el("td", "", shortId(run.runId)),
+        el("td", "", run.scenario || EM_DASH),
+        el("td", "", clientRunStatusLabel(run.status)),
+        el("td", "task-time-cell", taskTime(run.createdAt)),
+      );
+      rows.appendChild(row);
+    }
+    append(table, head, rows);
+    body.appendChild(table);
+  }
+}
+
+/** Hide the conversation detail panel. */
+function closeConversationDetail() {
+  app.conversationDetailId = null;
+  $("conversation-detail").hidden = true;
+  $("conversation-detail-body").replaceChildren();
+}
+
 /** Load the process metadata and restore a run from the URL hash. */
 async function boot() {
+  initLocale({ search: location.search });
   bindControls();
   renderShortcuts();
+  renderLocaleSelect();
+  setHistoryOpen(false);
   const savedTheme = (() => {
     try {
       return localStorage.getItem("a2at-ran-theme") || "auto";
@@ -1461,16 +1826,31 @@ async function boot() {
   startTicker();
   startTaskPolling();
   startClientRunPolling();
+  startConversationPolling();
   refreshTasks();
   refreshClientRuns();
+  refreshConversations();
   scheduleRender();
+
+  onLocaleChange(() => {
+    renderShortcuts();
+    renderLocaleSelect();
+    updateLocaleHint();
+    scheduleRender();
+  });
 
   try {
     app.meta = await api.getMeta();
+    setProcessLanguage(app.meta.language);
     store.setMeta(app.meta);
     populateMeta(app.meta);
+    renderLocaleSelect();
+    updateLocaleHint();
+    applyStatic(document);
   } catch (error) {
-    app.startError = `Process metadata is unavailable: ${String(error?.message ?? error)}`;
+    app.startError = t("notify.metadataUnavailableDetail", {
+      error: String(error?.message ?? error),
+    });
   }
   app.loading = false;
   const runId = runIdFromHash();
