@@ -29,6 +29,12 @@ from integration_helpers import (
     running_server,
 )
 from protocol.client_flow import ClientFlowResult
+from protocol.client_store import (
+    ClientRunRecord,
+    NegotiationEventRecord,
+    SqliteClientStore,
+    TaskSnapshotRecord,
+)
 from protocol.decision_provider import ManualDecisionProvider
 from protocol.sqlite_task_store import SqliteTaskStore
 from shared.config import SampleConfig
@@ -146,6 +152,7 @@ class FakeRuntime:
         self.closed = False
         self.run_id: str | None = None
         self.user_request: str | None = None
+        self.conversation_context: str | None = None
 
     async def run(
         self,
@@ -159,9 +166,11 @@ class FakeRuntime:
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
         user_request: str | None = None,
+        conversation_context: str | None = None,
     ) -> ClientFlowResult:
         self.run_id = run_id
         self.user_request = user_request
+        self.conversation_context = conversation_context
         if trace_sink is not None:
             trace_sink(
                 _trace_span(
@@ -312,6 +321,75 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     # The UI's stream grace is served by the backend, never hard-coded client-side. This fixture
     # disables the grace so streaming tests finish immediately.
     assert meta["finishedGraceMs"] == 0
+
+
+async def test_client_run_endpoints_return_persisted_runs_and_conversations(
+    offline_config: SampleConfig, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "client.sqlite3"
+    store = SqliteClientStore(db_path)
+    await store.ensure_conversation(
+        conversation_id="conv-1", external_id="ext-1", user_id="user-1", title="energy saving"
+    )
+    await store.append_turn(conversation_id="conv-1", role="user", content="save energy")
+    await store.create_run(
+        ClientRunRecord(
+            run_id="run-1",
+            conversation_id="conv-1",
+            scenario="information",
+            mode="auto",
+            transport="sse",
+            discovery="registry",
+            user_request="save energy",
+            status="finished",
+            final_state="task_completed",
+        )
+    )
+    await store.record_negotiation_event(
+        NegotiationEventRecord.new(
+            run_id="run-1",
+            seq=1,
+            direction="inbound",
+            actor="server",
+            kind="information",
+            round=1,
+            performative="PROPOSE",
+            content={"content": "missing region"},
+        )
+    )
+    await store.save_task_snapshot(
+        TaskSnapshotRecord(
+            run_id="run-1", task_id="task-1", context_id="ctx-1", state="TASK_STATE_COMPLETED"
+        )
+    )
+    config = replace(offline_config, client_db_path=str(db_path))
+    app = create_app(config, runs_dir=tmp_path, client_store=store, finished_grace_seconds=0.0)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        runs = await http_client.get("/api/client/runs")
+        assert runs.status_code == 200
+        payload = runs.json()
+        assert payload["enabled"] is True
+        assert payload["runs"][0]["runId"] == "run-1"
+        assert payload["runs"][0]["conversationId"] == "conv-1"
+
+        detail = await http_client.get("/api/client/runs/run-1")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["status"] == "finished"
+        assert body["turns"][0]["content"] == "save energy"
+        assert body["negotiationEvents"][0]["performative"] == "PROPOSE"
+        assert body["taskSnapshot"]["state"] == "TASK_STATE_COMPLETED"
+
+        conversations = await http_client.get("/api/client/conversations")
+        assert conversations.status_code == 200
+        assert conversations.json()["conversations"][0]["conversationId"] == "conv-1"
+
+        conversation = await http_client.get("/api/client/conversations/conv-1")
+        assert conversation.status_code == 200
+        assert conversation.json()["runs"][0]["runId"] == "run-1"
+
+        assert (await http_client.get("/api/client/runs/missing")).status_code == 404
 
 
 async def test_tasks_endpoint_returns_persisted_task_summaries(
@@ -606,9 +684,18 @@ async def test_second_start_is_rejected_while_a_run_is_active(
     first = await client.post("/api/runs", json={"scenario": "information", "mode": "manual", "transport": "sse"})
     assert first.status_code == 202
     run_id = first.json()["runId"]
+    conversation_id = first.json()["conversationId"]
     await _wait_status(client, run_id, lambda data: data["pendingDecision"] is True)
 
-    second = await client.post("/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"})
+    second = await client.post(
+        "/api/runs",
+        json={
+            "scenario": "information",
+            "mode": "auto",
+            "transport": "sse",
+            "conversationId": conversation_id,
+        },
+    )
 
     assert second.status_code == 409
     await client.post(
@@ -1108,15 +1195,23 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
             assert any(span["phase"] == "execution" for span in artifact_spans)
             assert all(span["phase"] in {"execution", "report"} for span in artifact_spans)
 
-            # ADK is client-only now. The server still makes A2A-T SDK LLM calls in the gate, but
-            # it has no ADK model; only the client has ADK LLM spans. The deterministic executor
-            # produces the server tool spans.
+            # ADK is client-only now. The server still makes A2A-T SDK LLM calls in the gate and
+            # runs the LangGraph planner, but it has no ADK model; only the client has ADK LLM
+            # spans. The LangGraph executor produces the server planner and tool spans.
             llm_spans = [span for span in spans if span["kind"] == "llm"]
             tool_spans = [span for span in spans if span["kind"] == "tool"]
             assert llm_spans and tool_spans
             server_llm = [span for span in llm_spans if span["side"] == "server"]
             assert server_llm
-            assert all(span["model"] == "scripted" for span in server_llm)
+            assert any(span["model"] == "scripted" for span in server_llm)
+            assert any(span["stage"] == "server_planner" for span in server_llm)
+            tool_names = {span["title"] for span in tool_spans if span["side"] == "server"}
+            assert {
+                "get_cell_energy_profile",
+                "evaluate_energy_saving_plan",
+                "apply_energy_saving_plan",
+                "generate_energy_saving_report",
+            } <= tool_names
             assert any(span["side"] == "client" for span in llm_spans)
             assert {span["side"] for span in tool_spans} == {"server"}
             for span in llm_spans:

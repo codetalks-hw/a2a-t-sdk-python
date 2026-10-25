@@ -192,6 +192,7 @@ class ClientRuntime:
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
         user_request: str | None = None,
+        conversation_context: str | None = None,
     ) -> ClientFlowResult:
         """Run the full client flow of the configured scenario.
 
@@ -209,6 +210,8 @@ class ClientRuntime:
             run_id: Optional Run Explorer run id (the Web UI and the CLI pass theirs).
             user_request: Optional natural-language request entered in the Web UI; ``None`` uses
                 the scenario's canned request.
+            conversation_context: Optional recent-turn block injected into the decision prompt
+                and Task-T generation so a follow-up can refer to an earlier run.
 
         Returns:
             The collected events, decisions and terminal state.
@@ -228,6 +231,9 @@ class ClientRuntime:
                     if isinstance(user_request, str) and user_request.strip()
                     else resolve_user_request(self.scenario, self.config.language)
                 )
+                set_context = getattr(self.provider, "set_conversation_context", None)
+                if callable(set_context):
+                    set_context(conversation_context)
                 return await run_client_flow(
                     prompt_client=self.prompt_client,
                     transport=self.transport,
@@ -239,6 +245,7 @@ class ClientRuntime:
                     on_decision_made=on_decision_made,
                     trace_sink=sink,
                     call_timeout_seconds=self.config.http_timeout_seconds,
+                    conversation_context=conversation_context,
                 )
         finally:
             if temporary_sink:

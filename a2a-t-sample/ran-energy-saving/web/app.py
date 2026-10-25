@@ -23,36 +23,41 @@ import asyncio
 import json
 import os
 import time
-import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol
+from typing import Final
 
-from a2a_t.core.metadata import NegotiationContext
-from protocol.client_flow import ClientFlowResult, DecisionMadeCallback
-from protocol.client_runtime import MODE_AUTO, MODE_MANUAL, build_client_runtime
+from protocol.client_runtime import MODE_AUTO, build_client_runtime
+from protocol.client_service import (
+    STATUS_RUNNING,
+    UI_MODES,
+    ClientRuntimeLike,
+    RunConflictError,
+    RunManager,
+    RunState,
+    RuntimeFactory,
+)
+from protocol.client_store import (
+    ClientStore,
+    read_client_run_detail,
+    read_client_run_summaries,
+    read_conversation_detail,
+    read_conversation_summaries,
+)
 from protocol.sqlite_task_store import read_task_summaries
-from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript, TranscriptPaths
 from shared.config import (
-    DISCOVERY_REGISTRY,
     SUPPORTED_DISCOVERY_MODES,
     SUPPORTED_TRANSPORTS,
     SampleConfig,
 )
-from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.models import NegotiationDecision
 from shared.scenario import SUPPORTED_SCENARIO_NAMES, get_scenario, resolve_user_request
 from shared.trace import (
-    PHASE_DISPATCH,
-    PHASE_DONE,
     PHASES,
     SCHEMA_VERSION,
-    Span,
-    TraceRecorder,
-    infer_decision_phase,
-    infer_event_phase,
 )
 from sse_starlette.sse import EventSourceResponse
 from starlette.applications import Starlette
@@ -64,661 +69,12 @@ from starlette.staticfiles import StaticFiles
 #: Static directory of the single page.
 STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
 
-#: Run statuses.
-RunStatus = Literal["running", "finished", "failed"]
-STATUS_RUNNING: Final[RunStatus] = "running"
-STATUS_FINISHED: Final[RunStatus] = "finished"
-STATUS_FAILED: Final[RunStatus] = "failed"
-
-#: Modes the Web UI may start; the scripted mode is a CLI/test seam only.
-UI_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL)
-
 #: Seconds an SSE stream stays open after ``finished`` so late cross-process server spans arrive.
 #:
 #: The server trace emitter batches spans with a 0.5 s flush interval, so its last batch is posted
 #: just after the client finishes. Closing the stream on ``finished`` would hide every server LLM
 #: and tool span of a fresh run, so the handler forwards those frames during a short grace window.
 FINISHED_GRACE_SECONDS: Final[float] = 2.0
-
-
-class ClientRuntimeLike(Protocol):
-    """Runtime surface the Web UI drives (the real :class:`ClientRuntime` or a test double)."""
-
-    manual_provider: Any | None
-
-    async def run(
-        self,
-        *,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
-        on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
-        on_decision_made: DecisionMadeCallback | None = None,
-        trace_sink: Callable[[dict[str, object]], None] | None = None,
-        run_id: str | None = None,
-        user_request: str | None = None,
-    ) -> ClientFlowResult: ...
-
-    async def aclose(self) -> None: ...
-
-
-RuntimeFactory = Callable[[SampleConfig, str, str, str, str], Awaitable[ClientRuntimeLike]]
-
-
-class RunConflictError(RuntimeError):
-    """Raised when a run is already active."""
-
-
-@dataclass
-class RunState:
-    """Mutable state of one Web-UI run.
-
-    Attributes:
-        run_id: Identifier returned by ``POST /api/runs``.
-        scenario: scenario name.
-        mode: decision mode (``auto`` / ``manual``).
-        transport: event transport.
-        user_request: optional natural-language request supplied by the UI; ``None`` uses the
-            scenario default.
-        status: ``running`` / ``finished`` / ``failed``.
-        messages: every SSE message broadcast so far (replayed to late subscribers).
-        subscribers: live SSE queues.
-        transcript: transcript recorded while the run executes.
-        runtime: assembled client runtime, once built.
-        result: client flow result, once finished.
-        paths: transcript file paths, once written.
-        error: failure message of a failed run.
-        transcript_error: failure message when the transcript could not be written.
-        pending_decision: whether the manual provider currently waits for a decision.
-        proposals: inbound proposals in order.
-        discovery: discovery mode of the run.
-        traces: every trace span produced/ingested for the run.
-        spans: span lookup by id.
-        task: background task of the run.
-        finished_at: monotonic time the terminal frame was broadcast, when it is known.
-    """
-
-    run_id: str
-    scenario: str
-    mode: str
-    transport: str
-    discovery: str = DISCOVERY_REGISTRY
-    user_request: str | None = None
-    status: RunStatus = STATUS_RUNNING
-    messages: list[dict[str, object]] = field(default_factory=list)
-    subscribers: set[asyncio.Queue[dict[str, object]]] = field(default_factory=set)
-    transcript: NegotiationTranscript | None = None
-    runtime: ClientRuntimeLike | None = None
-    result: ClientFlowResult | None = None
-    paths: TranscriptPaths | None = None
-    error: str | None = None
-    transcript_error: str | None = None
-    pending_decision: bool = False
-    proposals: list[NegotiationProposeView] = field(default_factory=list)
-    traces: list[dict[str, object]] = field(default_factory=list)
-    spans: dict[str, dict[str, object]] = field(default_factory=dict)
-    task: asyncio.Task[None] | None = None
-    finished_at: float | None = None
-    _seq: int = field(default=0, repr=False)
-    _phase_steps: dict[str, int] = field(default_factory=dict, repr=False)
-    _span_id_map: dict[str, str] = field(default_factory=dict, repr=False)
-    _producer_spans: dict[str, str] = field(default_factory=dict, repr=False)
-    _recorder: TraceRecorder = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Create the per-run span recorder (UI ids never collide with client-flow ids)."""
-        self._recorder = TraceRecorder(self.run_id, id_prefix="ui")
-
-    @property
-    def manual_provider(self) -> Any | None:
-        """The manual provider of the runtime, when the run uses one."""
-        return self.runtime.manual_provider if self.runtime is not None else None
-
-    def next_seq(self) -> int:
-        """Allocate the next global ``seq`` without consuming a phase step."""
-        self._seq += 1
-        return self._seq
-
-    def allocate(self, phase: str) -> tuple[int, int]:
-        """Allocate the next global ``seq`` and the next step number of one phase."""
-        seq = self.next_seq()
-        step = self._phase_steps.get(phase, 0) + 1
-        self._phase_steps[phase] = step
-        return seq, step
-
-    def broadcast(self, message: dict[str, object], *, seq: int | None = None) -> dict[str, object]:
-        """Publish one SSE message with a strictly increasing ``seq``."""
-        if seq is None:
-            seq = self.next_seq()
-        else:
-            self._seq = max(self._seq, seq)
-        message["seq"] = seq
-        self.messages.append(message)
-        for queue in tuple(self.subscribers):
-            queue.put_nowait(message)
-        return message
-
-    def emit_run_started(
-        self,
-        *,
-        description: str,
-        user_request: str,
-        language: str,
-        model_mode: str,
-        model_label: str,
-        expected_sequence: list[dict[str, object]],
-    ) -> dict[str, object]:
-        """Broadcast the first frame of the run (replayed to every late subscriber)."""
-        seq, step = self.allocate(PHASE_DISPATCH)
-        detail: dict[str, object] = {
-            "scenario": self.scenario,
-            "description": description,
-            "userRequest": user_request,
-            "language": language,
-            "mode": self.mode,
-            "transport": self.transport,
-            "discovery": self.discovery,
-            "modelMode": model_mode,
-            "modelLabel": model_label,
-            "expectedSequence": expected_sequence,
-        }
-        span = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            kind="run_started",
-            phase=PHASE_DISPATCH,
-            title="Run started",
-            actor="system",
-            side="client",
-            direction="internal",
-            detail=detail,
-        )
-        self._store_span(span, seq=seq, record=True, broadcast_frame=False)
-        message: dict[str, object] = {
-            "type": "run_started",
-            "runId": self.run_id,
-            "scenario": self.scenario,
-            "description": description,
-            "userRequest": user_request,
-            "language": language,
-            "mode": self.mode,
-            "transport": self.transport,
-            "discovery": self.discovery,
-            "modelMode": model_mode,
-            "modelLabel": model_label,
-            "expectedSequence": expected_sequence,
-            "phase": PHASE_DISPATCH,
-            "phaseStep": step,
-            "spanId": span.span_id,
-            "startedAt": span.started_at,
-        }
-        return self.broadcast(message, seq=seq)
-
-    def emit_trace(
-        self,
-        *,
-        kind: str,
-        phase: str,
-        title: str,
-        direction: str = "internal",
-        actor: str = "system",
-        side: str = "client",
-        status: str = "ok",
-        round_number: int | None = None,
-        context_id: str | None = None,
-        task_id: str | None = None,
-        detail: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
-        """Create, store and broadcast one local synthetic trace span."""
-        seq, step = self.allocate(phase)
-        span = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            kind=kind,
-            phase=phase,
-            title=title,
-            actor=actor,
-            side=side,
-            direction=direction,
-            status=status,
-            round=round_number,
-            context_id=context_id,
-            task_id=task_id,
-            detail=detail,
-        )
-        return self._store_span(span, seq=seq, record=True)
-
-    def record_trace(self, span: Mapping[str, object]) -> dict[str, object]:
-        """Ingest one producer span (client flow or server HTTP transport) and broadcast it.
-
-        A producer id that is empty or already taken by another span is remapped to a fresh UI id;
-        the parent reference follows the same mapping so nested spans stay connected.
-
-        A **re-sent** producer span (same original ``spanId``) is ignored: the first ingested copy
-        wins and the stored span is returned unchanged, so a retried server batch never duplicates
-        a timeline row. The server emitter retries whole batches, and ids are role-scoped
-        (``llm_server_*`` / ``tool_server_*``), so ignoring repeats is safe and idempotent.
-        """
-        candidate = Span.from_dict(span)
-        original_span_id = candidate.span_id
-        if original_span_id:
-            existing_span_id = self._producer_spans.get(original_span_id)
-            if existing_span_id is not None:
-                return self.spans.get(existing_span_id, {})
-        phase = candidate.phase
-        seq, step = self.allocate(phase)
-        span_id: str | None = candidate.span_id or None
-        if span_id is None or span_id in self.spans:
-            if span_id is not None:
-                span_id = self._recorder.new_span_id()
-                self._span_id_map[candidate.span_id] = span_id
-            else:
-                span_id = None
-        elif candidate.span_id:
-            self._span_id_map.setdefault(candidate.span_id, candidate.span_id)
-        parent_span_id = candidate.parent_span_id
-        if parent_span_id is not None:
-            parent_span_id = self._span_id_map.get(parent_span_id, parent_span_id)
-        built = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            span_id=span_id,
-            parent_span_id=parent_span_id,
-            kind=candidate.kind,
-            phase=phase,
-            title=candidate.title,
-            actor=candidate.actor,
-            side=candidate.side,
-            direction=candidate.direction,
-            status=candidate.status,
-            round=candidate.round,
-            context_id=candidate.context_id,
-            task_id=candidate.task_id,
-            stage=candidate.stage,
-            purpose=candidate.purpose,
-            model=candidate.model,
-            tokens=candidate.tokens,
-            error=candidate.error,
-            detail=candidate.detail,
-            started_at=candidate.started_at,
-            ended_at=candidate.ended_at,
-            duration_ms=candidate.duration_ms,
-        )
-        self._producer_spans[original_span_id or built.span_id] = built.span_id
-        return self._store_span(built, seq=seq, record=True)
-
-    def _store_span(
-        self,
-        span: Span,
-        *,
-        seq: int,
-        record: bool,
-        broadcast_frame: bool = True,
-    ) -> dict[str, object]:
-        """Store one span for lookup/trace export, optionally add a transcript row and broadcast."""
-        payload = span.to_dict()
-        self.traces.append(payload)
-        self.spans[span.span_id] = payload
-        if record and self.transcript is not None:
-            self.transcript.record_trace(payload, seq=seq, phase_step=span.phase_step)
-        if broadcast_frame:
-            self.broadcast({"type": "trace", "event": payload}, seq=seq)
-        return payload
-
-    def record_event(self, event: Mapping[str, object]) -> dict[str, object]:
-        """Record one normalized A2A event, its span and its SSE frame."""
-        if self.transcript is None:
-            return {}
-        phase = infer_event_phase(event)
-        seq, step = self.allocate(phase)
-        entry = self.transcript.record_event(event, phase=phase, phase_step=step, seq=seq)
-        round_number = entry.get("round")
-        context_value = entry.get("contextId")
-        span = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            kind=str(event.get("kind") or "event"),
-            phase=phase,
-            title=str(entry.get("summary") or event.get("kind") or "event"),
-            actor="server",
-            side="server",
-            direction="server->client",
-            round=round_number if isinstance(round_number, int) else None,
-            context_id=context_value if isinstance(context_value, str) else None,
-            task_id=str(event.get("task_id") or "") or None,
-            detail={"event": dict(event)},
-        )
-        entry["spanId"] = span.span_id
-        self._store_span(span, seq=seq, record=False, broadcast_frame=False)
-        self.broadcast({"type": "event", "event": entry}, seq=seq)
-        return entry
-
-    def record_decision(
-        self,
-        decision: NegotiationDecision,
-        propose: NegotiationProposeView | None,
-        *,
-        session: NegotiationContext | None = None,
-    ) -> dict[str, object]:
-        """Record one provider/human decision live and broadcast it with its span."""
-        if self.transcript is None:
-            return {}
-        phase = infer_decision_phase(decision.action)
-        seq, step = self.allocate(phase)
-        entry = self.transcript.record_decision(
-            decision,
-            propose=propose,
-            phase=phase,
-            phase_step=step,
-            seq=seq,
-        )
-        span = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            kind=decision.action,
-            phase=phase,
-            title=f"Decision · {decision.action}",
-            actor="human" if self.mode == MODE_MANUAL else "client",
-            side="client",
-            direction="internal",
-            status="ok",
-            round=session.round if session is not None else (propose.round if propose is not None else None),
-            context_id=propose.context_id if propose is not None else None,
-            detail={
-                "action": decision.action,
-                "rationale": decision.rationale,
-                "filledParams": dict(decision.filled_params) if decision.filled_params else None,
-                "counterProposal": decision.counter_proposal,
-                "counterParams": dict(decision.counter_params) if decision.counter_params else None,
-                "confirmedIntent": decision.confirmed_intent,
-                "feasibilitySummary": decision.feasibility_summary,
-            },
-        )
-        entry["spanId"] = span.span_id
-        self._store_span(span, seq=seq, record=False, broadcast_frame=False)
-        self.broadcast({"type": "event", "event": entry}, seq=seq)
-        return entry
-
-    def emit_finished(self) -> dict[str, object]:
-        """Broadcast the terminal frame and record its ``done`` trace row."""
-        seq, step = self.allocate(PHASE_DONE)
-        span = self._recorder.emit(
-            seq=seq,
-            phase_step=step,
-            kind="finished",
-            phase=PHASE_DONE,
-            title="Run finished",
-            actor="system",
-            side="client",
-            direction="internal",
-            status="error" if self.status == STATUS_FAILED else "ok",
-            context_id=self.result.context_id if self.result is not None else None,
-            task_id=self.result.task_id if self.result is not None else None,
-            error=self.error,
-            detail={
-                "finalState": self.result.final_state if self.result is not None else None,
-                "report": self.result.report if self.result is not None else None,
-            },
-        )
-        self._store_span(span, seq=seq, record=True, broadcast_frame=False)
-        message = self._finished_message()
-        message.update(
-            {
-                "phase": PHASE_DONE,
-                "phaseStep": step,
-                "spanId": span.span_id,
-                # The finished row starts when the terminal frame is built, which is what lets the
-                # Done phase render a duration instead of a null one.
-                "startedAt": span.started_at,
-            }
-        )
-        self.finished_at = time.monotonic()
-        return self.broadcast(message, seq=seq)
-
-    def subscribe(self) -> tuple[list[dict[str, object]], asyncio.Queue[dict[str, object]]]:
-        """Return the replay snapshot and the live queue of one new subscriber atomically."""
-        snapshot = list(self.messages)
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        self.subscribers.add(queue)
-        return snapshot, queue
-
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, object]]) -> None:
-        """Remove one SSE subscriber queue."""
-        self.subscribers.discard(queue)
-
-    def finished(self) -> bool:
-        """Whether the run reached a terminal status."""
-        return self.status != STATUS_RUNNING
-
-    def _finished_message(self) -> dict[str, object]:
-        """Build the terminal SSE message of this run."""
-        return {
-            "type": "finished",
-            "runId": self.run_id,
-            "status": self.status,
-            "finalState": self.result.final_state if self.result is not None else None,
-            "report": self.result.report if self.result is not None else None,
-            "error": self.error,
-            "transcriptJson": f"/api/runs/{self.run_id}/transcript.json",
-            "transcriptMarkdown": f"/api/runs/{self.run_id}/transcript.md",
-            "traceJson": f"/api/runs/{self.run_id}/trace.json",
-        }
-
-    def snapshot(self) -> dict[str, object]:
-        """Return the JSON status/result/transcript document of this run."""
-        transcript = self.transcript.to_dict() if self.transcript is not None else None
-        return {
-            "runId": self.run_id,
-            "scenario": self.scenario,
-            "mode": self.mode,
-            "transport": self.transport,
-            "discovery": self.discovery,
-            "status": self.status,
-            "pendingDecision": self.pending_decision,
-            "finalState": self.result.final_state if self.result is not None else None,
-            "contextId": self.result.context_id if self.result is not None else None,
-            "taskId": self.result.task_id if self.result is not None else None,
-            "report": self.result.report if self.result is not None else None,
-            "error": self.error,
-            "transcriptError": self.transcript_error,
-            "seq": self._seq,
-            "traceCount": len(self.traces),
-            "transcript": transcript,
-        }
-
-
-class RunManager:
-    """Owns the runs of one app instance (one concurrent run)."""
-
-    def __init__(
-        self,
-        *,
-        config: SampleConfig,
-        runtime_factory: RuntimeFactory,
-        runs_dir: Path | None = None,
-    ) -> None:
-        self._config = config
-        self._runtime_factory = runtime_factory
-        self._runs_dir = runs_dir
-        self._runs: dict[str, RunState] = {}
-        self._active: RunState | None = None
-
-    def get(self, run_id: str) -> RunState | None:
-        """Return one run by id, ``None`` when unknown."""
-        return self._runs.get(run_id)
-
-    def start(
-        self,
-        scenario: str,
-        mode: str,
-        transport: str,
-        discovery: str = DISCOVERY_REGISTRY,
-        user_request: str | None = None,
-    ) -> RunState:
-        """Start one background run and broadcast ``run_started`` before the task is scheduled.
-
-        ``user_request`` overrides the scenario's canned request when the UI supplied one.
-
-        Raises:
-            RunConflictError: when another run is still active.
-        """
-        if self._active is not None and not self._active.finished():
-            raise RunConflictError("Another run is still active; wait for it to finish.")
-        custom_request = user_request.strip() if isinstance(user_request, str) else None
-        if not custom_request:
-            custom_request = None
-        run = RunState(
-            run_id=uuid.uuid4().hex,
-            scenario=scenario,
-            mode=mode,
-            transport=transport,
-            discovery=discovery,
-            user_request=custom_request,
-        )
-        run.transcript = NegotiationTranscript(
-            scenario=scenario,
-            language=self._config.language,
-            model_mode=self._config.model_mode,
-            mode=mode,
-            transport=transport,
-            runs_dir=self._runs_dir or DEFAULT_RUNS_DIR,
-        )
-        spec = get_scenario(scenario)
-        run.emit_run_started(
-            description=spec.description,
-            user_request=custom_request or resolve_user_request(spec, self._config.language),
-            language=self._config.language,
-            model_mode=self._config.model_mode,
-            model_label=self._config.model_label,
-            expected_sequence=[
-                {"actor": step.actor, "performative": step.performative, "round": step.round}
-                for step in spec.expected_sequence
-            ],
-        )
-        self._runs[run.run_id] = run
-        self._active = run
-        run.task = asyncio.create_task(self._execute(run), name=f"ran-web-run-{run.run_id}")
-        return run
-
-    async def _execute(self, run: RunState) -> None:
-        """Build the runtime, run the client flow, write the transcript and publish the outcome."""
-        transcript = run.transcript
-        assert transcript is not None
-
-        def event_sink(event: dict[str, object]) -> None:
-            run.record_event(event)
-
-        def on_decision_requested(propose: NegotiationProposeView, session: NegotiationContext) -> None:
-            # The proposals are recorded in both modes because the finished run pairs them with the
-            # provider decisions; a manual decision panel only exists in manual mode.
-            run.proposals.append(propose)
-            if run.mode != MODE_MANUAL:
-                return
-            run.pending_decision = True
-            timeout_seconds = getattr(run.manual_provider, "timeout_seconds", None)
-            run.broadcast(
-                {
-                    "type": "decision_requested",
-                    "mode": run.mode,
-                    "proposal": propose.model_dump(),
-                    "round": session.round,
-                    "maxRounds": session.max_rounds,
-                    "performative": session.performative.value,
-                    "phase": "negotiation",
-                    # Tiny UI-support fields: the manual countdown would otherwise have to invent
-                    # the provider budget, and a replay after a reload would restart it.
-                    "timeoutSeconds": (
-                        float(timeout_seconds)
-                        if isinstance(timeout_seconds, (int, float))
-                        else None
-                    ),
-                    "requestedAt": _now_iso(),
-                }
-            )
-
-        def on_decision_made(
-            decision: NegotiationDecision,
-            propose: NegotiationProposeView,
-            session: NegotiationContext,
-        ) -> None:
-            run.record_decision(decision, propose, session=session)
-
-        def trace_sink(span: dict[str, object]) -> None:
-            run.record_trace(span)
-
-        try:
-            run.runtime = await self._runtime_factory(
-                self._config,
-                run.scenario,
-                run.mode,
-                run.transport,
-                run.discovery,
-            )
-            run.emit_trace(
-                kind="runtime_ready",
-                phase=PHASE_DISPATCH,
-                title="Client runtime ready",
-                detail={
-                    "mode": run.mode,
-                    "transport": run.transport,
-                    "discovery": run.discovery,
-                    "language": self._config.language,
-                    "modelMode": self._config.model_mode,
-                    "modelLabel": self._config.model_label,
-                },
-            )
-            discovered = getattr(run.runtime, "discovered", None)
-            card = getattr(discovered, "agent_card", None)
-            run.emit_trace(
-                kind="discovery",
-                phase=PHASE_DISPATCH,
-                title="Server discovered",
-                detail={
-                    "discovery": run.discovery,
-                    "url": getattr(discovered, "url", None),
-                    "agentName": getattr(card, "name", None),
-                },
-            )
-            result = await run.runtime.run(
-                event_sink=event_sink,
-                on_decision_requested=on_decision_requested,
-                on_decision_made=on_decision_made,
-                trace_sink=trace_sink,
-                run_id=run.run_id,
-                user_request=run.user_request,
-            )
-            run.result = result
-            # Decisions are normally recorded live by ``on_decision_made``; the late loop is only
-            # a fallback for a runtime double that does not call the hook.
-            for index, decision in enumerate(result.decisions):
-                if index < len(transcript.decisions):
-                    continue
-                propose = run.proposals[index] if index < len(run.proposals) else None
-                run.record_decision(decision, propose)
-            transcript.record_final(result)
-            run.status = STATUS_FINISHED
-        except Exception as exc:  # noqa: BLE001 - a failed run must reach the UI, not a bare task
-            run.status = STATUS_FAILED
-            run.error = f"{type(exc).__name__}: {exc}"
-            transcript.record_error(run.error)
-        finally:
-            run.pending_decision = False
-            if run.runtime is not None:
-                with suppress(asyncio.CancelledError, Exception):
-                    await run.runtime.aclose()
-            try:
-                run.paths = transcript.write(self._runs_dir)
-            except OSError as exc:
-                run.transcript_error = f"{type(exc).__name__}: {exc}"
-            self._active = None
-            run.emit_finished()
-
-    async def shutdown(self) -> None:
-        """Cancel a still-running background run (app shutdown)."""
-        active = self._active
-        if active is None or active.task is None or active.task.done():
-            return
-        active.task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await active.task
 
 
 def _resolve_default(
@@ -745,6 +101,8 @@ def create_app(
     runs_dir: Path | None = None,
     runtime_factory: RuntimeFactory | None = None,
     env_path: Path | None = None,
+    client_store: ClientStore | None = None,
+    memory_turns: int = 6,
     default_scenario: str | None = None,
     default_mode: str | None = None,
     default_transport: str | None = None,
@@ -758,6 +116,8 @@ def create_app(
         runs_dir: transcript directory; defaults to the sample ``runs/`` directory.
         runtime_factory: optional runtime builder (tests inject a deterministic double).
         env_path: source ``.env`` handed to the real client runtime.
+        client_store: optional client persistence store (conversations, runs, negotiations).
+        memory_turns: number of recent turns injected into the next run's prompts.
         default_scenario: scenario preselected by the page and used when a start body omits it;
             defaults to the first supported scenario.
         default_mode: decision mode preselected/used by default; defaults to ``auto``.
@@ -810,11 +170,14 @@ def create_app(
         config=config,
         runtime_factory=runtime_factory or default_factory,
         runs_dir=runs_dir,
+        store=client_store,
+        memory_turns=memory_turns,
     )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         del app
+        await manager.mark_interrupted()
         yield
         await manager.shutdown()
 
@@ -863,6 +226,68 @@ def create_app(
         rows = await asyncio.to_thread(read_task_summaries, path, limit)
         return JSONResponse({"enabled": True, "tasks": rows})
 
+    def query_limit(request: Request) -> int | Response:
+        """Parse and validate the ``limit`` query parameter."""
+        raw_limit = request.query_params.get("limit", "50")
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer."}, status_code=400)
+        if not 1 <= limit <= 500:
+            return JSONResponse({"error": "limit must be between 1 and 500."}, status_code=400)
+        return limit
+
+    async def client_runs(request: Request) -> Response:
+        """Return persisted client run summaries for the client-runs table."""
+        limit = query_limit(request)
+        if isinstance(limit, Response):
+            return limit
+        path = config.client_db_path
+        enabled = path is not None and Path(path).is_file()
+        if not enabled:
+            return JSONResponse({"enabled": False, "runs": []})
+        rows = await asyncio.to_thread(read_client_run_summaries, path, limit)
+        return JSONResponse({"enabled": True, "runs": rows})
+
+    async def client_run_detail(request: Request) -> Response:
+        """Return one persisted client run with turns and negotiation events."""
+        path = config.client_db_path
+        if path is None:
+            return JSONResponse({"error": "The client database is disabled."}, status_code=404)
+        detail = await asyncio.to_thread(
+            read_client_run_detail, path, request.path_params["run_id"]
+        )
+        if detail is None:
+            return JSONResponse({"error": "Unknown run."}, status_code=404)
+        live = manager.get(request.path_params["run_id"])
+        if live is not None:
+            detail["live"] = live.snapshot()
+        return JSONResponse(detail)
+
+    async def client_conversations(request: Request) -> Response:
+        """Return persisted client conversation summaries."""
+        limit = query_limit(request)
+        if isinstance(limit, Response):
+            return limit
+        path = config.client_db_path
+        enabled = path is not None and Path(path).is_file()
+        if not enabled:
+            return JSONResponse({"enabled": False, "conversations": []})
+        rows = await asyncio.to_thread(read_conversation_summaries, path, limit)
+        return JSONResponse({"enabled": True, "conversations": rows})
+
+    async def client_conversation_detail(request: Request) -> Response:
+        """Return one conversation with its turns and runs."""
+        path = config.client_db_path
+        if path is None:
+            return JSONResponse({"error": "The client database is disabled."}, status_code=404)
+        detail = await asyncio.to_thread(
+            read_conversation_detail, path, request.path_params["conversation_id"]
+        )
+        if detail is None:
+            return JSONResponse({"error": "Unknown conversation."}, status_code=404)
+        return JSONResponse(detail)
+
     async def start_run(request: Request) -> Response:
         try:
             body = await request.json()
@@ -881,6 +306,22 @@ def create_app(
                 status_code=400,
             )
         user_request = raw_user_request.strip() if isinstance(raw_user_request, str) else None
+        optional_strings: dict[str, str | None] = {}
+        for field_name in (
+            "conversationId",
+            "externalConversationId",
+            "userId",
+            "idempotencyKey",
+        ):
+            raw_value = body.get(field_name)
+            if raw_value is not None and not isinstance(raw_value, str):
+                return JSONResponse(
+                    {"error": f"The {field_name} field must be a string."},
+                    status_code=400,
+                )
+            optional_strings[field_name] = (
+                raw_value.strip() if isinstance(raw_value, str) and raw_value.strip() else None
+            )
         if scenario not in SUPPORTED_SCENARIO_NAMES:
             return JSONResponse(
                 {"error": f"Unsupported scenario: {scenario}; expected one of {SUPPORTED_SCENARIO_NAMES}"},
@@ -902,18 +343,31 @@ def create_app(
                 status_code=400,
             )
         try:
-            run = manager.start(str(scenario), str(mode), str(transport), str(discovery), user_request)
+            run = await manager.start(
+                str(scenario),
+                str(mode),
+                str(transport),
+                str(discovery),
+                user_request,
+                conversation_id=optional_strings["conversationId"],
+                external_conversation_id=optional_strings["externalConversationId"],
+                user_id=optional_strings["userId"] or "web-user",
+                idempotency_key=optional_strings["idempotencyKey"],
+            )
         except RunConflictError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
+        reused = run.task is None
         return JSONResponse(
             {
                 "runId": run.run_id,
+                "conversationId": run.conversation_id,
+                "deduplicated": reused,
                 "language": config.language,
                 "modelMode": config.model_mode,
                 "modelLabel": config.model_label,
                 "discovery": discovery,
             },
-            status_code=202,
+            status_code=200 if reused else 202,
         )
 
     async def run_status(request: Request) -> Response:
@@ -987,24 +441,56 @@ def create_app(
         provider.submit(decision)
         return JSONResponse({"accepted": True, "runId": run.run_id})
 
+    async def _stored_transcript(request: Request, field_name: str) -> str | None:
+        """Read one transcript path persisted with a finished run."""
+        path = config.client_db_path
+        if path is None:
+            return None
+        detail = await asyncio.to_thread(
+            read_client_run_detail, path, request.path_params["run_id"]
+        )
+        stored = detail.get(field_name) if detail is not None else None
+        if not isinstance(stored, str) or not Path(stored).is_file():
+            return None
+        try:
+            return await asyncio.to_thread(Path(stored).read_text, encoding="utf-8")
+        except OSError:
+            return None
+
     async def transcript_json(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
-        if run is None or run.transcript is None:
+        if run is not None and run.transcript is not None:
+            text = run.transcript.to_json()
+        else:
+            text = await _stored_transcript(request, "transcriptJson")
+        if text is None:
             return JSONResponse({"error": "Unknown run."}, status_code=404)
         return Response(
-            run.transcript.to_json(),
+            text,
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{run.run_id}.json"'},
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{request.path_params["run_id"]}.json"'
+                )
+            },
         )
 
     async def transcript_markdown(request: Request) -> Response:
         run = manager.get(request.path_params["run_id"])
-        if run is None or run.transcript is None:
+        if run is not None and run.transcript is not None:
+            text = run.transcript.to_markdown()
+        else:
+            text = await _stored_transcript(request, "transcriptMarkdown")
+        if text is None:
             return JSONResponse({"error": "Unknown run."}, status_code=404)
         return Response(
-            run.transcript.to_markdown(),
+            text,
             media_type="text/markdown",
-            headers={"Content-Disposition": f'attachment; filename="{run.run_id}.md"'},
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{request.path_params["run_id"]}.md"'
+                )
+            },
         )
 
     async def run_span(request: Request) -> Response:
@@ -1065,6 +551,10 @@ def create_app(
             Route("/", index),
             Route("/api/meta", meta),
             Route("/api/tasks", tasks),
+            Route("/api/client/runs", client_runs),
+            Route("/api/client/runs/{run_id}", client_run_detail),
+            Route("/api/client/conversations", client_conversations),
+            Route("/api/client/conversations/{conversation_id}", client_conversation_detail),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{run_id}", run_status),
             Route("/api/runs/{run_id}/events", run_events),
@@ -1079,6 +569,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.run_manager = manager
+    app.state.client_store = client_store
     app.state.config = config
     return app
 

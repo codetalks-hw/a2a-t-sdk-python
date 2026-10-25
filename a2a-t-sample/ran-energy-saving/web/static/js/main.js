@@ -53,6 +53,11 @@ const app = {
   tasksEnabled: false,
   taskFetching: false,
   taskTimer: null,
+  clientRuns: [],
+  clientRunsEnabled: false,
+  clientRunFetching: false,
+  clientRunTimer: null,
+  clientRunDetailId: null,
 };
 
 const timeline = new TimelineView({
@@ -564,11 +569,21 @@ async function startRun(event) {
       userRequest: $("user-request-input").value.trim() || null,
     });
     app.runId = payload.runId;
+    if (payload.deduplicated) {
+      // The request repeated an idempotency key: the existing run is already terminal. Show its
+      // persisted detail instead of opening an empty live stream.
+      history.replaceState(null, "", `#run=${payload.runId}`);
+      await refreshClientRuns();
+      await showClientRunDetail(payload.runId);
+      $("start-button").disabled = false;
+      return;
+    }
     resetRunUiState();
     store.beginRun(payload.runId, app.meta);
     history.replaceState(null, "", `#run=${payload.runId}`);
     connect(payload.runId);
     refreshTasks();
+    refreshClientRuns();
     scheduleRender();
   } catch (error) {
     showStartError(String(error?.message ?? error));
@@ -703,6 +718,7 @@ async function finalizeRun() {
     // The stream already carried every span it could; a missing trace document is not an error.
   }
   await refreshTasks();
+  await refreshClientRuns();
   scheduleRender();
 }
 
@@ -993,6 +1009,7 @@ function bindControls() {
   $("timeline-follow").addEventListener("click", toggleFollow);
   $("expand-all").addEventListener("click", () => timeline.expandAll());
   $("collapse-all").addEventListener("click", () => timeline.collapseAll());
+  $("client-run-detail-close")?.addEventListener("click", closeClientRunDetail);
 
   for (const chip of document.querySelectorAll("#filter-chips [data-filter]")) {
     chip.addEventListener("click", () => {
@@ -1237,6 +1254,194 @@ function startTaskPolling() {
   }, 3000);
 }
 
+/** Return the display label of one client run status. */
+function clientRunStatusLabel(status) {
+  const value = typeof status === "string" ? status : "";
+  return value || "unknown";
+}
+
+/** Render the persisted client run table from ``app.clientRuns``. */
+function renderClientRunTable() {
+  const body = $("client-run-table-body");
+  if (!body) return;
+  body.replaceChildren();
+  const count = app.clientRuns.length;
+  $("client-history-count").textContent = `${count} ${count === 1 ? "run" : "runs"}`;
+
+  const note = $("client-history-note");
+  const scroll = body.closest(".task-table-scroll");
+  if (!app.clientRunsEnabled) {
+    note.hidden = false;
+    note.textContent = "Client persistence is disabled (A2AT_SAMPLE_CLIENT_DB is unset).";
+    if (scroll) scroll.hidden = true;
+    return;
+  }
+  if (count === 0) {
+    note.hidden = false;
+    note.textContent = "No persisted client runs yet. Start a run to create one.";
+    if (scroll) scroll.hidden = true;
+    return;
+  }
+  note.hidden = true;
+  if (scroll) scroll.hidden = false;
+
+  for (const run of app.clientRuns) {
+    const row = el("tr");
+    const detailButton = el("button", "secondary-button client-run-view", "View");
+    detailButton.type = "button";
+    detailButton.addEventListener("click", () => showClientRunDetail(run.runId));
+    const detailCell = el("td", "client-run-detail-cell");
+    detailCell.appendChild(detailButton);
+    append(
+      row,
+      el("td", "task-id-cell", shortId(run.runId)),
+      el("td", "task-context-cell", run.conversationId ? shortId(run.conversationId) : EM_DASH),
+      el("td", "", run.scenario || EM_DASH),
+      el("td", "task-state-cell", clientRunStatusLabel(run.status)),
+      el("td", "", run.finalState || EM_DASH),
+      el("td", "task-time-cell", taskTime(run.createdAt)),
+      el("td", "task-summary-cell", truncate(run.userRequest, 160) || EM_DASH),
+      detailCell,
+    );
+    body.appendChild(row);
+  }
+}
+
+/** Fetch the persisted client runs without overlapping requests. */
+async function refreshClientRuns() {
+  if (app.clientRunFetching) return;
+  app.clientRunFetching = true;
+  try {
+    const payload = await api.getClientRuns(50);
+    app.clientRuns = Array.isArray(payload?.runs) ? payload.runs : [];
+    app.clientRunsEnabled = Boolean(payload?.enabled);
+    renderClientRunTable();
+    if (app.clientRunDetailId) await showClientRunDetail(app.clientRunDetailId, { reload: true });
+  } catch {
+    // The client history is diagnostic; a transient API failure must not disturb the run UI.
+  } finally {
+    app.clientRunFetching = false;
+  }
+}
+
+/** Poll the client run table while a run is active. */
+function startClientRunPolling() {
+  if (app.clientRunTimer) return;
+  app.clientRunTimer = window.setInterval(() => {
+    if (store.running) refreshClientRuns();
+  }, 3000);
+}
+
+/** Load and show one persisted client run detail. */
+async function showClientRunDetail(runId, options = {}) {
+  try {
+    const detail = await api.getClientRun(runId);
+    if (!detail) return;
+    app.clientRunDetailId = runId;
+    renderClientRunDetail(detail);
+    $("client-run-detail").hidden = false;
+    if (!options.reload) $("client-run-detail").scrollIntoView({ block: "nearest" });
+  } catch {
+    // A run removed between the list and the detail request simply keeps the old panel.
+  }
+}
+
+/** Render one client run detail: metadata, turns, negotiation audit and transcript links. */
+function renderClientRunDetail(detail) {
+  const body = $("client-run-detail-body");
+  if (!body) return;
+  body.replaceChildren();
+  $("client-run-detail-title").textContent = `Run ${shortId(detail.runId)}`;
+
+  const facts = el("dl", "client-run-meta");
+  append(
+    facts,
+    factRow("Conversation", detail.conversationId || EM_DASH),
+    factRow("Status", detail.status || EM_DASH),
+    factRow("Final state", detail.finalState || EM_DASH),
+    factRow("Scenario", detail.scenario || EM_DASH),
+    factRow("Context", detail.serverContextId ? shortId(detail.serverContextId) : EM_DASH),
+    factRow("Task", detail.serverTaskId ? shortId(detail.serverTaskId) : EM_DASH),
+    factRow("Error", detail.error || EM_DASH),
+  );
+  body.appendChild(facts);
+
+  const turns = Array.isArray(detail.turns) ? detail.turns : [];
+  body.appendChild(el("h4", "client-run-subtitle", `Turns (${turns.length})`));
+  const turnList = el("ol", "client-turn-list");
+  for (const turn of turns) {
+    const item = el("li", "client-turn");
+    append(
+      item,
+      el("span", `client-turn-role role-${turn.role || "system"}`, turn.role || "system"),
+      el("span", "client-turn-content", turn.content || EM_DASH),
+    );
+    turnList.appendChild(item);
+  }
+  body.appendChild(turnList);
+
+  const events = Array.isArray(detail.negotiationEvents) ? detail.negotiationEvents : [];
+  body.appendChild(el("h4", "client-run-subtitle", `Negotiation events (${events.length})`));
+  if (events.length === 0) {
+    body.appendChild(el("p", "task-history-note", "No negotiation was opened for this run."));
+  } else {
+    const table = el("table", "client-event-table");
+    const head = el("thead");
+    const headRow = el("tr");
+    for (const label of ["#", "Direction", "Round", "Performative", "Decision", "Rationale"]) {
+      headRow.appendChild(el("th", "", label));
+    }
+    append(head, headRow);
+    const rows = el("tbody");
+    for (const event of events) {
+      const row = el("tr");
+      append(
+        row,
+        el("td", "", event.seq ?? EM_DASH),
+        el("td", "", event.direction || EM_DASH),
+        el("td", "", event.round ?? EM_DASH),
+        el("td", "", event.performative || EM_DASH),
+        el("td", "", event.decisionAction || EM_DASH),
+        el("td", "client-event-rationale", event.rationale || EM_DASH),
+      );
+      rows.appendChild(row);
+    }
+    append(table, head, rows);
+    body.appendChild(table);
+  }
+
+  const links = el("p", "client-run-links");
+  if (detail.transcriptJson) {
+    const link = el("a", "", "Transcript JSON");
+    link.href = `/api/runs/${encodeURIComponent(detail.runId)}/transcript.json`;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    links.appendChild(link);
+  }
+  if (detail.transcriptMarkdown) {
+    const link = el("a", "", "Transcript Markdown");
+    link.href = `/api/runs/${encodeURIComponent(detail.runId)}/transcript.md`;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    links.appendChild(link);
+  }
+  if (links.childNodes.length > 0) body.appendChild(links);
+}
+
+/** Build one detail fact row. */
+function factRow(label, value) {
+  const wrapper = el("div", "fact");
+  append(wrapper, el("dt", "fact-label", label), el("dd", "fact-value", value));
+  return wrapper;
+}
+
+/** Hide the client run detail panel. */
+function closeClientRunDetail() {
+  app.clientRunDetailId = null;
+  $("client-run-detail").hidden = true;
+  $("client-run-detail-body").replaceChildren();
+}
+
 /** Load the process metadata and restore a run from the URL hash. */
 async function boot() {
   bindControls();
@@ -1255,7 +1460,9 @@ async function boot() {
   startPolling();
   startTicker();
   startTaskPolling();
+  startClientRunPolling();
   refreshTasks();
+  refreshClientRuns();
   scheduleRender();
 
   try {

@@ -270,6 +270,26 @@ async def _run(
     return result, transport, prompt_client
 
 
+async def test_conversation_context_is_prepended_to_task_t_generation() -> None:
+    prompt_client = FakePromptClient()
+    transport = ScriptedTransport(
+        [[propose_event("information", 1)], _task_completed_batch()]
+    )
+
+    await run_client_flow(
+        prompt_client=prompt_client,
+        transport=transport,
+        user_request="current request",
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        conversation_context="user: earlier request\nassistant: earlier result",
+    )
+
+    assert prompt_client.task_prompts[0].startswith("Conversation context")
+    assert "user: earlier request" in prompt_client.task_prompts[0]
+    assert "Current request:\ncurrent request" in prompt_client.task_prompts[0]
+
+
 async def test_information_scenario_accepts_and_completes_a_task() -> None:
     result, transport, prompt_client = await _run(
         SCENARIO_INFORMATION_SPEC,

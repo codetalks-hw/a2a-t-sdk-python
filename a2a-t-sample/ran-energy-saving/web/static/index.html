@@ -73,6 +73,39 @@
     </div>
   </section>
 
+  <section class="task-history client-history panel" aria-labelledby="client-history-title">
+    <div class="task-history-head">
+      <h2 class="panel-title" id="client-history-title">Client runs</h2>
+      <span class="task-history-count" id="client-history-count">0 runs</span>
+    </div>
+    <p class="task-history-note" id="client-history-note">No persisted client runs yet.</p>
+    <div class="task-table-scroll" hidden>
+      <table class="task-table" id="client-run-table">
+        <caption class="sr-only">Persisted client runs, conversations and negotiation audit</caption>
+        <thead>
+          <tr>
+            <th scope="col">Run</th>
+            <th scope="col">Conversation</th>
+            <th scope="col">Scenario</th>
+            <th scope="col">Status</th>
+            <th scope="col">Final state</th>
+            <th scope="col">Started</th>
+            <th scope="col">Request</th>
+            <th scope="col">Detail</th>
+          </tr>
+        </thead>
+        <tbody id="client-run-table-body"></tbody>
+      </table>
+    </div>
+    <section class="client-run-detail" id="client-run-detail" aria-labelledby="client-run-detail-title" hidden>
+      <div class="client-run-detail-head">
+        <h3 class="panel-title" id="client-run-detail-title">Run detail</h3>
+        <button class="secondary-button" id="client-run-detail-close" type="button">Close</button>
+      </div>
+      <div class="client-run-detail-body" id="client-run-detail-body"></div>
+    </section>
+  </section>
+
   <nav class="phase-stepper" id="phase-stepper" aria-label="Run phases">
     <ol class="phase-list" id="phase-steps">
       <li class="phase-step" data-phase="dispatch"><button type="button" class="phase-step-button" data-phase="dispatch"><span class="phase-step-index">01</span><span class="phase-step-label">Dispatch</span><span class="phase-step-meta">pending</span></button></li>

@@ -59,6 +59,19 @@ def test_build_decision_prompt_carries_the_round_and_content() -> None:
     assert "Please provide the region." in prompt
 
 
+def test_build_decision_prompt_carries_the_conversation_context() -> None:
+    prompt = build_decision_prompt(
+        _view(),
+        _session(1),
+        user_request="current request",
+        conversation_context="user: earlier request\nassistant: earlier result",
+    )
+
+    assert "Conversation context (earlier turns):" in prompt
+    assert "user: earlier request" in prompt
+    assert "Original user request:\ncurrent request" in prompt
+
+
 def test_build_decision_prompt_carries_the_original_request() -> None:
     prompt = build_decision_prompt(
         _view("target"),

@@ -7,22 +7,44 @@ from pathlib import Path
 import pytest
 from shared.adk_fake_model import FakeLlm
 from shared.config import (
+    CLIENT_DB_ENV_KEY,
+    CLIENT_MEMORY_TURNS_ENV_KEY,
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     DEFAULT_LLM_MAX_ATTEMPTS,
     DEFAULT_LLM_TIMEOUT_SECONDS,
+    DEFAULT_PLANNER_MAX_STEPS,
     DEFAULT_WEBHOOK_IDLE_TIMEOUT,
+    GATEWAY_PORT_ENV_KEY,
+    GATEWAY_REGISTER_ENV_KEY,
+    GATEWAY_SCENARIO_ENV_KEY,
     HTTP_TIMEOUT_ENV_KEY,
     LLM_MAX_ATTEMPTS_ENV_KEY,
     LLM_TIMEOUT_ENV_KEY,
     MODEL_MODE_LIVE,
     MODEL_MODE_OFFLINE,
+    PLANNER_MAX_STEPS_ENV_KEY,
+    PLANNER_MODEL_ENV_KEY,
+    PLANNER_TIMEOUT_ENV_KEY,
     TASK_DB_ENV_KEY,
     SampleConfig,
     build_adk_model,
     load_config,
 )
 
-_ENV_KEYS = (HTTP_TIMEOUT_ENV_KEY, LLM_TIMEOUT_ENV_KEY, LLM_MAX_ATTEMPTS_ENV_KEY, TASK_DB_ENV_KEY)
+_ENV_KEYS = (
+    HTTP_TIMEOUT_ENV_KEY,
+    LLM_TIMEOUT_ENV_KEY,
+    LLM_MAX_ATTEMPTS_ENV_KEY,
+    TASK_DB_ENV_KEY,
+    CLIENT_DB_ENV_KEY,
+    CLIENT_MEMORY_TURNS_ENV_KEY,
+    GATEWAY_PORT_ENV_KEY,
+    GATEWAY_REGISTER_ENV_KEY,
+    GATEWAY_SCENARIO_ENV_KEY,
+    PLANNER_MODEL_ENV_KEY,
+    PLANNER_TIMEOUT_ENV_KEY,
+    PLANNER_MAX_STEPS_ENV_KEY,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +108,78 @@ def test_task_db_path_is_optional_and_must_be_absolute(tmp_path: Path) -> None:
 
     env_file.write_text("A2AT_LANGUAGE=en-US\n", encoding="utf-8")
     assert load_config(env_path=env_file).task_db_path is None
+
+
+def test_client_db_gateway_and_planner_settings(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"{CLIENT_DB_ENV_KEY}={tmp_path / 'client.sqlite3'}",
+                f"{CLIENT_MEMORY_TURNS_ENV_KEY}=3",
+                f"{GATEWAY_PORT_ENV_KEY}=8101",
+                f"{GATEWAY_REGISTER_ENV_KEY}=yes",
+                f"{GATEWAY_SCENARIO_ENV_KEY}=target",
+                f"{PLANNER_MODEL_ENV_KEY}=planner-model",
+                f"{PLANNER_TIMEOUT_ENV_KEY}=22",
+                f"{PLANNER_MAX_STEPS_ENV_KEY}=7",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(env_path=env_file)
+
+    assert config.client_db_path == str(tmp_path / "client.sqlite3")
+    assert config.client_memory_turns == 3
+    assert config.gateway_port == 8101
+    assert config.gateway_register is True
+    assert config.gateway_scenario == "target"
+    assert config.planner_model == "planner-model"
+    assert config.planner_timeout_seconds == 22.0
+    assert config.planner_max_steps == 7
+
+
+def test_planner_defaults_follow_the_adk_endpoint(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "ADK_MODEL_NAME=openai/mass/volcengine/deepseek-v4.1-flash",
+                "ADK_MODEL_API_BASE=http://127.0.0.1:31943/v1",
+                "ADK_MODEL_API_KEY=not-needed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(env_path=env_file)
+
+    assert config.planner_model == "mass/volcengine/deepseek-v4.1-flash"
+    assert config.planner_api_base == "http://127.0.0.1:31943/v1"
+    assert config.planner_api_key == "not-needed"
+    assert config.planner_max_steps == DEFAULT_PLANNER_MAX_STEPS
+    assert config.gateway_register is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (CLIENT_DB_ENV_KEY, "relative/client.sqlite3"),
+        (CLIENT_MEMORY_TURNS_ENV_KEY, "-1"),
+        (GATEWAY_REGISTER_ENV_KEY, "sometimes"),
+        (GATEWAY_SCENARIO_ENV_KEY, "unknown"),
+        (PLANNER_MAX_STEPS_ENV_KEY, "0"),
+    ],
+)
+def test_client_gateway_and_planner_reject_invalid_values(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}={value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=key):
+        load_config(env_path=env_file)
 
 
 def test_missing_env_file_uses_offline_defaults(tmp_path: Path) -> None:

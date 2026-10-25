@@ -28,14 +28,22 @@ def test_write_run_env_points_both_processes_at_the_task_database(
         registry_host="127.0.0.1",
         registry_port=5001,
         ui_port=8080,
+        gateway_port=8001,
+        gateway_register=True,
     )
 
     values = dotenv_values(env_path)
     task_db = Path(str(values["A2AT_SAMPLE_TASK_DB"]))
+    client_db = Path(str(values["A2AT_SAMPLE_CLIENT_DB"]))
 
     assert task_db.is_absolute()
     assert task_db == run_demo.TASK_DB_PATH
     assert task_db.name == "task-status.sqlite3"
+    assert client_db.is_absolute()
+    assert client_db == run_demo.CLIENT_DB_PATH
+    assert client_db.name == "client-state.sqlite3"
+    assert values["A2AT_SAMPLE_GATEWAY_PORT"] == "8001"
+    assert values["A2AT_SAMPLE_GATEWAY_REGISTER"] == "1"
 
 
 def test_ui_port_default_reads_the_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,6 +121,7 @@ def test_state_round_trip_records_the_run_metadata(monkeypatch: pytest.MonkeyPat
         "trace_token": "tok",
         "trace_url": "http://127.0.0.1:8080",
         "ui_port": 8080,
+        "gateway_port": None,
     }
     assert run_demo._load_pids() == [11, 12]
 

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from dotenv import dotenv_values
 
-from shared.scenario import LANGUAGE_ZH, SUPPORTED_LANGUAGES
+from shared.scenario import LANGUAGE_ZH, SUPPORTED_LANGUAGES, SUPPORTED_SCENARIO_NAMES
 
 if TYPE_CHECKING:
     from google.adk.models.base_llm import BaseLlm
@@ -56,6 +56,17 @@ HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
 LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
 TASK_DB_ENV_KEY = "A2AT_SAMPLE_TASK_DB"
+CLIENT_DB_ENV_KEY = "A2AT_SAMPLE_CLIENT_DB"
+CLIENT_MEMORY_TURNS_ENV_KEY = "A2AT_SAMPLE_CLIENT_MEMORY_TURNS"
+GATEWAY_HOST_ENV_KEY = "A2AT_SAMPLE_GATEWAY_HOST"
+GATEWAY_PORT_ENV_KEY = "A2AT_SAMPLE_GATEWAY_PORT"
+GATEWAY_REGISTER_ENV_KEY = "A2AT_SAMPLE_GATEWAY_REGISTER"
+GATEWAY_SCENARIO_ENV_KEY = "A2AT_SAMPLE_GATEWAY_SCENARIO"
+PLANNER_MODEL_ENV_KEY = "A2AT_SAMPLE_PLANNER_MODEL"
+PLANNER_API_BASE_ENV_KEY = "A2AT_SAMPLE_PLANNER_API_BASE"
+PLANNER_API_KEY_ENV_KEY = "A2AT_SAMPLE_PLANNER_API_KEY"
+PLANNER_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_PLANNER_TIMEOUT_SECONDS"
+PLANNER_MAX_STEPS_ENV_KEY = "A2AT_SAMPLE_PLANNER_MAX_STEPS"
 
 #: Defaults matching ``env.example``.
 DEFAULT_HOST = "127.0.0.1"
@@ -86,6 +97,16 @@ DEFAULT_LLM_MAX_ATTEMPTS = 1
 #: Inclusive bounds of ``A2AT_SAMPLE_LLM_MAX_ATTEMPTS`` (mirrors the SDK's clamping bounds).
 LLM_MAX_ATTEMPTS_LOWER_BOUND = 1
 LLM_MAX_ATTEMPTS_UPPER_BOUND = 10
+
+#: Recent conversation turns injected into the next client run.
+DEFAULT_CLIENT_MEMORY_TURNS = 6
+
+#: A2A gateway defaults (the client agent's inbound A2A surface).
+DEFAULT_GATEWAY_PORT = 8001
+DEFAULT_GATEWAY_SCENARIO = "information"
+
+#: LangGraph planner defaults (the server's post-accept execution agent).
+DEFAULT_PLANNER_MAX_STEPS = 12
 DEFAULT_ADK_MODEL_PROVIDER = "litellm"
 DEFAULT_ADK_MODEL_NAME = "openai/mass/volcengine/deepseek-v4.1-flash"
 DEFAULT_ADK_MODEL_API_BASE = "http://127.0.0.1:31943/v1"
@@ -126,6 +147,22 @@ def _positive_seconds(values: dict[str, str | None], key: str, default: float) -
     return value
 
 
+def _non_negative_int(values: dict[str, str | None], key: str, default: int) -> int:
+    """Resolve one non-negative integer key, raising a readable error on invalid input."""
+    value = _env_int(values, key, default)
+    if value < 0:
+        raise ValueError(f"Invalid value for {key}: {value}; expected a non-negative integer")
+    return value
+
+
+def _positive_int(values: dict[str, str | None], key: str, default: int) -> int:
+    """Resolve one strictly positive integer key."""
+    value = _env_int(values, key, default)
+    if value < 1:
+        raise ValueError(f"Invalid value for {key}: {value}; expected a positive integer")
+    return value
+
+
 def _llm_max_attempts(values: dict[str, str | None]) -> int:
     """Resolve the live LLM attempt limit, validated against the inclusive SDK bounds."""
     value = _env_int(values, LLM_MAX_ATTEMPTS_ENV_KEY, DEFAULT_LLM_MAX_ATTEMPTS)
@@ -135,6 +172,16 @@ def _llm_max_attempts(values: dict[str, str | None]) -> int:
             f"{LLM_MAX_ATTEMPTS_LOWER_BOUND}..{LLM_MAX_ATTEMPTS_UPPER_BOUND}"
         )
     return value
+
+
+def _env_bool(values: dict[str, str | None], key: str, default: bool) -> bool:
+    """Resolve one boolean key (``1/true/yes/on`` and ``0/false/no/off``)."""
+    raw_value = _env_value(values, key, "true" if default else "false").lower()
+    if raw_value in ("1", "true", "yes", "on"):
+        return True
+    if raw_value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"Invalid boolean value for {key}: {raw_value}")
 
 
 def _optional_absolute_path(values: dict[str, str | None], key: str) -> str | None:
@@ -172,6 +219,18 @@ class SampleConfig:
         llm_max_attempts: Live SDK LLM attempt limit per retryable step.
         task_db_path: Absolute SQLite path of the persisted A2A Task store; ``None`` keeps the
             in-memory store (tests and ephemeral runs).
+        client_db_path: Absolute SQLite path of the client conversation/run store; ``None`` keeps
+            the client state in memory only.
+        client_memory_turns: Recent conversation turns injected into the next run's prompts.
+        gateway_host: bind host of the optional inbound A2A gateway.
+        gateway_port: bind port of the optional inbound A2A gateway.
+        gateway_register: whether the gateway registers its AgentCard in the registry center.
+        gateway_scenario: scenario used for an inbound gateway request.
+        planner_model: LangChain model id of the server's LangGraph planner.
+        planner_api_base: OpenAI-compatible endpoint of the planner.
+        planner_api_key: API key of the planner endpoint.
+        planner_timeout_seconds: per-call planner budget.
+        planner_max_steps: LangGraph recursion limit of one execution.
     """
 
     model_mode: ModelMode
@@ -192,6 +251,17 @@ class SampleConfig:
     llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
     llm_max_attempts: int = DEFAULT_LLM_MAX_ATTEMPTS
     task_db_path: str | None = None
+    client_db_path: str | None = None
+    client_memory_turns: int = DEFAULT_CLIENT_MEMORY_TURNS
+    gateway_host: str = DEFAULT_HOST
+    gateway_port: int = DEFAULT_GATEWAY_PORT
+    gateway_register: bool = False
+    gateway_scenario: str = DEFAULT_GATEWAY_SCENARIO
+    planner_model: str = ""
+    planner_api_base: str = ""
+    planner_api_key: str = ""
+    planner_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
+    planner_max_steps: int = DEFAULT_PLANNER_MAX_STEPS
 
     @property
     def is_offline(self) -> bool:
@@ -234,6 +304,26 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
     registry_host = _env_value(values, REGISTRY_HOST_ENV_KEY, DEFAULT_REGISTRY_HOST)
     registry_port = _env_int(values, REGISTRY_PORT_ENV_KEY, DEFAULT_REGISTRY_PORT)
 
+    gateway_scenario = _env_value(
+        values, GATEWAY_SCENARIO_ENV_KEY, DEFAULT_GATEWAY_SCENARIO
+    )
+    if gateway_scenario not in SUPPORTED_SCENARIO_NAMES:
+        raise ValueError(
+            f"Unsupported {GATEWAY_SCENARIO_ENV_KEY}: {gateway_scenario}; "
+            f"expected one of {SUPPORTED_SCENARIO_NAMES}"
+        )
+
+    adk_model_name = _env_value(values, ADK_MODEL_NAME_ENV_KEY, DEFAULT_ADK_MODEL_NAME)
+    adk_model_api_base = _env_value(
+        values, ADK_MODEL_API_BASE_ENV_KEY, DEFAULT_ADK_MODEL_API_BASE
+    )
+    adk_model_api_key = _env_value(
+        values, ADK_MODEL_API_KEY_ENV_KEY, DEFAULT_ADK_MODEL_API_KEY
+    )
+    # The ADK model id is a LiteLLM id ("openai/..."); ChatOpenAI takes the bare model id. The
+    # planner keys are independent so a deployment can point the server at a different model.
+    planner_model_default = adk_model_name.removeprefix("openai/")
+
     return SampleConfig(
         model_mode=model_mode,
         language=language,
@@ -244,9 +334,9 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         webhook_token=_env_value(values, WEBHOOK_TOKEN_ENV_KEY, DEFAULT_WEBHOOK_TOKEN),
         webhook_idle_timeout=_env_int(values, WEBHOOK_IDLE_TIMEOUT_ENV_KEY, DEFAULT_WEBHOOK_IDLE_TIMEOUT),
         adk_model_provider=_env_value(values, ADK_MODEL_PROVIDER_ENV_KEY, DEFAULT_ADK_MODEL_PROVIDER),
-        adk_model_name=_env_value(values, ADK_MODEL_NAME_ENV_KEY, DEFAULT_ADK_MODEL_NAME),
-        adk_model_api_base=_env_value(values, ADK_MODEL_API_BASE_ENV_KEY, DEFAULT_ADK_MODEL_API_BASE),
-        adk_model_api_key=_env_value(values, ADK_MODEL_API_KEY_ENV_KEY, DEFAULT_ADK_MODEL_API_KEY),
+        adk_model_name=adk_model_name,
+        adk_model_api_base=adk_model_api_base,
+        adk_model_api_key=adk_model_api_key,
         discovery=discovery,
         transport=transport,
         http_timeout_seconds=_positive_seconds(
@@ -255,6 +345,23 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         llm_timeout_seconds=_positive_seconds(values, LLM_TIMEOUT_ENV_KEY, DEFAULT_LLM_TIMEOUT_SECONDS),
         llm_max_attempts=_llm_max_attempts(values),
         task_db_path=_optional_absolute_path(values, TASK_DB_ENV_KEY),
+        client_db_path=_optional_absolute_path(values, CLIENT_DB_ENV_KEY),
+        client_memory_turns=_non_negative_int(
+            values, CLIENT_MEMORY_TURNS_ENV_KEY, DEFAULT_CLIENT_MEMORY_TURNS
+        ),
+        gateway_host=_env_value(values, GATEWAY_HOST_ENV_KEY, DEFAULT_HOST),
+        gateway_port=_env_int(values, GATEWAY_PORT_ENV_KEY, DEFAULT_GATEWAY_PORT),
+        gateway_register=_env_bool(values, GATEWAY_REGISTER_ENV_KEY, False),
+        gateway_scenario=gateway_scenario,
+        planner_model=_env_value(values, PLANNER_MODEL_ENV_KEY, planner_model_default),
+        planner_api_base=_env_value(values, PLANNER_API_BASE_ENV_KEY, adk_model_api_base),
+        planner_api_key=_env_value(values, PLANNER_API_KEY_ENV_KEY, adk_model_api_key),
+        planner_timeout_seconds=_positive_seconds(
+            values, PLANNER_TIMEOUT_ENV_KEY, DEFAULT_LLM_TIMEOUT_SECONDS
+        ),
+        planner_max_steps=_positive_int(
+            values, PLANNER_MAX_STEPS_ENV_KEY, DEFAULT_PLANNER_MAX_STEPS
+        ),
     )
 
 

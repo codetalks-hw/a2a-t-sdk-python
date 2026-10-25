@@ -1,6 +1,6 @@
 # RAN 节能样例（A2A + A2A-T + ADK 客户端）
 
-一个可运行的智能体协作参考实现：客户端智能体与 RAN（Radio Access Network，无线接入网）域服务端智能体通过 A2A-T 的 `Negotiation-T` 达成节能任务，再通过标准 A2A Task 执行任务。Google ADK（Agent Development Kit）**只用于客户端决策智能体**；服务端是普通 A2A/A2A-T 服务，使用确定性 OSS 执行器。
+一个可运行的智能体协作参考实现：客户端智能体与 RAN（Radio Access Network，无线接入网）域服务端智能体通过 A2A-T 的 `Negotiation-T` 达成节能任务，再通过标准 A2A Task 执行任务。Google ADK（Agent Development Kit）**只用于客户端决策智能体**；服务端是普通 A2A/A2A-T 服务，使用 LangGraph ReAct 执行器编排确定性 OSS 工具。
 
 本样例面向两类读者：**客户端智能体**开发团队与**服务端智能体**开发团队。首要目的是**客户端层集成**：展示一个智能体如何把 A2A 传输、A2A-T 语义与 ADK 推理组合起来，同时不让模型掌握协议正确性。§2.1 就是这份集成指南；其余部分是参考实现。当组件只属于一侧时，本文直接写明责任方，不使用未区分的“你”。
 
@@ -24,54 +24,68 @@
 - 目标存在歧义（两个吞吐时段重叠）；
 - 在当前条件下不可行（长时间停电期间仍要求保障速率）。
 
-服务端不会立即拒绝，而是开启 **Negotiation-T** 会话。双方在**任何 Task 创建之前**交换独立的 A2A `Message`：`Propose`、`Accept`、`Reject`、`Abort`。客户端接受后，协商确定的 `Task-T` 提示词被交给确定性 OSS 执行器，由它创建 Task、执行四个工具（读取小区画像、评估方案、下发方案、生成报告），并把每次 Task 状态变化持久化到 SQLite。
+服务端不会立即拒绝，而是开启 **Negotiation-T** 会话。双方在**任何 Task 创建之前**交换独立的 A2A `Message`：`Propose`、`Accept`、`Reject`、`Abort`。客户端接受后，协商确定的 `Task-T` 提示词被交给 **LangGraph ReAct planner**，由它创建 Task、选择并执行四个受约束的 OSS 工具（读取小区画像、评估方案、下发方案、生成报告），并把每次 Task 状态变化持久化到 SQLite。
 
 样例演示了：
 
 - 真实 A2A HTTP+JSON 链路上的四类 A2A-T performative；
 - 真正的多轮协商（`maxRounds = 3`），包含反提议；
-- 客户端 ADK `LlmAgent` 使用工具与结构化 `output_schema`；服务端使用无 ADK 模型的确定性 `AgentExecutor`；
+- 客户端 ADK `LlmAgent` 使用工具与结构化 `output_schema`；服务端不使用 ADK，而是用 LangGraph ReAct planner 编排确定性 OSS 工具；
 - 任务前协商网关与 Task 执行器之间的显式集成缝；
-- 确定性离线运行（脚本化 SDK LLM + 客户端 ADK fake model）与面向 OpenAI-compatible 端点的在线模式；
-- SQLite `TaskStore` 与 Web UI 的 OSS 任务状态表格；
+- 确定性离线运行（脚本化 SDK LLM + 客户端 ADK fake model + 脚本化 LangGraph planner）与面向 OpenAI-compatible 端点的在线模式；
+- 两套 SQLite 存储：服务端 A2A `TaskStore` 与客户端会话/运行/协商审计库，以及 Web UI 的两个表格；
+- 可选入站 A2A gateway，使客户端智能体也能作为 Gemini Enterprise 的后端智能体；
 - CLI 与轻量 Web UI。
 
 ## 2. 架构与目录
 
 ```mermaid
 flowchart LR
+    subgraph Callers
+        UI[Web UI :8080]
+        CLI[CLI]
+        GE[Gemini Enterprise /<br/>外部 A2A 调用方]
+    end
+
     subgraph Client process
-        UI[Web UI :8080<br/>可选 --ui]
+        SVC[ClientAgentService<br/>会话 / 运行 / 记忆]
         CF[客户端流程<br/>SSE / webhook]
         CA[ADK 客户端决策智能体<br/>LlmAgent + output_schema]
         DP[决策 Provider<br/>ADK / manual / scripted]
-        UI --> CF
+        GW[A2A Gateway :8001<br/>可选 --gateway]
+        CDB[(SQLite ClientStore<br/>runs / turns / 协商审计)]
+        UI --> SVC
+        CLI --> SVC
+        GE -- A2A --> GW --> SVC
+        SVC --> CF
         CF --> DP
         DP --> CA
+        SVC --> CDB
     end
 
     subgraph Server process
         G[协商网关<br/>Task-T + Negotiation-T]
         P[确定性策略<br/>propose / abort / execute / end]
         EX[NegotiationAgentExecutor]
-        DET[确定性 OSS 执行器<br/>无 ADK / 无 LLM]
-        TOOLS[四个 OSS 工具]
+        LG[LangGraph ReAct planner<br/>无 ADK]
+        TOOLS[四个受约束 OSS 工具]
         DB[(SQLite TaskStore)]
         G --> P
         G --> EX
-        EX --> DET
-        DET --> TOOLS
-        DET --> DB
+        EX --> LG
+        LG --> TOOLS
+        LG --> DB
     end
 
     REG[(Mock 注册中心<br/>:5001)]
     CF -- A2A / SSE 或 webhook --> G
     EX -- Message / Task 事件 --> CF
-    SA -- AgentCard 注册 --> REG
+    EX -- AgentCard 注册 --> REG
     CF -- AgentCard 发现 --> REG
+    GW -- AgentCard 注册（可选） --> REG
 ```
 
-所有协商都发生在**Task 创建之前**：`Propose` / `Accept` / `Reject` / `Abort` 都是独立的 `Message`，不是 Task 事件。只有协商被接受后才会创建 Task，并由确定性执行器推进到 `COMPLETED`；服务端在执行阶段不使用 ADK 智能体或 LLM。
+所有协商都发生在**Task 创建之前**：`Propose` / `Accept` / `Reject` / `Abort` 都是独立的 `Message`，不是 Task 事件。只有协商被接受后才会创建 Task，并由 LangGraph 执行器推进到 `COMPLETED`；服务端不使用 ADK 智能体，但其 planner 在 live 模式下由 LLM 驱动。
 
 ### 2.1 客户端层集成：A2A、A2A-T 与 ADK
 
@@ -81,8 +95,10 @@ flowchart LR
 | --- | --- | --- | --- |
 | **A2A**（`a2a-sdk`） | 传输与生命周期：发现 AgentCard、发送 `Message`、流式接收事件或 webhook 推送、表达 `Task` 及其状态。 | HTTP+JSON、SSE/webhook、`contextId`、`Message`、`Task`、`TaskState`。 | 不理解 Task-T / Negotiation-T 的含义。 |
 | **A2A-T**（`a2a_t`） | A2A 之上的语义层：抽取并校验 Task-T 参数、渲染 Task-T 提示词、生成并校验 Negotiation-T performative、携带 `templateUri` 与 `negotiationContext`。 | `A2ATClient` / `A2ATServer` 门面、模板、结构化校验、扩展元数据。 | 不建立 HTTP 连接，也不运行智能体。 |
-| **ADK**（`google-adk`，仅客户端） | 推理与工具：决定如何应答提议、调用客户端工具、产出结构化 `NegotiationDecision`。 | `LlmAgent`、工具、`output_schema`、`Runner`、会话。 | 从不把协议内容放到线上，从不决定 round 或 performative，也从不解析原始 A2A-T 元数据；服务端不使用 ADK。 |
+| **ADK**（`google-adk`，仅客户端） | 推理与工具：决定如何应答提议、调用客户端工具、产出结构化 `NegotiationDecision`。 | `LlmAgent`、工具、`output_schema`、`Runner`、会话。 | 从不把协议内容放到线上，从不决定 round 或 performative，也从不解析原始 A2A-T 元数据；服务端不使用 ADK，服务端执行 planner 是 LangGraph。 |
 | **确定性客户端流程**（本样例） | 编排与协议正确性：调用正确的 A2A-T API、发送正确的 A2A 消息、保持 round/performative 一致、处理终态。 | `protocol/client_flow.py`。 | 不做业务决策；业务决策来自 Provider。 |
+| **客户端应用服务 + 存储**（本样例） | 会话身份、运行生命周期、每会话并发约束、最近轮次记忆与审计。 | `protocol/client_service.py`、`protocol/client_store.py`。 | 不直接说 A2A，也不做决策。 |
+| **A2A Gateway**（可选，本样例） | 客户端智能体的入站 A2A 接口，供 Gemini Enterprise 或其他调用方使用。 | `protocol/client_gateway.py`。 | 不替代出站 A2A-T 流程；每条入站消息启动一次客户端运行。 |
 
 一句话心智模型：
 
@@ -94,24 +110,30 @@ flowchart LR
 flowchart TB
     subgraph Client["客户端进程"]
         UI["CLI / Web UI<br/>自然语言请求"]
+        GW["A2A Gateway :8001<br/>可选，Gemini Enterprise"]
+        SVC["ClientAgentService<br/>会话 + 运行生命周期"]
+        STORE["SQLite ClientStore<br/>turns / runs / 协商审计"]
         RT["ClientRuntime<br/>装配"]
         FLOW["run_client_flow<br/>确定性协议循环"]
         PROV["NegotiationDecisionProvider<br/>ADK / manual / scripted"]
         AGENT["ADK LlmAgent<br/>工具 + output_schema"]
         FACADE["A2ATClient<br/>Task-T / Negotiation-T 门面"]
         A2A["a2a-sdk Client<br/>HTTP+JSON + SSE/webhook"]
-        UI --> RT --> FLOW
+        UI --> SVC
+        GW --> SVC
+        SVC --> STORE
+        SVC --> RT --> FLOW
         FLOW --> PROV --> AGENT
         AGENT --> PROV
         FLOW --> FACADE
         FACADE --> FLOW
         FLOW --> A2A
     end
-    SERVER["A2A-T 服务端<br/>网关 + 确定性 OSS 执行器<br/>+ SQLite TaskStore"]
+    SERVER["A2A-T 服务端<br/>网关 + LangGraph OSS 执行器<br/>+ SQLite TaskStore"]
     A2A <-->|"Message / Task 事件"| SERVER
 ```
 
-`ClientRuntime` 只负责装配：生成每次运行的 A2A-T SDK `.env`、注册 traced/scripted Provider、创建 `A2ATClient`、发现服务端 AgentCard、创建 a2a-sdk 客户端、选择传输与决策 Provider。真正的集成发生在 `run_client_flow`。
+`ClientAgentService` 负责会话身份、持久化、记忆与每会话并发约束。`ClientRuntime` 只负责单次运行的装配：生成每次运行的 A2A-T SDK `.env`、注册 traced/scripted Provider、创建 `A2ATClient`、发现服务端 AgentCard、创建 a2a-sdk 客户端、选择传输与决策 Provider。真正的集成发生在 `run_client_flow`。
 
 #### 端到端时序：target 场景（反提议后接受）
 
@@ -171,7 +193,7 @@ sequenceDiagram
     A->>G: HTTP+JSON
     G->>S: validate_accept_prompt_and_data_filling(...)
     G->>S: validate_task_prompt_and_data_filling(重填结果)
-    G->>X: 交给确定性 OSS 执行器
+    G->>X: 交给LangGraph OSS 执行器
     X->>X: 创建 Task、执行工具
     X-->>A: SUBMITTED、WORKING、artifacts、COMPLETED
     A-->>F: 流式 / webhook 事件
@@ -182,7 +204,7 @@ sequenceDiagram
 
 #### 直接路径：Task-T 校验通过，不进入协商
 
-如果初始 Task-T 完整且有效，网关不会开启协商，同一请求直接进入确定性 OSS 执行器。这就是 Run Explorer 中 Phase 04/05 为空的场景。
+如果初始 Task-T 完整且有效，网关不会开启协商，同一请求直接进入LangGraph OSS 执行器。这就是 Run Explorer 中 Phase 04/05 为空的场景。
 
 ```mermaid
 sequenceDiagram
@@ -197,7 +219,7 @@ sequenceDiagram
     F->>A: Message(Task-T metadata)
     A->>G: HTTP+JSON
     G->>G: validate_task_prompt_and_data_filling = OK
-    G->>X: 交给确定性 OSS 执行器
+    G->>X: 交给LangGraph OSS 执行器
     X-->>A: Task 事件 ... COMPLETED
     A-->>F: events
 ```
@@ -266,7 +288,7 @@ ADK 智能体刻意**不在线上路径中**：
 
 ### 2.2 ADK 原生 A2A 与 ADK + A2A-T 对比
 
-左侧是 ADK 开发者使用 ADK 内置 A2A 能力时的基线；右侧是本样例：相同的 ADK 开发步骤，加上 A2A-T 语义层与确定性服务端。
+左侧是 ADK 开发者使用 ADK 内置 A2A 能力时的基线；右侧是本样例：相同的 ADK 开发步骤，加上 A2A-T 语义层与 LangGraph 服务端。
 
 ```mermaid
 flowchart LR
@@ -281,7 +303,7 @@ flowchart LR
     subgraph RIGHT["B · ADK + A2A-T（本样例）"]
         direction TB
         R1["Step 1 · 定义智能体<br/>ADK LlmAgent（客户端决策）<br/>output_schema NegotiationDecision"]
-        R2["Step 2 · 加入 A2A-T 层<br/>A2ATClient/Server + NegotiationGate<br/>确定性 OSS 执行器（无 ADK）"]
+        R2["Step 2 · 加入 A2A-T 层<br/>A2ATClient/Server + NegotiationGate<br/>LangGraph OSS 执行器（无 ADK）"]
         R3["Step 3 · 协商感知交互<br/>Task-T → Propose/Accept/Counter<br/>只有 Accept 后才创建 Task"]
         R1 --> R2 --> R3
     end
@@ -306,33 +328,76 @@ flowchart LR
 | 客户端推理 | `RemoteA2aAgent` 或 ADK agent | ADK `LlmAgent` + `Runner` + `output_schema`，只负责决策 | 复用 |
 | 初始请求转换 | `A2ARequestToAgentRunRequestConverter` | `NegotiationGate` 读取消息元数据并重写 Task-T 提示词 | 重写 |
 | 任务前协议 | 无 | 网关 + `NegotiationAgentExecutor` 独立消息 | 重写 |
-| 服务端执行 | ADK agent + 工具 + 会话 | `DeterministicTaskExecutor` + 四个纯 OSS 工具 | 重写 |
+| 服务端执行 | ADK agent + 工具 + 会话 | `LangGraphTaskExecutor` + LangGraph ReAct planner + 四个受约束工具 | 重写 |
 | Artifact/状态元数据 | `ExecuteInterceptor.after_event` / `after_agent` | `TaskUpdater.add_artifact(metadata=...)` / `update_status(metadata=...)` | 钩子 |
-| 记忆/连续性 | ADK `SessionService`（按 `contextId`） | `contextId`/`taskId` + SQLite `TaskStore`；客户端按协商保留 ADK 会话 | 重写 |
-| 可观测性 | ADK `TracePlugin` | 客户端 ADK 追踪 + 服务端 `emit_span` 执行/工具 span | 客户端复用，服务端重写 |
+| 记忆/连续性 | ADK `SessionService`（按 `contextId`） | 客户端 SQLite 库（`conversations`/`turns`）+ `contextId`/`taskId`；服务端 SQLite `TaskStore` | 重写 |
+| 可观测性 | ADK `TracePlugin` | 客户端 ADK 追踪 + 服务端 LangGraph planner/工具 span | 客户端复用，服务端重写 |
+| 入站接口 | ADK A2A server endpoint | 可选独立 A2A Gateway（`ClientGatewayExecutor`） | 重写 |
 
-关键边界：A2A 的传输、AgentCard 与 Task 类型原样复用；A2A-T 增加任务前协议与结构化提示词；服务端执行器是确定性的；客户端 ADK agent 只产出 `NegotiationDecision`，从不写协议元数据或 round。
+关键边界：A2A 的传输、AgentCard 与 Task 类型原样复用；A2A-T 增加任务前协议与结构化提示词；服务端执行器是 LangGraph ReAct graph，而不是 ADK agent；客户端 ADK agent 只产出 `NegotiationDecision`，从不写协议元数据或 round。
+
+### 2.3 两套系统、两个数据库与入站 Gateway
+
+客户端与 RAN 服务端是两套系统，各自保存状态：
+
+| 归属 | 存储 | 表 / 内容 | 写入方 |
+| --- | --- | --- | --- |
+| 客户端 | `runs/client-state.sqlite3`（`A2AT_SAMPLE_CLIENT_DB`） | `conversations`、`turns`、`runs`、`negotiation_events`、`task_snapshots` | `ClientAgentService` |
+| 服务端 | `runs/task-status.sqlite3`（`A2AT_SAMPLE_TASK_DB`） | A2A `Task` blob + 摘要列 | `SqliteTaskStore` |
+
+客户端库是可查询的审计/索引层；完整 transcript 与 trace span 仍保存在 `runs/<runId>/` 文件中。它提供：
+
+- **会话身份**：客户端 `conversation_id`，以及调用方传入的可选 `external_id`（例如 Gemini Enterprise 的会话 id）；
+- **轮次记忆**：最近 `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` 轮会注入下一次决策提示词与 Task-T 生成；
+- **运行生命周期**：`running` / `finished` / `failed` / `interrupted`；同一会话最多一个活跃运行，不同会话可并发；
+- **协商审计**：每条入站 `Propose` 与出站决策，包含 round、performative、内容与理由；
+- **Task 快照**：客户端观测到的最后一次 A2A Task 状态；
+- **重启处理**：所属进程已消失的 `running` 运行标记为 `interrupted`；仍存活的第二个进程（gateway + Web UI）不受影响。
+
+可选的**入站 A2A Gateway**（`run_demo.py --gateway`，端口 8001）把客户端智能体变成 Gemini Enterprise 或其他 A2A 调用方的后端智能体：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GE as Gemini Enterprise
+    participant GW as 客户端 A2A Gateway
+    participant SVC as ClientAgentService
+    participant RAN as RAN A2A-T 服务端
+    participant DB as ClientStore
+    GE->>GW: message:send (contextId)
+    GW->>SVC: 启动一次客户端运行
+    SVC->>DB: conversation / turn / run
+    SVC->>RAN: Task-T、Propose/Accept、Task
+    RAN-->>SVC: Task 事件 + 报告
+    SVC->>DB: 协商审计 + 最终状态
+    GW-->>GE: Task artifact（最终报告）
+```
+
+一条入站消息对应一次客户端运行；入站 `contextId` 作为客户端 `conversation_id`。协商过程保留在客户端库与 Web UI；Gateway 返回最终报告 artifact。Gateway 路径禁用人工决策。
 
 ### 目录说明
 
 | 路径 | 职责 |
 | --- | --- |
-| [`run_demo.py`](run_demo.py) | 三进程启动器：后台启动注册中心与服务端，前台运行 CLI 客户端（`--ui` 时改为 Web UI），结束后停止子进程。 |
+| [`run_demo.py`](run_demo.py) | 多进程启动器：后台启动注册中心、服务端（以及 `--gateway` 时的入站 A2A Gateway），前台运行 CLI 客户端（`--ui` 时改为 Web UI），结束后停止子进程。 |
 | [`env.example`](env.example) | 统一的、可直接离线运行的配置模板。 |
-| [`agents/server_agent/`](agents/server_agent) | 确定性服务端工具：`tools.py` 为四个 OSS 工具；不存在 ADK agent 或 instruction。 |
+| [`agents/server_agent/`](agents/server_agent) | 服务端 LangGraph 执行：`planner.py`（脚本化/在线模型 + 提示词）、`langgraph_tools.py`（受约束工具 + `PlanGuard`）、`graph.py`（ReAct 状态图）、`tools.py`（纯 OSS 工具）；不使用 ADK。 |
 | [`agents/client_agent/`](agents/client_agent) | 客户端 ADK 决策智能体：`agent.py` 导出 `root_agent`；`tools.py` 为 SLA 与影响评估工具；`prompts/request_instruction.md` 为 instruction。 |
 | [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | 服务端唯一协议入口：识别任务前请求、校验 Task-T / Negotiation-T 消息，并转发被接受的请求。 |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | 纯确定性服务端策略：`propose`、`abort`、`execute`、`end`，不调用 LLM。 |
-| [`protocol/server_executor.py`](protocol/server_executor.py) | 外层协商执行器与 `DeterministicTaskExecutor`：执行四个 OSS 工具并发布 A2A Task 生命周期；不使用 ADK。 |
+| [`protocol/server_executor.py`](protocol/server_executor.py) | 外层协商执行器与 `LangGraphTaskExecutor`：运行 ReAct planner 并发布 A2A Task 生命周期；不使用 ADK。 |
 | [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore`，持久化 A2A Task 状态并为 UI 提供任务摘要。 |
 | [`protocol/server_app.py`](protocol/server_app.py) | 服务端装配：AgentCard（声明 `Task-T/v1` 与 `Negotiation-T/v1`）、请求处理器、Starlette 应用、注册中心注册。 |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | 客户端协议流程：初始 Task-T、多轮协商、accept 重填、SSE/webhook 终态处理。 |
-| [`protocol/client_runtime.py`](protocol/client_runtime.py) | 客户端装配：每次运行的 SDK `.env`、服务发现、SDK 客户端、传输、决策 Provider。 |
+| [`protocol/client_runtime.py`](protocol/client_runtime.py) | 客户端单次运行装配：每次运行的 SDK `.env`、服务发现、SDK 客户端、传输、决策 Provider。 |
+| [`protocol/client_service.py`](protocol/client_service.py) | 客户端应用服务：会话、运行生命周期、记忆注入、每会话并发约束、持久化钩子。 |
+| [`protocol/client_store.py`](protocol/client_store.py) | 客户端 SQLite 库：会话、轮次、运行、协商审计、Task 快照。 |
+| [`protocol/client_gateway.py`](protocol/client_gateway.py) | 可选入站 A2A Gateway：一条入站消息 -> 一次客户端运行 -> 最终报告 artifact。 |
 | [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted 三种实现。 |
 | [`protocol/discovery.py`](protocol/discovery.py) | 通过注册中心或 `/.well-known/agent-card.json` 发现 AgentCard。 |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T 元数据助手：扩展 URI、`templateUri`、`negotiationContext`、结束消息、样例专用元数据。 |
 | [`protocol/transcript.py`](protocol/transcript.py) | 结构化运行记录，写入 `runs/<timestamp>-<scenario>.json` 与 `.md`。 |
-| [`shared/config.py`](shared/config.py) | 读取 `.env`、解析任务数据库路径，并构建客户端 ADK 模型（离线 fake model，在线 `LiteLlm`）。 |
+| [`shared/config.py`](shared/config.py) | 读取 `.env`、解析两套数据库路径、Gateway 与 planner 配置，并构建客户端 ADK 模型（离线 fake model，在线 `LiteLlm`）。 |
 | [`shared/agent_card.py`](shared/agent_card.py) | 客户端（服务发现）与服务端（构建 AgentCard）共享的身份常量。 |
 | [`shared/sdk_env.py`](shared/sdk_env.py) | 两个运行时共用的每次运行 SDK `.env` 构建器（消除 client↔server 导入）。 |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision`（客户端 `output_schema`）与 Provider 视角的提议视图。 |
@@ -452,7 +517,7 @@ artifact 的明细行、id 与路径省略）：
 python run_demo.py --scenario target --mode auto --model-mode live
 ```
 
-在线模式下，**客户端** ADK 决策智能体使用 `ADK_MODEL_*`，两侧 A2A-T SDK 使用 `A2AT_LLM_*`，两者必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么；被接受的 Task 本身仍是确定性的。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
+在线模式下，**客户端** ADK 决策智能体使用 `ADK_MODEL_*`，两侧 A2A-T SDK 使用 `A2AT_LLM_*`，服务端 LangGraph planner 使用 `A2AT_SAMPLE_PLANNER_*`（未设置时默认沿用 ADK 端点/模型）。它们必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列与 planner 的工具选择**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么，planner 决定 OSS 方案；工具本身仍是确定性且受顺序约束的。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
 
 **在线模式为尽力而为，但有确定性护栏。** SDK 语义结论与客户端决策智能体由模型驱动，但样例在接受 Task-T 前会重新检查调用方 schema 的必填字段，以及设计中的冲突条件（目标时段重叠、背景停电期间仍要求保障速率）。客户端 accept 路径只回答被请求的信息项，并把目标规整到模板允许的三段式上限。离线模式仍是验收路径。
 
@@ -491,6 +556,27 @@ python run_demo.py --ui --scenario information --mode auto --model-mode live
 #### 持久化 OSS 任务表格
 
 服务端把每个被接受的 A2A Task 持久化到 `runs/task-status.sqlite3`（可用 `A2AT_SAMPLE_TASK_DB` 覆盖）。阶段条上方的全宽 **Persisted OSS tasks** 表格通过 `GET /api/tasks` 读取，展示 task id、状态、context、更新时间、报告摘要与 run id。它会在启动/结束以及运行期间刷新，因此 `WORKING` 行会在运行结束前出现。表格是只读的，服务端是唯一写入方。
+
+#### 持久化客户端运行
+
+客户端使用独立 SQLite 库 `runs/client-state.sqlite3`（可用 `A2AT_SAMPLE_CLIENT_DB` 覆盖）。**Client runs** 表格通过 `GET /api/client/runs` 读取，展示 run id、会话、场景、状态、终态、开始时间与请求摘要。**View** 通过 `GET /api/client/runs/{id}` 加载并渲染轮次、协商审计（方向、round、performative、决策、理由）与运行记录链接。`GET /api/client/conversations` 按会话聚合同一批数据。表格只读，客户端服务是唯一写入方。
+
+#### 入站 A2A Gateway
+
+客户端智能体也可以作为后端 A2A 智能体：
+
+```bash
+python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
+```
+
+Gateway 在 `http://127.0.0.1:8001/.well-known/agent-card.json` 提供 AgentCard，并接受 `POST /message:send`（A2A HTTP+JSON，`A2A-Version: 1.0`）。一条入站消息启动一次客户端运行，并把最终报告作为 Task artifact 返回。加 `--gateway-register` 可把 Gateway 卡片注册到 mock 注册中心。Web UI 与 Gateway 共享客户端库但是不同进程；由于重启清理会检查 owner PID，仍在运行的 Gateway 运行不会被误标为 `interrupted`。
+
+```bash
+curl -X POST http://127.0.0.1:8001/message:send \
+  -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"message":{"messageId":"m1","role":"ROLE_USER","contextId":"conv-1",
+       "parts":[{"text":"在满足吞吐目标的前提下最大化节能。"}]}}'
+```
 
 #### 八个阶段
 
@@ -572,28 +658,44 @@ python run_demo.py --ui --mode manual --scenario target --ui-port 8080
 - `reject` 与 `abort` 都不创建 Task。`reject` 以一条不含 Negotiation-T 元数据的普通 A2A `Message` 结束；`abort` 使用通用 abort 模板，在 `round = maxRounds = 3` 发出。
 - 首个 Task-T 校验错误码到协商类型的映射（`content.param_missing` → information、`content.value_not_allowed` → target、`content.rule_violation` → feasibility）是**样例约定**，不是 A2A-T 契约。实现位于 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 的 `NEGOTIATION_KIND_BY_ERROR_CODE`。
 
-## 5. 客户端 ADK 智能体与确定性服务端执行器
+## 5. 客户端 ADK 智能体与 LangGraph 服务端执行器
 
-### 服务端：确定性 OSS 执行器（无 ADK）
+### 服务端：LangGraph ReAct 执行器（无 ADK）
 
-服务端没有 `LlmAgent`、没有 ADK `Runner`，也没有服务端会话。网关批准 Task-T 后，[`protocol/server_executor.py`](protocol/server_executor.py) 运行 `execute_sample_plan`：读取小区画像、评估方案、下发方案、生成报告。该计划是样例业务逻辑（`cell-001`、`00:00~06:00`、`30%`）；真实部署应替换此函数。
+服务端没有 `LlmAgent`、没有 ADK `Runner`，也没有 ADK 会话。网关批准 Task-T 后，[`protocol/server_executor.py`](protocol/server_executor.py) 运行一张小型 LangGraph ReAct 图：
+
+```mermaid
+flowchart LR
+    START --> A[agent<br/>planner 模型]
+    A -- tool_calls --> T[tools<br/>四个受约束 OSS 工具]
+    T --> A
+    A -- 无 tool call --> END
+```
+
+- **agent**：用系统提示词调用 planner 模型；提示词携带已接受的 Task-T、数据集目录与工具规则。模型选择下一个工具及其参数。
+- **tools**：执行请求的工具；每个工具返回结构化 JSON，并更新本次运行的 `PlanGuard`。
+- 离线模型是 `ScriptedChatModel`（按顺序发出四个样例调用），在线模型是 `ChatOpenAI`；两者走同一张图。不引入持久 checkpointer；A2A `TaskStore` 是 Task 级事实源。
+- `A2AT_SAMPLE_PLANNER_MAX_STEPS` 是图递归上限；超限时 Task 以明确错误进入 `FAILED`。
+
+**工具强制业务顺序**，因此模型无法在未评估时下发方案，也无法在没有 plan id 时生成报告：
+
+| 工具 | 输入 | 前置条件 | 作用 |
+| --- | --- | --- | --- |
+| `get_cell_energy_profile` | `cell_id`、`date` | 无 | 返回 24 小时负载/能耗曲线、容量/SLA、可用节能窗口。 |
+| `evaluate_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 已读取同一小区画像 | 校验窗口、节能率上限与 SLA；估算节能与 KPI 影响。 |
+| `apply_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 同一方案已评估成功 | 重新评估并写入进程内方案存储。 |
+| `generate_energy_saving_report` | `plan_id` | 已成功 apply 该方案 | 根据已存方案生成结构化最终报告。 |
+
+前置条件失败返回 `{"ok": false, "error_code": "tool_order_violation", ...}`，planner 可在步数预算内自我纠正。可预期的业务失败（未知小区、参数格式错误、方案不可行）返回其他结构化 `error_code`。如果 planner 始终无法生成成功报告，Task 进入 `FAILED`，不会发布空报告。
 
 执行器用 `TaskUpdater` 发布标准 A2A Task 生命周期：
 
 1. 入队 `Task(SUBMITTED)` 与请求历史；
 2. `start_work()` → `WORKING`；
-3. 每次工具调用一个执行 artifact，并发出一个 `tool` trace span；
-4. 报告 artifact 带 `Task-T/v1`、`templateUri`、协商上下文与 run id 元数据；
-5. 以最终文本进入 `COMPLETED`。
-
-| 工具 | 输入 | 作用 |
-| --- | --- | --- |
-| `get_cell_energy_profile` | `cell_id`、`date` | 返回 24 小时负载/能耗曲线、容量/SLA、可用节能窗口。 |
-| `evaluate_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 校验窗口、节能率上限与 SLA；估算节能与 KPI 影响。 |
-| `apply_energy_saving_plan` | `cell_id`、`window`、`target_rate` | 重新评估并写入进程内方案存储。 |
-| `generate_energy_saving_report` | `plan_id` | 根据已存方案生成结构化最终报告。 |
-
-工具都是基于 [`shared/ran_data.py`](shared/ran_data.py) 的确定性函数。可预期的失败（未知小区、参数格式错误、方案不可行）返回结构化的 `{"ok": false, "error_code": ...}` 字典；执行器把失败转换为 `FAILED` Task，而不是报告。
+3. 每个非报告工具调用一个 `tool result` artifact，并发出一个 `tool` trace span；
+4. 每个 planner turn 一个 `llm` trace span，挂在执行 span 下；
+5. 报告 artifact 带 `Task-T/v1`、`templateUri`、协商上下文与 run id 元数据；
+6. 以最终文本进入 `COMPLETED`。
 
 当设置 `A2AT_SAMPLE_TASK_DB` 时，每次 Task 状态变化都由 [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) 持久化。Web UI 以只读方式打开同一文件来渲染任务表格。
 
@@ -613,21 +715,22 @@ root_agent = LlmAgent(
 
 `get_sla_policy(cell_id)` 返回小区的 SLA 下限、最大节能率与可用窗口。`evaluate_proposal_impact(proposal)` 从提议文本中解析小区 id、窗口与节能率，返回确定性可行性与影响视图。`output_schema=NegotiationDecision` 让 ADK 解析模型的结构化答案；客户端流程从不解析自由文本。
 
-[`protocol/decision_provider.py`](protocol/decision_provider.py) 通过 `InMemoryRunner` 运行智能体，每个协商 id 保留一个 ADK 会话（后续轮次可见之前的提议），仅在离线模式下回退到安全的 `accept` 决策。
+[`protocol/decision_provider.py`](protocol/decision_provider.py) 通过 `InMemoryRunner` 运行智能体，每个协商 id 保留一个 ADK 会话（后续轮次可见之前的提议），仅在离线模式下回退到安全的 `accept` 决策。`ClientAgentService` 会把最近若干轮会话（默认 6 轮）注入每次决策提示词与 Task-T 生成，因此“同样方案给 cell-002”这类后续请求仍保留前文语境。
 
 当提议包含具体小区、时间窗或速率时，决策智能体会调用 `get_sla_policy` / `evaluate_proposal_impact`。在 `information` 场景中，提示词会要求它在决策前对两个样例小区调用 `get_sla_policy`，因此那里也会出现工具行。`target` 仍是最直观的多轮示例。如果根本没有开启协商，客户端决策智能体不会被调用，自然也没有工具调用。
 
 ### 执行器与持久化集成
 
-`NegotiationAgentExecutor` 先运行网关。短路结果只入队一条独立消息（协商 `Propose`/`Abort`，或普通结束消息），不创建 Task；否则委托给 `DeterministicTaskExecutor`。旧 ADK `request_converter` 与 `ExecuteInterceptor` 注入的 A2A-T 元数据，现在由确定性执行器直接写入：
+`NegotiationAgentExecutor` 先运行网关。短路结果只入队一条独立消息（协商 `Propose`/`Abort`，或普通结束消息），不创建 Task；否则委托给 `LangGraphTaskExecutor`。旧 ADK `request_converter` 与 `ExecuteInterceptor` 注入的 A2A-T 元数据，现在由 LangGraph 执行器直接写入：
 
 - 网关把 `context.message` 重写为达成一致的 Task-T 提示词；
+- planner 提示词携带已接受的 Task-T 与已接受的协商上下文；
 - 执行器在报告 artifact 与终态 status 上写入 `Task-T/v1`、`templateUri`、`negotiationContext` 与样例 run id；
 - `TaskUpdater` 发出标准 A2A 状态/artifact 事件，SQLite `TaskStore` 持久化每次状态变化。
 
 ### 客户方需要替换什么
 
-四个工具与 `execute_sample_plan` 是服务端业务层。实现自有 RAN 服务的客户方应把工具实现替换为对自身 OSS/BSS/网管系统的调用，并用自有规划器替换样例计划。客户端替换两个 ADK 工具与 instruction。A2A-T 网关、策略状态机、确定性流程与 TaskStore 结构保持不变。
+四个工具、`PlanGuard` 与 planner 提示词是服务端业务层。实现自有 RAN 服务的客户方应把工具实现替换为对自身 OSS/BSS/网管系统的调用，用自有策略替换样例提示词/planner 模型，并保留图外壳、A2A 执行器生命周期与 TaskStore。客户端替换两个 ADK 工具、instruction 与会话/轮次 schema。A2A-T 网关、策略状态机、确定性流程、客户端服务、Gateway 与 TaskStore 结构保持不变。
 
 ## 6. A2A-T 协商集成
 
@@ -648,7 +751,7 @@ root_agent = LlmAgent(
 
 1. 初始 Task-T 请求通过 `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` 校验。
 2. 校验失败且首个错误码可映射到协商类型时，生成初始 `Propose`；不可映射时返回带结构化错误的终态 `REJECTED` Task。
-3. `Accept` 通过 `validate_accept_prompt_and_data_filling` 校验；随后再次校验协商确定的 Task-T 提示词并交给确定性执行器。
+3. `Accept` 通过 `validate_accept_prompt_and_data_filling` 校验；随后再次校验协商确定的 Task-T 提示词并交给 LangGraph 执行器。
 4. `Reject` 或 `Abort` 是终态：网关回一条普通消息，不创建 Task。
 5. 客户端反提议通过 `validate_propose_prompt_and_data_filling` 校验，再由策略引擎应答。
 
@@ -719,7 +822,10 @@ root_agent = LlmAgent(
 | `agents/client_agent/prompts/request_instruction.md` | **REPLACE** | 客户端策略与措辞。 |
 | `agents/client_agent/tools.py`（`get_sla_policy`、`evaluate_proposal_impact`） | **REPLACE** | 改为读取你的 SLA/目录系统，而不是进程内数据集。 |
 | `shared/scenario.py`（脚本化决策、用户请求） | **REPLACE** | 演示输入；仅离线演示/测试保留。 |
-| `protocol/client_runtime.py` | KEEP | 装配；通过配置调整 SDK 端点。 |
+| `protocol/client_runtime.py` | KEEP | 单次运行装配；通过配置调整 SDK 端点。 |
+| `protocol/client_service.py` | KEEP | 会话身份、运行生命周期、记忆与每会话并发约束。 |
+| `protocol/client_store.py` | KEEP | 最小持久化客户端库；生产环境可替换为自有数据库。 |
+| `protocol/client_gateway.py` | KEEP（调整 AgentCard/身份） | 可选入站 A2A 接口；替换演示卡片、鉴权与注册。 |
 | `shared/scripted_llm.py`、`shared/adk_fake_model.py`、`resources/mock_llm/` | KEEP（仅离线/测试） | 确定性测试；禁止用于生产。 |
 | `web/app.py`、`web/static/index.html` | KEEP 或 REPLACE | 开发者 UI；可替换为自有界面。 |
 | `shared/models.py`（`NegotiationDecision`） | KEEP | 只有决策需要更多载荷时才扩展字段。 |
@@ -729,7 +835,9 @@ root_agent = LlmAgent(
 | 文件 / 函数 | 结论 | 原因 |
 | --- | --- | --- |
 | `protocol/negotiation_gate.py`（`NegotiationGate`） | KEEP | 协议入口与校验/短路逻辑。 |
-| `protocol/server_executor.py`（`NegotiationAgentExecutor`、`DeterministicTaskExecutor`） | KEEP 外壳，**REPLACE** `execute_sample_plan` | A2A 生命周期与网关接线可复用；样例计划属于业务逻辑。 |
+| `protocol/server_executor.py`（`NegotiationAgentExecutor`、`LangGraphTaskExecutor`） | KEEP 外壳 | A2A 生命周期、图循环与网关接线可复用；planner 提示词/模型与工具属于业务逻辑。 |
+| `agents/server_agent/planner.py` | **REPLACE** 提示词/模型策略 | 保留 `ScriptedChatModel` 供离线测试；把在线模型指向你的端点与提示词。 |
+| `agents/server_agent/langgraph_tools.py`（`PlanGuard`、工具包装） | **REPLACE** 顺序规则 | 保留包装结构；调整业务前置条件。 |
 | `protocol/sqlite_task_store.py`（`SqliteTaskStore`） | KEEP | 最小持久化 A2A TaskStore；生产环境可替换为自有数据库。 |
 | `protocol/server_app.py`（`build_agent_card`、`build_server_runtime`） | KEEP | 装配；替换卡片元数据/Provider URL 与 TaskStore。 |
 | `protocol/negotiation_policy.py`（`decide` 及规则助手） | 替换规则，保留结构 | 状态机可复用；业务规则与提议文本属于样例。 |
@@ -747,7 +855,7 @@ root_agent = LlmAgent(
 | `registry/` | **REPLACE** | 这是 mock 注册中心；使用部署环境注册中心或绕过发现。 |
 | `shared/webhook_receiver.py` + `A2AT_SAMPLE_WEBHOOK_TOKEN` | 替换鉴权，保留接收器 | 静态演示 token 不是生产鉴权。 |
 | `protocol/transcript.py` | KEEP | 运行记录；可按需调整输出目录。 |
-| `run_demo.py` | KEEP（仅开发） | 三进程启动器，不是部署工具。 |
+| `run_demo.py` | KEEP（仅开发） | 多进程启动器，不是部署工具。 |
 | `tests/` | KEEP / 调整 | 用你的验收用例替换场景断言。 |
 
 ## 8. 配置参考
@@ -756,7 +864,7 @@ root_agent = LlmAgent(
 
 | 键 | 取值 | 作用 |
 | --- | --- | --- |
-| `A2AT_SAMPLE_MODEL_MODE` | `offline`（默认）、`live` | `offline` = 脚本化 SDK Provider + 确定性客户端 ADK fake model；`live` = 两侧 SDK 与客户端 ADK 使用 OpenAI-compatible 端点。服务端执行器在两种模式下都是确定性的。 |
+| `A2AT_SAMPLE_MODEL_MODE` | `offline`（默认）、`live` | `offline` = 脚本化 SDK Provider + 确定性客户端 ADK fake model + 脚本化 LangGraph planner；`live` = 两侧 SDK、客户端 ADK 与服务端 LangGraph planner 使用 OpenAI-compatible 端点。 |
 | `A2AT_LANGUAGE` | `en-US`、`zh-CN`（未设置时默认 `zh-CN`；`run_demo.py` 默认 `en-US`） | 进程级语言，作用于模板、预置响应、注册中心/服务端/客户端。不能按运行切换；Web UI 只展示当前值。 |
 | `A2AT_SAMPLE_HOST` / `A2AT_SAMPLE_PORT` | 默认 `127.0.0.1` / `8000` | 服务端绑定与 AgentCard 对外接口。 |
 | `REGISTRY_CENTER_HOST` / `REGISTRY_CENTER_PORT` | 默认 `127.0.0.1` / `5001` | Mock 注册中心绑定与查询 URL。 |
@@ -775,6 +883,15 @@ root_agent = LlmAgent(
 | `A2AT_SAMPLE_TRACE_TOKEN` | 默认未设置；`--ui` 生成随机 token | 服务端出示、UI 校验的本地 token；未设置时 ingest 路由关闭（失败关闭）。 |
 | `A2AT_SAMPLE_TRACE_DIR` | 默认未设置；CLI 设为 `<sample>/runs` | CLI 服务端 trace 目录（`<dir>/<runId>/server-trace.jsonl`）。 |
 | `A2AT_SAMPLE_TASK_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/task-status.sqlite3` | 服务端持久化 A2A Task 存储的绝对 SQLite 路径，也由 `GET /api/tasks` 读取。 |
+| `A2AT_SAMPLE_CLIENT_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/client-state.sqlite3` | 客户端会话/运行/协商存储的绝对 SQLite 路径。 |
+| `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` | 默认 `6`（>= 0） | 注入下一次决策提示词与 Task-T 生成的最近会话轮数。 |
+| `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | 默认 `127.0.0.1` / `8001` | 可选入站 A2A Gateway 的绑定与 AgentCard 对外接口。 |
+| `A2AT_SAMPLE_GATEWAY_REGISTER` | `0`（默认）、`1` | 是否把 Gateway AgentCard 注册到注册中心。 |
+| `A2AT_SAMPLE_GATEWAY_SCENARIO` | 默认 `information` | 入站 Gateway 请求使用的场景。 |
+| `A2AT_SAMPLE_PLANNER_MODEL` | 默认：ADK 模型去掉 `openai/` 前缀 | 服务端 planner 的 LangChain 模型 id。 |
+| `A2AT_SAMPLE_PLANNER_API_BASE` / `A2AT_SAMPLE_PLANNER_API_KEY` | 默认：ADK 端点/key | 服务端 planner 端点。 |
+| `A2AT_SAMPLE_PLANNER_TIMEOUT_SECONDS` | 默认 `120`（> 0） | 服务端 planner 单次调用预算。 |
+| `A2AT_SAMPLE_PLANNER_MAX_STEPS` | 默认 `12`（> 0） | 单个已接受 Task 的 LangGraph 递归上限。 |
 | `ADK_MODEL_PROVIDER` | `litellm` | 客户端 ADK 模型 Provider（本样例只实现 LiteLlm）。 |
 | `ADK_MODEL_NAME` | 默认 `openai/mass/volcengine/deepseek-v4.1-flash` | LiteLlm 模型 id（需要 provider 前缀）。 |
 | `ADK_MODEL_API_BASE` | 默认 `http://127.0.0.1:31943/v1` | OpenAI-compatible 端点。 |
@@ -787,15 +904,15 @@ root_agent = LlmAgent(
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false`（默认） | 打印完整 LLM 载荷（调试；可能暴露敏感内容）。 |
 | `A2AT_SAMPLE_DEBUG` | `false`（默认） | 额外样例调试日志。 |
 
-**离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册 traced 包装（离线 `scripted_traced`、在线 `openai_traced`），并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted_traced`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。客户端 ADK agent 使用 `shared/adk_fake_model.py`；服务端执行器是确定性的。日志与 Web UI 标注为 `offline (scripted)`。
+**离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册 traced 包装（离线 `scripted_traced`、在线 `openai_traced`），并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted_traced`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。客户端 ADK agent 使用 `shared/adk_fake_model.py`；服务端 planner 使用 `ScriptedChatModel`，按顺序发出四个样例工具调用。日志与 Web UI 标注为 `offline (scripted)`。
 
-**在线模式。** 两侧 SDK 与客户端 ADK agent 使用配置端点；服务端执行器仍运行确定性工具。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取与语义校验，见 §3。
+**在线模式。** 两侧 SDK、客户端 ADK agent 与服务端 LangGraph planner 使用配置端点。工具保持确定性并受顺序约束；只有 planner 的工具选择与参数由模型驱动。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取、语义校验与规划，见 §3。
 
 **超时预算。** 客户端每次 A2A 请求都通过 `ClientCallContext.timeout` 携带 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`（默认 300s），`httpx` 客户端使用同一预算。在线模式下服务端网关在发出任何事件前会执行多次 LLM 调用，因此客户端预算必须长于该最坏情况；原先固定的 60s 会让客户端在服务端仍在工作时提前放弃（`A2AClientTimeoutError`）。在线 LLM 调用拥有 **120s 单次调用预算**（SDK 结构化调用与客户端 ADK `LiteLlm` turn 共用；更慢的端点可继续调高）。每次运行的 SDK `.env` 写入 `A2AT_LLM_TIMEOUT_SECONDS=120` 与 `A2AT_LLM_MAX_ATTEMPTS=1`。traced Provider 关闭了 OpenAI SDK 自身的传输层重试，LiteLLM 也以 `num_retries=0` 构建，因此一次调用不会悄悄变成三次尝试；卡住的调用会在配置预算内失败，网关随后返回结构化的协议错误消息供客户端展示。离线模式不受影响（脚本化 Provider 不发起网络调用）。webhook 空闲兜底遵循同一原则，默认等于 300s 的 HTTP 预算，客户端仍在等待时不会提前结束阶段。
 
 已有的 `.env` 若设置了 `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` 或 `A2AT_LLM_TIMEOUT_SECONDS=60`，应更新或删除：新的样例键为 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`、`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`、`A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`。
 
-**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`（绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给三个进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。演示 UI 没有认证，请只在可信网络中暴露。
+**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`、可选 A2A Gateway `8001`（均绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给子进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。演示 UI 与 Gateway 没有认证，请只在可信网络中暴露。
 
 ## 9. 测试与验证
 
@@ -808,7 +925,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（376 个测试）。覆盖范围：
+测试套件完全离线且确定性（413 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -818,13 +935,17 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
-| `test_web_ui.py` | `/api/meta`、`/api/tasks`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 tool span、`trace.json`）与真实人工决策流程。 |
+| `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
 | `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页、CSS token；`node --check` 全部 JS，并运行仓库内 `tests/js` store 与真实帧 harness（无 Node 时跳过）。 |
-| `test_server_executor.py` | 确定性计划序列、Task 生命周期、报告元数据、失败路径、网关委托、AgentCard 扩展、注册载荷。 |
+| `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、网关委托、AgentCard 扩展、注册载荷。 |
+| `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
+| `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、只读助手。 |
+| `test_client_service.py` | 运行持久化、会话记忆、每会话单活跃运行、失败/中断处理。 |
+| `test_client_gateway.py` | 入站 A2A 消息 -> 一次运行 -> 报告 artifact、冲突处理、取消、Gateway 卡片。 |
 | `test_sqlite_task_store.py` | Task save/get/delete、列表过滤/分页、摘要/run id、并发保存、缺失 DB 的只读行为。 |
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
 | `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性客户端 ADK 模型。 |
-| `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置（含 `A2AT_SAMPLE_TASK_DB`）、场景定义、运行记录、运行时装配，以及服务端导入不加载 ADK。 |
+| `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置（含两套数据库、Gateway 与 planner 键）、场景定义、运行记录、运行时装配，以及服务端导入不加载 ADK。 |
 | `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，外来监听则拒绝。 |
 
 JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
@@ -861,7 +982,20 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 curl http://127.0.0.1:8080/api/meta
 ```
 
-`/api/meta` 返回 §3 所示的语言、模型模式、场景、模式、传输与默认值，即视为 UI smoke 通过。
+`/api/meta` 返回 §3 所示的语言、模型模式、场景、模式、传输与默认值，且 `/api/client/runs` 返回带轮次的运行，即视为 UI smoke 通过。
+
+### Gateway smoke
+
+```bash
+python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
+curl -X POST http://127.0.0.1:8001/message:send \
+  -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"message":{"messageId":"m1","role":"ROLE_USER","contextId":"conv-gw",
+       "parts":[{"text":"在满足吞吐目标的前提下最大化节能。"}]}}'
+curl 'http://127.0.0.1:8080/api/client/runs?limit=5'
+```
+
+Gateway 返回 `TASK_STATE_COMPLETED` 的 Task 与 `energy saving intent report` artifact；`/api/client/runs` 显示对应的客户端运行与会话。该序列已在离线模式下端到端验证。
 
 ### 在线 smoke
 
@@ -869,7 +1003,7 @@ curl http://127.0.0.1:8080/api/meta
 python run_demo.py --scenario target --mode auto --model-mode live
 ```
 
-需要可访问的 OpenAI-compatible 端点。该命令仅手工执行，不进入自动套件，因为输出依赖模型。使用本样例开发期间的本地代理时，运行可以端到端完成，但 SDK 的语义校验拒绝了 target 请求（`task_rejected`），没有进入设计的协商序列；离线模式才是权威、可复现的演示。
+需要可访问的 OpenAI-compatible 端点。该命令仅手工执行，不进入自动套件，因为输出依赖模型。客户端协商由模型驱动，服务端 planner 选择 OSS 工具调用；工具及其顺序约束是确定性的。离线模式仍是权威、可复现的演示。
 
 每次运行写入 `runs/<timestamp>-<scenario>.json` 与 `.md`（已 gitignore）。Markdown 文件包含双向时间线与决策表。
 
@@ -877,13 +1011,13 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 本样例刻意保持原型性质。生产化之前：
 
-- **持久化。** 本样例用 SQLite 保存 Task（`protocol/sqlite_task_store.py`）；生产应使用自有数据库与迁移。方案仍保存在进程内存储（`shared/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`，客户端 ADK 决策智能体使用 `InMemorySessionService`。重启安全与多实例部署需要替换方案与会话存储；服务端没有 ADK 会话。
+- **持久化。** 本样例有两个 SQLite 存储：服务端 Task（`protocol/sqlite_task_store.py`）与客户端会话/运行/协商（`protocol/client_store.py`）。生产应使用自有数据库与迁移。方案仍保存在进程内存储（`shared/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`，客户端 ADK 决策智能体使用 `InMemorySessionService`，LangGraph 执行器不引入持久 checkpointer。重启安全与多实例部署需要替换方案/会话存储，并在需要断点恢复时增加持久 graph checkpointer；服务端没有 ADK 会话。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
-- **鉴权与 TLS。** 本样例的 A2A 服务端与注册中心没有鉴权。应在网关或 A2A 层终止 TLS 并增加认证/授权。
-- **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
+- **鉴权与 TLS。** 本样例的 A2A 服务端、入站 Gateway 与注册中心没有鉴权。应在网关或 A2A 层终止 TLS 并增加认证/授权；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
+- **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点，服务端 LangGraph planner 还会发送已接受的 Task-T 与工具结果。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
 - **协议正确性由确定性代码掌握。** round、performative、终态与 Task 生命周期必须留在确定性代码中；LLM 只负责意图、文本与工具调用。
 - **离线机制仅供测试。** `shared/scripted_llm.py`、`shared/adk_fake_model.py`、`resources/mock_llm/` 与 `shared/scenario.py` 用于可复现的演示与测试，不要作为生产路径发布。
-- **单运行 Web UI。** Web UI 每个应用实例只允许一个并发运行，是开发者工具，不是多租户控制台。
+- **运行并发。** 客户端服务允许每个会话一个活跃运行，不同会话可并发；Web UI 仍是开发者工具，不是多租户控制台。多进程部署还需要进程外的共享并发/锁机制。
 - **SDK 范围。** 本样例不修改 `src/a2a_t/`。SDK 缺陷应作为独立 SDK 变更处理，不要在样例内打补丁。
-- **Gemini Enterprise。** Gemini Enterprise 通过 Google Cloud Agent Registry 消费 A2A AgentCard；卡片声明服务 URL 与接口，而对话连续性仍由智能体自己负责（`contextId`/`taskId` + 持久化会话或 Task 存储）。参考官方注册指南：<https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent>。
+- **Gemini Enterprise。** Gemini Enterprise 通过 Google Cloud Agent Registry 消费 A2A AgentCard；卡片声明服务 URL 与接口，而对话连续性仍由智能体自己负责（`contextId`/`taskId` + 持久化会话存储）。本样例的可选 Gateway 就是这个入站接口，客户端 `conversations`/`turns` 库就是记忆缝。参考官方注册指南：<https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent>。

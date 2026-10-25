@@ -1,0 +1,334 @@
+"""Tests of the client application service (runs, conversations, persistence, memory)."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from protocol.client_flow import ClientFlowResult
+from protocol.client_service import RunConflictError, RunManager
+from protocol.client_store import (
+    ClientRunRecord,
+    SqliteClientStore,
+    read_client_run_detail,
+    read_conversation_detail,
+)
+from shared.config import SampleConfig
+from shared.models import NegotiationDecision, NegotiationProposeView
+
+
+class FakeRuntime:
+    """Deterministic runtime double with an optional wait and failure."""
+
+    def __init__(
+        self,
+        *,
+        wait: asyncio.Event | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.manual_provider = None
+        self.discovered = SimpleNamespace(url="http://server", agent_card=SimpleNamespace(name="ran"))
+        self.wait = wait
+        self.error = error
+        self.conversation_context: str | None = None
+        self.user_request: str | None = None
+        self.closed = False
+        self.entered = asyncio.Event()
+
+    async def run(
+        self,
+        *,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+        on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None]
+        | None = None,
+        on_decision_made: Callable[
+            [NegotiationDecision, NegotiationProposeView, NegotiationContext], None
+        ]
+        | None = None,
+        trace_sink: Callable[[dict[str, object]], None] | None = None,
+        run_id: str | None = None,
+        user_request: str | None = None,
+        conversation_context: str | None = None,
+    ) -> ClientFlowResult:
+        del trace_sink, run_id
+        self.conversation_context = conversation_context
+        self.user_request = user_request
+        self.entered.set()
+        if self.wait is not None:
+            await self.wait.wait()
+        if self.error is not None:
+            raise self.error
+        if event_sink is not None:
+            event_sink(
+                {
+                    "kind": "status",
+                    "task_id": "task-1",
+                    "context_id": "ctx-1",
+                    "state": "TASK_STATE_WORKING",
+                    "text": "working",
+                }
+            )
+        propose = NegotiationProposeView(
+            negotiation_id="neg-1",
+            kind="information",
+            round=1,
+            max_rounds=3,
+            content="missing region",
+            template_uri="Negotiation-T/information-negotiation/propose/v1",
+            context_id="ctx-1",
+        )
+        session = NegotiationContext(
+            id="neg-1",
+            round=1,
+            max_rounds=3,
+            performative=NegotiationPerformative.PROPOSE,
+        )
+        if on_decision_requested is not None:
+            on_decision_requested(propose, session)
+        decision = NegotiationDecision(action="accept", rationale="accepted")
+        if on_decision_made is not None:
+            on_decision_made(decision, propose, session)
+        return ClientFlowResult(
+            final_state="task_completed",
+            decisions=[decision],
+            context_id="ctx-1",
+            task_id="task-1",
+            report={"summary": "The plan is applied."},
+        )
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _manager(
+    tmp_path: Path,
+    config: SampleConfig,
+    *,
+    wait: asyncio.Event | None = None,
+    error: Exception | None = None,
+    memory_turns: int = 6,
+) -> tuple[RunManager, SqliteClientStore, list[FakeRuntime]]:
+    store = SqliteClientStore(tmp_path / "client.sqlite3")
+    runtimes: list[FakeRuntime] = []
+
+    async def factory(
+        resolved_config: SampleConfig,
+        scenario: str,
+        mode: str,
+        transport: str,
+        discovery: str,
+    ) -> FakeRuntime:
+        del resolved_config, scenario, mode, transport, discovery
+        runtime = FakeRuntime(wait=wait, error=error)
+        runtimes.append(runtime)
+        return runtime
+
+    manager = RunManager(
+        config=config,
+        runtime_factory=factory,
+        runs_dir=tmp_path / "runs",
+        store=store,
+        memory_turns=memory_turns,
+    )
+    return manager, store, runtimes
+
+
+async def _finish(manager: RunManager, run_id: str) -> None:
+    run = manager.get(run_id)
+    assert run is not None and run.task is not None
+    await run.task
+
+
+async def test_run_persists_lifecycle_negotiation_and_task_snapshot(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, store, _ = _manager(tmp_path, offline_config)
+    run = await manager.start("information", "auto", "sse", user_request="please save energy")
+    await _finish(manager, run.run_id)
+
+    assert run.status == "finished"
+    stored = await store.get_run(run.run_id)
+    assert stored is not None
+    assert stored.status == "finished"
+    assert stored.final_state == "task_completed"
+    assert stored.server_task_id == "task-1"
+    assert stored.server_context_id == "ctx-1"
+    assert stored.transcript_json is not None
+
+    turns = await store.list_turns(stored.conversation_id or "")
+    assert [turn.role for turn in turns] == ["user", "assistant"]
+    assert turns[1].content == "The plan is applied."
+
+    events = await store.list_negotiation_events(run.run_id)
+    assert [event.direction for event in events] == ["inbound", "outbound"]
+    assert events[0].performative == "PROPOSE"
+    assert events[1].performative == "ACCEPT"
+    assert events[1].decision_action == "accept"
+
+    snapshot = await store.get_task_snapshot(run.run_id)
+    assert snapshot is not None
+    assert snapshot.task_id == "task-1"
+    assert snapshot.state == "TASK_STATE_WORKING"
+
+
+async def test_conversation_memory_is_injected_into_the_next_run(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, store, runtimes = _manager(tmp_path, offline_config, memory_turns=4)
+    first = await manager.start(
+        "information", "auto", "sse", user_request="first request", conversation_id="conv-1"
+    )
+    await _finish(manager, first.run_id)
+
+    second = await manager.start(
+        "information", "auto", "sse", user_request="second request", conversation_id="conv-1"
+    )
+    await _finish(manager, second.run_id)
+
+    assert runtimes[1].conversation_context is not None
+    assert "user: first request" in runtimes[1].conversation_context
+    assert "assistant: The plan is applied." in runtimes[1].conversation_context
+    assert "second request" not in runtimes[1].conversation_context
+
+    conversation = read_conversation_detail(store.path, "conv-1")
+    assert conversation is not None
+    turns = conversation["turns"]
+    runs = conversation["runs"]
+    assert isinstance(turns, list) and len(turns) == 4
+    assert isinstance(runs, list) and len(runs) == 2
+
+
+async def test_idempotency_key_reuses_the_existing_run(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, store, runtimes = _manager(tmp_path, offline_config)
+    first = await manager.start(
+        "information",
+        "auto",
+        "sse",
+        user_request="request",
+        conversation_id="conv-1",
+        idempotency_key="key-1",
+    )
+    await _finish(manager, first.run_id)
+    turn_count = len(await store.list_turns("conv-1"))
+
+    reused = await manager.start(
+        "information",
+        "auto",
+        "sse",
+        user_request="request",
+        conversation_id="conv-1",
+        idempotency_key="key-1",
+    )
+    assert reused.run_id == first.run_id
+    assert reused.task is None
+    assert len(runtimes) == 1
+    assert len(await store.list_turns("conv-1")) == turn_count
+
+
+async def test_one_active_run_per_conversation_but_conversations_are_independent(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    wait = asyncio.Event()
+    manager, _, _ = _manager(tmp_path, offline_config, wait=wait)
+    first = await manager.start(
+        "information", "auto", "sse", user_request="first", conversation_id="conv-1"
+    )
+    while True:
+        first_run = manager.get(first.run_id)
+        if first_run is not None and first_run.runtime is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(RunConflictError):
+        await manager.start(
+            "information", "auto", "sse", user_request="second", conversation_id="conv-1"
+        )
+
+    other = await manager.start(
+        "information", "auto", "sse", user_request="other", conversation_id="conv-2"
+    )
+    assert other.run_id != first.run_id
+
+    wait.set()
+    await _finish(manager, first.run_id)
+    await _finish(manager, other.run_id)
+
+
+async def test_failed_run_is_persisted(tmp_path: Path, offline_config: SampleConfig) -> None:
+    manager, store, _ = _manager(tmp_path, offline_config, error=RuntimeError("boom"))
+    run = await manager.start("information", "auto", "sse", user_request="fail")
+    await _finish(manager, run.run_id)
+
+    assert run.status == "failed"
+    stored = await store.get_run(run.run_id)
+    assert stored is not None
+    assert stored.status == "failed"
+    assert stored.error is not None and "boom" in stored.error
+    turns = await store.list_turns(stored.conversation_id or "")
+    assert turns[-1].role == "assistant"
+    assert "Run failed" in turns[-1].content
+
+
+async def test_shutdown_marks_running_run_interrupted(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    wait = asyncio.Event()
+    manager, store, _ = _manager(tmp_path, offline_config, wait=wait)
+    run = await manager.start("information", "auto", "sse", user_request="slow")
+    while run.runtime is None:
+        await asyncio.sleep(0.01)
+
+    await manager.shutdown()
+    await asyncio.sleep(0.05)
+
+    stored = await store.get_run(run.run_id)
+    assert stored is not None
+    assert stored.status == "interrupted"
+
+
+async def test_mark_interrupted_sweeps_previous_runs(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, store, _ = _manager(tmp_path, offline_config)
+    await store.ensure_conversation(conversation_id="conv-1")
+    await store.create_run(
+        ClientRunRecord(
+            run_id="previous",
+            conversation_id="conv-1",
+            scenario="information",
+            mode="auto",
+            transport="sse",
+            discovery="registry",
+            user_request="previous",
+        )
+    )
+    assert await manager.mark_interrupted() == 1
+    stored = await store.get_run("previous")
+    assert stored is not None and stored.status == "interrupted"
+
+
+async def test_read_detail_exposes_persisted_paths(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, store, _ = _manager(tmp_path, offline_config)
+    run = await manager.start("information", "auto", "sse", user_request="detail")
+    await _finish(manager, run.run_id)
+
+    detail = read_client_run_detail(store.path, run.run_id)
+    assert detail is not None
+    assert detail["status"] == "finished"
+    assert detail["transcriptJson"] is not None
+    assert Path(str(detail["transcriptJson"])).is_file()

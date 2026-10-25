@@ -267,7 +267,7 @@ def build_server_runtime(
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
     gate = NegotiationGate(prompt_server, max_rounds=MAX_ROUNDS, logger=resolved_logger)
-    executor = build_negotiation_executor(gate=gate)
+    executor = build_negotiation_executor(gate=gate, config=resolved_config)
     task_store: TaskStore = (
         SqliteTaskStore(resolved_config.task_db_path)
         if resolved_config.task_db_path

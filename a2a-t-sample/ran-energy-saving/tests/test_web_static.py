@@ -36,6 +36,8 @@ MODULES: tuple[str, ...] = (
 API_ROUTES: tuple[str, ...] = (
     "/api/meta",
     "/api/tasks",
+    "/api/client/runs",
+    "/api/client/conversations",
     "/api/runs",
     "/api/runs/${encodeURIComponent(runId)}",
     "/events",
@@ -131,6 +133,9 @@ def test_payloads_are_never_rendered_with_innerhtml() -> None:
     assert "replaceChildren" in main_source
     assert "renderTaskTable" in main_source
     assert "refreshTasks" in main_source
+    assert "refreshClientRuns" in main_source
+    assert "renderClientRunTable" in main_source
+    assert "renderClientRunDetail" in main_source
 
 
 def test_api_module_covers_the_backend_contract() -> None:
@@ -142,6 +147,9 @@ def test_api_module_covers_the_backend_contract() -> None:
         assert route in source, route
     assert "getSpan" in source
     assert "getTasks" in source
+    assert "getClientRuns" in source
+    assert "getClientRun" in source
+    assert "getConversations" in source
 
 
 def test_store_module_deduplicates_and_exposes_the_phase_model() -> None:
@@ -223,6 +231,10 @@ async def test_index_shell_is_accessible_and_complete(static_client: httpx.Async
     assert 'id="task-table"' in page
     assert 'id="task-table-body"' in page
     assert "Persisted OSS tasks" in page
+    assert 'id="client-run-table"' in page
+    assert 'id="client-run-table-body"' in page
+    assert 'id="client-run-detail"' in page
+    assert "Client runs" in page
     for phase in (
         "dispatch",
         "task_prompt",
@@ -265,6 +277,8 @@ def test_css_implements_the_visual_spec() -> None:
         ".status-pill",
         ".inspector-tabs",
         ".task-table",
+        ".client-run-detail",
+        ".client-event-table",
     ):
         assert anatomy in css, anatomy
     assert '.connection-state[data-state="closed"]' in css

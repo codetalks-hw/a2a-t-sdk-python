@@ -54,12 +54,14 @@ REPO_ROOT = SAMPLE_DIR.parent
 RUN_DIR = Path(tempfile.gettempdir()) / "a2at-ran-energy-saving-adk"
 PID_FILE = RUN_DIR / "pids.json"
 TASK_DB_PATH = CASE_DIR / "runs" / "task-status.sqlite3"
+CLIENT_DB_PATH = CASE_DIR / "runs" / "client-state.sqlite3"
 
 #: Source ``.env`` candidates, in resolution order.
 ENV_CANDIDATES = (CASE_DIR / ".env", SAMPLE_DIR / ".env", SAMPLE_DIR / "env.example")
 
 REGISTRY_MODULE = "registry.registry_main"
 SERVER_MODULE = "protocol.server_app"
+GATEWAY_MODULE = "protocol.client_gateway"
 
 DEFAULT_REGISTRY_PORT = 5001
 DEFAULT_SERVER_PORT = 8000
@@ -131,6 +133,11 @@ def _ui_port_default(values: dict[str, str]) -> int:
 def _ui_host_default(values: dict[str, str]) -> str:
     """Return the ``--ui-host`` default: ``A2AT_SAMPLE_UI_HOST``, else ``127.0.0.1``."""
     return values.get("A2AT_SAMPLE_UI_HOST") or os.environ.get("A2AT_SAMPLE_UI_HOST") or DEFAULT_UI_HOST
+
+
+def _gateway_port_default(values: dict[str, str]) -> int:
+    """Return the ``--gateway-port`` default: ``A2AT_SAMPLE_GATEWAY_PORT``, else ``8001``."""
+    return _env_int(values, "A2AT_SAMPLE_GATEWAY_PORT", 8001)
 
 
 def _child_env(language: str, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -215,6 +222,8 @@ def _write_run_env(
     registry_host: str,
     registry_port: int,
     ui_port: int,
+    gateway_port: int = 8001,
+    gateway_register: bool = False,
 ) -> Path:
     """Write the per-run ``.env`` and return its path."""
     values = _read_env(source) if source is not None else {}
@@ -230,6 +239,10 @@ def _write_run_env(
             "A2AT_SAMPLE_UI_PORT": str(ui_port),
             "A2AT_SAMPLE_DIRECT_SERVER_URL": f"http://{server_host}:{server_port}",
             "A2AT_SAMPLE_TASK_DB": str(TASK_DB_PATH),
+            "A2AT_SAMPLE_CLIENT_DB": str(CLIENT_DB_PATH),
+            "A2AT_SAMPLE_GATEWAY_HOST": server_host,
+            "A2AT_SAMPLE_GATEWAY_PORT": str(gateway_port),
+            "A2AT_SAMPLE_GATEWAY_REGISTER": "1" if gateway_register else "0",
             "REGISTRY_CENTER_HOST": registry_host,
             "REGISTRY_CENTER_PORT": str(registry_port),
         }
@@ -306,6 +319,7 @@ def _save_state(
     trace_token: str = "",
     trace_url: str = "",
     ui_port: int | None = None,
+    gateway_port: int | None = None,
 ) -> None:
     """Persist the managed PIDs and their run metadata atomically.
 
@@ -320,6 +334,7 @@ def _save_state(
         "trace_token": trace_token,
         "trace_url": trace_url,
         "ui_port": ui_port,
+        "gateway_port": gateway_port,
     }
     tmp_path = PID_FILE.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(state), encoding="utf-8")
@@ -458,7 +473,8 @@ def _preflight(python: str, source_env: Path | None) -> bool:
         [
             python,
             "-c",
-            "import a2a, a2a_t, google.adk, sse_starlette, starlette, uvicorn",
+            "import a2a, a2a_t, google.adk, langgraph, langchain_openai, "
+            "sse_starlette, starlette, uvicorn",
         ],
         cwd=str(SAMPLE_DIR),
         env=_child_env("en-US"),
@@ -584,13 +600,21 @@ def _run_ui(
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
     import uvicorn
+    from protocol.client_store import SqliteClientStore
     from shared.config import load_config
     from web.app import create_app
 
     config = load_config(env_path=env_path)
+    client_store = (
+        SqliteClientStore(config.client_db_path)
+        if config.client_db_path is not None
+        else None
+    )
     app = create_app(
         config,
         env_path=env_path,
+        client_store=client_store,
+        memory_turns=config.client_memory_turns,
         default_scenario=scenario,
         default_mode=mode,
         default_transport=transport,
@@ -614,6 +638,7 @@ def _run_ui(
 def _build_parser(
     default_ui_port: int = DEFAULT_UI_PORT,
     default_ui_host: str = DEFAULT_UI_HOST,
+    default_gateway_port: int = 8001,
 ) -> argparse.ArgumentParser:
     """Build the CLI parser of the new launcher.
 
@@ -622,6 +647,8 @@ def _build_parser(
             caller (``8080`` when the key is absent).
         default_ui_host: default of ``--ui-host``, resolved from ``A2AT_SAMPLE_UI_HOST`` by the
             caller (``127.0.0.1`` when the key is absent).
+        default_gateway_port: default of ``--gateway-port``, resolved from
+            ``A2AT_SAMPLE_GATEWAY_PORT`` by the caller (``8001`` when the key is absent).
     """
     from protocol.client_runtime import SUPPORTED_MODES
     from shared.config import SUPPORTED_DISCOVERY_MODES, SUPPORTED_MODEL_MODES, SUPPORTED_TRANSPORTS
@@ -680,6 +707,22 @@ def _build_parser(
             "Use 0.0.0.0 to expose it on all interfaces."
         ),
     )
+    parser.add_argument(
+        "--gateway",
+        action="store_true",
+        help="also serve the client agent's inbound A2A gateway (Gemini Enterprise path)",
+    )
+    parser.add_argument(
+        "--gateway-port",
+        type=int,
+        default=default_gateway_port,
+        help=f"bind port of the A2A gateway (default: {default_gateway_port}; A2AT_SAMPLE_GATEWAY_PORT)",
+    )
+    parser.add_argument(
+        "--gateway-register",
+        action="store_true",
+        help="register the A2A gateway AgentCard with the registry center",
+    )
     parser.add_argument("--keep-alive", action="store_true", help="leave registry/server running afterwards")
     parser.add_argument("--keep-logs", action="store_true", help="keep the temporary run directory (logs/.env)")
     parser.add_argument("--stop", action="store_true", help="stop a previous --keep-alive run and exit")
@@ -701,6 +744,7 @@ def main() -> int:
     parser = _build_parser(
         default_ui_port=_ui_port_default(source_values),
         default_ui_host=_ui_host_default(source_values),
+        default_gateway_port=_gateway_port_default(source_values),
     )
     args = parser.parse_args()
 
@@ -730,6 +774,13 @@ def main() -> int:
     server_host = source_values.get("A2AT_SAMPLE_HOST") or "127.0.0.1"
     server_port = _env_int(source_values, "A2AT_SAMPLE_PORT", DEFAULT_SERVER_PORT)
     webhook_port = _env_int(source_values, "A2AT_SAMPLE_WEBHOOK_PORT", 9000)
+    reserved_ports = {registry_port, server_port}
+    if args.ui:
+        reserved_ports.add(args.ui_port)
+    if args.gateway and args.gateway_port in reserved_ports:
+        parser.error(
+            f"--gateway-port {args.gateway_port} collides with the registry/server/UI port"
+        )
 
     env_path = _write_run_env(
         source=source_env,
@@ -743,6 +794,8 @@ def main() -> int:
         registry_host=registry_host,
         registry_port=registry_port,
         ui_port=args.ui_port,
+        gateway_port=args.gateway_port,
+        gateway_register=args.gateway_register,
     )
 
     from shared.config import load_config
@@ -793,7 +846,10 @@ def main() -> int:
             f"processes and starting fresh"
         )
         _stop_pids(existing)
-        if not _wait_ports_closed([registry_port, server_port]):
+        close_ports = [registry_port, server_port]
+        if args.gateway:
+            close_ports.append(args.gateway_port)
+        if not _wait_ports_closed(close_ports):
             print("[run_demo] recorded processes did not release their ports; free them and retry")
             PID_FILE.unlink(missing_ok=True)
             return 1
@@ -896,6 +952,8 @@ def main() -> int:
             os.environ["A2AT_SAMPLE_TRACE_TOKEN"] = server_trace_env["A2AT_SAMPLE_TRACE_TOKEN"]
         if start("server", SERVER_MODULE, server_port, server_trace_env) is None:
             return 1
+        if args.gateway and start("gateway", GATEWAY_MODULE, args.gateway_port) is None:
+            return 1
         _save_state(
             list(dict.fromkeys(managed)),
             model_mode=args.model_mode,
@@ -903,6 +961,7 @@ def main() -> int:
             trace_token=server_trace_env.get("A2AT_SAMPLE_TRACE_TOKEN", ""),
             trace_url=_trace_url(args.ui_port) if args.ui else "",
             ui_port=args.ui_port if args.ui else None,
+            gateway_port=args.gateway_port if args.gateway else None,
         )
         persisted = True
 

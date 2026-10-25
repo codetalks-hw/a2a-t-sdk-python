@@ -46,6 +46,28 @@ export class ApiClient {
     return requestJson(`${this.baseUrl}/api/tasks?limit=${encodeURIComponent(limit)}`);
   }
 
+  /** Read the persisted client run summaries. */
+  getClientRuns(limit = 50) {
+    return requestJson(`${this.baseUrl}/api/client/runs?limit=${encodeURIComponent(limit)}`);
+  }
+
+  /** Read one persisted client run with turns and negotiation events. */
+  getClientRun(runId) {
+    return requestJson(`${this.baseUrl}/api/client/runs/${encodeURIComponent(runId)}`);
+  }
+
+  /** Read the persisted client conversations. */
+  getConversations(limit = 50) {
+    return requestJson(`${this.baseUrl}/api/client/conversations?limit=${encodeURIComponent(limit)}`);
+  }
+
+  /** Read one persisted conversation with turns and runs. */
+  getConversation(conversationId) {
+    return requestJson(
+      `${this.baseUrl}/api/client/conversations/${encodeURIComponent(conversationId)}`,
+    );
+  }
+
   /** Start one run. */
   startRun(body) {
     return requestJson(`${this.baseUrl}/api/runs`, {

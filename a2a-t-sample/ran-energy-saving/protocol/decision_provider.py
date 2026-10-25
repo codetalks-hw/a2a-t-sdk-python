@@ -72,14 +72,21 @@ def build_decision_prompt(
     session: NegotiationContext,
     *,
     user_request: str | None = None,
+    conversation_context: str | None = None,
 ) -> str:
     """Build the user message handed to the ADK decision agent for one proposal.
 
     The original user request matters for target/feasibility proposals: their rendered content
     states the conflict but not the concrete throughput target, so a model without the request
-    cannot propose a corrected, non-overlapping target and tends to loop through the tools.
+    cannot propose a corrected, non-overlapping target and tends to loop through the tools. The
+    conversation context carries earlier turns so a follow-up keeps the same intent.
     """
     original = f"Original user request:\n{user_request}\n\n" if user_request else ""
+    history = (
+        f"Conversation context (earlier turns):\n{conversation_context.strip()}\n\n"
+        if conversation_context and conversation_context.strip()
+        else ""
+    )
     if propose.kind == "information":
         tool_rule = (
             "This information proposal does not name a concrete plan. Before deciding, call "
@@ -97,6 +104,7 @@ def build_decision_prompt(
         f"Round: {session.round} of {session.max_rounds}\n"
         f"Proposal template: {propose.template_uri or 'unknown'}\n"
         f"{original}"
+        f"{history}"
         "Proposal content:\n"
         f"{propose.content}\n\n"
         f"{tool_rule}"
@@ -124,6 +132,7 @@ class AdkDecisionProvider:
         fallback_decision: NegotiationDecision | None = None,
         offline: bool = False,
         user_request: str | None = None,
+        conversation_context: str | None = None,
     ) -> None:
         """Create one ADK-backed provider.
 
@@ -140,6 +149,8 @@ class AdkDecisionProvider:
                 malformed offline response must not abort the demo).
             user_request: Original natural-language request of the run; included in every decision
                 prompt so target/feasibility proposals can be resolved without guessing.
+            conversation_context: Recent turns of the same client conversation; included in every
+                decision prompt so a follow-up keeps the earlier intent.
         """
         if agent is None:
             from agents.client_agent.agent import build_client_agent
@@ -152,7 +163,12 @@ class AdkDecisionProvider:
         self._user_id = user_id
         self._fallback = fallback_decision or (OFFLINE_FALLBACK_DECISION if offline else None)
         self._user_request = user_request
+        self._conversation_context = conversation_context
         self._sessions: set[str] = set()
+
+    def set_conversation_context(self, conversation_context: str | None) -> None:
+        """Set the recent-turn block used by the next decision prompts."""
+        self._conversation_context = conversation_context
 
     @property
     def runner(self) -> InMemoryRunner:
@@ -203,6 +219,7 @@ class AdkDecisionProvider:
                             propose,
                             session,
                             user_request=self._user_request,
+                            conversation_context=self._conversation_context,
                         )
                     )
                 ],

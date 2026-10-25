@@ -750,6 +750,121 @@ body.inspector-closed .inspector {
   white-space: nowrap;
 }
 
+/* ---------- Persisted client runs and detail ---------- */
+
+.client-history {
+  margin-top: 8px;
+}
+
+.client-history .task-table-scroll {
+  max-height: 210px;
+}
+
+.client-run-view {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.client-run-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.client-run-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.client-run-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px 16px;
+  margin: 8px 0;
+}
+
+.client-run-meta .fact {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.client-run-meta .fact-label {
+  min-width: 80px;
+  color: var(--text-muted);
+}
+
+.client-run-meta .fact-value {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.client-run-subtitle {
+  margin: 12px 0 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.client-turn-list {
+  max-height: 180px;
+  margin: 0;
+  padding-left: 20px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.client-turn {
+  margin-bottom: 4px;
+}
+
+.client-turn-role {
+  display: inline-block;
+  min-width: 70px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.client-turn-content {
+  white-space: pre-wrap;
+}
+
+.client-event-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.client-event-table th,
+.client-event-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.client-event-table th {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.client-event-rationale {
+  max-width: 360px;
+}
+
+.client-run-links {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
 .task-state-cell {
   color: var(--actor-server);
   font-weight: 600;

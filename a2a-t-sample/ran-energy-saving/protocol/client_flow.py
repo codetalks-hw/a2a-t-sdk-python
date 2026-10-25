@@ -415,6 +415,7 @@ async def run_client_flow(
     on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
     on_decision_made: DecisionMadeCallback | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
+    conversation_context: str | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -443,6 +444,9 @@ async def run_client_flow(
         trace_sink: Optional observer of synthetic Run Explorer spans (``task_prompt_rendered``,
             ``message_sent``, ``decision_requested``, ``decision_made``). Protocol events keep using
             ``event_sink``; the two streams share the Web UI sequence numbering.
+        conversation_context: Optional recent-turn block prepended to the natural-language request
+            before Task-T generation, so a follow-up can refer to an earlier run. The wire prompt
+            still contains only the current request plus this delimited context.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -522,7 +526,10 @@ async def run_client_flow(
         )
 
     with trace_stage("task_t_slot_extraction"):
-        prompt_content = prompt_client.generate_task_prompt_from_text(user_request, task_template_uri)
+        prompt_content = prompt_client.generate_task_prompt_from_text(
+            _request_with_context(user_request, conversation_context),
+            task_template_uri,
+        )
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
     emit_trace(
         "task_prompt_rendered",
@@ -911,6 +918,18 @@ def _build_terminal_request(
 # ----------------------------------------------------------------------
 # Event helpers
 # ----------------------------------------------------------------------
+
+
+def _request_with_context(user_request: str, conversation_context: str | None) -> str:
+    """Prepend a delimited recent-turn block to the natural-language request."""
+    if not conversation_context or not conversation_context.strip():
+        return user_request
+    return (
+        "Conversation context (earlier turns of this client conversation):\n"
+        f"{conversation_context.strip()}\n\n"
+        "Current request:\n"
+        f"{user_request}"
+    )
 
 
 def _require_prompt_text(content: MetadataContent, what: str) -> str:

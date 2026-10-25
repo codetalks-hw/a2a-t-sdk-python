@@ -1,14 +1,17 @@
-"""Deterministic A2A task executor and the pre-task negotiation wrapper.
+"""LangGraph A2A task executor and the pre-task negotiation wrapper.
 
 The server deliberately uses **no ADK agent**. After the negotiation gate accepts a Task-T, the
-request is handed to :class:`DeterministicTaskExecutor`, which runs the sample's four OSS tools in
-order and publishes a standard A2A Task lifecycle. The protocol layer stays in
+request is handed to :class:`LangGraphTaskExecutor`, which runs a small ReAct graph over the sample's
+four OSS tools and publishes a standard A2A Task lifecycle. The protocol layer stays in
 :class:`NegotiationAgentExecutor`: it runs the gate first, enqueues standalone negotiation messages
-without creating a Task, and delegates only accepted work to the deterministic executor.
+without creating a Task, and delegates only accepted work to the graph executor.
 
-The plan executed here is **sample business logic**, not a protocol rule: it reads cell-001's
-profile, evaluates and applies a 30% saving plan in 00:00~06:00, and writes the report. A real
-deployment replaces :func:`execute_sample_plan` with its own OSS planning logic.
+The graph is sample business logic, not a protocol rule: it reads cell-001's profile, evaluates and
+applies a 30% saving plan in 00:00~06:00, and writes the report. A real deployment replaces the
+planner/tool set with its own OSS planning logic.
+
+Offline mode uses the deterministic :class:`~agents.server_agent.planner.ScriptedChatModel`; live
+mode uses ``ChatOpenAI``. Both run through the same graph and the same guarded tools.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -33,14 +37,23 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
-from agents.server_agent.tools import (
-    apply_energy_saving_plan,
-    evaluate_energy_saving_plan,
-    generate_energy_saving_report,
-    get_cell_energy_profile,
+from agents.server_agent.graph import build_execution_graph
+from agents.server_agent.langgraph_tools import (
+    REPORT_TOOL_NAME,
+    PlanGuard,
+    build_execution_tools,
+    tool_result_from_text,
+)
+from agents.server_agent.planner import (
+    build_planner_input,
+    build_planner_model,
+    build_system_prompt,
 )
 from google.protobuf.json_format import ParseDict
-from shared import ran_data
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
+from shared.config import SampleConfig, load_config
 from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
 from protocol.messages import (
@@ -49,13 +62,9 @@ from protocol.messages import (
     metadata_to_dict,
     negotiation_context_metadata,
     parse_negotiation_context,
+    task_prompt_from_metadata,
 )
 from protocol.negotiation_gate import NegotiationGate
-
-#: Sample plan executed by the deterministic server.
-DEFAULT_CELL_ID: Final[str] = "cell-001"
-DEFAULT_WINDOW: Final[str] = "00:00~06:00"
-DEFAULT_TARGET_RATE: Final[str] = "30"
 
 #: Artifact names.
 REPORT_ARTIFACT_NAME: Final[str] = "energy saving intent report"
@@ -64,27 +73,14 @@ TOOL_ARTIFACT_NAME: Final[str] = "tool result"
 #: Final text of a completed Task.
 FINAL_TASK_TEXT: Final[str] = "RAN energy-saving task completed."
 
-#: Trace stage of the deterministic server execution.
+#: Trace stages.
 EXECUTOR_STAGE: Final[str] = "server_execution_agent"
+PLANNER_STAGE: Final[str] = "server_planner"
+
+#: Default recursion limit when no config is supplied (tests).
+DEFAULT_PLANNER_MAX_STEPS: Final[int] = 12
 
 _LOGGER = logging.getLogger("ran_energy_saving.server_executor")
-
-
-@dataclass(frozen=True)
-class SamplePlan:
-    """The deterministic sample plan executed after a Task-T is accepted.
-
-    Attributes:
-        cell_id: Cell to optimise.
-        window: Energy-saving window.
-        target_rate: Energy-saving rate in percent.
-        date: Profile date; ``None`` uses the dataset date.
-    """
-
-    cell_id: str = DEFAULT_CELL_ID
-    window: str = DEFAULT_WINDOW
-    target_rate: str = DEFAULT_TARGET_RATE
-    date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,96 +100,13 @@ class ToolStep:
     duration_ms: float = 0.0
 
 
-class PlanExecutionError(RuntimeError):
-    """Raised when one deterministic tool returns a structured failure."""
+@dataclass
+class _PendingToolCall:
+    """One model-requested tool call awaiting its result."""
 
-    def __init__(self, tool: str, args: dict[str, object], result: dict[str, object]) -> None:
-        """Create one failed plan step.
-
-        Args:
-            tool: Tool name.
-            args: Arguments passed to the tool.
-            result: Structured failure returned by the tool.
-        """
-        self.tool = tool
-        self.arguments = args
-        self.result = result
-        message = result.get("error_message", "the tool returned ok=false")
-        super().__init__(f"{tool} failed: {message}")
-
-
-def execute_sample_plan(plan: SamplePlan | None = None) -> list[ToolStep]:
-    """Run the sample's four OSS tools in order.
-
-    Args:
-        plan: Plan to execute; defaults to :class:`SamplePlan`.
-
-    Returns:
-        The four executed steps in order.
-
-    Raises:
-        PlanExecutionError: when a tool returns ``{"ok": False, ...}``.
-    """
-    resolved = plan or SamplePlan()
-    date = resolved.date or ran_data.dataset_date()
-    steps: list[ToolStep] = []
-
-    profile_args: dict[str, object] = {"cell_id": resolved.cell_id, "date": date}
-    started = time.perf_counter()
-    profile = get_cell_energy_profile(resolved.cell_id, date)
-    steps.append(
-        ToolStep("get_cell_energy_profile", profile_args, profile, _elapsed_ms(started))
-    )
-    _require_ok("get_cell_energy_profile", profile_args, profile)
-
-    evaluate_args: dict[str, object] = {
-        "cell_id": resolved.cell_id,
-        "window": resolved.window,
-        "target_rate": resolved.target_rate,
-    }
-    started = time.perf_counter()
-    evaluation = evaluate_energy_saving_plan(
-        resolved.cell_id, resolved.window, resolved.target_rate
-    )
-    steps.append(
-        ToolStep("evaluate_energy_saving_plan", evaluate_args, evaluation, _elapsed_ms(started))
-    )
-    _require_ok("evaluate_energy_saving_plan", evaluate_args, evaluation)
-
-    apply_args: dict[str, object] = {
-        "cell_id": resolved.cell_id,
-        "window": resolved.window,
-        "target_rate": resolved.target_rate,
-    }
-    started = time.perf_counter()
-    applied = apply_energy_saving_plan(resolved.cell_id, resolved.window, resolved.target_rate)
-    steps.append(
-        ToolStep("apply_energy_saving_plan", apply_args, applied, _elapsed_ms(started))
-    )
-    _require_ok("apply_energy_saving_plan", apply_args, applied)
-
-    plan_id = applied.get("plan_id")
-    if not isinstance(plan_id, str) or not plan_id:
-        raise PlanExecutionError("apply_energy_saving_plan", apply_args, applied)
-    report_args: dict[str, object] = {"plan_id": plan_id}
-    started = time.perf_counter()
-    report = generate_energy_saving_report(plan_id)
-    steps.append(
-        ToolStep("generate_energy_saving_report", report_args, report, _elapsed_ms(started))
-    )
-    _require_ok("generate_energy_saving_report", report_args, report)
-    return steps
-
-
-def _elapsed_ms(started: float) -> float:
-    """Return the milliseconds elapsed since ``started``."""
-    return round((time.perf_counter() - started) * 1000.0, 3)
-
-
-def _require_ok(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
-    """Raise :class:`PlanExecutionError` when a tool result is not successful."""
-    if result.get("ok") is not True:
-        raise PlanExecutionError(tool, args, result)
+    name: str
+    args: dict[str, object]
+    started: float
 
 
 def _metadata(context: RequestContext) -> dict[str, object]:
@@ -254,8 +167,8 @@ def _emit_execution_span(context: RequestContext, task_id: str) -> str:
             side="server",
             kind="execution",
             stage=EXECUTOR_STAGE,
-            title="Deterministic OSS task execution",
-            purpose="Run the four OSS tools in order.",
+            title="LangGraph OSS task execution",
+            purpose="Run the LangGraph ReAct planner over the OSS tools.",
             direction="internal",
         )
     )
@@ -268,7 +181,7 @@ def _emit_tool_span(
     parent_span_id: str,
     step: ToolStep,
 ) -> None:
-    """Emit one tool span parented to the deterministic execution span."""
+    """Emit one tool span parented to the execution span."""
     emit_span(
         Span(
             run_id=_run_id(context),
@@ -282,7 +195,7 @@ def _emit_tool_span(
             kind="tool",
             stage=EXECUTOR_STAGE,
             title=step.name,
-            purpose="Deterministic OSS tool call.",
+            purpose="Guarded OSS tool call.",
             status="ok" if step.result.get("ok") is True else "error",
             duration_ms=step.duration_ms,
             detail={
@@ -294,19 +207,124 @@ def _emit_tool_span(
     )
 
 
-class DeterministicTaskExecutor(AgentExecutor):
-    """Execute one accepted Task-T with the sample's deterministic OSS tools."""
+def _message_digest(message: BaseMessage, *, limit: int = 2000) -> dict[str, object]:
+    """Build a bounded trace digest of one planner message."""
+    content = str(message.content)
+    if len(content) > limit:
+        content = content[: limit - 1] + "…"
+    digest: dict[str, object] = {"role": message.type, "content": content}
+    calls = getattr(message, "tool_calls", None)
+    if calls:
+        digest["toolCalls"] = [
+            {"name": call.get("name"), "args": call.get("args"), "id": call.get("id")}
+            for call in calls
+        ]
+    return digest
 
-    def __init__(self, *, plan: SamplePlan | None = None) -> None:
+
+def _model_id(model: BaseChatModel) -> str:
+    """Return the display model id of one chat model."""
+    for attribute in ("model_name", "model"):
+        value = getattr(model, attribute, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(model).__name__
+
+
+def _token_usage(message: BaseMessage) -> dict[str, object] | None:
+    """Return the usage map of one model response, when the provider reports one."""
+    usage = getattr(message, "usage_metadata", None)
+    return dict(usage) if isinstance(usage, dict) else None
+
+
+def _emit_planner_span(
+    context: RequestContext,
+    task_id: str,
+    parent_span_id: str,
+    *,
+    model: BaseChatModel,
+    system_prompt: str,
+    history: list[BaseMessage],
+    response: AIMessage,
+    duration_ms: float,
+) -> None:
+    """Emit one LLM span for a planner turn."""
+    emit_span(
+        Span(
+            run_id=_run_id(context),
+            span_id=f"llm_server_{uuid.uuid4().hex}",
+            parent_span_id=parent_span_id,
+            context_id=context.context_id,
+            task_id=task_id,
+            phase=PHASE_EXECUTION,
+            actor="llm",
+            side="server",
+            kind="llm",
+            stage=PLANNER_STAGE,
+            title="Planner turn",
+            purpose="Choose the next guarded OSS tool call.",
+            status="ok",
+            duration_ms=round(duration_ms, 3),
+            model=_model_id(model),
+            tokens=_token_usage(response),
+            detail={
+                "provider": "langgraph",
+                "request": {
+                    "systemPrompt": system_prompt,
+                    "messages": [_message_digest(message) for message in history[-8:]],
+                },
+                "response": _message_digest(response),
+            },
+        )
+    )
+
+
+def _task_prompt(context: RequestContext) -> str:
+    """Return the accepted Task-T prompt, falling back to the inbound text."""
+    prompt = task_prompt_from_metadata(_metadata(context))
+    if prompt.strip():
+        return prompt
+    message = context.message
+    if message is not None:
+        for part in message.parts or ():
+            if part.text and part.text.strip():
+                return part.text.strip()
+    return "Create a RAN energy saving task."
+
+
+class LangGraphTaskExecutor(AgentExecutor):
+    """Execute one accepted Task-T with the LangGraph ReAct planner."""
+
+    def __init__(
+        self,
+        *,
+        config: SampleConfig | None = None,
+        planner_model_factory: Callable[[], BaseChatModel] | None = None,
+    ) -> None:
         """Create one executor.
 
         Args:
-            plan: Plan override (tests); defaults to the sample plan.
+            config: resolved sample configuration; defaults to :func:`load_config`.
+            planner_model_factory: optional model factory (tests); defaults to
+                :func:`~agents.server_agent.planner.build_planner_model`.
         """
-        self._plan = plan
+        self._config = config
+        self._planner_model_factory = planner_model_factory
+
+    @property
+    def recursion_limit(self) -> int:
+        """Return the planner recursion limit of this executor."""
+        configured = self._config.planner_max_steps if self._config is not None else None
+        return configured if configured is not None else DEFAULT_PLANNER_MAX_STEPS
+
+    def _model(self) -> BaseChatModel:
+        """Build the planner model of this execution."""
+        if self._planner_model_factory is not None:
+            return self._planner_model_factory()
+        return build_planner_model(self._config or load_config())
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Create the Task, run the tools, and publish artifacts/status updates.
+        """Create the Task, run the graph, and publish artifacts/status updates.
 
         Args:
             context: Gate-approved request; its message already carries the agreed Task-T prompt.
@@ -335,58 +353,152 @@ class DeterministicTaskExecutor(AgentExecutor):
         await updater.start_work()
         execution_span_id = _emit_execution_span(context, task.id)
 
+        negotiation_context = _negotiation_context(context)
         try:
-            steps = await asyncio.to_thread(execute_sample_plan, self._plan)
-        except PlanExecutionError as exc:
-            _LOGGER.warning("deterministic plan failed at %s: %s", exc.tool, exc)
-            _emit_failed_tool_span(context, task.id, execution_span_id, exc)
-            await updater.failed(
-                message=updater.new_agent_message(
-                    [Part(text=f"The energy-saving plan failed: {exc}")]
-                )
+            await self._run_graph(
+                context,
+                updater,
+                task.id,
+                execution_span_id,
+                negotiation_context,
             )
-            return
         except asyncio.CancelledError:
             raise
+        except GraphRecursionError:
+            _LOGGER.warning("planner exceeded %s steps for task %s", self.recursion_limit, task.id)
+            await updater.failed(
+                message=updater.new_agent_message(
+                    [
+                        Part(
+                            text=(
+                                "The energy-saving planner exceeded "
+                                f"{self.recursion_limit} steps without completing the task."
+                            )
+                        )
+                    ]
+                )
+            )
         except Exception as exc:  # noqa: BLE001 - the Task must always reach a terminal state
-            _LOGGER.exception("unexpected deterministic executor failure")
+            _LOGGER.exception("unexpected LangGraph executor failure")
             await updater.failed(
                 message=updater.new_agent_message(
                     [Part(text=f"The energy-saving task failed unexpectedly: {exc}")]
                 )
             )
+
+    async def _run_graph(
+        self,
+        context: RequestContext,
+        updater: TaskUpdater,
+        task_id: str,
+        execution_span_id: str,
+        negotiation_context: dict[str, object] | None,
+    ) -> None:
+        """Run the graph, publishing one artifact per tool result and the final report."""
+        guard = PlanGuard()
+        tools = build_execution_tools(guard)
+        model = self._model()
+        system_prompt = build_system_prompt()
+        graph = build_execution_graph(model=model, tools=tools, system_prompt=system_prompt)
+        user_content = build_planner_input(_task_prompt(context), negotiation_context)
+
+        history: list[BaseMessage] = [HumanMessage(content=user_content)]
+        steps: list[ToolStep] = []
+        pending: dict[str, _PendingToolCall] = {}
+        final_text = ""
+        last_update_at = time.perf_counter()
+
+        async for update in graph.astream(
+            {"messages": [HumanMessage(content=user_content)]},
+            config={"recursion_limit": self.recursion_limit},
+            stream_mode="updates",
+        ):
+            for node_update in update.values():
+                for item in node_update.get("messages", []):
+                    history.append(item)
+                    if isinstance(item, AIMessage):
+                        now = time.perf_counter()
+                        turn_duration_ms = (now - last_update_at) * 1000.0
+                        last_update_at = now
+                        for call in item.tool_calls or []:
+                            call_id = str(call.get("id") or uuid.uuid4().hex)
+                            args = call.get("args")
+                            pending[call_id] = _PendingToolCall(
+                                name=str(call.get("name") or "unknown"),
+                                args=dict(args) if isinstance(args, dict) else {},
+                                started=now,
+                            )
+                        if not item.tool_calls and item.content:
+                            final_text = str(item.content)
+                        _emit_planner_span(
+                            context,
+                            task_id,
+                            execution_span_id,
+                            model=model,
+                            system_prompt=system_prompt,
+                            history=history[:-1],
+                            response=item,
+                            duration_ms=turn_duration_ms,
+                        )
+                    elif isinstance(item, ToolMessage):
+                        call = pending.pop(str(item.tool_call_id), None)
+                        name = call.name if call is not None else str(item.name or "unknown")
+                        args = call.args if call is not None else {}
+                        duration_ms = (
+                            (time.perf_counter() - call.started) * 1000.0
+                            if call is not None
+                            else 0.0
+                        )
+                        step = ToolStep(
+                            name=name,
+                            args=args,
+                            result=tool_result_from_text(item.content),
+                            duration_ms=round(duration_ms, 3),
+                        )
+                        steps.append(step)
+                        _emit_tool_span(context, task_id, execution_span_id, step)
+                        if name != REPORT_TOOL_NAME:
+                            await updater.add_artifact(
+                                [Part(text=json.dumps(step.result, ensure_ascii=False))],
+                                name=TOOL_ARTIFACT_NAME,
+                                metadata={"toolName": step.name},
+                                last_chunk=True,
+                            )
+
+        report_steps = [
+            step
+            for step in steps
+            if step.name == REPORT_TOOL_NAME and step.result.get("ok") is True
+        ]
+        if not report_steps:
+            reason = (
+                "The planner stopped before generating a successful report."
+                if not final_text
+                else "The planner stopped without generating a report."
+            )
+            await updater.failed(
+                message=updater.new_agent_message([Part(text=reason)])
+            )
             return
 
-        negotiation_context = _negotiation_context(context)
-        for step in steps[:-1]:
-            _emit_tool_span(context, task.id, execution_span_id, step)
-            await updater.add_artifact(
-                [Part(text=json.dumps(step.result, ensure_ascii=False))],
-                name=TOOL_ARTIFACT_NAME,
-                metadata={"toolName": step.name},
-                last_chunk=True,
-            )
-
-        report_step = steps[-1]
-        _emit_tool_span(context, task.id, execution_span_id, report_step)
-        report = report_step.result
+        report = report_steps[-1].result
         summary = str(report.get("summary", ""))
-        report_metadata = _report_metadata(context, summary, negotiation_context)
+        metadata = _report_metadata(context, summary, negotiation_context)
         report_part = Part()
         ParseDict(report, report_part.data)
         await updater.add_artifact(
             [report_part, Part(text=summary)],
             name=REPORT_ARTIFACT_NAME,
-            metadata=report_metadata,
+            metadata=metadata,
             last_chunk=True,
         )
         final_message = updater.new_agent_message(
-            [Part(text=FINAL_TASK_TEXT)], metadata=report_metadata
+            [Part(text=FINAL_TASK_TEXT)], metadata=metadata
         )
         await updater.update_status(
             TaskState.TASK_STATE_COMPLETED,
             message=final_message,
-            metadata=report_metadata,
+            metadata=metadata,
         )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -404,30 +516,15 @@ class DeterministicTaskExecutor(AgentExecutor):
         await updater.cancel()
 
 
-def _emit_failed_tool_span(
-    context: RequestContext,
-    task_id: str,
-    parent_span_id: str,
-    error: PlanExecutionError,
-) -> None:
-    """Emit one failed tool span for a plan step that returned a structured error."""
-    _emit_tool_span(
-        context,
-        task_id,
-        parent_span_id,
-        ToolStep(error.tool, error.arguments, error.result),
-    )
-
-
 class NegotiationAgentExecutor(AgentExecutor):
-    """Outer executor: pre-task negotiation gate in front of the deterministic executor."""
+    """Outer executor: pre-task negotiation gate in front of the graph executor."""
 
     def __init__(self, *, gate: NegotiationGate, inner: AgentExecutor) -> None:
         """Create one executor.
 
         Args:
             gate: pre-task negotiation gate.
-            inner: deterministic executor that runs an accepted Task.
+            inner: graph executor that runs an accepted Task.
         """
         self._gate = gate
         self._inner = inner
@@ -443,11 +540,11 @@ class NegotiationAgentExecutor(AgentExecutor):
 
     @property
     def inner(self) -> AgentExecutor:
-        """Return the inner deterministic executor."""
+        """Return the inner graph executor."""
         return self._inner
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Run the gate, then short-circuit or delegate to the deterministic executor.
+        """Run the gate, then short-circuit or delegate to the graph executor.
 
         Args:
             context: inbound A2A request context.
@@ -485,14 +582,27 @@ class NegotiationAgentExecutor(AgentExecutor):
             return self._run_ids.get(key)
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Delegate cancellation to the deterministic executor."""
+        """Delegate cancellation to the graph executor."""
         await self._inner.cancel(context, event_queue)
 
 
-def build_negotiation_executor(*, gate: NegotiationGate) -> NegotiationAgentExecutor:
-    """Build the outer executor with the deterministic sample executor inside.
+def build_negotiation_executor(
+    *,
+    gate: NegotiationGate,
+    config: SampleConfig | None = None,
+    planner_model_factory: Callable[[], BaseChatModel] | None = None,
+) -> NegotiationAgentExecutor:
+    """Build the outer executor with the LangGraph executor inside.
 
     Args:
         gate: pre-task negotiation gate.
+        config: resolved sample configuration.
+        planner_model_factory: optional planner model factory (tests).
     """
-    return NegotiationAgentExecutor(gate=gate, inner=DeterministicTaskExecutor())
+    return NegotiationAgentExecutor(
+        gate=gate,
+        inner=LangGraphTaskExecutor(
+            config=config,
+            planner_model_factory=planner_model_factory,
+        ),
+    )

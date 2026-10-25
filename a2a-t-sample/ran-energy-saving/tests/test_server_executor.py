@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
-import pytest
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext, UnauthenticatedUser
@@ -29,6 +28,7 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
+from agents.server_agent.planner import ScriptedChatModel
 from dotenv import dotenv_values
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
@@ -43,12 +43,9 @@ from protocol.server_app import (
 from protocol.server_executor import (
     REPORT_ARTIFACT_NAME,
     TOOL_ARTIFACT_NAME,
-    DeterministicTaskExecutor,
+    LangGraphTaskExecutor,
     NegotiationAgentExecutor,
-    PlanExecutionError,
-    SamplePlan,
     build_negotiation_executor,
-    execute_sample_plan,
 )
 from shared import ran_data
 from shared.config import MODEL_MODE_LIVE, SampleConfig
@@ -197,38 +194,14 @@ async def test_executor_cancel_delegates_to_the_inner_executor() -> None:
     assert inner.cancelled == [context]
 
 
-def test_execute_sample_plan_runs_the_four_tools_in_order() -> None:
-    ran_data.reset()
-    try:
-        steps = execute_sample_plan()
-    finally:
-        ran_data.reset()
-
-    assert [step.name for step in steps] == [
-        "get_cell_energy_profile",
-        "evaluate_energy_saving_plan",
-        "apply_energy_saving_plan",
-        "generate_energy_saving_report",
-    ]
-    assert steps[2].result["plan_id"] == "plan-cell-001-001"
-    assert steps[3].result["summary"]
-
-
-def test_execute_sample_plan_reports_an_infeasible_plan() -> None:
-    ran_data.reset()
-    try:
-        with pytest.raises(PlanExecutionError):
-            execute_sample_plan(SamplePlan(cell_id="cell-does-not-exist"))
-    finally:
-        ran_data.reset()
-
-
-async def test_deterministic_executor_publishes_task_artifacts_and_report() -> None:
+async def test_langgraph_executor_publishes_task_artifacts_and_report(
+    offline_config: SampleConfig,
+) -> None:
     ran_data.reset()
     context = _make_context(
         negotiation={"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
     )
-    executor = DeterministicTaskExecutor()
+    executor = LangGraphTaskExecutor(config=offline_config)
     queue = RecordingEventQueue()
 
     try:
@@ -263,9 +236,14 @@ async def test_deterministic_executor_publishes_task_artifacts_and_report() -> N
     assert report.artifact.parts[1].text
 
 
-async def test_deterministic_executor_fails_when_the_plan_is_infeasible() -> None:
+async def test_langgraph_executor_fails_when_the_planner_cannot_generate_a_report(
+    offline_config: SampleConfig,
+) -> None:
     context = _make_context()
-    executor = DeterministicTaskExecutor(plan=SamplePlan(cell_id="cell-does-not-exist"))
+    executor = LangGraphTaskExecutor(
+        config=offline_config,
+        planner_model_factory=lambda: ScriptedChatModel(dataset_date="not-a-date"),
+    )
     queue = RecordingEventQueue()
 
     await executor.execute(context, queue)
@@ -279,13 +257,15 @@ async def test_deterministic_executor_fails_when_the_plan_is_infeasible() -> Non
     )
 
 
-def test_build_negotiation_executor_wraps_the_deterministic_executor() -> None:
+def test_build_negotiation_executor_wraps_the_langgraph_executor(
+    offline_config: SampleConfig,
+) -> None:
     gate = cast(NegotiationGate, FixedGate(GateOutcome.execution(_make_context())))
 
-    executor = build_negotiation_executor(gate=gate)
+    executor = build_negotiation_executor(gate=gate, config=offline_config)
 
     assert isinstance(executor, NegotiationAgentExecutor)
-    assert isinstance(executor.inner, DeterministicTaskExecutor)
+    assert isinstance(executor.inner, LangGraphTaskExecutor)
     assert executor.gate is gate
 
 
