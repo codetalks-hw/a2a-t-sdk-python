@@ -654,23 +654,31 @@ python run_demo.py --ui --scenario information --mode auto --model-mode live
 Use the left rail to pick a scenario and `auto`/`manual` mode, then **Start run**. The context
 strip and `GET /api/meta` show the read-only process language and model mode.
 
-#### Persisted OSS task table
+#### Run history
 
-The server persists every accepted A2A Task in `runs/task-status.sqlite3` (override with
-`A2AT_SAMPLE_TASK_DB`). The full-width **Persisted OSS tasks** table above the phase stepper reads
-`GET /api/tasks` and shows task id, state, context, update time, report summary and run id. It
-refreshes on start/finish and while a run is active, so a `WORKING` row appears before the run
-ends. The table is read-only; the server remains the only writer.
+Both databases are readable from the page. The collapsed **History** panel below the timeline has
+three tabs and never pushes the explorer off the first screen:
 
-#### Persisted client runs
+| Tab | Source | Columns |
+| --- | --- | --- |
+| **OSS tasks** | `GET /api/tasks` → `runs/task-status.sqlite3` | task id, state, context, update time, report summary, run id |
+| **Client runs** | `GET /api/client/runs` → `runs/client-state.sqlite3` | run id, conversation, scenario, status, final state, start time, request |
+| **Conversations** | `GET /api/client/conversations` | conversation, turns, runs, updated |
 
-The client keeps its own SQLite store in `runs/client-state.sqlite3` (override with
-`A2AT_SAMPLE_CLIENT_DB`). The **Client runs** table reads `GET /api/client/runs` and shows run id,
-conversation, scenario, status, final state, start time and the request. **View** loads
-`GET /api/client/runs/{id}` and renders the turns, the negotiation audit (direction, round,
-performative, decision, rationale) and transcript links. `GET /api/client/conversations` exposes
-the same data grouped by conversation. The table is read-only for the page; the client service is
-the only writer.
+The tasks tab refreshes on start/finish and while a run is active, so a `WORKING` row appears
+before the run ends. **View** loads `GET /api/client/runs/{id}` (turns, negotiation audit,
+transcript links) or `GET /api/client/conversations/{id}` (turns and runs). Every table is
+read-only for the page; the server or client service is the only writer.
+
+#### UI language
+
+The interface ships English and Chinese (`zh-CN`) copy in `web/static/js/i18n/` — no build step and
+no network request. The header menu selects **Auto**, **English** or **中文** and remembers the
+choice in `localStorage`; `?lang=en` / `?lang=zh-CN` overrides it for one page load. **Auto** follows
+`A2AT_LANGUAGE`, so a Chinese process gets a Chinese interface and Chinese scenario text together.
+When the interface language differs from the process language, the context strip shows a quiet
+`UI 中文 · data en-US` hint. Protocol identifiers (`Task-T`, `Negotiation-T`, `PROPOSE`, tool names,
+JSON payload values) stay in English so they still match the specification and the trace.
 
 #### Inbound A2A gateway
 
@@ -1162,7 +1170,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (413 tests). What it covers:
+The suite is fully offline and deterministic (415 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -1173,7 +1181,7 @@ The suite is fully offline and deterministic (413 tests). What it covers:
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
 | `test_web_ui.py` | `/api/meta`, `/api/tasks`, `/api/client/runs`, `/api/client/conversations`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server planner/tool spans, `trace.json`) and a real manual decision flow. |
-| `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs, CSS tokens; runs `node --check` on every JS module and the in-repo `tests/js` store and real-frame harnesses (skipped without Node). |
+| `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs and CSS tokens, every element id used by `main.js` exists in the shell; runs `node --check` on every JS module and the in-repo `tests/js` store, i18n and real-frame harnesses (skipped without Node). |
 | `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, gate delegation, AgentCard extensions, registry payload. |
 | `test_server_planner.py` | Scripted planner sequence, guarded tool order, offline/live model selection, prompt content. |
 | `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, read-only helpers. |

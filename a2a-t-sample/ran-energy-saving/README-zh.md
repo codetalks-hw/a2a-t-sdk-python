@@ -553,13 +553,21 @@ python run_demo.py --ui --scenario information --mode auto --model-mode live
 
 在左侧栏选择场景与 `auto`/`manual` 模式，然后点击 **Start run**。上下文条与 `GET /api/meta` 展示只读的进程级语言与模型模式。
 
-#### 持久化 OSS 任务表格
+#### 历史记录
 
-服务端把每个被接受的 A2A Task 持久化到 `runs/task-status.sqlite3`（可用 `A2AT_SAMPLE_TASK_DB` 覆盖）。阶段条上方的全宽 **Persisted OSS tasks** 表格通过 `GET /api/tasks` 读取，展示 task id、状态、context、更新时间、报告摘要与 run id。它会在启动/结束以及运行期间刷新，因此 `WORKING` 行会在运行结束前出现。表格是只读的，服务端是唯一写入方。
+两个数据库都可以在页面上查看。时间线下方的 **历史记录** 面板默认折叠，含三个标签页，不会再把运行观察器挤出首屏：
 
-#### 持久化客户端运行
+| 标签页 | 数据源 | 列 |
+| --- | --- | --- |
+| **OSS 任务** | `GET /api/tasks` → `runs/task-status.sqlite3` | task id、状态、context、更新时间、报告摘要、run id |
+| **客户端运行** | `GET /api/client/runs` → `runs/client-state.sqlite3` | run id、会话、场景、状态、终态、开始时间、请求摘要 |
+| **会话** | `GET /api/client/conversations` | 会话、轮次数、运行数、更新时间 |
 
-客户端使用独立 SQLite 库 `runs/client-state.sqlite3`（可用 `A2AT_SAMPLE_CLIENT_DB` 覆盖）。**Client runs** 表格通过 `GET /api/client/runs` 读取，展示 run id、会话、场景、状态、终态、开始时间与请求摘要。**View** 通过 `GET /api/client/runs/{id}` 加载并渲染轮次、协商审计（方向、round、performative、决策、理由）与运行记录链接。`GET /api/client/conversations` 按会话聚合同一批数据。表格只读，客户端服务是唯一写入方。
+OSS 任务页在启动/结束以及运行期间刷新，因此 `WORKING` 行会在运行结束前出现。**查看** 会加载 `GET /api/client/runs/{id}`（轮次、协商审计、运行记录链接）或 `GET /api/client/conversations/{id}`（轮次与运行列表）。所有表格对页面只读，服务端或客户端服务是唯一写入方。
+
+#### 界面语言
+
+界面内置英文与中文（`zh-CN`）两套文案，位于 `web/static/js/i18n/`，无需构建，也不发起网络请求。页头菜单可选择 **自动**、**English** 或 **中文**，选择会写入 `localStorage`；`?lang=en` / `?lang=zh-CN` 可对单次加载临时覆盖。**自动** 跟随 `A2AT_LANGUAGE`，因此中文进程会同时得到中文界面与中文场景文本。当界面语言与进程语言不一致时，上下文条会显示一条轻提示，例如 `界面 中文 · 数据 en-US`。协议标识符（`Task-T`、`Negotiation-T`、`PROPOSE`、工具名、JSON 载荷值）保持英文，以便与规范及 trace 对照。
 
 #### 入站 A2A Gateway
 
@@ -925,7 +933,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（413 个测试）。覆盖范围：
+测试套件完全离线且确定性（415 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -936,7 +944,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
 | `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
-| `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页、CSS token；`node --check` 全部 JS，并运行仓库内 `tests/js` store 与真实帧 harness（无 Node 时跳过）。 |
+| `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页与 CSS token、`main.js` 用到的每个元素 id 都存在于页面；`node --check` 全部 JS，并运行仓库内 `tests/js` 的 store、i18n 与真实帧 harness（无 Node 时跳过）。 |
 | `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、网关委托、AgentCard 扩展、注册载荷。 |
 | `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
 | `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、只读助手。 |
