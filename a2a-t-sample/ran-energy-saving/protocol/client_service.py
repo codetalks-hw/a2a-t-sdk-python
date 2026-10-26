@@ -51,9 +51,13 @@ from protocol.client_store import (
     TaskSnapshotRecord,
     now_iso,
 )
+from protocol.decision_provider import sweep_stale_sessions
 from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript, TranscriptPaths
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_service")
+
+#: Minimum interval between run-triggered decision-session sweeps (startup sweeps ignore it).
+SESSION_SWEEP_INTERVAL_SECONDS: Final[float] = 3600.0
 
 
 class ClientRuntimeLike(Protocol):
@@ -686,6 +690,7 @@ class RunManager:
         self._memory_turns = max(0, memory_turns)
         self._runs: dict[str, RunState] = {}
         self._active_by_conversation: dict[str, RunState] = {}
+        self._last_session_sweep = 0.0
 
     @property
     def store(self) -> ClientStore | None:
@@ -813,10 +818,27 @@ class RunManager:
             run.finished_at = time.monotonic()
         return run
 
+    async def sweep_sessions(self, *, force: bool = True) -> None:
+        """Delete decision sessions past the retention window.
+
+        Called at startup (``force``) and before a run. A run is the only thing that grows the
+        session table, so a run-triggered sweep is enough for a long-lived process; the hourly
+        guard keeps it from scanning the table on every run.
+        """
+        now = time.monotonic()
+        if not force and now - self._last_session_sweep < SESSION_SWEEP_INTERVAL_SECONDS:
+            return
+        self._last_session_sweep = now
+        await sweep_stale_sessions(
+            self._config.client_db_path,
+            retention_days=self._config.adk_session_retention_days,
+        )
+
     async def _execute(self, run: RunState) -> None:
         """Build the runtime, run the client flow, persist the outcome and publish the result."""
         transcript = run.transcript
         assert transcript is not None
+        await self.sweep_sessions(force=False)
         await self._prepare_persistence(run)
 
         def event_sink(event: dict[str, object]) -> None:

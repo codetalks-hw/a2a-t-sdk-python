@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from protocol.client_flow import ClientFlowResult
 from protocol.client_service import RunConflictError, RunManager
 from protocol.client_store import (
@@ -17,6 +21,7 @@ from protocol.client_store import (
     read_client_run_detail,
     read_conversation_detail,
 )
+from protocol.decision_provider import CLIENT_APP_NAME, CLIENT_USER_ID
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
 
@@ -178,6 +183,37 @@ async def test_run_persists_lifecycle_negotiation_and_task_snapshot(
     assert snapshot is not None
     assert snapshot.task_id == "task-1"
     assert snapshot.state == "TASK_STATE_WORKING"
+
+
+async def test_run_applies_the_decision_session_retention_window(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    db_path = tmp_path / "client.sqlite3"
+    service = SqliteSessionService(str(db_path))
+    await service.create_session(
+        app_name=CLIENT_APP_NAME, user_id=CLIENT_USER_ID, session_id="ran-client-stale"
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET update_time = ? WHERE id = ?",
+            (time.time() - 8 * 24 * 60 * 60, "ran-client-stale"),
+        )
+        connection.commit()
+
+    manager, _, _ = _manager(
+        tmp_path,
+        replace(
+            offline_config,
+            client_db_path=str(db_path),
+            adk_session_retention_days=7,
+        ),
+    )
+    run = await manager.start("information", "auto", "sse")
+    await _finish(manager, run.run_id)
+
+    remaining = await service.list_sessions(app_name=CLIENT_APP_NAME)
+    assert remaining.sessions == []
 
 
 async def test_conversation_memory_is_injected_into_the_next_run(

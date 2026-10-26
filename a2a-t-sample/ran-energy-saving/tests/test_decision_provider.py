@@ -230,25 +230,22 @@ def test_adk_provider_raises_without_a_fallback_on_unparseable_output() -> None:
         provider._fallback_or_raise("no decision")
 
 
-async def test_adk_provider_persists_and_deletes_a_decision_session(tmp_path: Path) -> None:
-    """The decision session is durable during the run and gone once the run closes."""
+async def test_adk_provider_persists_a_decision_session(tmp_path: Path) -> None:
+    """The decision session is durable: it survives the provider and is kept as audit data."""
+    db_path = tmp_path / "client.sqlite3"
     provider = AdkDecisionProvider(
         model=build_fake_model(),
-        session_db_path=str(tmp_path / "client.sqlite3"),
+        session_db_path=str(db_path),
     )
     assert provider.durable_sessions is True
 
     decision = await provider.respond(_view(), _session())
     assert decision.action == "accept"
 
-    service = provider.runner.session_service
-    listed = await service.list_sessions(app_name=CLIENT_APP_NAME)
+    # A fresh service over the same file is what a later process (or the sweep) sees.
+    reopened = SqliteSessionService(str(db_path))
+    listed = await reopened.list_sessions(app_name=CLIENT_APP_NAME)
     assert [session.id for session in listed.sessions] == ["ran-client-neg-1"]
-
-    await provider.aclose()
-
-    listed = await service.list_sessions(app_name=CLIENT_APP_NAME)
-    assert listed.sessions == []
 
 
 async def test_adk_provider_reuses_one_persisted_session_across_rounds(tmp_path: Path) -> None:
@@ -264,7 +261,6 @@ async def test_adk_provider_reuses_one_persisted_session_across_rounds(tmp_path:
 
     listed = await provider.runner.session_service.list_sessions(app_name=CLIENT_APP_NAME)
     assert [session.id for session in listed.sessions] == ["ran-client-neg-1"]
-    await provider.aclose()
 
 
 async def test_adk_provider_falls_back_to_memory_when_the_database_cannot_be_opened(
@@ -280,10 +276,9 @@ async def test_adk_provider_falls_back_to_memory_when_the_database_cannot_be_ope
     assert provider.durable_sessions is False
     decision = await provider.respond(_view(), _session())
     assert decision.action == "accept"
-    await provider.aclose()
 
 
-async def test_sweep_stale_sessions_deletes_only_abandoned_sessions(tmp_path: Path) -> None:
+async def test_sweep_deletes_only_sessions_past_the_retention_window(tmp_path: Path) -> None:
     db_path = tmp_path / "client.sqlite3"
     service = SqliteSessionService(str(db_path))
     await service.create_session(
@@ -295,11 +290,11 @@ async def test_sweep_stale_sessions_deletes_only_abandoned_sessions(tmp_path: Pa
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE sessions SET update_time = ? WHERE id = ?",
-            (time.time() - 3600, "ran-client-old"),
+            (time.time() - 2 * 24 * 60 * 60, "ran-client-old"),
         )
         connection.commit()
 
-    deleted = await sweep_stale_sessions(str(db_path), ttl_seconds=600)
+    deleted = await sweep_stale_sessions(str(db_path), retention_days=1)
 
     assert deleted == 1
     remaining = await service.list_sessions(app_name=CLIENT_APP_NAME)

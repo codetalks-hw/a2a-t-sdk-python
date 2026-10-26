@@ -253,15 +253,10 @@ class ClientRuntime:
                 set_global_sink(self.trace_sink)
 
     async def aclose(self) -> None:
-        """Stop the provider, the webhook receiver and the HTTP clients; remove the SDK env."""
+        """Stop the webhook receiver, close the HTTP clients and remove the temporary SDK env."""
         if self._closed:
             return
         self._closed = True
-        # The ADK provider owns the decision-agent sessions; deleting them here keeps the client
-        # database and the process memory from growing with every finished run.
-        close_provider = getattr(self.provider, "aclose", None)
-        if callable(close_provider):
-            await close_provider()
         if self._webhook_receiver is not None:
             await self._webhook_receiver.stop()
         close_client = getattr(self.a2a_client, "close", None)

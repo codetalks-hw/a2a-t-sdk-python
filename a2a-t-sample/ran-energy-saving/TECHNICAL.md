@@ -216,11 +216,12 @@ Every provider implements `respond(propose, session) -> NegotiationDecision`. Pr
 
 **Where the ADK session lives.** `AdkDecisionProvider` keeps one ADK session per negotiation, so the
 agent still sees the earlier rounds. With `A2AT_SAMPLE_CLIENT_DB` set those sessions are stored in
-that same SQLite file and survive a restart; unset (tests, ephemeral runs) keeps them in memory.
-Either way `aclose()` deletes them when the run ends, and a client process deletes sessions older
-than 24 hours at startup — a normal run leaves nothing behind, so only a crash creates an orphan. If
-the database cannot be opened the provider logs a warning and falls back to memory: a decision never
-depends on the audit store.
+that same SQLite file and survive a restart; unset (tests, ephemeral runs) keeps them in memory. A
+durable session is the audit record of that negotiation — the prompts the agent received, its
+answers and the tool results it saw — and is kept for
+`A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` (default 7). The sweep runs at client startup and, at most
+hourly, before a run, so a long-lived process stays bounded. If the database cannot be opened the
+provider logs a warning and falls back to memory: a decision never depends on the audit store.
 
 The most common failure when connecting your own model is prose instead of JSON. The sample's
 `AdkDecisionProvider` first extracts a JSON object from a fence or surrounding text, then sends one
@@ -466,6 +467,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_TASK_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/task-status.sqlite3` | Absolute SQLite path of the server's persisted A2A Task store, also read by `GET /api/tasks`. |
 | `A2AT_SAMPLE_CLIENT_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/client-state.sqlite3` | Absolute SQLite path of the client's conversation/run/negotiation store and of the ADK decision-agent sessions. |
 | `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` | default `6` (>= 0) | Number of recent conversation turns injected into the next decision prompt and Task-T generation. |
+| `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | default `7` (>= 1) | Days a decision-agent session is kept as audit data before the startup/periodic sweep removes it. |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | default `127.0.0.1` / `8001` | Optional inbound A2A gateway bind and advertised AgentCard interface. |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0` (default), `1` | Register the gateway AgentCard with the registry center. |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | default `information` | Scenario used for an inbound gateway request. |
@@ -540,7 +542,7 @@ The suite is fully offline and deterministic (420 tests). What it covers:
 | `test_policy.py` | Every policy decision and round rule, including the abort at `maxRounds` and the error-code mapping. |
 | `test_negotiation_gate.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, and the real offline server. |
 | `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
-| `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout, durable session storage, cleanup, the in-memory fallback and the stale-session sweep. |
+| `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout, durable session storage, the in-memory fallback and the retention sweep. |
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
 | `test_web_ui.py` | `/api/meta`, `/api/tasks`, `/api/client/runs`, `/api/client/conversations`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server planner/tool spans, `trace.json`) and a real manual decision flow. |
@@ -633,11 +635,11 @@ The sample is deliberately a prototype. Before production:
   (`protocol/sqlite_task_store.py`) and client conversations/runs/negotiations
   (`protocol/client_store.py`). Production should use your database and migrations. Plans still
   live in a process-local store (`shared/ran_data._PLANS`) and push configs use
-  `InMemoryPushNotificationConfigStore`. The client ADK decision sessions are durable for the
-  lifetime of a run and deleted when it ends (stale ones are swept at startup), so they are not an
-  audit trail — the client store and the run transcript are. The LangGraph NMS execution uses no
-  persistent checkpointer; add one only if you need resume-after-restart semantics. The server has no
-  ADK session.
+  `InMemoryPushNotificationConfigStore`. Client ADK decision sessions are kept as audit data for
+  `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` (default 7) and then swept; they contain prompts and tool
+  results, so set the window from your audit and data-protection requirements, and size the client
+  database for it. The LangGraph NMS execution uses no persistent checkpointer; add one only if you
+  need resume-after-restart semantics. The server has no ADK session.
 - **Registry.** `registry/` is a mock. Use the deployment's real registry center or configure
   `direct` discovery with a stable AgentCard endpoint.
 - **Webhook security.** `A2AT_SAMPLE_WEBHOOK_TOKEN` is a static demo token. Use per-client secrets,

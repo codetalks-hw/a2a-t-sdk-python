@@ -47,7 +47,6 @@ from protocol.client_store import (
     read_conversation_detail,
     read_conversation_summaries,
 )
-from protocol.decision_provider import sweep_stale_sessions
 from protocol.sqlite_task_store import read_task_summaries
 from shared.config import (
     SUPPORTED_DISCOVERY_MODES,
@@ -179,8 +178,8 @@ def create_app(
     async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         del app
         await manager.mark_interrupted()
-        # A run deletes its decision sessions when it ends, so anything left is a crash orphan.
-        await sweep_stale_sessions(config.client_db_path)
+        # Apply the decision-session retention window before the first run of this process.
+        await manager.sweep_sessions()
         yield
         await manager.shutdown()
 

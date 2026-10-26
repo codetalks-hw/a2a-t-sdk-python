@@ -58,6 +58,7 @@ LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
 TASK_DB_ENV_KEY = "A2AT_SAMPLE_TASK_DB"
 CLIENT_DB_ENV_KEY = "A2AT_SAMPLE_CLIENT_DB"
 CLIENT_MEMORY_TURNS_ENV_KEY = "A2AT_SAMPLE_CLIENT_MEMORY_TURNS"
+ADK_SESSION_RETENTION_DAYS_ENV_KEY = "A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS"
 GATEWAY_HOST_ENV_KEY = "A2AT_SAMPLE_GATEWAY_HOST"
 GATEWAY_PORT_ENV_KEY = "A2AT_SAMPLE_GATEWAY_PORT"
 GATEWAY_REGISTER_ENV_KEY = "A2AT_SAMPLE_GATEWAY_REGISTER"
@@ -100,6 +101,9 @@ LLM_MAX_ATTEMPTS_UPPER_BOUND = 10
 
 #: Recent conversation turns injected into the next client run.
 DEFAULT_CLIENT_MEMORY_TURNS = 6
+
+#: Days the client keeps a decision-agent session as an audit record before the sweep removes it.
+DEFAULT_ADK_SESSION_RETENTION_DAYS = 7
 
 #: A2A gateway defaults (the client agent's inbound A2A surface).
 DEFAULT_GATEWAY_PORT = 8001
@@ -222,6 +226,8 @@ class SampleConfig:
         client_db_path: Absolute SQLite path of the client conversation/run store; ``None`` keeps
             the client state in memory only.
         client_memory_turns: Recent conversation turns injected into the next run's prompts.
+        adk_session_retention_days: Days a decision-agent session is kept as an audit record before
+            the sweep removes it.
         gateway_host: bind host of the optional inbound A2A gateway.
         gateway_port: bind port of the optional inbound A2A gateway.
         gateway_register: whether the gateway registers its AgentCard in the registry center.
@@ -253,6 +259,7 @@ class SampleConfig:
     task_db_path: str | None = None
     client_db_path: str | None = None
     client_memory_turns: int = DEFAULT_CLIENT_MEMORY_TURNS
+    adk_session_retention_days: int = DEFAULT_ADK_SESSION_RETENTION_DAYS
     gateway_host: str = DEFAULT_HOST
     gateway_port: int = DEFAULT_GATEWAY_PORT
     gateway_register: bool = False
@@ -348,6 +355,9 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         client_db_path=_optional_absolute_path(values, CLIENT_DB_ENV_KEY),
         client_memory_turns=_non_negative_int(
             values, CLIENT_MEMORY_TURNS_ENV_KEY, DEFAULT_CLIENT_MEMORY_TURNS
+        ),
+        adk_session_retention_days=_positive_int(
+            values, ADK_SESSION_RETENTION_DAYS_ENV_KEY, DEFAULT_ADK_SESSION_RETENTION_DAYS
         ),
         gateway_host=_env_value(values, GATEWAY_HOST_ENV_KEY, DEFAULT_HOST),
         gateway_port=_env_int(values, GATEWAY_PORT_ENV_KEY, DEFAULT_GATEWAY_PORT),

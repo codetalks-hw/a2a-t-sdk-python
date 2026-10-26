@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 from shared.adk_fake_model import FakeLlm
 from shared.config import (
+    ADK_SESSION_RETENTION_DAYS_ENV_KEY,
     CLIENT_DB_ENV_KEY,
     CLIENT_MEMORY_TURNS_ENV_KEY,
+    DEFAULT_ADK_SESSION_RETENTION_DAYS,
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     DEFAULT_LLM_MAX_ATTEMPTS,
     DEFAULT_LLM_TIMEOUT_SECONDS,
@@ -38,6 +40,7 @@ _ENV_KEYS = (
     TASK_DB_ENV_KEY,
     CLIENT_DB_ENV_KEY,
     CLIENT_MEMORY_TURNS_ENV_KEY,
+    ADK_SESSION_RETENTION_DAYS_ENV_KEY,
     GATEWAY_PORT_ENV_KEY,
     GATEWAY_REGISTER_ENV_KEY,
     GATEWAY_SCENARIO_ENV_KEY,
@@ -117,6 +120,7 @@ def test_client_db_gateway_and_planner_settings(tmp_path: Path) -> None:
             [
                 f"{CLIENT_DB_ENV_KEY}={tmp_path / 'client.sqlite3'}",
                 f"{CLIENT_MEMORY_TURNS_ENV_KEY}=3",
+                f"{ADK_SESSION_RETENTION_DAYS_ENV_KEY}=30",
                 f"{GATEWAY_PORT_ENV_KEY}=8101",
                 f"{GATEWAY_REGISTER_ENV_KEY}=yes",
                 f"{GATEWAY_SCENARIO_ENV_KEY}=target",
@@ -132,6 +136,7 @@ def test_client_db_gateway_and_planner_settings(tmp_path: Path) -> None:
 
     assert config.client_db_path == str(tmp_path / "client.sqlite3")
     assert config.client_memory_turns == 3
+    assert config.adk_session_retention_days == 30
     assert config.gateway_port == 8101
     assert config.gateway_register is True
     assert config.gateway_scenario == "target"
@@ -167,6 +172,7 @@ def test_planner_defaults_follow_the_adk_endpoint(tmp_path: Path) -> None:
     [
         (CLIENT_DB_ENV_KEY, "relative/client.sqlite3"),
         (CLIENT_MEMORY_TURNS_ENV_KEY, "-1"),
+        (ADK_SESSION_RETENTION_DAYS_ENV_KEY, "0"),
         (GATEWAY_REGISTER_ENV_KEY, "sometimes"),
         (GATEWAY_SCENARIO_ENV_KEY, "unknown"),
         (PLANNER_MAX_STEPS_ENV_KEY, "0"),
@@ -192,6 +198,7 @@ def test_missing_env_file_uses_offline_defaults(tmp_path: Path) -> None:
     assert config.llm_max_attempts == DEFAULT_LLM_MAX_ATTEMPTS == 1
     assert config.webhook_idle_timeout == DEFAULT_WEBHOOK_IDLE_TIMEOUT == 300
     assert DEFAULT_WEBHOOK_IDLE_TIMEOUT == int(DEFAULT_HTTP_TIMEOUT_SECONDS)
+    assert config.adk_session_retention_days == DEFAULT_ADK_SESSION_RETENTION_DAYS == 7
 
 
 def test_timeout_budgets_are_read_from_the_env_file(tmp_path: Path) -> None:

@@ -63,10 +63,12 @@ DECISION_RETRY_PROMPT = (
     "markdown fences, or prose outside the JSON."
 )
 
-#: Age after which a decision session is treated as an orphan of a crashed process.
-#: A run deletes its own sessions when it ends, so only a crash leaves one behind; the grace
-#: period keeps a startup sweep from deleting sessions that another live client process is using.
-DEFAULT_SESSION_SWEEP_TTL_SECONDS = 24 * 60 * 60
+#: Default retention of a decision session. Sessions are kept as an audit record of what the
+#: decision agent saw and answered; the sweep removes the ones older than this.
+DEFAULT_SESSION_RETENTION_DAYS = 7
+
+#: Seconds in one day (retention is configured in days, the sweep compares timestamps).
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 def build_session_service(db_path: str | None) -> tuple[BaseSessionService, bool]:
@@ -119,18 +121,20 @@ async def sweep_stale_sessions(
     db_path: str | None,
     *,
     app_name: str = CLIENT_APP_NAME,
-    ttl_seconds: float = DEFAULT_SESSION_SWEEP_TTL_SECONDS,
+    retention_days: float = DEFAULT_SESSION_RETENTION_DAYS,
 ) -> int:
-    """Delete decision sessions left behind by a crashed client process.
+    """Delete decision sessions older than the retention window.
 
-    A run deletes its sessions when it ends, so anything older than ``ttl_seconds`` is an orphan.
-    The age guard matters because the Web UI and the gateway may share one client database: a
-    startup must never delete the live sessions of the other process.
+    A session is the audit record of one negotiation: the prompts the decision agent received, what
+    it answered, and the tool results it saw. The client keeps them for ``retention_days`` and then
+    removes them, so the database grows with recent runs only. The age guard also matters because
+    the Web UI and the gateway may share one client database: one process must never delete the live
+    sessions of the other.
 
     Args:
         db_path: Absolute SQLite path of the client database, or ``None``.
         app_name: ADK application name owning the sessions.
-        ttl_seconds: Age after which a session counts as abandoned.
+        retention_days: How long a session is kept after its last update.
 
     Returns:
         Number of deleted sessions.
@@ -139,7 +143,7 @@ async def sweep_stale_sessions(
         return 0
     if not await asyncio.to_thread(_has_session_tables, db_path):
         return 0
-    cutoff = time.time() - ttl_seconds
+    cutoff = time.time() - retention_days * SECONDS_PER_DAY
     try:
         service = SqliteSessionService(str(db_path))
         listing = await service.list_sessions(app_name=app_name)
@@ -233,8 +237,8 @@ class AdkDecisionProvider:
 
     The provider keeps one ADK session per negotiation session id, so the agent sees the previous
     proposals and decisions of the same negotiation. Sessions live in the client database when one
-    is configured and in memory otherwise; either way :meth:`aclose` deletes them when the run ends,
-    so a long-running client process does not accumulate agent history. The structured
+    is configured and in memory otherwise; a durable session stays as an audit record for the
+    configured retention window (see :func:`sweep_stale_sessions`). The structured
     ``NegotiationDecision`` is read from the final event's ``output`` when ADK parsed it and from the
     final text content otherwise; in offline mode an unparseable output falls back to
     :data:`OFFLINE_FALLBACK_DECISION`.
@@ -296,8 +300,6 @@ class AdkDecisionProvider:
         self._user_request = user_request
         self._conversation_context = conversation_context
         self._durable_sessions = durable
-        self._session_ids: set[str] = set()
-        self._closed = False
 
     def set_conversation_context(self, conversation_context: str | None) -> None:
         """Set the recent-turn block used by the next decision prompts."""
@@ -312,29 +314,6 @@ class AdkDecisionProvider:
     def durable_sessions(self) -> bool:
         """Whether decision sessions are persisted in the client database."""
         return self._durable_sessions
-
-    async def aclose(self) -> None:
-        """Delete the negotiation sessions of this provider and drop the runner.
-
-        A session holds the full prompt/response history of the decision agent, so keeping it after
-        the run ends would grow the process (in-memory service) or the database without a reader.
-        The audit trail lives in the client store and the run transcript instead. Failures are
-        logged: a cleanup problem must not turn a finished run into a failed one.
-        """
-        if self._closed:
-            return
-        self._closed = True
-        session_ids = sorted(self._session_ids)
-        self._session_ids.clear()
-        for session_id in session_ids:
-            try:
-                await self._runner.session_service.delete_session(
-                    app_name=self._runner.app_name,
-                    user_id=self._user_id,
-                    session_id=session_id,
-                )
-            except Exception as exc:  # noqa: BLE001 - cleanup must not fail the run
-                _LOGGER.warning("decision session %s could not be deleted: %s", session_id, exc)
 
     async def respond(
         self,
@@ -362,7 +341,6 @@ class AdkDecisionProvider:
         session_id = self._session_id(propose.negotiation_id)
         # The runner creates the session on first use (``auto_create_session``) and reuses it on
         # later rounds, so the agent still sees the previous proposals of this negotiation.
-        self._session_ids.add(session_id)
 
         final_event = await self._run_turn(
             session_id,

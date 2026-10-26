@@ -204,7 +204,7 @@ class NegotiationDecisionProvider(Protocol):
 
 所有 Provider 都实现 `respond(propose, session) -> NegotiationDecision`。Provider 只决定**意图**；流程层负责生成协议内容，且从不改变 round。
 
-**ADK 会话存在哪。** `AdkDecisionProvider` 为每次协商保留一个 ADK 会话，让智能体看到前面几轮的提议。设置 `A2AT_SAMPLE_CLIENT_DB` 时，这些会话落在同一个 SQLite 文件里，进程重启后仍在；未设置（单元测试、临时运行）则留在内存。两种情况下 `aclose()` 都会在运行结束时删除会话，客户端进程启动时还会清理超过 24 小时的会话——正常结束的运行不留痕迹，只有崩溃才会遗留孤儿会话。数据库打不开时记一条警告并降级为内存：决策不依赖审计存储。
+**ADK 会话存在哪。** `AdkDecisionProvider` 为每次协商保留一个 ADK 会话，让智能体看到前面几轮的提议。设置 `A2AT_SAMPLE_CLIENT_DB` 时，这些会话落在同一个 SQLite 文件里，进程重启后仍在；未设置（单元测试、临时运行）则留在内存。落盘的会话就是这次协商的审计记录——模型收到的提示词、给出的回答与看到的工具结果——按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）保留。清扫在客户端启动时执行，之后在每次运行前最多每小时执行一次，长驻进程不会无限增长。数据库打不开时记一条警告并降级为内存：决策不依赖审计存储。
 
 自己接一个模型时，最容易出错的是“模型返回了散文而不是 JSON”。样例的 `AdkDecisionProvider` 会先尝试从围栏或正文中提取 JSON 对象，再追加一次纠正性追问；仍然失败才报错。你的实现至少要做到：
 
@@ -409,6 +409,7 @@ flowchart LR
 | `A2AT_SAMPLE_TASK_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/task-status.sqlite3` | 服务端持久化 A2A Task 存储的绝对 SQLite 路径，也由 `GET /api/tasks` 读取。 |
 | `A2AT_SAMPLE_CLIENT_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/client-state.sqlite3` | 客户端会话/运行/协商存储，以及 ADK 决策智能体会话的绝对 SQLite 路径。 |
 | `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` | 默认 `6`（>= 0） | 注入下一次决策提示词与 Task-T 生成的最近会话轮数。 |
+| `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | 默认 `7`（>= 1） | 决策智能体会话作为审计数据保留的天数，到期由启动/定期清扫删除。 |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | 默认 `127.0.0.1` / `8001` | 可选入站 A2A Gateway 的绑定与 AgentCard 对外接口。 |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0`（默认）、`1` | 是否把 Gateway AgentCard 注册到注册中心。 |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | 默认 `information` | 入站 Gateway 请求使用的场景。 |
@@ -456,7 +457,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_policy.py` | 所有策略决策与轮次规则，包括 `maxRounds` 时的 abort 与错误码映射。 |
 | `test_negotiation_gate.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理，以及真实离线服务端。 |
 | `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
-| `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时、会话落盘与清理、内存降级、过期会话清扫。 |
+| `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时、会话落盘、内存降级与保留期清扫。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
 | `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
@@ -535,7 +536,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 本样例刻意保持原型性质。生产化之前：
 
-- **持久化。** 本样例有两个 SQLite 存储：服务端 Task（`protocol/sqlite_task_store.py`）与客户端会话/运行/协商（`protocol/client_store.py`）。生产应使用自有数据库与迁移。方案仍保存在进程内存储（`shared/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话在一次运行内持久化，运行结束即删除（启动时清扫过期会话），因此它们不是审计数据——审计看客户端库与运行 transcript。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
+- **持久化。** 本样例有两个 SQLite 存储：服务端 Task（`protocol/sqlite_task_store.py`）与客户端会话/运行/协商（`protocol/client_store.py`）。生产应使用自有数据库与迁移。方案仍保存在进程内存储（`shared/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
 - **鉴权与 TLS。** 本样例的 A2A 服务端、入站 Gateway 与注册中心没有鉴权。应在网关或 A2A 层终止 TLS 并增加认证/授权；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。

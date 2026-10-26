@@ -60,7 +60,6 @@ from starlette.applications import Starlette
 from protocol.client_runtime import MODE_AUTO, build_client_runtime
 from protocol.client_service import RunConflictError, RunManager, RunState
 from protocol.client_store import SqliteClientStore
-from protocol.decision_provider import sweep_stale_sessions
 from protocol.transcript import DEFAULT_RUNS_DIR
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_gateway")
@@ -256,8 +255,8 @@ def build_gateway_app(
     async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         del app
         await service.mark_interrupted()
-        # A run deletes its decision sessions when it ends, so anything left is a crash orphan.
-        await sweep_stale_sessions(config.client_db_path)
+        # Apply the decision-session retention window before the first run of this process.
+        await service.sweep_sessions()
         yield
         await service.shutdown()
 
