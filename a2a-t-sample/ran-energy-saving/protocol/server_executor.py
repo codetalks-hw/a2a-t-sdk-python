@@ -2,13 +2,13 @@
 
 The server deliberately uses **no ADK agent**. After the negotiation gate accepts a Task-T, the
 request is handed to :class:`LangGraphTaskExecutor`, which runs a small ReAct graph over the sample's
-four OSS tools and publishes a standard A2A Task lifecycle. The protocol layer stays in
+four RAN NMS tools and publishes a standard A2A Task lifecycle. The protocol layer stays in
 :class:`NegotiationAgentExecutor`: it runs the gate first, enqueues standalone negotiation messages
 without creating a Task, and delegates only accepted work to the graph executor.
 
 The graph is sample business logic, not a protocol rule: it reads cell-001's profile, evaluates and
 applies a 30% saving plan in 00:00~06:00, and writes the report. A real deployment replaces the
-planner/tool set with its own OSS planning logic.
+planner/tool set with its own RAN NMS planning logic.
 
 Offline mode uses the deterministic :class:`~agents.server_agent.planner.ScriptedChatModel`; live
 mode uses ``ChatOpenAI``. Both run through the same graph and the same guarded tools.
@@ -85,7 +85,7 @@ _LOGGER = logging.getLogger("ran_energy_saving.server_executor")
 
 @dataclass(frozen=True)
 class ToolStep:
-    """One executed OSS tool step.
+    """One executed RAN NMS tool step.
 
     Attributes:
         name: Tool name.
@@ -167,8 +167,8 @@ def _emit_execution_span(context: RequestContext, task_id: str) -> str:
             side="server",
             kind="execution",
             stage=EXECUTOR_STAGE,
-            title="LangGraph OSS task execution",
-            purpose="Run the LangGraph ReAct planner over the OSS tools.",
+            title="RAN NMS task execution",
+            purpose="Run the LangGraph ReAct planner over the RAN NMS tools.",
             direction="internal",
         )
     )
@@ -195,7 +195,7 @@ def _emit_tool_span(
             kind="tool",
             stage=EXECUTOR_STAGE,
             title=step.name,
-            purpose="Guarded OSS tool call.",
+            purpose="Guarded RAN NMS tool call.",
             status="ok" if step.result.get("ok") is True else "error",
             duration_ms=step.duration_ms,
             detail={
@@ -262,7 +262,7 @@ def _emit_planner_span(
             kind="llm",
             stage=PLANNER_STAGE,
             title="Planner turn",
-            purpose="Choose the next guarded OSS tool call.",
+            purpose="Choose the next guarded RAN NMS tool call.",
             status="ok",
             duration_ms=round(duration_ms, 3),
             model=_model_id(model),

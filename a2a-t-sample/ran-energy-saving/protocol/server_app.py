@@ -2,7 +2,7 @@
 
 The module builds the AgentCard (declaring the Task-T and Negotiation-T extensions), the A2A
 request handler, the Starlette app and the registry registration. The server always runs the
-negotiation gate in front of the deterministic OSS executor, so all negotiation happens before a
+negotiation gate in front of the deterministic RAN NMS executor, so all negotiation happens before a
 Task is created and the server uses no ADK agent.
 
 Offline mode registers the traced scripted SDK provider and points the SDK at a temporary ``.env``

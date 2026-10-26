@@ -1,4 +1,4 @@
-"""LangChain tools and the business guard of the LangGraph OSS execution agent.
+"""LangChain tools and the business guard of the LangGraph RAN NMS execution agent.
 
 The pure tool functions live in :mod:`agents.server_agent.tools`; this module adapts them to
 LangChain tools and enforces the order the sample's plan requires. The guard is per execution:
@@ -87,7 +87,7 @@ def _same_plan(
 
 
 def build_execution_tools(guard: PlanGuard) -> list[BaseTool]:
-    """Build the four guarded OSS tools of one execution.
+    """Build the four guarded RAN NMS tools of one execution.
 
     Args:
         guard: per-execution order state.

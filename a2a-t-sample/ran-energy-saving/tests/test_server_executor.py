@@ -285,7 +285,7 @@ def test_registration_payload_is_a_registry_card_list() -> None:
 
     cards = cast(list[dict[str, object]], payload["agentCards"])
     assert len(cards) == 1
-    assert cards[0]["name"] == "RAN Domain Agent"
+    assert cards[0]["name"] == "RAN NMS Agent"
     assert "supportedInterfaces" in cards[0]
 
 

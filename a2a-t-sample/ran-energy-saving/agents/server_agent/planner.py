@@ -1,7 +1,7 @@
-"""LangGraph planner model and prompt of the RAN OSS execution agent.
+"""LangGraph planner model and prompt of the RAN NMS execution agent.
 
 The server executes an accepted Task with a ReAct-style LangGraph: the planner chooses the next
-OSS tool (and its parameters), the graph runs it, and the loop repeats until the planner stops. The
+RAN NMS tool (and its parameters), the graph runs it, and the loop repeats until the planner stops. The
 tools enforce the business preconditions, so a model cannot apply an unevaluated plan or generate a
 report without a plan id even if it ignores the prompt.
 
@@ -34,7 +34,7 @@ class PlannerError(RuntimeError):
 
 
 class ScriptedChatModel(BaseChatModel):
-    """Deterministic chat model that emits the sample's four OSS tool calls in order.
+    """Deterministic chat model that emits the sample's four RAN NMS tool calls in order.
 
     The model is stateless with respect to the graph messages except for its turn counter; the
     ``generate_energy_saving_report`` call reads the ``plan_id`` from the preceding
@@ -183,10 +183,11 @@ def describe_dataset() -> str:
 
 
 def build_system_prompt(*, dataset_catalog: str | None = None) -> str:
-    """Build the system prompt of the OSS execution planner."""
+    """Build the system prompt of the RAN NMS execution planner."""
     catalog = dataset_catalog if dataset_catalog is not None else describe_dataset()
     return (
-        "You are the RAN OSS execution agent. Execute the accepted energy-saving task using the "
+        "You are the RAN NMS (network management system) execution agent. Execute the "
+        "accepted energy-saving task using the "
         "provided tools.\n\n"
         "Dataset cells:\n"
         f"{catalog}\n\n"

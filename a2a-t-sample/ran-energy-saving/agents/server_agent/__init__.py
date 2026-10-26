@@ -1,1 +1,1 @@
-"""Deterministic OSS tools of the RAN energy-saving server (no ADK agent)."""
+"""Deterministic RAN NMS tools of the energy-saving server (no ADK agent)."""

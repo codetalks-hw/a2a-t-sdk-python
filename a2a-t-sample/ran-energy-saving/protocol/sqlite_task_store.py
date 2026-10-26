@@ -1,4 +1,4 @@
-"""Minimal SQLite-backed A2A ``TaskStore`` for the sample's OSS task history.
+"""Minimal SQLite-backed A2A ``TaskStore`` for the sample's RAN NMS task history.
 
 The server persists every Task transition in a single SQLite database; the Web UI process opens the
 same file read-only to render the task-status table. The implementation intentionally uses the

@@ -10,10 +10,13 @@ from __future__ import annotations
 from typing import Final
 
 #: AgentCard name registered in the registry.
-AGENT_CARD_NAME: Final[str] = "RAN Domain Agent"
+AGENT_CARD_NAME: Final[str] = "RAN NMS Agent"
 
 #: AgentCard description.
-AGENT_CARD_DESCRIPTION: Final[str] = "RAN Domain Agent"
+AGENT_CARD_DESCRIPTION: Final[str] = (
+    "RAN network management agent: validates and negotiates energy-saving tasks, then "
+    "evaluates, applies and reports energy-saving plans."
+)
 
 #: Provider organization of the sample card.
 AGENT_CARD_ORGANIZATION: Final[str] = "Huawei"

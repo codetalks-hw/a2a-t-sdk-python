@@ -1,4 +1,4 @@
-r"""LangGraph execution graph of the RAN OSS agent.
+r"""LangGraph execution graph of the RAN NMS agent.
 
 The graph is a minimal ReAct loop built from LangGraph primitives rather than the deprecated
 ``create_react_agent`` helper:
@@ -9,7 +9,7 @@ START -> agent --(tool calls)--> tools -> agent
 ```
 
 ``agent`` invokes the planner model with the system prompt and the accumulated messages; ``tools``
-runs the guarded OSS tools. Each accepted Task builds its own graph (the tools close over a
+runs the guarded RAN NMS tools. Each accepted Task builds its own graph (the tools close over a
 per-execution :class:`~agents.server_agent.langgraph_tools.PlanGuard`), so no shared state leaks
 between concurrent Tasks.
 """

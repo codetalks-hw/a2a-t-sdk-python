@@ -1,4 +1,4 @@
-"""Deterministic OSS tools of the RAN energy-saving server.
+"""Deterministic RAN NMS tools of the energy-saving server.
 
 Every tool is a deterministic function over the in-memory dataset of :mod:`shared.ran_data` and its
 process-local plan store. Tools never access the network and never raise for expected failures:
