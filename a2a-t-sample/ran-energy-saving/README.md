@@ -1,10 +1,22 @@
 ﻿# RAN Energy Saving Sample (A2A + A2A-T + ADK client)
 
+> **In one sentence:** the OSS asks for an energy-saving goal; the RAN network management system
+> negotiates to fill or correct it, then evaluates, applies and reports — automatically, with a
+> full audit trail.
+
+```mermaid
+flowchart LR
+    OSS["OSS/BSS<br/>client side<br/>requests energy saving"] -->|"A2A-T pre-task negotiation"| NMS["RAN network management<br/>validate · negotiate · evaluate · apply"]
+    NMS -->|"plan applied"| CELL["Cells / base stations"]
+    NMS -->|"task status + report"| OSS
+```
+
 A runnable reference for an agent-to-agent RAN (Radio Access Network) energy-saving service. A
 client agent and a RAN domain server agent agree on an energy-saving task through A2A-T
 `Negotiation-T`, then execute it through a standard A2A Task. Google ADK (Agent Development Kit)
-is used **only for the client decision agent**; the server is a plain A2A/A2A-T service with a
-LangGraph ReAct executor over deterministic OSS tools.
+is used **only for the client decision agent**; the server is the RAN network management system
+(NMS), a plain A2A/A2A-T service with a LangGraph ReAct execution layer over deterministic NMS
+tools.
 
 The sample is written for two audiences: teams building a **client agent** and teams building a
 **server agent**. Its primary purpose is the **client-side integration**: showing how one agent
@@ -22,12 +34,37 @@ addressing an unspecified "you".
 | ADK | Google Agent Development Kit: builds the client `LlmAgent`, its tools, `Runner`, and sessions. The server does not use ADK. |
 | RAN | Radio Access Network: the radio cells and their energy/load behaviour. |
 | SLA | Service Level Agreement: the guaranteed throughput floor a cell must keep. |
-| OSS / BSS | Operations / Business Support Systems: the server-side domain role, and a production integration target. The sample models the OSS task executor and its persisted Task store. |
+| OSS / BSS | Operations / Business Support Systems: the **client side** of this sample — the operator system that requests energy saving and decides the negotiation answer. |
+| NMS | Network Management System: the **execution side** of this sample — the RAN network management agent that validates and negotiates the task, then evaluates and applies the energy-saving plan on the cells. |
 | OCS | Online Charging System: a production charging integration target, not part of this sample. |
+
+## 0. Business view (30 seconds)
+
+**The story.** The OSS asks to save energy while keeping the guaranteed throughput target. That
+goal is often incomplete or contradictory: a missing value, overlapping time segments, or a target
+that cannot hold during a planned outage. The RAN network management system (NMS) therefore
+negotiates *before* creating the task: the OSS fills the gap, corrects the overlap, or accepts an
+alternative. Only then does the NMS evaluate and apply the plan and return a report.
+
+| Business pain | Without pre-task negotiation | In this sample |
+| --- | --- | --- |
+| Missing parameters | the task fails, or someone asks by ticket | the NMS asks; the OSS fills the value automatically |
+| Conflicting targets | a wrong plan may be applied | the conflict is corrected before any task exists |
+| Infeasible conditions | the apply fails and has to be rolled back | the NMS proposes an alternative; nothing runs until accepted |
+| Audit | emails and tickets | every proposal, decision and apply is recorded |
+
+| Business term | Technical term |
+| --- | --- |
+| OSS/BSS (client side) | A2A-T client |
+| RAN network management (execution side) | A2A-T server |
+| energy-saving task | `Task-T` |
+| pre-task negotiation | `Negotiation-T` |
+| propose / accept / reject / abort | `PROPOSE` / `ACCEPT` / `REJECT` / `ABORT` |
+| NMS execution | `LangGraphTaskExecutor` |
 
 ## 1. What this sample solves
 
-A client asks for RAN energy saving, for example "maximize energy saving while keeping a
+The OSS (client side) asks for RAN energy saving, for example "maximize energy saving while keeping a
 time-segmented guaranteed throughput target". The request often cannot be executed exactly as
 received:
 
@@ -36,10 +73,10 @@ received:
 - the request is infeasible under current conditions (a guaranteed rate during a long power
   outage).
 
-Instead of rejecting immediately, the server opens a **Negotiation-T** session. Server and client
+Instead of rejecting immediately, the NMS (server side) opens a **Negotiation-T** session. NMS and OSS
 exchange standalone A2A `Message`s — `Propose`, `Accept`, `Reject`, `Abort` — **before any Task
 exists**. When the client accepts, the negotiated `Task-T` prompt is handed to a **LangGraph ReAct
-planner**, which creates the Task, chooses and runs four guarded OSS tools (read the cell profile,
+planner**, which creates the Task, chooses and runs four guarded NMS tools (read the cell profile,
 evaluate the plan, apply the plan, write the report), and persists every Task transition in SQLite.
 
 The sample demonstrates:
@@ -47,8 +84,8 @@ The sample demonstrates:
 - four A2A-T performatives on a real A2A HTTP+JSON chain;
 - true multi-round negotiation (`maxRounds = 3`), including counter-proposals;
 - an ADK `LlmAgent` with tools and a structured `output_schema` on the client; the server has no
-  ADK model and runs a LangGraph ReAct planner over deterministic OSS tools;
-- an explicit integration seam between the pre-task negotiation gate and the task executor;
+  ADK model and runs a LangGraph ReAct planner over deterministic NMS tools;
+- an explicit integration seam between the pre-task negotiation gate and the NMS execution;
 - deterministic offline runs (scripted SDK LLM + client ADK fake model + scripted LangGraph planner)
   and a live mode against an OpenAI-compatible endpoint;
 - two SQLite stores: the server's A2A `TaskStore` and the client's conversation/run/negotiation
@@ -88,7 +125,7 @@ flowchart LR
         P[Deterministic policy<br/>propose / abort / execute / end]
         EX[NegotiationAgentExecutor]
         LG[LangGraph ReAct planner<br/>no ADK]
-        TOOLS[Four guarded OSS tools]
+        TOOLS[Four guarded NMS tools]
         DB[(SQLite TaskStore)]
         G --> P
         G --> EX
@@ -107,7 +144,7 @@ flowchart LR
 
 All negotiation happens **before the Task is created**: `Propose` / `Accept` / `Reject` /
 `Abort` are standalone `Message`s, not Task events. Only an accepted negotiation produces a
-Task, which the LangGraph executor creates and drives to `COMPLETED`; the server uses no ADK agent,
+Task, which the LangGraph NMS execution creates and drives to `COMPLETED`; the server uses no ADK agent,
 but its planner is an LLM in live mode.
 
 ### 2.1 Client-layer integration: A2A, A2A-T, and ADK
@@ -154,7 +191,7 @@ flowchart TB
         FACADE --> FLOW
         FLOW --> A2A
     end
-    SERVER["A2A-T server<br/>gate + LangGraph OSS executor<br/>+ SQLite TaskStore"]
+    SERVER["A2A-T server<br/>gate + LangGraph NMS execution<br/>+ SQLite TaskStore"]
     A2A <-->|"Message / Task events"| SERVER
 ```
 
@@ -181,7 +218,7 @@ sequenceDiagram
     participant P as Server policy
     participant S as A2ATServer (A2A-T)
     participant D as Client ADK agent
-    participant X as Server OSS executor
+    participant X as NMS execution (server)
 
     U->>R: request + scenario + mode
     R->>R: per-run SDK .env, discovery, A2A client, transport, provider
@@ -223,7 +260,7 @@ sequenceDiagram
     A->>G: HTTP+JSON
     G->>S: validate_accept_prompt_and_data_filling(...)
     G->>S: validate_task_prompt_and_data_filling(refilled)
-    G->>X: delegate to LangGraph OSS executor
+    G->>X: delegate to NMS execution (LangGraph)
     X->>X: create Task, run four tools, persist state
     X-->>A: SUBMITTED, WORKING, artifacts, COMPLETED
     A-->>F: stream / webhook events
@@ -236,7 +273,7 @@ events.** The A2A `Task` appears only after the gate validates the `Accept` and 
 #### Direct path: Task-T validates without negotiation
 
 If the initial Task-T is complete and valid, the gate never opens a negotiation; the same request
-continues into the LangGraph OSS executor. This is the Run Explorer case where phases 4 and 5
+continues into the LangGraph NMS execution. This is the Run Explorer case where phases 4 and 5
 stay empty.
 
 ```mermaid
@@ -246,13 +283,13 @@ sequenceDiagram
     participant T as A2ATClient
     participant A as a2a-sdk
     participant G as Server gate
-    participant X as Server OSS executor
+    participant X as NMS execution (server)
     F->>T: generate_task_prompt_from_text(...)
     T-->>F: Task-T prompt
     F->>A: Message(Task-T metadata)
     A->>G: HTTP+JSON
     G->>G: validate_task_prompt_and_data_filling = OK
-    G->>X: delegate to LangGraph OSS executor
+    G->>X: delegate to NMS execution (LangGraph)
     X-->>A: Task events ... COMPLETED
     A-->>F: events
 ```
@@ -364,7 +401,7 @@ flowchart LR
     subgraph RIGHT["B · ADK + A2A-T (this sample)"]
         direction TB
         R1["Step 1 · Define agent<br/>ADK LlmAgent (client decisions)<br/>output_schema NegotiationDecision"]
-        R2["Step 2 · Add A2A-T layer<br/>A2ATClient/Server + NegotiationGate<br/>LangGraph OSS executor (no ADK)"]
+        R2["Step 2 · Add A2A-T layer<br/>A2ATClient/Server + NegotiationGate<br/>LangGraph NMS execution (no ADK)"]
         R3["Step 3 · Negotiation-aware interaction<br/>Task-T → Propose/Accept/Counter<br/>Task only after Accept"]
         R1 --> R2 --> R3
     end
@@ -396,7 +433,7 @@ flowchart LR
 | Inbound surface | ADK A2A server endpoint | Optional standalone A2A gateway (`ClientGatewayExecutor`) | Rewrite |
 
 The important boundary: A2A's transport, AgentCard and Task types are reused unchanged. A2A-T adds
-the pre-task protocol and structured prompts; the server executor is a LangGraph ReAct graph, not
+the pre-task protocol and structured prompts; the NMS execution is a LangGraph ReAct graph, not
 an ADK agent. The client ADK agent only produces a `NegotiationDecision`; it never writes protocol
 metadata or rounds.
 
@@ -454,7 +491,7 @@ the final report artifact. Manual decisions are disabled on the gateway path.
 | --- | --- |
 | [`run_demo.py`](run_demo.py) | Multi-process launcher: starts registry, server and (with `--gateway`) the inbound A2A gateway in the background, runs the CLI client in the foreground (or serves the Web UI with `--ui`), and stops the children afterwards. |
 | [`env.example`](env.example) | Unified offline-ready configuration template. |
-| [`agents/server_agent/`](agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure OSS tools). No ADK. |
+| [`agents/server_agent/`](agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure NMS tools). No ADK. |
 | [`agents/client_agent/`](agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |
 | [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
@@ -601,7 +638,7 @@ on both sides, and `A2AT_SAMPLE_PLANNER_*` (defaulting to the ADK endpoint/model
 LangGraph planner. All must point at the same OpenAI-compatible endpoint; `env.example` defaults
 to the local proxy at `http://127.0.0.1:31943/v1`. The command runs end to end, but the negotiation
 sequence and the planner's tool choice are **model-dependent**: the SDK's LLM-backed extraction and
-semantic validation decide what reaches the server, and the planner chooses the OSS plan. The tools
+semantic validation decide what reaches the server, and the planner chooses the energy-saving plan. The tools
 remain deterministic and guarded. Offline mode is the reproducible reference used by the tests and
 by §4. A live run should be treated as an integration smoke, not as an acceptance test.
 
@@ -665,7 +702,7 @@ three tabs and never pushes the explorer off the first screen:
 
 | Tab | Source | Columns |
 | --- | --- | --- |
-| **OSS tasks** | `GET /api/tasks` → `runs/task-status.sqlite3` | task id, state, context, update time, report summary, run id |
+| **NMS tasks** | `GET /api/tasks` → `runs/task-status.sqlite3` | task id, state, context, update time, report summary, run id |
 | **Client runs** | `GET /api/client/runs` → `runs/client-state.sqlite3` | run id, conversation, scenario, status, final state, start time, request |
 | **Conversations** | `GET /api/client/conversations` | conversation, turns, runs, updated |
 
@@ -715,7 +752,7 @@ curl -X POST http://127.0.0.1:8001/message:send \
 | 3 | Task validation | First A2A send, server gate validation, negotiation opened or task accepted directly. |
 | 4 | Negotiation | Per round: server propose, decision request, decision, response, server validation. |
 | 5 | Resolution | Accepted/rejected/aborted/ended, refilled Task-T and agreed parameters. |
-| 6 | Execution | Deterministic OSS tool calls, intermediate artifacts and `WORKING` status. |
+| 6 | NMS execution | Deterministic NMS tool calls, intermediate artifacts and `WORKING` status. |
 | 7 | Report | Report artifact payload and `COMPLETED`. |
 | 8 | Done | Final state, transcript and summary. |
 
@@ -801,13 +838,13 @@ python run_demo.py --ui --mode manual --scenario target --ui-port 8080
 All sequences are initiated by the server. `S` = server, `C` = client; parentheses show the round.
 The expected sequences are asserted by `tests/test_scenarios.py` and `tests/test_client_flow.py`.
 
-| Scenario | Trigger | Negotiation sequence | Final state |
-| --- | --- | --- | --- |
-| `information` | The Task-T request omits the time-segmented guaranteed throughput target (`content.param_missing`). | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
-| `target` | The guaranteed-throughput target has overlapping time segments (`content.value_not_allowed`). | `S:Propose(1)` → `C:Propose(1)` (counter) → `S:Propose(2)` (revision) → `C:Accept(2)` | Task `COMPLETED` + report (`task_completed`) |
-| `feasibility` | A guaranteed rate conflicts with an 18-hour power outage (`content.rule_violation`). | `S:Propose(1)` (alternative plan) → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
-| `reject` | The client cannot provide the missing throughput target. | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | No Task (`no_task_negotiation_ended`) |
-| `abort` | The client keeps counter-proposing a plan the policy cannot accept. | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | No Task (`no_task_negotiation_aborted`) |
+| Scenario | Business reading | Trigger | Negotiation sequence | Final state |
+| --- | --- | --- | --- | --- |
+| `information` | Missing value: the NMS asks, the OSS fills it | The Task-T request omits the time-segmented guaranteed throughput target (`content.param_missing`). | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
+| `target` | Conflicting segments: correct the overlap before executing | The guaranteed-throughput target has overlapping time segments (`content.value_not_allowed`). | `S:Propose(1)` → `C:Propose(1)` (counter) → `S:Propose(2)` (revision) → `C:Accept(2)` | Task `COMPLETED` + report (`task_completed`) |
+| `feasibility` | Infeasible conditions: the NMS proposes an alternative | A guaranteed rate conflicts with an 18-hour power outage (`content.rule_violation`). | `S:Propose(1)` (alternative plan) → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
+| `reject` | The OSS cannot provide the value: the negotiation ends | The client cannot provide the missing throughput target. | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | No Task (`no_task_negotiation_ended`) |
+| `abort` | No convergence: the NMS aborts after the round budget | The client keeps counter-proposing a plan the policy cannot accept. | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | No Task (`no_task_negotiation_aborted`) |
 
 Notes:
 
@@ -822,9 +859,9 @@ Notes:
   implemented in `NEGOTIATION_KIND_BY_ERROR_CODE` in
   [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py).
 
-## 5. Client ADK agent and LangGraph server executor
+## 5. Client ADK agent and RAN NMS execution
 
-### Server: LangGraph ReAct executor (no ADK)
+### RAN NMS execution: LangGraph ReAct (no ADK)
 
 The server has no `LlmAgent`, no ADK `Runner`, and no ADK session. After the gate approves a
 Task-T, [`protocol/server_executor.py`](protocol/server_executor.py) runs a small LangGraph ReAct
@@ -833,7 +870,7 @@ graph:
 ```mermaid
 flowchart LR
     START --> A[agent<br/>planner model]
-    A -- tool_calls --> T[tools<br/>four guarded OSS tools]
+    A -- tool_calls --> T[tools<br/>four guarded NMS tools]
     T --> A
     A -- no tool calls --> END
 ```
@@ -863,7 +900,7 @@ planner may correct itself within the step budget. Expected business failures (u
 malformed input, infeasible plan) return other structured `error_code` values. If the planner
 cannot produce a successful report, the Task ends `FAILED` instead of publishing an empty report.
 
-The executor publishes a normal A2A Task lifecycle with `TaskUpdater`:
+The NMS execution publishes a normal A2A Task lifecycle with `TaskUpdater`:
 
 1. enqueue `Task(SUBMITTED)` with the request history;
 2. `start_work()` -> `WORKING`;
@@ -906,17 +943,17 @@ concrete cell, window, or rate. For the `information` scenario the prompt asks i
 `target` scenario remains the clearest multi-round example. If no negotiation opens, the client
 decision agent is never invoked and therefore has no tool calls.
 
-### Executor and persistence integration
+### NMS execution and persistence integration
 
 `NegotiationAgentExecutor` runs the gate first. A short-circuit outcome enqueues exactly one
 standalone message (a negotiation `Propose`/`Abort`, or the plain end message) and creates no Task;
 otherwise it delegates to `LangGraphTaskExecutor`. The A2A-T metadata that the old ADK
 `request_converter` and `ExecuteInterceptor` used to inject is now written directly by the
-LangGraph executor:
+LangGraph NMS execution:
 
 - the gate rewrites `context.message` to the agreed Task-T prompt;
 - the planner prompt carries the accepted Task-T and the accepted negotiation context;
-- the executor stamps the report artifact and terminal status with `Task-T/v1`, `templateUri`,
+- the NMS execution stamps the report artifact and terminal status with `Task-T/v1`, `templateUri`,
   `negotiationContext` and the sample run id;
 - `TaskUpdater` emits the standard A2A status/artifact events, and the SQLite `TaskStore` persists
   each transition.
@@ -924,9 +961,8 @@ LangGraph executor:
 ### What a customer replaces
 
 The four tools, `PlanGuard`, and the planner prompt are the server business layer. A customer
-implementing its own RAN service replaces the tool bodies with calls to its OSS/BSS/network-
-management systems, replaces the sample prompt/planner model with its own policy, and keeps the
-graph shell, the A2A executor lifecycle, and the TaskStore. On the client, replace the two ADK
+implementing its own RAN service replaces the tool bodies with calls to its own network-management systems, replaces the sample prompt/planner model with its own policy, and keeps the
+graph shell, the A2A task lifecycle, and the TaskStore. On the client, replace the two ADK
 tools, the instruction, and the conversation/turn schema. The A2A-T gate, policy state machine,
 deterministic flow, client service, gateway, and TaskStore shapes stay.
 
@@ -955,7 +991,7 @@ not a reliable signal because `RequestContext` generates one in its constructor)
 2. A validation failure whose first error code maps to a negotiation type becomes the initial
    `Propose`; an unmappable failure becomes a terminal `REJECTED` Task with structured errors.
 3. An `Accept` is validated with `validate_accept_prompt_and_data_filling`; the agreed Task-T
-   prompt is then validated again and handed to the LangGraph executor.
+   prompt is then validated again and handed to the LangGraph NMS execution.
 4. A `Reject` or `Abort` is terminal: the gate answers with a plain message and creates no Task.
 5. A client counter-`Propose` is validated with `validate_propose_prompt_and_data_filling`, then
    answered by the policy.
@@ -1060,7 +1096,7 @@ sample business content or demo-only machinery.
 | `protocol/sqlite_task_store.py` (`SqliteTaskStore`) | KEEP | Minimal durable A2A TaskStore; swap for your database in production. |
 | `protocol/server_app.py` (`build_agent_card`, `build_server_runtime`) | KEEP | Assembly; replace card metadata/provider URL and TaskStore. |
 | `protocol/negotiation_policy.py` (`decide` and rule helpers) | REPLACE the rules, KEEP the shape | The state machine is reusable; the business rules and proposal texts are sample-specific. |
-| `agents/server_agent/tools.py` (four tools) | **REPLACE** | Wire real RAN/OSS/BSS/network-management operations. |
+| `agents/server_agent/tools.py` (four tools) | **REPLACE** | Wire real RAN network-management operations. |
 | `shared/ran_data.py`, `resources/ran_data/cells.json` | **REPLACE** | In-memory demo data and plan store. |
 
 ### Both sides
@@ -1174,7 +1210,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (419 tests). What it covers:
+The suite is fully offline and deterministic (420 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -1260,7 +1296,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 Requires a reachable OpenAI-compatible endpoint. The command is exercised manually; it is not part
 of the automated suite because output depends on the model. The client negotiation is model-driven
-and the server planner chooses the OSS tool calls; the tools and their order guards are
+and the server planner chooses the NMS tool calls; the tools and their order guards are
 deterministic. Offline mode remains the authoritative, reproducible demonstration.
 
 Each run writes `runs/<timestamp>-<scenario>.json` and `.md` (gitignored). The Markdown file
@@ -1275,7 +1311,7 @@ The sample is deliberately a prototype. Before production:
   (`protocol/client_store.py`). Production should use your database and migrations. Plans still
   live in a process-local store (`shared/ran_data._PLANS`), push configs use
   `InMemoryPushNotificationConfigStore`, the client ADK decision agent uses `InMemorySessionService`,
-  and the LangGraph executor uses no persistent checkpointer. Replace the plan/session stores and add
+  and the LangGraph NMS execution uses no persistent checkpointer. Replace the plan/session stores and add
   a durable graph checkpointer only if you need resume-after-restart semantics. The server has no
   ADK session.
 - **Registry.** `registry/` is a mock. Use the deployment's real registry center or configure
