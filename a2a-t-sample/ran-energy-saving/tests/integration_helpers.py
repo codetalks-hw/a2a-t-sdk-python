@@ -25,8 +25,11 @@ from typing import Any
 import uvicorn
 from a2a.client.client import ClientCallContext
 from a2a.types import SendMessageRequest
+from demo.agents.server_agent.factory import build_server_agent
+from demo.composition import build_demo_negotiation_policy, build_demo_runtime, install_offline_provider
+from demo.scenario import LANGUAGE_EN, ExpectedStep
 from protocol.client_flow import ClientFlowResult, ClientTransport
-from protocol.client_runtime import MODE_AUTO, build_client_runtime
+from protocol.client_runtime import MODE_AUTO
 from protocol.decision_provider import AdkDecisionProvider
 from protocol.messages import is_negotiation_message, metadata_to_dict, parse_negotiation_context
 from protocol.server_app import ServerRuntime, build_server_runtime
@@ -36,7 +39,6 @@ from shared.config import (
     TRANSPORT_SSE,
     SampleConfig,
 )
-from shared.scenario import LANGUAGE_EN, ExpectedStep
 
 #: Budgets of the in-process server: bind/publication and graceful shutdown.
 SERVER_START_TIMEOUT_SECONDS: float = 10.0
@@ -99,7 +101,12 @@ def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]
     that runtime does not own a cleanup hook.
     """
     env_dirs_before = _server_env_dirs()
-    runtime = build_server_runtime(config=config)
+    runtime = build_server_runtime(
+        agent_factory=build_server_agent,
+        policy=build_demo_negotiation_policy(),
+        install_offline_provider=install_offline_provider,
+        config=config,
+    )
     uvicorn_server = uvicorn.Server(
         uvicorn.Config(
             runtime.app,
@@ -273,7 +280,7 @@ async def run_scenario_flow(
     Raises:
         AssertionError: when the auto mode silently used a different decision provider.
     """
-    client = await build_client_runtime(config, scenario_name, MODE_AUTO, transport)
+    client = await build_demo_runtime(config, scenario_name, MODE_AUTO, transport, config.discovery)
     assert isinstance(client.provider, AdkDecisionProvider), (
         "The auto mode must keep the ADK runner in the decision loop"
     )

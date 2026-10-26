@@ -1,0 +1,70 @@
+"""Composition root helpers that wire the demo assets into the core runtime.
+
+Only this module (and the entry points that import it) may combine ``protocol`` with demo assets.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from protocol.client_runtime import build_client_runtime
+from protocol.run_spec import RunSpec
+from shared.config import SampleConfig
+
+
+def offline_model_factory(run_spec: RunSpec) -> Any:
+    """Build the deterministic ADK model carrying one run's scripted decisions."""
+    from demo.adk_fake_model import build_client_script, build_fake_model
+
+    return build_fake_model((build_client_script(run_spec.scripted_decisions),))
+
+
+def build_demo_negotiation_policy() -> Any:
+    """Return the negotiation policy bound to the demonstration plan evaluator."""
+    from functools import partial
+
+    from protocol.negotiation_policy import decide
+
+    from demo.plan_evaluator import RanDataPlanEvaluator
+
+    return partial(decide, evaluator=RanDataPlanEvaluator())
+
+
+def install_offline_provider() -> None:
+    """Install the deterministic SDK structured-call routing used in offline mode."""
+    from demo.scripted_llm import register_scripted_provider
+    from demo.traced_scripted import register_traced_scripted_provider
+
+    register_scripted_provider()
+    register_traced_scripted_provider()
+
+
+async def build_demo_runtime(
+    config: SampleConfig,
+    scenario: str,
+    mode: str,
+    transport: str,
+    discovery: str,
+    *,
+    env_path: Path | None = None,
+    trace_sink: Callable[[dict[str, object]], None] | None = None,
+) -> Any:
+    """Build one client runtime with the demo catalog and offline assets."""
+    from demo.agents.client_agent.agent import build_client_agent
+    from demo.catalog import DemoRunCatalog
+
+    return await build_client_runtime(
+        replace(config, discovery=discovery),
+        scenario,
+        mode,
+        transport,
+        catalog=DemoRunCatalog(),
+        env_path=env_path,
+        trace_sink=trace_sink,
+        offline_model_factory=offline_model_factory,
+        install_offline_provider=install_offline_provider,
+        client_agent_factory=build_client_agent,
+    )

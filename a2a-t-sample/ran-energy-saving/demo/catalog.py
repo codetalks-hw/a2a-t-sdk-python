@@ -1,0 +1,56 @@
+"""Scenario catalog and client policy of the demonstration.
+
+The core only knows :class:`protocol.run_spec.RunSpec`; this module resolves one of the sample
+scenarios to it, including the business values filled into an accepted Task-T.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from protocol.run_spec import ClientPolicy, ExpectedStep, RunSpec
+from shared.run_constants import LANGUAGE_ZH
+
+from demo.scenario import (
+    SUPPORTED_SCENARIO_NAMES,
+    Scenario,
+    accept_confirmation_text,
+    accept_filled_params,
+    get_scenario,
+    resolve_user_request,
+)
+
+#: Business values of the sample OSS: the negotiated Task-T parameters and its accept text.
+DEMO_CLIENT_POLICY: ClientPolicy = ClientPolicy(
+    filled_params=accept_filled_params,
+    accept_text=accept_confirmation_text,
+)
+
+
+def to_run_spec(scenario: Scenario, *, language: str = LANGUAGE_ZH) -> RunSpec:
+    """Convert one demonstration scenario into the core run specification."""
+    return RunSpec(
+        name=scenario.name,
+        description=scenario.description,
+        user_request=resolve_user_request(scenario, language),
+        scripted_decisions=tuple(scenario.scripted_client_decisions),
+        expected_sequence=tuple(
+            ExpectedStep(actor=step.actor, performative=step.performative, round=step.round)
+            for step in scenario.expected_sequence
+        ),
+        policy=DEMO_CLIENT_POLICY,
+    )
+
+
+@dataclass(frozen=True)
+class DemoRunCatalog:
+    """Catalog over the five canned scenarios of :mod:`demo.scenario`."""
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Supported scenario names, in display order."""
+        return SUPPORTED_SCENARIO_NAMES
+
+    def spec(self, name: str, *, language: str = LANGUAGE_ZH) -> RunSpec:
+        """Resolve one scenario name to its run specification."""
+        return to_run_spec(get_scenario(name), language=language)

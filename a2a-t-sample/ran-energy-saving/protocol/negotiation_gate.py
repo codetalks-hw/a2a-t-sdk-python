@@ -37,7 +37,7 @@ from a2a_t.core.metadata import (
 )
 from a2a_t.core.validation_pipeline import FilledParamData
 from shared.logging_setup import log_context
-from shared.scenario import MAX_ROUNDS
+from shared.run_constants import MAX_ROUNDS
 from shared.task_schema import TASK_PARAM_SCHEMA
 from shared.trace import trace_stage
 
@@ -177,6 +177,7 @@ class NegotiationGate:
         task_template_uri: str = TASK_TEMPLATE_URI,
         task_schema: Mapping[str, object] | None = None,
         logger: logging.Logger | None = None,
+        policy: Callable[[NegotiationState], PolicyDecision] | None = None,
     ) -> None:
         """Create one gate.
 
@@ -186,12 +187,15 @@ class NegotiationGate:
             task_template_uri: Task-T template the accepted prompt must address.
             task_schema: caller parameter schema of the Task-T validation.
             logger: optional logger; defaults to the module logger.
+            policy: decision function of the negotiation state machine; a deployment injects one
+                bound to its plan evaluator.
         """
         self._prompt_server = prompt_server
         self._max_rounds = max_rounds
         self._task_template_uri = task_template_uri
         self._task_schema: Mapping[str, object] = task_schema if task_schema is not None else TASK_PARAM_SCHEMA
         self._logger = logger or _LOGGER
+        self._policy = policy or decide
 
     async def handle(self, context: RequestContext) -> GateOutcome:
         """Classify one inbound request and return the gate outcome.
@@ -260,7 +264,7 @@ class NegotiationGate:
                 max_rounds=self._max_rounds,
                 missing_items=_missing_slot_names(exc.errors),
             )
-            return await self._emit_policy_decision(context_id, decide(state))
+            return await self._emit_policy_decision(context_id, self._policy(state))
         except (A2ATError, ValueError) as exc:
             return GateOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
 
@@ -279,7 +283,7 @@ class NegotiationGate:
                 "Task-T validation passed semantically but required fields are missing: %s",
                 ", ".join(missing_required),
             )
-            return await self._emit_policy_decision(context_id, decide(state))
+            return await self._emit_policy_decision(context_id, self._policy(state))
 
         data = filled.data if isinstance(filled.data, Mapping) else {}
         deterministic_kind = _deterministic_negotiation_kind(data)
@@ -293,7 +297,7 @@ class NegotiationGate:
                 "Task-T validation passed semantically but the sample detected a %s conflict",
                 deterministic_kind.value,
             )
-            return await self._emit_policy_decision(context_id, decide(state))
+            return await self._emit_policy_decision(context_id, self._policy(state))
 
         self._rewrite_task_prompt(context, prompt)
         self._logger.info("initial Task-T validated; handing the request to the deterministic executor")
@@ -442,7 +446,7 @@ class NegotiationGate:
             max_rounds=session.max_rounds,
             inbound=InboundDecision(performative=NegotiationPerformative.PROPOSE, sample_proposal=sample),
         )
-        return await self._emit_policy_decision(context_id, decide(state))
+        return await self._emit_policy_decision(context_id, self._policy(state))
 
     # ------------------------------------------------------------------
     # Shared helpers

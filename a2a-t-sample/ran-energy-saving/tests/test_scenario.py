@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from shared.scenario import (
+from demo.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
     FINAL_STATE_TASK_COMPLETED,
-    MAX_ROUNDS,
     SCENARIOS,
-    SUPPORTED_LANGUAGES,
     SUPPORTED_SCENARIO_NAMES,
     ExpectedStep,
     accept_filled_params,
     resolve_user_request,
 )
+from shared.run_constants import MAX_ROUNDS, SUPPORTED_LANGUAGES
 from shared.task_schema import TASK_PARAM_SCHEMA
 
 

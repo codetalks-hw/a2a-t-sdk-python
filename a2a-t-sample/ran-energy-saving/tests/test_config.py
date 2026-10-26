@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from shared.adk_fake_model import FakeLlm
+from demo.adk_fake_model import FakeLlm, build_fake_model
 from shared.config import (
     ADK_SESSION_RETENTION_DAYS_ENV_KEY,
     CLIENT_DB_ENV_KEY,
@@ -29,9 +29,9 @@ from shared.config import (
     PLANNER_TIMEOUT_ENV_KEY,
     TASK_DB_ENV_KEY,
     SampleConfig,
-    build_adk_model,
     load_config,
 )
+from shared.model_factory import build_adk_model
 
 _ENV_KEYS = (
     HTTP_TIMEOUT_ENV_KEY,
@@ -174,7 +174,6 @@ def test_planner_defaults_follow_the_adk_endpoint(tmp_path: Path) -> None:
         (CLIENT_MEMORY_TURNS_ENV_KEY, "-1"),
         (ADK_SESSION_RETENTION_DAYS_ENV_KEY, "0"),
         (GATEWAY_REGISTER_ENV_KEY, "sometimes"),
-        (GATEWAY_SCENARIO_ENV_KEY, "unknown"),
         (PLANNER_MAX_STEPS_ENV_KEY, "0"),
     ],
 )
@@ -251,9 +250,14 @@ def test_invalid_model_mode_is_rejected(tmp_path: Path) -> None:
 
 
 def test_build_adk_model_returns_fake_model_offline(offline_config: SampleConfig) -> None:
-    model = build_adk_model(offline_config)
+    model = build_adk_model(offline_config, offline_model_factory=lambda: build_fake_model())
 
     assert isinstance(model, FakeLlm)
+
+
+def test_build_adk_model_requires_an_offline_factory(offline_config: SampleConfig) -> None:
+    with pytest.raises(ValueError, match="offline_model_factory"):
+        build_adk_model(offline_config)
 
 
 def test_build_adk_model_rejects_empty_live_model_name(offline_config: SampleConfig) -> None:

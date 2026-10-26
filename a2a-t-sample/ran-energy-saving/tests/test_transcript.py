@@ -10,6 +10,7 @@ from a2a_t.core.metadata import (
     NEGOTIATION_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
+from demo.scenario import FINAL_STATE_TASK_COMPLETED
 from protocol.client_flow import ClientFlowResult
 from protocol.transcript import (
     DIRECTION_CLIENT_TO_SERVER,
@@ -18,7 +19,6 @@ from protocol.transcript import (
     NegotiationTranscript,
 )
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import FINAL_STATE_TASK_COMPLETED
 
 CONTEXT_ID = "ctx-transcript"
 

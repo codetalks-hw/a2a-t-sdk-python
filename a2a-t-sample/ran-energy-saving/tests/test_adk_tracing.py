@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import shared.adk_tracing as adk_tracing
+from demo.adk_fake_model import FakeScript, FakeToolCall, FakeTurn, build_fake_model
 from google.adk.agents import LlmAgent
 from google.adk.apps import App
 from google.adk.models._capabilities import LlmCapabilities
@@ -16,7 +17,6 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
-from shared.adk_fake_model import FakeScript, FakeToolCall, FakeTurn, build_fake_model
 from shared.adk_tracing import (
     SHARED_LINKER,
     SpanLinker,

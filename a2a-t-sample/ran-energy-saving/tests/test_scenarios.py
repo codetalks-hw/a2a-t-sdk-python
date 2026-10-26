@@ -20,6 +20,14 @@ from collections.abc import Mapping, Sequence
 import pytest
 from a2a.types import TaskState
 from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI
+from demo.scenario import (
+    FINAL_STATE_NEGOTIATION_ABORTED,
+    FINAL_STATE_NEGOTIATION_ENDED,
+    FINAL_STATE_TASK_COMPLETED,
+    SUPPORTED_SCENARIO_NAMES,
+    Scenario,
+    get_scenario,
+)
 from integration_helpers import (
     free_tcp_port,
     offline_direct_config,
@@ -28,14 +36,6 @@ from integration_helpers import (
 )
 from protocol.client_flow import ClientFlowResult
 from protocol.messages import metadata_to_dict, parse_negotiation_context
-from shared.scenario import (
-    FINAL_STATE_NEGOTIATION_ABORTED,
-    FINAL_STATE_NEGOTIATION_ENDED,
-    FINAL_STATE_TASK_COMPLETED,
-    SUPPORTED_SCENARIO_NAMES,
-    Scenario,
-    get_scenario,
-)
 
 #: Client decision action matching one expected performative.
 _ACTION_BY_PERFORMATIVE: dict[str, str] = {

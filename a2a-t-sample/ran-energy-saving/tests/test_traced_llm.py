@@ -10,8 +10,9 @@ import pytest
 from a2a_t.llm.errors import LLMRuntimeError
 from a2a_t.llm.models import LLMClientConfig
 from a2a_t.llm.providers.openai import OpenAIClient
+from demo.scripted_llm import ScriptedLLMClient
+from demo.traced_scripted import TracedScriptedClient, register_traced_scripted_provider
 from shared.adk_tracing import serialize_llm_response
-from shared.scripted_llm import ScriptedLLMClient
 from shared.trace import (
     PHASE_NEGOTIATION,
     PHASE_RESOLUTION,
@@ -27,7 +28,6 @@ from shared.traced_llm import (
     TRACED_OPENAI_PROVIDER,
     TRACED_SCRIPTED_PROVIDER,
     TracedOpenAIClient,
-    TracedScriptedClient,
     is_traced_provider_registered,
     register_traced_providers,
     sdk_provider_name,
@@ -102,6 +102,8 @@ def _sink(spans: list[dict[str, object]]) -> Any:
 def test_register_traced_providers_is_idempotent_and_selects_by_mode() -> None:
     register_traced_providers()
     register_traced_providers()
+    register_traced_scripted_provider()
+    register_traced_scripted_provider()
 
     assert is_traced_provider_registered(TRACED_OPENAI_PROVIDER)
     assert is_traced_provider_registered(TRACED_SCRIPTED_PROVIDER)

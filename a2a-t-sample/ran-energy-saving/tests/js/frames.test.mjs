@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-import { RunStore } from "../../web/static/js/store.js";
+import { RunStore } from "../../demo/web/static/js/store.js";
 
 const framesPath = process.argv[2];
 assert.ok(framesPath, "usage: node tests/js/frames.test.mjs <frames.json>");

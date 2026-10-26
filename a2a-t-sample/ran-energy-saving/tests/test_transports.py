@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 from a2a.types import TaskState
+from demo.scenario import SCENARIO_INFORMATION, SCENARIO_TARGET, get_scenario
 from integration_helpers import (
     free_tcp_port,
     offline_direct_config,
@@ -22,7 +23,6 @@ from integration_helpers import (
 )
 from protocol.client_flow import ClientFlowResult
 from shared.config import TRANSPORT_SSE, TRANSPORT_WEBHOOK
-from shared.scenario import SCENARIO_INFORMATION, SCENARIO_TARGET, get_scenario
 
 _COMPLETED = TaskState.Name(TaskState.TASK_STATE_COMPLETED)
 

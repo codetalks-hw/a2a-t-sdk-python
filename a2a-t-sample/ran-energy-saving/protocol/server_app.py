@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,14 +56,15 @@ from shared.agent_card import (
 from shared.config import SampleConfig, load_config
 from shared.logging_setup import configure_logging
 from shared.registry_client import register_agentcard
-from shared.scenario import MAX_ROUNDS
-from shared.scripted_llm import register_scripted_provider
+from shared.run_constants import MAX_ROUNDS
 from shared.sdk_env import prepare_sdk_env
 from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
 from shared.traced_llm import register_traced_providers
 from starlette.applications import Starlette
 
 from protocol.negotiation_gate import NegotiationGate
+from protocol.negotiation_policy import NegotiationState, PolicyDecision
+from protocol.server_agent_spec import ServerAgentFactory
 from protocol.server_executor import NegotiationAgentExecutor, build_negotiation_executor
 from protocol.sqlite_task_store import SqliteTaskStore
 
@@ -243,32 +244,56 @@ def build_rest_app(
 
 def build_server_runtime(
     *,
+    agent_factory: ServerAgentFactory,
+    policy: Callable[[NegotiationState], PolicyDecision] | None = None,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
+    install_offline_provider: Callable[[], None] | None = None,
 ) -> ServerRuntime:
     """Assemble the full server runtime.
 
     Args:
+        agent_factory: builder of the NMS planner graph for one accepted task.
+        policy: negotiation decision function bound to the deployment's plan evaluator;
+            defaults to the unbound state machine.
         config: resolved sample configuration; defaults to :func:`shared.config.load_config`.
         env_path: optional ``.env`` source path.
         logger: optional logger shared by the gate and the runtime.
+        install_offline_provider: installer of the deterministic SDK LLM routing; required in
+            offline mode.
 
     Returns:
         The assembled runtime, including the Starlette app.
+
+    Raises:
+        ValueError: when offline mode has no deterministic provider installer.
     """
     resolved_logger = logger or _LOGGER
     resolved_config = config or load_config(env_path=env_path)
     register_traced_providers()
     if resolved_config.is_offline:
-        register_scripted_provider()
+        if install_offline_provider is None:
+            raise ValueError(
+                "Offline mode needs install_offline_provider; the demo entry point supplies it."
+            )
+        install_offline_provider()
     trace_emitter = build_trace_emitter()
     if trace_emitter is not None:
         set_global_sink(trace_emitter)
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
-    gate = NegotiationGate(prompt_server, max_rounds=MAX_ROUNDS, logger=resolved_logger)
-    executor = build_negotiation_executor(gate=gate, config=resolved_config)
+    gate = NegotiationGate(
+        prompt_server,
+        max_rounds=MAX_ROUNDS,
+        logger=resolved_logger,
+        policy=policy,
+    )
+    executor = build_negotiation_executor(
+        gate=gate,
+        agent_factory=agent_factory,
+        config=resolved_config,
+    )
     task_store: TaskStore = (
         SqliteTaskStore(resolved_config.task_db_path)
         if resolved_config.task_db_path
@@ -299,12 +324,22 @@ def build_server_runtime(
 
 def build_server_app(
     *,
+    agent_factory: ServerAgentFactory,
+    policy: Callable[[NegotiationState], PolicyDecision] | None = None,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
+    install_offline_provider: Callable[[], None] | None = None,
 ) -> Starlette:
     """Build only the Starlette app (see :func:`build_server_runtime` for the full runtime)."""
-    return build_server_runtime(config=config, env_path=env_path, logger=logger).app
+    return build_server_runtime(
+        agent_factory=agent_factory,
+        policy=policy,
+        config=config,
+        env_path=env_path,
+        logger=logger,
+        install_offline_provider=install_offline_provider,
+    ).app
 
 
 async def register_server_agent_card(
@@ -346,7 +381,15 @@ def main() -> None:
     configure_logging()
     env_path = Path.cwd() / ".env"
     resolved_env_path = env_path if env_path.exists() else None
-    runtime = build_server_runtime(env_path=resolved_env_path)
+    from demo.agents.server_agent.factory import build_server_agent
+    from demo.composition import build_demo_negotiation_policy, install_offline_provider
+
+    runtime = build_server_runtime(
+        agent_factory=build_server_agent,
+        policy=build_demo_negotiation_policy(),
+        env_path=resolved_env_path,
+        install_offline_provider=install_offline_provider,
+    )
     asyncio.run(
         register_server_agent_card(
             runtime.agent_card,

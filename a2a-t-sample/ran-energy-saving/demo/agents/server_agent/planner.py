@@ -24,8 +24,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from pydantic import PrivateAttr
-from shared import ran_data
 from shared.config import SampleConfig
+
+from demo import ran_data
 
 
 #: Planner configuration error.

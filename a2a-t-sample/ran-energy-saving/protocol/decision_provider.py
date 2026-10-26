@@ -20,23 +20,23 @@ import asyncio
 import logging
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
 from google.adk.apps import App
 from google.adk.events import Event as AdkEvent
+from google.adk.models.base_llm import BaseLlm
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import BaseSessionService
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from google.genai import types
 from shared.adk_tracing import TracePlugin
-from shared.config import build_traced_adk_model
 from shared.json_text import iter_json_objects
+from shared.model_factory import build_traced_adk_model
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import Scenario, get_scenario
 from shared.trace import trace_scope
 
 _LOGGER = logging.getLogger("ran_energy_saving.decision_provider")
@@ -256,6 +256,7 @@ class AdkDecisionProvider:
         user_request: str | None = None,
         conversation_context: str | None = None,
         session_db_path: str | None = None,
+        agent_factory: Callable[[BaseLlm], Any] | None = None,
     ) -> None:
         """Create one ADK-backed provider.
 
@@ -277,11 +278,19 @@ class AdkDecisionProvider:
             session_db_path: Absolute SQLite path of the client database holding the decision
                 sessions; ``None`` keeps them in memory. An unopenable path degrades to memory
                 with a logged warning (see :func:`build_session_service`).
+            agent_factory: builder of the decision agent from the configured model, supplied by
+                the composition root (the sample's client agent lives with the demo assets).
+
+        Raises:
+            ValueError: when neither ``agent`` nor ``agent_factory`` is supplied.
         """
         if agent is None:
-            from agents.client_agent.agent import build_client_agent
-
-            agent = build_client_agent(build_traced_adk_model(model=model))
+            if agent_factory is None:
+                raise ValueError(
+                    "AdkDecisionProvider needs an agent or an agent_factory; the sample client "
+                    "agent is part of the demo package."
+                )
+            agent = agent_factory(build_traced_adk_model(model=model))
         # The tool plugin is attached through the ``App`` (the ``plugins=`` runner argument is
         # deprecated); it records one ``tool`` span per client-agent tool call.
         app = App(name=app_name, root_agent=agent, plugins=[TracePlugin()])
@@ -427,7 +436,7 @@ def _parse_decision_json(text: str) -> NegotiationDecision | None:
 class ScriptedDecisionProvider:
     """Decision provider replaying a pre-defined sequence of decisions.
 
-    The offline scenarios of :mod:`shared.scenario` carry their decisions in order; each call to
+    The offline scenarios of :mod:`demo.scenario` carry their decisions in order; each call to
     :meth:`respond` consumes the next one. Exhausting the sequence is an error, so a scenario whose
     server behavior drifts from its script fails loudly instead of silently accepting.
     """
@@ -436,12 +445,6 @@ class ScriptedDecisionProvider:
         """Create one scripted provider over an ordered decision list."""
         self._decisions = tuple(decisions)
         self._index = 0
-
-    @classmethod
-    def from_scenario(cls, scenario: Scenario | str) -> ScriptedDecisionProvider:
-        """Build a provider from one scenario object or scenario name."""
-        resolved = get_scenario(scenario) if isinstance(scenario, str) else scenario
-        return cls(resolved.scripted_client_decisions)
 
     @property
     def remaining(self) -> int:

@@ -24,9 +24,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 from shared.models import NegotiationDecision
-
-#: Round budget of every scenario (design D11).
-MAX_ROUNDS = 3
+from shared.run_constants import (
+    FINAL_STATE_NEGOTIATION_ABORTED,
+    FINAL_STATE_NEGOTIATION_ENDED,
+    FINAL_STATE_TASK_COMPLETED,
+    LANGUAGE_EN,
+    LANGUAGE_ZH,
+    FinalState,
+)
 
 #: Supported scenario names.
 SCENARIO_INFORMATION = "information"
@@ -39,22 +44,6 @@ SCENARIO_ABORT = "abort"
 KIND_INFORMATION = "information"
 KIND_TARGET = "target"
 KIND_FEASIBILITY = "feasibility"
-
-#: Expected terminal states.
-FINAL_STATE_TASK_COMPLETED = "task_completed"
-FINAL_STATE_NEGOTIATION_ENDED = "no_task_negotiation_ended"
-FINAL_STATE_NEGOTIATION_ABORTED = "no_task_negotiation_aborted"
-
-FinalState = Literal[
-    "task_completed",
-    "no_task_negotiation_ended",
-    "no_task_negotiation_aborted",
-]
-
-#: Supported process-level languages.
-LANGUAGE_EN = "en-US"
-LANGUAGE_ZH = "zh-CN"
-SUPPORTED_LANGUAGES = (LANGUAGE_EN, LANGUAGE_ZH)
 
 #: Chinese natural-language task request used for prompt generation (UC1, complete input).
 NATURAL_LANGUAGE_PROMPT_INPUT_ZH = (

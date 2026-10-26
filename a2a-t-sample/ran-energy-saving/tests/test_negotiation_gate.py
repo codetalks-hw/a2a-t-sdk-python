@@ -31,6 +31,12 @@ from a2a_t.core.standard_templates import (
 )
 from a2a_t.core.validation_pipeline import FilledParamData
 from a2a_t.server.a2at_server import A2ATServer
+from demo.composition import install_offline_provider
+from demo.scenario import (
+    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
+)
 from google.protobuf.json_format import MessageToDict
 from protocol.messages import (
     END_MESSAGE_TEXT,
@@ -40,12 +46,6 @@ from protocol.messages import (
 from protocol.negotiation_gate import GateOutcome, NegotiationGate
 from protocol.server_app import prepare_sdk_env_path
 from shared.config import SampleConfig
-from shared.scenario import (
-    NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
-    NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
-    NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
-)
-from shared.scripted_llm import register_scripted_provider
 
 CONTEXT_ID = "ctx-negotiation"
 TASK_PROMPT = "Create a RAN energy saving task in the Songshanhu area."
@@ -562,7 +562,7 @@ async def test_existing_task_bypasses_the_negotiation_gate() -> None:
 @pytest.fixture
 def real_server(offline_config: SampleConfig) -> A2ATServer:
     """Build a real A2ATServer on the scripted SDK provider (no network)."""
-    register_scripted_provider()
+    install_offline_provider()
     return A2ATServer(env_path=prepare_sdk_env_path(offline_config))
 
 

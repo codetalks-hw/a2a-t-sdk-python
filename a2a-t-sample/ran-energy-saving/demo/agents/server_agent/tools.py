@@ -1,6 +1,6 @@
 """Deterministic RAN NMS tools of the energy-saving server.
 
-Every tool is a deterministic function over the in-memory dataset of :mod:`shared.ran_data` and its
+Every tool is a deterministic function over the in-memory dataset of :mod:`demo.ran_data` and its
 process-local plan store. Tools never access the network and never raise for expected failures:
 unknown cells, unknown plans, malformed requests, and infeasible plans are reported as structured
 error dictionaries so the caller can explain them and adapt.
@@ -11,8 +11,8 @@ failures carry ``"ok": False``, ``"error_code"``, and ``"error_message"``.
 
 from __future__ import annotations
 
-from shared import ran_data
-from shared.ran_data import (
+from demo import ran_data
+from demo.ran_data import (
     CellCapacity,
     EnergySavingPlan,
     HourlySample,

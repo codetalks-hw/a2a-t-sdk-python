@@ -15,13 +15,13 @@ SAMPLE_ROOT = Path(__file__).resolve().parents[1]
 if str(SAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(SAMPLE_ROOT))
 
+from demo.scenario import LANGUAGE_EN  # noqa: E402
 from shared.config import (  # noqa: E402
     DISCOVERY_REGISTRY,
     MODEL_MODE_OFFLINE,
     TRANSPORT_SSE,
     SampleConfig,
 )
-from shared.scenario import LANGUAGE_EN  # noqa: E402
 
 
 #: Nuisance warnings of the third-party a2a/ADK stack and of the SDK's retired negotiation modules.

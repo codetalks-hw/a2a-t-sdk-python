@@ -25,6 +25,20 @@ from a2a_t.core.standard_templates import (
     NEGOTIATION_ABORT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
+from demo.catalog import DEMO_CLIENT_POLICY
+from demo.scenario import (
+    FINAL_STATE_NEGOTIATION_ABORTED,
+    FINAL_STATE_NEGOTIATION_ENDED,
+    FINAL_STATE_TASK_COMPLETED,
+    SCENARIO_ABORT_SPEC,
+    SCENARIO_FEASIBILITY_SPEC,
+    SCENARIO_INFORMATION_SPEC,
+    SCENARIO_REJECT_SPEC,
+    SCENARIO_TARGET_SPEC,
+    SUPPORTED_SCENARIO_NAMES,
+    Scenario,
+    get_scenario,
+)
 from google.protobuf.json_format import MessageToDict
 from protocol.client_flow import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
@@ -39,19 +53,6 @@ from protocol.decision_provider import ScriptedDecisionProvider
 from protocol.messages import END_MESSAGE_TEXT, SAMPLE_PROPOSAL_METADATA_KEY
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import (
-    FINAL_STATE_NEGOTIATION_ABORTED,
-    FINAL_STATE_NEGOTIATION_ENDED,
-    FINAL_STATE_TASK_COMPLETED,
-    SCENARIO_ABORT_SPEC,
-    SCENARIO_FEASIBILITY_SPEC,
-    SCENARIO_INFORMATION_SPEC,
-    SCENARIO_REJECT_SPEC,
-    SCENARIO_TARGET_SPEC,
-    SUPPORTED_SCENARIO_NAMES,
-    Scenario,
-    get_scenario,
-)
 from shared.trace import (
     PHASE_NEGOTIATION,
     PHASE_RESOLUTION,
@@ -266,6 +267,7 @@ async def _run(
         user_request=user_request,
         provider=ScriptedDecisionProvider(decisions),
         language="en-US",
+        policy=DEMO_CLIENT_POLICY,
     )
     return result, transport, prompt_client
 
@@ -424,6 +426,7 @@ async def test_counter_carries_the_sample_proposal() -> None:
         user_request="request",
         provider=ScriptedDecisionProvider([decision]),
         language="en-US",
+        policy=DEMO_CLIENT_POLICY,
     )
 
     counter_metadata = MessageToDict(transport.requests[1].message.metadata)
@@ -469,6 +472,7 @@ async def test_every_send_carries_the_configured_call_timeout() -> None:
         user_request=SCENARIO_TARGET_SPEC.user_request["en-US"],
         provider=ScriptedDecisionProvider(SCENARIO_TARGET_SPEC.scripted_client_decisions),
         language="en-US",
+        policy=DEMO_CLIENT_POLICY,
         call_timeout_seconds=123.0,
     )
 
@@ -510,6 +514,7 @@ async def test_call_timeout_defaults_to_the_documented_budget() -> None:
         user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
         provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
         language="en-US",
+        policy=DEMO_CLIENT_POLICY,
     )
 
     assert all(context.timeout == DEFAULT_CALL_TIMEOUT_SECONDS for context in transport.call_contexts)
@@ -688,10 +693,10 @@ async def test_real_sdk_client_runs_the_information_flow_offline(
 ) -> None:
     """The flow works with the real A2ATClient and the scripted LLM (no network)."""
     from a2a_t.client.a2at_client import A2ATClient
+    from demo.composition import install_offline_provider
     from protocol.server_app import prepare_sdk_env_path
-    from shared.scripted_llm import register_scripted_provider
 
-    register_scripted_provider()
+    install_offline_provider()
     # The scripted provider resolves its language from the process environment (the demo launcher
     # sets it per process); the test pins it to the language of the offline configuration.
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)

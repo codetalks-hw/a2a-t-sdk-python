@@ -31,18 +31,15 @@ from a2a.utils.constants import TransportProtocol
 from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.metadata import NegotiationContext
 from dotenv import dotenv_values
-from shared.adk_fake_model import build_client_script, build_fake_model
 from shared.agent_card import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION
 from shared.config import (
     SUPPORTED_TRANSPORTS,
     TRANSPORT_SSE,
     TRANSPORT_WEBHOOK,
     SampleConfig,
-    build_traced_adk_model,
 )
+from shared.model_factory import build_traced_adk_model
 from shared.models import NegotiationProposeView
-from shared.scenario import Scenario, get_scenario, resolve_user_request
-from shared.scripted_llm import register_scripted_provider
 from shared.sdk_env import SdkEnvFile, prepare_sdk_env
 from shared.trace import set_global_sink, trace_scope
 from shared.traced_llm import register_traced_providers
@@ -64,6 +61,7 @@ from protocol.decision_provider import (
     ScriptedDecisionProvider,
 )
 from protocol.discovery import DiscoveredAgent, discover_agent
+from protocol.run_spec import RunCatalog, RunSpec
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_runtime")
 
@@ -120,12 +118,19 @@ def _direct_base_url(config: SampleConfig, env_path: Path | None) -> str:
     return configured or f"http://{config.host}:{config.port}"
 
 
-def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> NegotiationDecisionProvider:
+def _decision_provider(
+    config: SampleConfig,
+    run_spec: RunSpec,
+    mode: str,
+    *,
+    model: Any | None = None,
+    client_agent_factory: Callable[[Any], Any] | None = None,
+) -> NegotiationDecisionProvider:
     """Build the decision provider of one client mode.
 
-    In offline ``auto`` mode the fake model serves the scenario's scripted decisions, so the ADK
-    runner stays in the loop and still produces counter/reject/abort decisions instead of always
-    accepting.
+    The offline model is supplied by the composition root; a scripted provider replays the run
+    spec's decisions. In offline ``auto`` mode the model serves the same scripted decisions, so the
+    ADK runner stays in the loop and still produces counter/reject/abort decisions.
 
     Raises:
         ClientRuntimeError: when the mode is not supported.
@@ -133,22 +138,17 @@ def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> N
     if mode == MODE_MANUAL:
         return ManualDecisionProvider()
     if mode == MODE_SCRIPTED:
-        return ScriptedDecisionProvider.from_scenario(scenario)
+        return ScriptedDecisionProvider(run_spec.scripted_decisions)
     if mode == MODE_AUTO:
-        if config.is_offline:
-            # The client Runner only runs the request agent, so the fake model carries just the
-            # client decision script; no server script can match this agent's marker.
-            model = build_fake_model((build_client_script(scenario.scripted_client_decisions),))
-        else:
-            model = None
         # The traced wrapper keeps the ADK decision turns visible in the Run Explorer. The original
         # request is carried into every decision prompt: target/feasibility proposals describe the
         # conflict but not the concrete throughput target, so the model cannot resolve them alone.
         return AdkDecisionProvider(
             model=build_traced_adk_model(config, model=model),
             offline=config.is_offline,
-            user_request=resolve_user_request(scenario, config.language),
+            user_request=run_spec.user_request,
             session_db_path=config.client_db_path,
+            agent_factory=client_agent_factory,
         )
     raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
 
@@ -159,7 +159,7 @@ class ClientRuntime:
 
     Attributes:
         config: resolved sample configuration.
-        scenario: scenario being demonstrated.
+        run_spec: the named run being executed (catalog entry).
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
         transport_name: event transport (``sse`` / ``webhook``).
         prompt_client: A2A-T SDK prompt facade.
@@ -172,7 +172,7 @@ class ClientRuntime:
     """
 
     config: SampleConfig
-    scenario: Scenario
+    run_spec: RunSpec
     mode: str
     transport_name: str
     prompt_client: A2ATClient
@@ -233,7 +233,7 @@ class ClientRuntime:
                 request_text = (
                     user_request.strip()
                     if isinstance(user_request, str) and user_request.strip()
-                    else resolve_user_request(self.scenario, self.config.language)
+                    else self.run_spec.user_request
                 )
                 set_context = getattr(self.provider, "set_conversation_context", None)
                 if callable(set_context):
@@ -244,6 +244,7 @@ class ClientRuntime:
                     user_request=request_text,
                     provider=self.provider,
                     language=self.config.language,
+                    policy=self.run_spec.policy,
                     event_sink=event_sink,
                     on_decision_requested=on_decision_requested,
                     on_decision_made=on_decision_made,
@@ -277,26 +278,35 @@ async def build_client_runtime(
     mode: str = MODE_AUTO,
     transport: str = TRANSPORT_SSE,
     *,
+    catalog: RunCatalog,
     env_path: Path | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
+    offline_model_factory: Callable[[RunSpec], Any] | None = None,
+    install_offline_provider: Callable[[], None] | None = None,
+    client_agent_factory: Callable[[Any], Any] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
     Args:
         config: resolved sample configuration (language and model mode are process-level).
-        scenario: one of the five scenario names.
+        scenario: run name resolved through ``catalog``.
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
         transport: event transport (``sse`` / ``webhook``).
+        catalog: run catalog supplied by the composition root.
         env_path: source ``.env`` used for discovery and for the per-run SDK ``.env``.
         trace_sink: optional Run Explorer sink attached **before** the SDK and ADK clients are
             built, so their LLM/tool producers are traced from the first call.
+        offline_model_factory: builder of the deterministic ADK model; required in offline mode.
+        install_offline_provider: optional installer of the deterministic SDK LLM routing.
+        client_agent_factory: optional builder of the ADK decision agent from its model.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
 
     Raises:
-        ClientRuntimeError: on an unsupported mode/transport or when the runtime cannot assemble.
-        KeyError: when the scenario name is unknown.
+        ClientRuntimeError: on an unsupported mode/transport, a missing offline factory, or when
+            the runtime cannot assemble.
+        KeyError: when the run name is unknown to the catalog.
         DiscoveryError: when no usable server endpoint is found.
     """
     if mode not in SUPPORTED_MODES:
@@ -304,10 +314,16 @@ async def build_client_runtime(
     if transport not in SUPPORTED_TRANSPORTS:
         raise ClientRuntimeError(f"Unsupported transport: {transport}; expected one of {SUPPORTED_TRANSPORTS}")
 
-    scenario_spec = get_scenario(scenario)
+    run_spec = catalog.spec(scenario, language=config.language)
     register_traced_providers()
     if config.is_offline:
-        register_scripted_provider()
+        if offline_model_factory is None:
+            raise ClientRuntimeError(
+                "Offline mode needs a deterministic model factory; configure live mode or pass "
+                "offline_model_factory from the composition root."
+            )
+        if install_offline_provider is not None:
+            install_offline_provider()
     if trace_sink is not None:
         set_global_sink(trace_sink)
     sdk_env = prepare_client_sdk_env(config, env_path)
@@ -358,10 +374,17 @@ async def build_client_runtime(
         shutil.rmtree(sdk_env.directory, ignore_errors=True)
         raise
 
-    provider = _decision_provider(config, scenario_spec, mode)
+    offline_model = offline_model_factory(run_spec) if offline_model_factory is not None else None
+    provider = _decision_provider(
+        config,
+        run_spec,
+        mode,
+        model=offline_model,
+        client_agent_factory=client_agent_factory,
+    )
     return ClientRuntime(
         config=config,
-        scenario=scenario_spec,
+        run_spec=run_spec,
         mode=mode,
         transport_name=transport,
         prompt_client=prompt_client,

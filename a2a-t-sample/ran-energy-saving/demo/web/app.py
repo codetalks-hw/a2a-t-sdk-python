@@ -26,12 +26,11 @@ import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from protocol.client_runtime import MODE_AUTO, build_client_runtime
+from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import (
     STATUS_RUNNING,
     UI_MODES,
@@ -48,6 +47,7 @@ from protocol.client_store import (
     read_conversation_detail,
     read_conversation_summaries,
 )
+from protocol.run_spec import RunCatalog
 from protocol.sqlite_task_store import read_task_summaries
 from shared.config import (
     SUPPORTED_DISCOVERY_MODES,
@@ -55,7 +55,6 @@ from shared.config import (
     SampleConfig,
 )
 from shared.models import NegotiationDecision
-from shared.scenario import SUPPORTED_SCENARIO_NAMES, get_scenario, resolve_user_request
 from shared.trace import (
     PHASES,
     SCHEMA_VERSION,
@@ -103,6 +102,7 @@ def create_app(
     *,
     runs_dir: Path | None = None,
     runtime_factory: RuntimeFactory | None = None,
+    catalog: RunCatalog | None = None,
     env_path: Path | None = None,
     client_store: ClientStore | None = None,
     memory_turns: int = 6,
@@ -118,6 +118,7 @@ def create_app(
         config: process-level sample configuration (language and model mode are read-only).
         runs_dir: transcript directory; defaults to the sample ``runs/`` directory.
         runtime_factory: optional runtime builder (tests inject a deterministic double).
+        catalog: run catalog of the deployment; defaults to the demo scenarios.
         env_path: source ``.env`` handed to the real client runtime.
         client_store: optional client persistence store (conversations, runs, negotiations).
         memory_turns: number of recent turns injected into the next run's prompts.
@@ -138,8 +139,13 @@ def create_app(
     Raises:
         ValueError: when an explicit default is not a supported value.
     """
+    if catalog is None:
+        from demo.catalog import DemoRunCatalog
+
+        catalog = DemoRunCatalog()
+    scenario_names = catalog.names
     resolved_default_scenario = _resolve_default(
-        default_scenario, SUPPORTED_SCENARIO_NAMES, SUPPORTED_SCENARIO_NAMES[0], "scenario"
+        default_scenario, scenario_names, scenario_names[0], "scenario"
     )
     resolved_default_mode = _resolve_default(default_mode, UI_MODES, MODE_AUTO, "mode")
     config_transport = config.transport if config.transport in SUPPORTED_TRANSPORTS else SUPPORTED_TRANSPORTS[0]
@@ -161,17 +167,21 @@ def create_app(
         discovery: str,
     ) -> ClientRuntimeLike:
         """Build the real client runtime with the app's source ``.env``."""
-        return await build_client_runtime(
-            replace(resolved_config, discovery=discovery),
+        from demo.composition import build_demo_runtime
+
+        return await build_demo_runtime(
+            resolved_config,
             scenario,
             mode,
             transport,
+            discovery,
             env_path=env_path,
         )
 
     manager = RunManager(
         config=config,
         runtime_factory=runtime_factory or default_factory,
+        catalog=catalog,
         runs_dir=runs_dir,
         store=client_store,
         memory_turns=memory_turns,
@@ -204,10 +214,10 @@ def create_app(
                 "language": config.language,
                 "modelMode": config.model_mode,
                 "modelLabel": config.model_label,
-                "scenarios": list(SUPPORTED_SCENARIO_NAMES),
+                "scenarios": list(scenario_names),
                 "scenarioRequests": {
-                    name: resolve_user_request(get_scenario(name), config.language)
-                    for name in SUPPORTED_SCENARIO_NAMES
+                    name: catalog.spec(name, language=config.language).user_request
+                    for name in scenario_names
                 },
                 "modes": list(UI_MODES),
                 "transports": list(SUPPORTED_TRANSPORTS),
@@ -361,9 +371,9 @@ def create_app(
             optional_strings[field_name] = (
                 raw_value.strip() if isinstance(raw_value, str) and raw_value.strip() else None
             )
-        if scenario not in SUPPORTED_SCENARIO_NAMES:
+        if scenario not in scenario_names:
             return JSONResponse(
-                {"error": f"Unsupported scenario: {scenario}; expected one of {SUPPORTED_SCENARIO_NAMES}"},
+                {"error": f"Unsupported scenario: {scenario}; expected one of {scenario_names}"},
                 status_code=400,
             )
         if mode not in UI_MODES:

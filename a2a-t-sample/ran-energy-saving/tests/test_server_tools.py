@@ -6,7 +6,8 @@ import json
 from collections.abc import Iterator
 
 import pytest
-from agents.server_agent.tools import (
+from demo import ran_data
+from demo.agents.server_agent.tools import (
     ERROR_INVALID_DATE,
     ERROR_INVALID_REQUEST,
     ERROR_PLAN_INFEASIBLE,
@@ -17,7 +18,6 @@ from agents.server_agent.tools import (
     generate_energy_saving_report,
     get_cell_energy_profile,
 )
-from shared import ran_data
 
 
 def _as_mapping(value: object) -> dict[str, object]:

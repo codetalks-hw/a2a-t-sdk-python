@@ -58,13 +58,11 @@ from google.protobuf.json_format import ParseDict
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import (
+from shared.run_constants import (
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
     FINAL_STATE_TASK_COMPLETED,
     LANGUAGE_ZH,
-    accept_confirmation_text,
-    accept_filled_params,
 )
 from shared.sse_event_consumer import normalize_event
 from shared.task_schema import TASK_PARAM_SCHEMA
@@ -93,6 +91,7 @@ from protocol.messages import (
     parse_negotiation_context,
 )
 from protocol.negotiation_policy import NegotiationKind, negotiation_kind_for_template_uri
+from protocol.run_spec import DEFAULT_CLIENT_POLICY, ClientPolicy
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_flow")
 
@@ -403,6 +402,7 @@ async def run_client_flow(
     label: str = TASK_REQUEST_LABEL,
     task_template_uri: str = TASK_TEMPLATE_URI,
     language: str = LANGUAGE_ZH,
+    policy: ClientPolicy = DEFAULT_CLIENT_POLICY,
     max_exchanges: int = DEFAULT_MAX_EXCHANGES,
     call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS,
     event_sink: Callable[[dict[str, object]], None] | None = None,
@@ -666,6 +666,7 @@ async def run_client_flow(
                 label=label,
                 task_template_uri=task_template_uri,
                 language=language,
+                policy=policy,
                 call_timeout_seconds=call_timeout_seconds,
             )
             send_phase = PHASE_RESOLUTION
@@ -793,15 +794,16 @@ def _accept_filled_values(
     kind: NegotiationKind,
     decision: NegotiationDecision,
     language: str,
+    policy: ClientPolicy,
 ) -> dict[str, object]:
-    """Merge model-filled values into the scenario's agreed Task-T parameters safely.
+    """Merge model-filled values into the policy's agreed Task-T parameters safely.
 
     Live models sometimes fill an information request with per-cell SLA floors instead of the
     required time-segmented target. Only whitelisted Task-T keys are accepted, and the throughput
-    target must have the ``{HH:MM~HH:MM,<rate>Mbps}`` shape; otherwise the scenario's agreed value
+    target must have the ``{HH:MM~HH:MM,<rate>Mbps}`` shape; otherwise the policy's agreed value
     wins. For target/feasibility accepts, the negotiated target is authoritative.
     """
-    filled = accept_filled_params(kind.value, language)
+    filled = dict(policy.filled_params(kind.value, language))
     if kind is NegotiationKind.INFORMATION and decision.filled_params:
         allowed = TASK_PARAM_SCHEMA.get("properties")
         if isinstance(allowed, Mapping):
@@ -812,9 +814,9 @@ def _accept_filled_values(
                     filled[key] = value
         target = filled.get("guaranteedThroughputTarget")
         if not isinstance(target, str) or not _TIME_SEGMENTED_TARGET_PATTERN.search(target):
-            filled["guaranteedThroughputTarget"] = accept_filled_params(
+            filled["guaranteedThroughputTarget"] = policy.filled_params(
                 kind.value, language
-            )["guaranteedThroughputTarget"]
+            ).get("guaranteedThroughputTarget")
     if filled.get("operationType") not in {"Create", "Modify"}:
         filled["operationType"] = "Create"
     return filled
@@ -830,17 +832,18 @@ def _build_accept_request(
     label: str,
     task_template_uri: str,
     language: str,
+    policy: ClientPolicy,
     call_timeout_seconds: float,
 ) -> tuple[SendMessageRequest, ClientCallContext]:
     """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type."""
-    filled = _accept_filled_values(kind, decision, language)
+    filled = _accept_filled_values(kind, decision, language, policy)
     with trace_stage("task_t_slot_extraction_refill"):
         task_content = prompt_client.generate_task_prompt_from_data_with_schema(
             filled, TASK_PARAM_SCHEMA, task_template_uri
         )
     task_text = _require_prompt_text(task_content, "the refilled Task-T prompt")
 
-    accept_text = _accept_text(kind, filled, decision, language)
+    accept_text = _accept_text(kind, filled, decision, language, policy)
     accept_context = session.with_performative(NegotiationPerformative.ACCEPT)
     with trace_stage("negotiation_accept_extraction"):
         content = prompt_client.generate_negotiation_accept_prompt_from_text(
@@ -1023,6 +1026,7 @@ def _accept_text(
     filled: Mapping[str, object],
     decision: NegotiationDecision,
     language: str,
+    policy: ClientPolicy,
 ) -> str:
     """Render the natural-language input of an accept for the proposal type."""
     if kind is NegotiationKind.INFORMATION:
@@ -1044,7 +1048,7 @@ def _accept_text(
         if kind is NegotiationKind.TARGET
         else decision.feasibility_summary
     )
-    return f"Accept. {confirmation or accept_confirmation_text(kind.value, language) or decision.rationale}"
+    return f"Accept. {confirmation or policy.accept_text(kind.value, language) or decision.rationale}"
 
 
 def _reject_text(kind: NegotiationKind, propose_content: str, decision: NegotiationDecision) -> str:

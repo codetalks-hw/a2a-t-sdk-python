@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import demo.run_demo as run_demo
 import pytest
-import run_demo
 from dotenv import dotenv_values
 
 

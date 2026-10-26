@@ -1,6 +1,6 @@
 """ADK function tools of the RAN energy-saving client decision agent.
 
-Both tools are deterministic over the in-memory dataset of :mod:`shared.ran_data` (or its static
+Both tools are deterministic over the in-memory dataset of :mod:`demo.ran_data` (or its static
 policy view). They never access the network and never raise for expected failures: unknown cells
 and malformed proposals are reported as structured error dictionaries so the LLM can explain them
 and adapt.
@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import re
 
-from shared import ran_data
-from shared.ran_data import PlanEvaluation, RanCell
+from demo import ran_data
+from demo.ran_data import PlanEvaluation, RanCell
 
 #: Error code for an unknown cell id.
 ERROR_UNKNOWN_CELL = "unknown_cell"

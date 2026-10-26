@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from demo.catalog import DemoRunCatalog
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from protocol.client_flow import ClientFlowResult
 from protocol.client_service import RunConflictError, RunManager
@@ -135,6 +136,7 @@ def _manager(
     manager = RunManager(
         config=config,
         runtime_factory=factory,
+        catalog=DemoRunCatalog(),
         runs_dir=tmp_path / "runs",
         store=store,
         memory_turns=memory_turns,

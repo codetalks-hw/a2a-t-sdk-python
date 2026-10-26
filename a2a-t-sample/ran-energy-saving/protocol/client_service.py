@@ -28,7 +28,6 @@ from a2a_t.core.metadata import NegotiationContext
 from shared.config import DISCOVERY_REGISTRY, SampleConfig
 from shared.logging_setup import log_context
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import get_scenario, resolve_user_request
 from shared.trace import (
     PHASE_DISPATCH,
     PHASE_DONE,
@@ -53,6 +52,7 @@ from protocol.client_store import (
     now_iso,
 )
 from protocol.decision_provider import sweep_stale_sessions
+from protocol.run_spec import RunCatalog
 from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript, TranscriptPaths
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_service")
@@ -680,12 +680,14 @@ class RunManager:
         *,
         config: SampleConfig,
         runtime_factory: RuntimeFactory,
+        catalog: RunCatalog,
         runs_dir: Path | None = None,
         store: ClientStore | None = None,
         memory_turns: int = 6,
     ) -> None:
         self._config = config
         self._runtime_factory = runtime_factory
+        self._catalog = catalog
         self._runs_dir = runs_dir
         self._store = store
         self._memory_turns = max(0, memory_turns)
@@ -784,10 +786,10 @@ class RunManager:
             transport=transport,
             runs_dir=self._runs_dir or DEFAULT_RUNS_DIR,
         )
-        spec = get_scenario(scenario)
+        spec = self._catalog.spec(scenario, language=self._config.language)
         run.emit_run_started(
             description=spec.description,
-            user_request=custom_request or resolve_user_request(spec, self._config.language),
+            user_request=custom_request or spec.user_request,
             language=self._config.language,
             model_mode=self._config.model_mode,
             model_label=self._config.model_label,
@@ -995,9 +997,9 @@ class RunManager:
         """Create the conversation, load memory, append the user turn and persist the run row."""
         if self._store is None or run.conversation_id is None:
             return
-        request_text = run.user_request or resolve_user_request(
-            get_scenario(run.scenario), self._config.language
-        )
+        request_text = run.user_request or self._catalog.spec(
+            run.scenario, language=self._config.language
+        ).user_request
         await self._store.ensure_conversation(
             conversation_id=run.conversation_id,
             external_id=run.external_conversation_id or "",

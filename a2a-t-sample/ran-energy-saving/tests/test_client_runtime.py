@@ -11,10 +11,12 @@ from pathlib import Path
 
 import pytest
 from a2a.client import ClientConfig
+from demo.adk_fake_model import CLIENT_AGENT_NAME, FakeLlm
+from demo.composition import build_demo_runtime
+from demo.scenario import SCENARIO_ABORT, SCENARIO_TARGET, get_scenario
 from dotenv import dotenv_values
 from google.adk.agents.llm_agent import LlmAgent
 from protocol.client_runtime import (
-    build_client_runtime,
     prepare_client_sdk_env,
 )
 from protocol.decision_provider import (
@@ -24,10 +26,8 @@ from protocol.decision_provider import (
 )
 from protocol.discovery import DiscoveredAgent
 from protocol.server_app import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION, build_agent_card
-from shared.adk_fake_model import CLIENT_AGENT_NAME, FakeLlm
 from shared.adk_tracing import TracingLlm
 from shared.config import MODEL_MODE_LIVE, SampleConfig
-from shared.scenario import SCENARIO_ABORT, SCENARIO_TARGET, get_scenario
 
 
 class _FakeA2AClient:
@@ -70,11 +70,12 @@ async def test_manual_runtime_wires_scripted_env_and_streaming(
     monkeypatch.setattr(client_runtime, "create_client", fake_create)
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
 
-    runtime = await build_client_runtime(
+    runtime = await build_demo_runtime(
         offline_config,
         "information",
         "manual",
         "sse",
+        offline_config.discovery,
         env_path=tmp_path / "missing.env",
     )
 
@@ -121,11 +122,12 @@ async def test_scripted_mode_uses_the_scenario_decisions(
     monkeypatch.setattr(client_runtime, "create_client", fake_create)
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
 
-    runtime = await build_client_runtime(
+    runtime = await build_demo_runtime(
         offline_config,
         SCENARIO_TARGET,
         "scripted",
         "sse",
+        offline_config.discovery,
         env_path=tmp_path / "missing.env",
     )
 
@@ -162,11 +164,12 @@ async def test_auto_offline_mode_scripts_the_scenario_decisions(
     monkeypatch.setattr(client_runtime, "create_client", fake_create)
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
 
-    runtime = await build_client_runtime(
+    runtime = await build_demo_runtime(
         offline_config,
         scenario_name,
         "auto",
         "sse",
+        offline_config.discovery,
         env_path=tmp_path / "missing.env",
     )
     try:
@@ -206,11 +209,12 @@ async def test_runtime_attaches_the_trace_sink_before_building_and_clears_it_on_
     monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
 
     spans: list[dict[str, object]] = []
-    runtime = await build_client_runtime(
+    runtime = await build_demo_runtime(
         offline_config,
         "information",
         "auto",
         "sse",
+        offline_config.discovery,
         env_path=tmp_path / "missing.env",
         trace_sink=spans.append,
     )
@@ -284,8 +288,8 @@ async def test_runtime_http_client_uses_the_configured_http_budget(
     monkeypatch.setattr(client_runtime, "create_client", fake_create)
     config = replace(offline_config, http_timeout_seconds=42.0)
 
-    runtime = await build_client_runtime(
-        config, "information", "manual", "sse", env_path=tmp_path / "missing.env"
+    runtime = await build_demo_runtime(
+        config, "information", "manual", "sse", config.discovery, env_path=tmp_path / "missing.env"
     )
     try:
         assert runtime._httpx_client.timeout.read == 42.0
@@ -300,8 +304,8 @@ async def test_runtime_http_client_uses_the_configured_http_budget(
         return object()
 
     monkeypatch.setattr(client_runtime, "run_client_flow", fake_flow)
-    runtime = await build_client_runtime(
-        config, "information", "manual", "sse", env_path=tmp_path / "missing.env"
+    runtime = await build_demo_runtime(
+        config, "information", "manual", "sse", config.discovery, env_path=tmp_path / "missing.env"
     )
     try:
         await runtime.run(user_request="custom request from the UI")

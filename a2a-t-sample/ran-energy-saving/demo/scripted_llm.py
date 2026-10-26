@@ -25,10 +25,9 @@ from typing import Any
 from a2a_t.llm.factory import LLMClientFactory
 from a2a_t.llm.models import LLMClientConfig, LLMResponse
 from dotenv import dotenv_values
+from shared.run_constants import LANGUAGE_ZH, MAX_ROUNDS
 
-from shared.scenario import (
-    LANGUAGE_ZH,
-    MAX_ROUNDS,
+from demo.scenario import (
     NATURAL_LANGUAGE_PROMPT_INPUT_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,

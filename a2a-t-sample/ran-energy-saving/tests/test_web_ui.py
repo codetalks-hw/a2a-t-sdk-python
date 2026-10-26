@@ -22,6 +22,8 @@ from a2a_t.core.metadata import (
     NegotiationContext,
     NegotiationPerformative,
 )
+from demo.scenario import FINAL_STATE_TASK_COMPLETED, get_scenario, resolve_user_request
+from demo.web.app import create_app
 from integration_helpers import (
     free_tcp_port,
     offline_direct_config,
@@ -39,9 +41,7 @@ from protocol.decision_provider import ManualDecisionProvider
 from protocol.sqlite_task_store import SqliteTaskStore
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import FINAL_STATE_TASK_COMPLETED, get_scenario, resolve_user_request
 from shared.trace import PHASES
-from web.app import create_app
 
 CONTEXT_ID = "ctx-web"
 

@@ -126,32 +126,56 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | 3 | Validation | the NMS validates Task-T; a failure opens a negotiation | `protocol/negotiation_gate.py` |
 | 4 | Negotiation | propose, decide, counter (at most three rounds) | `negotiation_gate.py`, `decision_provider.py` |
 | 5 | Resolution | accept/reject/abort; an accept refills Task-T | `client_flow.py`, `negotiation_gate.py` |
-| 6 | NMS execution | evaluate and apply the plan | `server_executor.py`, `agents/server_agent/` |
+| 6 | NMS execution | evaluate and apply the plan | `server_executor.py`, `demo/agents/server_agent/` |
 | 7 | Report | publish the report artifact; the Task completes | `server_executor.py` |
-| 8 | Done | write the transcript; the UI replays it | `client_service.py`, `web/` |
+| 8 | Done | write the transcript; the UI replays it | `client_service.py`, `demo/web/` |
 
 ### 2.3 Code map: start from the change you need
 
 | You want to change | Start here |
 | --- | --- |
-| OSS decision logic | `agents/client_agent/` + `protocol/decision_provider.py` |
+| OSS decision logic | `demo/agents/client_agent/` + `protocol/decision_provider.py` |
 | OSS protocol loop | `protocol/client_flow.py` |
 | OSS conversations and run history | `protocol/client_service.py`, `protocol/client_store.py` |
 | expose the OSS as an A2A backend | `protocol/client_gateway.py` |
 | NMS negotiation rules | `protocol/negotiation_gate.py`, `protocol/negotiation_policy.py` |
-| NMS execution flow | `protocol/server_executor.py`, `agents/server_agent/` |
-| connect the real NMS interfaces | `agents/server_agent/tools.py` |
+| NMS execution flow | `protocol/server_executor.py`, `demo/agents/server_agent/` |
+| connect the real NMS interfaces | `demo/agents/server_agent/tools.py` |
 | Task persistence | `protocol/sqlite_task_store.py` |
-| Web UI | `web/` |
+| Web UI | `demo/web/` |
+| the runs a deployment exposes | implement `protocol/run_spec.py` `RunCatalog` |
+| values filled into an accepted Task-T | implement `protocol/run_spec.py` `ClientPolicy` |
+| the planner graph and tools | implement `protocol/server_agent_spec.py` `ServerAgentFactory` |
+| plan feasibility of a counter proposal | implement `protocol/negotiation_policy.py` `PlanEvaluator` |
 
 ### 2.4 What is sample code, what you replace
 
 - **Reuse as is:** the A2A-T gate, the deterministic client flow, the client service and store, the
-  NMS execution shell, and the TaskStore shape.
+  NMS execution shell, the TaskStore shape, the logging/trace plumbing and the run-spec interfaces.
 - **Replace:** the client decision agent and its tools, the four NMS tool bodies, the planner
-  prompt/model, and the conversation/turn schema.
-- **Demo only:** the mock registry, the Web UI, the in-process plan store, and the static webhook
-  token.
+  prompt/model, the conversation/turn schema, and the demo plan evaluator.
+- **Demo only (`demo/`):** the scenario catalog, the dataset, the fake/scripted models, the mock
+  registry, the Web UI, the launcher and the sample agents.
+
+### 2.5 The demo package and the composition seams
+
+`protocol/` and `shared/` are the reusable core; `demo/` holds everything that exists to make the
+interaction reproducible offline. The core never imports the demo package at module import time; a
+composition root (the launcher, the Web UI, the gateway CLI or the NMS server entry point) wires the
+demo in explicitly:
+
+| Seam | Interface | Demo implementation |
+| --- | --- | --- |
+| named runs | `RunCatalog` / `RunSpec` (`protocol/run_spec.py`) | `demo/catalog.py` |
+| accept values | `ClientPolicy` (`protocol/run_spec.py`) | `DEMO_CLIENT_POLICY` |
+| offline model and providers | `offline_model_factory` / `install_offline_provider` | `demo/composition.py` |
+| client decision agent | `agent_factory` | `demo/agents/client_agent/` |
+| NMS planner | `ServerAgentFactory` (`protocol/server_agent_spec.py`) | `demo/agents/server_agent/factory.py` |
+| plan feasibility | `PlanEvaluator` (`protocol/negotiation_policy.py`) | `demo/plan_evaluator.py` |
+
+`tests/test_demo_boundary.py` imports every core module in a fresh interpreter and asserts that no
+`demo.*` module is loaded. The demo entry points are `run_demo.py` (a shim over `demo/run_demo.py`),
+`demo/web/`, `demo/registry/` and the lazy imports inside `protocol.server_app.main`.
 
 ## 3. OSS-side developer guide (how-to)
 
@@ -183,7 +207,14 @@ discovered = await discover_agent(                       # registry or direct
     name=AGENT_CARD_NAME,
     registry_center_url=config.registry_url,
 )
-runtime = await build_client_runtime(config, scenario, mode, transport)
+runtime = await build_client_runtime(
+    config,
+    scenario,
+    mode,
+    transport,
+    catalog=catalog,                  # RunCatalog supplied by the composition root
+    client_agent_factory=agent_factory,  # optional: build the ADK decision agent
+)
 ```
 
 **Why a per-run `.env`:** the A2A-T SDK reads model and endpoint settings from the environment; a
@@ -213,6 +244,10 @@ The sample ships three implementations:
 
 Every provider implements `respond(propose, session) -> NegotiationDecision`. Providers decide
 **intent only**; the flow turns it into protocol content and never changes the round.
+
+`AdkDecisionProvider` needs the decision agent: pass `agent=` directly, or `agent_factory=` (the
+demo composition passes `demo.agents.client_agent.agent.build_client_agent`). The provider no longer
+imports the sample agent itself, so a deployment can plug its own ADK graph.
 
 **Where the ADK session lives.** `AdkDecisionProvider` keeps one ADK session per negotiation, so the
 agent still sees the earlier rounds. With `A2AT_SAMPLE_CLIENT_DB` set those sessions are stored in
@@ -333,8 +368,24 @@ flowchart LR
 | `generate_energy_saving_report` | the plan was applied | produce the final report |
 
 `PlanGuard` enforces the order; an out-of-order call returns `tool_order_violation`, and the planner
-may correct itself within its step budget. Replacing `agents/server_agent/tools.py` with real NMS
-calls keeps the graph shell and the order guard.
+may correct itself within its step budget. Replacing `demo/agents/server_agent/tools.py` with real
+NMS calls keeps the graph shell and the order guard.
+
+The executor shell takes the graph from outside:
+
+```python
+# protocol/server_app.py (excerpt)
+executor = build_negotiation_executor(
+    gate=NegotiationGate(prompt_server, policy=negotiation_policy),
+    agent_factory=server_agent_factory,   # builds the graph, tools and prompt of one task
+    config=config,
+)
+```
+
+`ServerAgentFactory` returns a `ServerAgentSpec` (graph, model, system prompt, report tool name,
+initial messages, tool-result parser). The demo implementation is
+`demo/agents/server_agent/factory.py`; a real NMS returns its own graph. `NegotiationGate` likewise
+takes the policy callable; the demo binds it to `RanDataPlanEvaluator` in `demo/plan_evaluator.py`.
 
 **Verify:** the server trace shows four tool spans; the Task ends `COMPLETED` with a report artifact.
 
@@ -491,7 +542,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 **Offline mode.** Before constructing `A2ATClient` / `A2ATServer`, the runtimes register the traced
 wrappers (`scripted_traced`, live `openai_traced`) and build a temporary SDK `.env` with
 `A2AT_LLM_PROVIDER=scripted_traced`, `A2AT_LLM_MODEL=scripted`, `A2AT_LLM_API_KEY=not-needed`. The
-source `.env` is never modified. The client ADK agent uses `shared/adk_fake_model.py`; the server
+source `.env` is never modified. The client ADK agent uses `demo/adk_fake_model.py`; the server
 planner uses `ScriptedChatModel`, which emits the four sample tool calls in order. Logs and the Web
 UI label the run `offline (scripted)`.
 
@@ -536,7 +587,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (420 tests). What it covers:
+The suite is fully offline and deterministic (440 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -558,6 +609,7 @@ The suite is fully offline and deterministic (420 tests). What it covers:
 | `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic client ADK model. |
 | `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration (including both databases, gateway and planner keys), scenario definitions, transcripts, runtime assembly, and the server import that must not load ADK. |
 | `test_logging_setup.py` | Text/JSON format, context propagation into child tasks, credential redaction, and the environment-driven configuration. |
+| `test_demo_boundary.py` | A fresh interpreter imports every core module and must not load `demo.*`; the runtime rejects a call without a run catalog. |
 | `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
 
 The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
@@ -636,7 +688,7 @@ The sample is deliberately a prototype. Before production:
 - **Persistence.** The two SQLite stores are the demo persistence layer: server Tasks
   (`protocol/sqlite_task_store.py`) and client conversations/runs/negotiations
   (`protocol/client_store.py`). Production should use your database and migrations. Plans still
-  live in a process-local store (`shared/ran_data._PLANS`) and push configs use
+  live in a process-local store (`demo/ran_data._PLANS`) and push configs use
   `InMemoryPushNotificationConfigStore`. Client ADK decision sessions are kept as audit data for
   `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` (default 7) and then swept; they contain prompts and tool
   results, so set the window from your audit and data-protection requirements, and size the client
@@ -660,8 +712,8 @@ The sample is deliberately a prototype. Before production:
   `A2AT_LLM_DETAIL_LOG_ENABLED=false` outside debugging.
 - **Deterministic code owns protocol correctness.** Keep rounds, performatives, terminal states,
   and Task lifecycle in deterministic code; let the LLM produce intent, text, and tool calls only.
-- **Offline machinery is test-only.** `shared/scripted_llm.py`, `shared/adk_fake_model.py`,
-  `resources/mock_llm/`, and `shared/scenario.py` exist to make demos and tests reproducible; do
+- **Offline machinery is test-only.** `demo/scripted_llm.py`, `demo/adk_fake_model.py`,
+  `resources/mock_llm/`, and `demo/scenario.py` exist to make demos and tests reproducible; do
   not ship them as production paths.
 - **Run concurrency.** The client service allows one active run per conversation and independent
   conversations concurrently; the Web UI is still a developer tool, not a multi-tenant console.
@@ -697,8 +749,8 @@ The sample is deliberately a prototype. Before production:
 | --- | --- |
 | [`run_demo.py`](run_demo.py) | Multi-process launcher: starts registry, server and (with `--gateway`) the inbound A2A gateway in the background, runs the CLI client in the foreground (or serves the Web UI with `--ui`), and stops the children afterwards. |
 | [`env.example`](env.example) | Unified offline-ready configuration template. |
-| [`agents/server_agent/`](agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure NMS tools). No ADK. |
-| [`agents/client_agent/`](agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |
+| [`demo/agents/server_agent/`](demo/agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure NMS tools). No ADK. |
+| [`demo/agents/client_agent/`](demo/agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |
 | [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
 | [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `LangGraphTaskExecutor`: runs the ReAct planner and publishes the A2A Task lifecycle. No ADK. |
@@ -713,20 +765,27 @@ The sample is deliberately a prototype. Before production:
 | [`protocol/discovery.py`](protocol/discovery.py) | AgentCard discovery through the registry center or `/.well-known/agent-card.json`. |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T metadata helpers: extension URIs, `templateUri`, `negotiationContext`, end message, sample-only metadata. |
 | [`protocol/transcript.py`](protocol/transcript.py) | Structured run transcript written to `runs/<timestamp>-<scenario>.json` and `.md`. |
-| [`shared/config.py`](shared/config.py) | Reads `.env`, resolves both database paths, gateway and planner settings, and builds the client ADK model (fake model offline, `LiteLlm` live). |
+| [`shared/config.py`](shared/config.py) | Reads `.env`, resolves both database paths, gateway and planner settings; a pure value object with no model construction. |
+| [`shared/model_factory.py`](shared/model_factory.py) | Builds the ADK model: `LiteLlm` live, an injected deterministic model offline. |
+| [`shared/logging_setup.py`](shared/logging_setup.py) | Root logging, run-correlation context, text/JSON formats and credential redaction. |
+| [`protocol/run_spec.py`](protocol/run_spec.py) | `RunSpec`, `RunCatalog` and `ClientPolicy`: what a run is and which values an accept fills. |
+| [`protocol/server_agent_spec.py`](protocol/server_agent_spec.py) | `ServerAgentSpec` / `ServerAgentFactory`: the planner graph a deployment plugs into the executor. |
+| [`demo/catalog.py`](demo/catalog.py) | Demo `RunCatalog` and `ClientPolicy` over the five scenarios. |
+| [`demo/composition.py`](demo/composition.py) | Composition root: offline model/provider, demo runtime and negotiation policy. |
+| [`demo/plan_evaluator.py`](demo/plan_evaluator.py) | `RanDataPlanEvaluator`: feasibility and revision of a counter-proposed plan. |
 | [`shared/agent_card.py`](shared/agent_card.py) | AgentCard identity constants shared by the client (discovery) and the server (card build). |
 | [`shared/sdk_env.py`](shared/sdk_env.py) | Per-run SDK `.env` builder shared by both runtimes (no client↔server import). |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision` (client `output_schema`) and the provider-facing proposal view. |
-| [`shared/scenario.py`](shared/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
+| [`demo/scenario.py`](demo/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
-| [`shared/ran_data.py`](shared/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | In-memory RAN dataset, plan evaluation, and process-local plan store. |
-| [`shared/scripted_llm.py`](shared/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | Scripted SDK `LLMClient` registered with the official factory; schema-routed canned responses. |
-| [`shared/adk_fake_model.py`](shared/adk_fake_model.py) | Deterministic client ADK `BaseLlm` used offline and in tests. |
+| [`demo/ran_data.py`](demo/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | In-memory RAN dataset, plan evaluation, and process-local plan store. |
+| [`demo/scripted_llm.py`](demo/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | Scripted SDK `LLMClient` registered with the official factory; schema-routed canned responses. |
+| [`demo/adk_fake_model.py`](demo/adk_fake_model.py) | Deterministic client ADK `BaseLlm` used offline and in tests. |
 | [`shared/registry_client.py`](shared/registry_client.py) | Registry center register/query HTTP calls. |
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | Embedded webhook push receiver with token validation. |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
-| [`registry/`](registry) | Mock registry center (AgentCard register/query, port 5001). |
-| [`web/`](web) | Starlette Web UI (`app.py`) and the single-page front end (`static/index.html`). |
+| [`demo/registry/`](demo/registry) | Mock registry center (AgentCard register/query, port 5001). |
+| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`) and the single-page front end (`static/index.html`). |
 | [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
 
 ### B.2 Replace checklist
@@ -740,16 +799,16 @@ sample business content or demo-only machinery.
 | --- | --- | --- |
 | `protocol/client_flow.py` (`run_client_flow`) | KEEP | Protocol correctness: message sequence, metadata, transports, terminal handling. |
 | `protocol/decision_provider.py` (`NegotiationDecisionProvider`, `AdkDecisionProvider`) | KEEP | The ADK integration and decision contract. |
-| `agents/client_agent/agent.py` (`build_client_agent`) | KEEP | ADK wiring; replace only if your agent graph differs. |
-| `agents/client_agent/prompts/request_instruction.md` | **REPLACE** | Your client's policy and wording. |
-| `agents/client_agent/tools.py` (`get_sla_policy`, `evaluate_proposal_impact`) | **REPLACE** | Read your SLA/catalog systems instead of the in-memory dataset. |
-| `shared/scenario.py` (scripted decisions, user requests) | **REPLACE** | Demo inputs; keep only for offline demos/tests. |
+| `demo/agents/client_agent/agent.py` (`build_client_agent`) | KEEP | ADK wiring; replace only if your agent graph differs. |
+| `demo/agents/client_agent/prompts/request_instruction.md` | **REPLACE** | Your client's policy and wording. |
+| `demo/agents/client_agent/tools.py` (`get_sla_policy`, `evaluate_proposal_impact`) | **REPLACE** | Read your SLA/catalog systems instead of the in-memory dataset. |
+| `demo/scenario.py` (scripted decisions, user requests) | **REPLACE** | Demo inputs; keep only for offline demos/tests. |
 | `protocol/client_runtime.py` | KEEP | Per-run assembly; adapt the SDK endpoint values via configuration. |
 | `protocol/client_service.py` | KEEP | Conversation identity, run lifecycle, memory and per-conversation concurrency. |
 | `protocol/client_store.py` | KEEP | Minimal durable client store; swap for your database in production. |
 | `protocol/client_gateway.py` | KEEP (adapt the AgentCard/identity) | Optional inbound A2A surface; replace the demo agent card, auth and registration. |
-| `shared/scripted_llm.py`, `shared/adk_fake_model.py`, `resources/mock_llm/` | KEEP (offline/test only) | Deterministic tests; never use them in production. |
-| `web/app.py`, `web/static/index.html` | KEEP or REPLACE | Developer UI; replace with your own UI if needed. |
+| `demo/scripted_llm.py`, `demo/adk_fake_model.py`, `resources/mock_llm/` | KEEP (offline/test only) | Deterministic tests; never use them in production. |
+| `demo/web/app.py`, `demo/web/static/index.html` | KEEP or REPLACE | Developer UI; replace with your own UI if needed. |
 | `shared/models.py` (`NegotiationDecision`) | KEEP | Extend fields only if your decision needs more payload. |
 
 #### Server side
@@ -758,13 +817,13 @@ sample business content or demo-only machinery.
 | --- | --- | --- |
 | `protocol/negotiation_gate.py` (`NegotiationGate`) | KEEP | Protocol entry and validation/short-circuit logic. |
 | `protocol/server_executor.py` (`NegotiationAgentExecutor`, `LangGraphTaskExecutor`) | KEEP the shell | The A2A lifecycle, graph loop and gate wiring are reusable; the planner prompt/model and tools are business logic. |
-| `agents/server_agent/planner.py` | **REPLACE** the prompt/model policy | Keep the `ScriptedChatModel` for offline tests; point the live model at your endpoint and prompt. |
-| `agents/server_agent/langgraph_tools.py` (`PlanGuard`, tool wrappers) | **REPLACE** the order rules | Keep the wrapper shape; adapt the business preconditions. |
+| `demo/agents/server_agent/planner.py` | **REPLACE** the prompt/model policy | Keep the `ScriptedChatModel` for offline tests; point the live model at your endpoint and prompt. |
+| `demo/agents/server_agent/langgraph_tools.py` (`PlanGuard`, tool wrappers) | **REPLACE** the order rules | Keep the wrapper shape; adapt the business preconditions. |
 | `protocol/sqlite_task_store.py` (`SqliteTaskStore`) | KEEP | Minimal durable A2A TaskStore; swap for your database in production. |
 | `protocol/server_app.py` (`build_agent_card`, `build_server_runtime`) | KEEP | Assembly; replace card metadata/provider URL and TaskStore. |
 | `protocol/negotiation_policy.py` (`decide` and rule helpers) | REPLACE the rules, KEEP the shape | The state machine is reusable; the business rules and proposal texts are sample-specific. |
-| `agents/server_agent/tools.py` (four tools) | **REPLACE** | Wire real RAN network-management operations. |
-| `shared/ran_data.py`, `resources/ran_data/cells.json` | **REPLACE** | In-memory demo data and plan store. |
+| `demo/agents/server_agent/tools.py` (four tools) | **REPLACE** | Wire real RAN network-management operations. |
+| `demo/ran_data.py`, `resources/ran_data/cells.json` | **REPLACE** | In-memory demo data and plan store. |
 
 #### Both sides
 

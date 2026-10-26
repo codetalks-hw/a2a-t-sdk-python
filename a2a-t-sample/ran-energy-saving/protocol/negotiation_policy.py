@@ -17,7 +17,7 @@ Server-side state machine (design §6.2/§6.3):
   ``Propose`` that the client can accept.
 
 Sample convention: a client counter proposal may carry ``metadata["sampleProposal"]`` with
-``{cellId, window, targetRate}``. The policy evaluates it with :func:`shared.ran_data.evaluate_plan`,
+``{cellId, window, targetRate}``. The policy evaluates it with :func:`demo.ran_data.evaluate_plan`,
 so the demo behaves deterministically. The field is not part of A2A-T; without it the policy advances
 through the preset revision sequence.
 """
@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from a2a_t.core.errors.exceptions import SlotValidationError
 from a2a_t.core.metadata import NegotiationPerformative
@@ -37,8 +37,7 @@ from a2a_t.core.standard_templates import (
     NEGOTIATION_ABORT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
-from shared import ran_data
-from shared.scenario import MAX_ROUNDS
+from shared.run_constants import MAX_ROUNDS
 
 
 #: Negotiation type the server opened.
@@ -129,16 +128,31 @@ class SampleProposal:
         return cls(cell_id=cell_id.strip(), window=window.strip(), target_rate=rendered_rate)
 
 
-#: Fallback plan used when a counter proposal carries no usable sample plan.
-DEFAULT_PLAN: Final[SampleProposal] = SampleProposal(
-    cell_id="cell-001", window="00:00~06:00", target_rate="30"
-)
+@dataclass(frozen=True)
+class PlanAssessment:
+    """The deployment's verdict on one counter-proposed plan.
 
-#: Preset revisions when the counter proposal carries no sample plan.
-PRESET_REVISIONS: Final[dict[int, SampleProposal]] = {
-    2: DEFAULT_PLAN,
-    3: SampleProposal(cell_id="cell-001", window="23:00~24:00", target_rate="30"),
-}
+    Attributes:
+        feasible: whether the plan can be applied.
+        reasons: human-readable rejection reasons, empty when feasible.
+        revised: the plan the server proposes instead; the requested plan when feasible.
+    """
+
+    feasible: bool
+    reasons: str
+    revised: SampleProposal
+
+
+class PlanEvaluator(Protocol):
+    """Business evaluation of a sample counter proposal, supplied by the NMS integration."""
+
+    def evaluate(self, plan: SampleProposal) -> PlanAssessment:
+        """Assess one plan and derive the server's revised proposal."""
+        ...
+
+    def preset(self, round_number: int) -> SampleProposal:
+        """Return the server's preset plan for a round without a client plan."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -277,11 +291,18 @@ def negotiation_kind_for_template_uri(template_uri: str | None) -> NegotiationKi
     return _KIND_BY_URI_SEGMENT.get(parts[1])
 
 
-def decide(state: NegotiationState) -> PolicyDecision:
+def decide(
+    state: NegotiationState,
+    *,
+    evaluator: PlanEvaluator | None = None,
+) -> PolicyDecision:
     """Return the deterministic server decision for the given negotiation state.
 
     Args:
         state: current negotiation state.
+        evaluator: business evaluation of a counter-proposed plan; supplied by the NMS
+            integration. Without one, a counter proposal is answered by asking for a concrete
+            plan instead of judging feasibility.
 
     Returns:
         The next action: ``propose`` on the initial failure and on an acceptable counter,
@@ -297,7 +318,7 @@ def decide(state: NegotiationState) -> PolicyDecision:
         return PolicyDecision("end", None, "The client rejected the proposal; the negotiation ends.")
     if inbound.performative is NegotiationPerformative.ABORT:
         return PolicyDecision("end", None, "The client aborted the negotiation; the negotiation ends.")
-    return _counter_decision(state)
+    return _counter_decision(state, evaluator)
 
 
 def _initial_decision(state: NegotiationState) -> PolicyDecision:
@@ -343,7 +364,10 @@ def _initial_decision(state: NegotiationState) -> PolicyDecision:
     )
 
 
-def _counter_decision(state: NegotiationState) -> PolicyDecision:
+def _counter_decision(
+    state: NegotiationState,
+    evaluator: PlanEvaluator | None,
+) -> PolicyDecision:
     """Return the server answer to a client counter proposal."""
     # At the last round there is no room for the server's confirming Propose: the server would
     # have to advance past ``maxRounds``. It aborts at the current round instead, even when the
@@ -367,29 +391,41 @@ def _counter_decision(state: NegotiationState) -> PolicyDecision:
             f"following items before the energy saving task can start: {items}."
         )
         rationale = "The information negotiation still misses required task parameters."
-    elif sample is not None and _is_feasible(sample):
-        text = (
-            f"The plan proposed in round {state.round} is acceptable: cell {sample.cell_id}, "
-            f"window {sample.window}, target rate {sample.target_rate}%. The server publishes it as "
-            f"the final agreement in round {next_round}; please accept it."
-        )
-        rationale = "The client counter proposal is feasible, so the server publishes the final proposal."
-    elif sample is not None:
-        revised = _revise_plan(sample)
-        reasons = _infeasibility_reasons(sample)
-        text = (
-            f"The plan proposed in round {state.round} is not feasible ({reasons}). Revised "
-            f"proposal for round {next_round}: cell {revised.cell_id}, window {revised.window}, "
-            f"target rate {revised.target_rate}%. Please accept this revised plan."
-        )
-        rationale = "The client counter proposal is infeasible, so the server proposes a revised plan."
-    else:
-        preset = PRESET_REVISIONS.get(next_round, DEFAULT_PLAN)
+    elif sample is not None and evaluator is not None:
+        assessment = evaluator.evaluate(sample)
+        if assessment.feasible:
+            text = (
+                f"The plan proposed in round {state.round} is acceptable: cell {sample.cell_id}, "
+                f"window {sample.window}, target rate {sample.target_rate}%. The server publishes it "
+                f"as the final agreement in round {next_round}; please accept it."
+            )
+            rationale = (
+                "The client counter proposal is feasible, so the server publishes the final proposal."
+            )
+        else:
+            revised = assessment.revised
+            text = (
+                f"The plan proposed in round {state.round} is not feasible ({assessment.reasons}). "
+                f"Revised proposal for round {next_round}: cell {revised.cell_id}, window "
+                f"{revised.window}, target rate {revised.target_rate}%. Please accept this revised "
+                "plan."
+            )
+            rationale = (
+                "The client counter proposal is infeasible, so the server proposes a revised plan."
+            )
+    elif evaluator is not None:
+        preset = evaluator.preset(next_round)
         text = (
             f"Revised proposal for round {next_round}: cell {preset.cell_id}, window "
             f"{preset.window}, target rate {preset.target_rate}%. Please accept this revised plan."
         )
         rationale = "No sample counter proposal was carried, so the server advances its preset sequence."
+    else:
+        text = (
+            "The counter proposal cannot be evaluated: no plan evaluator is configured. Provide a "
+            "concrete plan (cell, window and target rate) so the server can answer."
+        )
+        rationale = "No plan evaluator is configured; the server asks for a concrete plan."
     return PolicyDecision(
         "propose",
         ProposalContent(
@@ -415,48 +451,3 @@ def _abort_decision(state: NegotiationState, *, reason: str, text: str) -> Polic
         ),
         f"The negotiation cannot converge within {state.max_rounds} rounds.",
     )
-
-
-def _is_feasible(plan: SampleProposal) -> bool:
-    """Evaluate one sample plan against the RAN dataset; malformed plans are infeasible."""
-    try:
-        return ran_data.evaluate_plan(plan.cell_id, plan.window, plan.target_rate).feasible
-    except ran_data.RanDataError:
-        return False
-
-
-def _infeasibility_reasons(plan: SampleProposal) -> str:
-    """Return the dataset's reasons for rejecting a sample plan."""
-    try:
-        evaluation = ran_data.evaluate_plan(plan.cell_id, plan.window, plan.target_rate)
-    except ran_data.RanDataError as exc:
-        return str(exc)
-    return "; ".join(evaluation.reasons) or "the dataset rejected the plan"
-
-
-def _revise_plan(plan: SampleProposal) -> SampleProposal:
-    """Return a feasible plan derived from an infeasible counter proposal.
-
-    The revision keeps the requested cell and target rate where possible, but moves the plan to the
-    cell's first available window and caps the rate so the cell's maximum saving rate and SLA floor
-    both hold.
-    """
-    cell = ran_data.get_cell(plan.cell_id)
-    if cell is None:
-        return DEFAULT_PLAN
-    try:
-        requested_rate = ran_data.parse_target_rate(plan.target_rate)
-    except ran_data.InvalidPlanError:
-        requested_rate = float(DEFAULT_PLAN.target_rate)
-    sla_rate_cap = 100.0 * (
-        1.0
-        - cell.capacity.sla_min_throughput_mbps / cell.capacity.max_throughput_mbps
-    )
-    rate = min(requested_rate, cell.max_saving_rate, sla_rate_cap)
-    if rate <= 0:
-        return DEFAULT_PLAN
-    rendered_rate = f"{rate:g}"
-    for window in cell.available_windows:
-        if _is_feasible(SampleProposal(cell_id=cell.cell_id, window=window, target_rate=rendered_rate)):
-            return SampleProposal(cell_id=cell.cell_id, window=window, target_rate=rendered_rate)
-    return DEFAULT_PLAN

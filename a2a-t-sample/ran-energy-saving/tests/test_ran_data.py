@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterator
 
 import pytest
-from shared import ran_data
+from demo import ran_data
 
 
 @pytest.fixture(autouse=True)

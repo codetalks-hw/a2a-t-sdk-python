@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from a2a_t.core.errors.exceptions import SlotValidationError
 from a2a_t.core.metadata import NegotiationPerformative
@@ -11,8 +13,8 @@ from a2a_t.core.standard_templates import (
     NEGOTIATION_ABORT_URI,
     TARGET_NEGOTIATION_PROPOSE_URI,
 )
+from demo.plan_evaluator import DEFAULT_PLAN, RanDataPlanEvaluator
 from protocol.negotiation_policy import (
-    DEFAULT_PLAN,
     AbortContent,
     InboundDecision,
     NegotiationKind,
@@ -20,11 +22,15 @@ from protocol.negotiation_policy import (
     PolicyDecision,
     ProposalContent,
     SampleProposal,
-    decide,
     negotiation_kind_for_error_code,
     negotiation_kind_for_errors,
     negotiation_kind_for_template_uri,
 )
+from protocol.negotiation_policy import (
+    decide as _decide,
+)
+
+decide = partial(_decide, evaluator=RanDataPlanEvaluator())
 
 ACCEPT = InboundDecision(performative=NegotiationPerformative.ACCEPT)
 REJECT = InboundDecision(performative=NegotiationPerformative.REJECT)

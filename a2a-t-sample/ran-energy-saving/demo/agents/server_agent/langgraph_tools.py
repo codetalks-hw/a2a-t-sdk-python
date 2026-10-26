@@ -14,7 +14,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
-from agents.server_agent.tools import (
+from demo.agents.server_agent.tools import (
     apply_energy_saving_plan,
     evaluate_energy_saving_plan,
     generate_energy_saving_report,

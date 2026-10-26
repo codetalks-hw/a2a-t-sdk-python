@@ -5,12 +5,12 @@
 
 import assert from "node:assert/strict";
 
-import { RunStore } from "../../web/static/js/store.js";
+import { RunStore } from "../../demo/web/static/js/store.js";
 import {
   FilterState,
   availableRounds,
   filterItems,
-} from "../../web/static/js/filters.js";
+} from "../../demo/web/static/js/filters.js";
 
 const store = new RunStore();
 store.setMeta({ language: "en-US", modelMode: "offline", modelLabel: "offline (scripted)" });

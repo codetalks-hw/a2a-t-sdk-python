@@ -22,7 +22,6 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -37,23 +36,11 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
-from agents.server_agent.graph import build_execution_graph
-from agents.server_agent.langgraph_tools import (
-    REPORT_TOOL_NAME,
-    PlanGuard,
-    build_execution_tools,
-    tool_result_from_text,
-)
-from agents.server_agent.planner import (
-    build_planner_input,
-    build_planner_model,
-    build_system_prompt,
-)
 from google.protobuf.json_format import ParseDict
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
-from shared.config import SampleConfig, load_config
+from shared.config import SampleConfig
 from shared.logging_setup import log_context
 from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
@@ -66,6 +53,7 @@ from protocol.messages import (
     task_prompt_from_metadata,
 )
 from protocol.negotiation_gate import NegotiationGate
+from protocol.server_agent_spec import ServerAgentFactory
 
 #: Artifact names.
 REPORT_ARTIFACT_NAME: Final[str] = "energy saving intent report"
@@ -299,30 +287,24 @@ class LangGraphTaskExecutor(AgentExecutor):
     def __init__(
         self,
         *,
+        agent_factory: ServerAgentFactory,
         config: SampleConfig | None = None,
-        planner_model_factory: Callable[[], BaseChatModel] | None = None,
     ) -> None:
         """Create one executor.
 
         Args:
+            agent_factory: builder of the planner graph and its metadata for one task; supplied by
+                the NMS integration (the demo factory lives in :mod:`demo.agents.server_agent`).
             config: resolved sample configuration; defaults to :func:`load_config`.
-            planner_model_factory: optional model factory (tests); defaults to
-                :func:`~agents.server_agent.planner.build_planner_model`.
         """
         self._config = config
-        self._planner_model_factory = planner_model_factory
+        self._agent_factory = agent_factory
 
     @property
     def recursion_limit(self) -> int:
         """Return the planner recursion limit of this executor."""
         configured = self._config.planner_max_steps if self._config is not None else None
         return configured if configured is not None else DEFAULT_PLANNER_MAX_STEPS
-
-    def _model(self) -> BaseChatModel:
-        """Build the planner model of this execution."""
-        if self._planner_model_factory is not None:
-            return self._planner_model_factory()
-        return build_planner_model(self._config or load_config())
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Create the Task, run the graph, and publish artifacts/status updates.
@@ -406,21 +388,20 @@ class LangGraphTaskExecutor(AgentExecutor):
         negotiation_context: dict[str, object] | None,
     ) -> None:
         """Run the graph, publishing one artifact per tool result and the final report."""
-        guard = PlanGuard()
-        tools = build_execution_tools(guard)
-        model = self._model()
-        system_prompt = build_system_prompt()
-        graph = build_execution_graph(model=model, tools=tools, system_prompt=system_prompt)
-        user_content = build_planner_input(_task_prompt(context), negotiation_context)
-
-        history: list[BaseMessage] = [HumanMessage(content=user_content)]
+        agent = self._agent_factory(
+            self._config,
+            task_prompt=_task_prompt(context),
+            negotiation_context=negotiation_context,
+        )
+        report_tool_name = agent.report_tool_name
+        history: list[BaseMessage] = list(agent.initial_messages)
         steps: list[ToolStep] = []
         pending: dict[str, _PendingToolCall] = {}
         final_text = ""
         last_update_at = time.perf_counter()
 
-        async for update in graph.astream(
-            {"messages": [HumanMessage(content=user_content)]},
+        async for update in agent.graph.astream(
+            {"messages": list(agent.initial_messages)},
             config={"recursion_limit": self.recursion_limit},
             stream_mode="updates",
         ):
@@ -445,8 +426,8 @@ class LangGraphTaskExecutor(AgentExecutor):
                             context,
                             task_id,
                             execution_span_id,
-                            model=model,
-                            system_prompt=system_prompt,
+                            model=agent.model,
+                            system_prompt=agent.system_prompt,
                             history=history[:-1],
                             response=item,
                             duration_ms=turn_duration_ms,
@@ -463,12 +444,12 @@ class LangGraphTaskExecutor(AgentExecutor):
                         step = ToolStep(
                             name=name,
                             args=args,
-                            result=tool_result_from_text(item.content),
+                            result=agent.parse_tool_result(item.content),
                             duration_ms=round(duration_ms, 3),
                         )
                         steps.append(step)
                         _emit_tool_span(context, task_id, execution_span_id, step)
-                        if name != REPORT_TOOL_NAME:
+                        if name != report_tool_name:
                             await updater.add_artifact(
                                 [Part(text=json.dumps(step.result, ensure_ascii=False))],
                                 name=TOOL_ARTIFACT_NAME,
@@ -479,7 +460,7 @@ class LangGraphTaskExecutor(AgentExecutor):
         report_steps = [
             step
             for step in steps
-            if step.name == REPORT_TOOL_NAME and step.result.get("ok") is True
+            if step.name == report_tool_name and step.result.get("ok") is True
         ]
         if not report_steps:
             reason = (
@@ -602,20 +583,20 @@ class NegotiationAgentExecutor(AgentExecutor):
 def build_negotiation_executor(
     *,
     gate: NegotiationGate,
+    agent_factory: ServerAgentFactory,
     config: SampleConfig | None = None,
-    planner_model_factory: Callable[[], BaseChatModel] | None = None,
 ) -> NegotiationAgentExecutor:
     """Build the outer executor with the LangGraph executor inside.
 
     Args:
         gate: pre-task negotiation gate.
+        agent_factory: builder of the planner graph of one accepted task.
         config: resolved sample configuration.
-        planner_model_factory: optional planner model factory (tests).
     """
     return NegotiationAgentExecutor(
         gate=gate,
         inner=LangGraphTaskExecutor(
+            agent_factory=agent_factory,
             config=config,
-            planner_model_factory=planner_model_factory,
         ),
     )

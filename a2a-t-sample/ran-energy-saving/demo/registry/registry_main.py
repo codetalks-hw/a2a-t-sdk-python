@@ -10,7 +10,7 @@ import uvicorn
 from dotenv import dotenv_values
 from shared.logging_setup import configure_logging
 
-from registry.registry_routes import build_registry_app
+from demo.registry.registry_routes import build_registry_app
 
 _LOGGER = logging.getLogger("ran_energy_saving.registry")
 

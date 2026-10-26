@@ -10,6 +10,16 @@ from pathlib import Path
 
 import pytest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from demo.adk_fake_model import (
+    CLIENT_AGENT_NAME,
+    PROGRESS_MODEL_TURNS,
+    FakeLlm,
+    FakeScript,
+    FakeTurn,
+    build_fake_model,
+)
+from demo.agents.client_agent.agent import build_client_agent
+from demo.scenario import SCENARIO_INFORMATION, SCENARIO_TARGET, get_scenario
 from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from protocol.decision_provider import (
     CLIENT_APP_NAME,
@@ -23,16 +33,7 @@ from protocol.decision_provider import (
     build_decision_prompt,
     sweep_stale_sessions,
 )
-from shared.adk_fake_model import (
-    CLIENT_AGENT_NAME,
-    PROGRESS_MODEL_TURNS,
-    FakeLlm,
-    FakeScript,
-    FakeTurn,
-    build_fake_model,
-)
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.scenario import SCENARIO_INFORMATION, SCENARIO_TARGET, get_scenario
 
 
 def _session(
@@ -57,7 +58,7 @@ def _view(kind: str = "information", *, content: str = "Please provide the regio
 
 def test_all_providers_satisfy_the_protocol() -> None:
     providers = (
-        AdkDecisionProvider(model=build_fake_model()),
+        AdkDecisionProvider(agent_factory=build_client_agent, model=build_fake_model()),
         ScriptedDecisionProvider([NegotiationDecision(action="accept", rationale="ok")]),
         ManualDecisionProvider(timeout_seconds=0.1),
     )
@@ -101,7 +102,7 @@ def test_build_decision_prompt_carries_the_original_request() -> None:
 
 
 async def test_scripted_provider_returns_decisions_in_order_and_then_raises() -> None:
-    provider = ScriptedDecisionProvider.from_scenario(SCENARIO_TARGET)
+    provider = ScriptedDecisionProvider(get_scenario(SCENARIO_TARGET).scripted_client_decisions)
     session = _session()
 
     first = await provider.respond(_view("target"), session)
@@ -114,9 +115,9 @@ async def test_scripted_provider_returns_decisions_in_order_and_then_raises() ->
         await provider.respond(_view("target"), session)
 
 
-def test_scripted_provider_accepts_a_scenario_name() -> None:
-    provider = ScriptedDecisionProvider.from_scenario(SCENARIO_INFORMATION)
+def test_scripted_provider_accepts_a_decision_sequence() -> None:
     scenario = get_scenario(SCENARIO_INFORMATION)
+    provider = ScriptedDecisionProvider(scenario.scripted_client_decisions)
 
     assert provider.remaining == len(scenario.scripted_client_decisions)
 
@@ -162,7 +163,7 @@ async def test_manual_provider_waits_for_a_late_submission() -> None:
 
 
 async def test_adk_provider_returns_the_fake_model_decision() -> None:
-    provider = AdkDecisionProvider(model=build_fake_model())
+    provider = AdkDecisionProvider(agent_factory=build_client_agent, model=build_fake_model())
 
     decision = await provider.respond(_view(), _session())
 
@@ -188,6 +189,7 @@ async def test_adk_provider_extracts_a_decision_from_prose_and_fences() -> None:
     """A live model may wrap the JSON in a sentence or a fence; the parser still finds it."""
     payload = json.dumps({"action": "reject", "rationale": "The SLA cannot be met."})
     provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
         model=_scripted_model(f"Here is my decision:\n```json\n{payload}\n```\nDone."),
     )
 
@@ -201,6 +203,7 @@ async def test_adk_provider_retries_once_when_the_model_returns_only_prose() -> 
     """One corrective turn recovers a model that ignored the output schema."""
     payload = json.dumps({"action": "counter", "rationale": "Use a non-overlapping target."})
     provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
         model=_scripted_model(
             "I need to check the policy before I answer.",
             payload,
@@ -214,7 +217,11 @@ async def test_adk_provider_retries_once_when_the_model_returns_only_prose() -> 
 
 
 async def test_adk_provider_uses_the_offline_fallback_when_the_model_returns_no_decision() -> None:
-    provider = AdkDecisionProvider(model=build_fake_model(), fallback_decision=OFFLINE_FALLBACK_DECISION)
+    provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
+        model=build_fake_model(),
+        fallback_decision=OFFLINE_FALLBACK_DECISION,
+    )
 
     decision = await provider.respond(_view(), _session())
 
@@ -224,7 +231,7 @@ async def test_adk_provider_uses_the_offline_fallback_when_the_model_returns_no_
 
 
 def test_adk_provider_raises_without_a_fallback_on_unparseable_output() -> None:
-    provider = AdkDecisionProvider(model=build_fake_model())
+    provider = AdkDecisionProvider(agent_factory=build_client_agent, model=build_fake_model())
 
     with pytest.raises(DecisionProviderError):
         provider._fallback_or_raise("no decision")
@@ -234,6 +241,7 @@ async def test_adk_provider_persists_a_decision_session(tmp_path: Path) -> None:
     """The decision session is durable: it survives the provider and is kept as audit data."""
     db_path = tmp_path / "client.sqlite3"
     provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
         model=build_fake_model(),
         session_db_path=str(db_path),
     )
@@ -252,6 +260,7 @@ async def test_adk_provider_reuses_one_persisted_session_across_rounds(tmp_path:
     """A durable store already holds the session on the next round; it must load, not re-create."""
     payload = json.dumps({"action": "accept", "rationale": "The plan is feasible."})
     provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
         model=_scripted_model(payload, payload),
         session_db_path=str(tmp_path / "client.sqlite3"),
     )
@@ -269,6 +278,7 @@ async def test_adk_provider_falls_back_to_memory_when_the_database_cannot_be_ope
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("occupied", encoding="utf-8")
     provider = AdkDecisionProvider(
+        agent_factory=build_client_agent,
         model=build_fake_model(),
         session_db_path=str(blocker / "client.sqlite3"),
     )

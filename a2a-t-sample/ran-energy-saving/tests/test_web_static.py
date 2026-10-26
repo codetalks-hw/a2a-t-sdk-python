@@ -16,8 +16,8 @@ from pathlib import Path
 
 import httpx
 import pytest
+from demo.web.app import STATIC_DIR, create_app
 from shared.config import SampleConfig
-from web.app import STATIC_DIR, create_app
 
 #: JavaScript modules of the explorer.
 MODULES: tuple[str, ...] = (

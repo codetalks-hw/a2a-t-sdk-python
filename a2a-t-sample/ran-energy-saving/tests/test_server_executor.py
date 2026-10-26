@@ -28,7 +28,10 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
     TEMPLATE_URI_METADATA_KEY,
 )
-from agents.server_agent.planner import ScriptedChatModel
+from demo import ran_data
+from demo.agents.server_agent.factory import build_server_agent, server_agent_factory
+from demo.agents.server_agent.planner import ScriptedChatModel
+from demo.composition import build_demo_negotiation_policy
 from dotenv import dotenv_values
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
@@ -47,7 +50,6 @@ from protocol.server_executor import (
     NegotiationAgentExecutor,
     build_negotiation_executor,
 )
-from shared import ran_data
 from shared.config import MODEL_MODE_LIVE, SampleConfig
 
 CONTEXT_ID = "ctx-executor"
@@ -201,7 +203,9 @@ async def test_langgraph_executor_publishes_task_artifacts_and_report(
     context = _make_context(
         negotiation={"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
     )
-    executor = LangGraphTaskExecutor(config=offline_config)
+    executor = LangGraphTaskExecutor(
+        agent_factory=build_server_agent, config=offline_config
+    )
     queue = RecordingEventQueue()
 
     try:
@@ -241,8 +245,10 @@ async def test_langgraph_executor_fails_when_the_planner_cannot_generate_a_repor
 ) -> None:
     context = _make_context()
     executor = LangGraphTaskExecutor(
+        agent_factory=server_agent_factory(
+            model_factory=lambda: ScriptedChatModel(dataset_date="not-a-date")
+        ),
         config=offline_config,
-        planner_model_factory=lambda: ScriptedChatModel(dataset_date="not-a-date"),
     )
     queue = RecordingEventQueue()
 
@@ -262,7 +268,9 @@ def test_build_negotiation_executor_wraps_the_langgraph_executor(
 ) -> None:
     gate = cast(NegotiationGate, FixedGate(GateOutcome.execution(_make_context())))
 
-    executor = build_negotiation_executor(gate=gate, config=offline_config)
+    executor = build_negotiation_executor(
+        gate=gate, agent_factory=build_server_agent, config=offline_config
+    )
 
     assert isinstance(executor, NegotiationAgentExecutor)
     assert isinstance(executor.inner, LangGraphTaskExecutor)
@@ -339,7 +347,12 @@ def test_live_server_constructs_from_the_example_env_with_an_empty_key(
     )
     config = replace(offline_config, model_mode=MODEL_MODE_LIVE)
 
-    runtime = build_server_runtime(config=config, env_path=live_source)
+    runtime = build_server_runtime(
+        agent_factory=build_server_agent,
+        policy=build_demo_negotiation_policy(),
+        config=config,
+        env_path=live_source,
+    )
 
     assert runtime.prompt_server is not None
     assert runtime.config.is_offline is False

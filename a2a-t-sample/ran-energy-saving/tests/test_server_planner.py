@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
-from agents.server_agent.graph import build_execution_graph
-from agents.server_agent.langgraph_tools import (
+from demo import ran_data
+from demo.agents.server_agent.graph import build_execution_graph
+from demo.agents.server_agent.langgraph_tools import (
     PlanGuard,
     build_execution_tools,
     tool_result_from_text,
 )
-from agents.server_agent.planner import (
+from demo.agents.server_agent.planner import (
     ScriptedChatModel,
     build_planner_input,
     build_planner_model,
@@ -20,7 +21,6 @@ from agents.server_agent.planner import (
 )
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
-from shared import ran_data
 from shared.config import MODEL_MODE_LIVE, SampleConfig
 
 

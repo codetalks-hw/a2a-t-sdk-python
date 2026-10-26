@@ -1,20 +1,19 @@
 """Traced SDK ``LLMClient`` providers of the RAN energy-saving sample (Run Explorer design §5.1).
 
 The A2A-T SDK resolves its provider through ``LLMClientFactory`` and calls ``structured`` for every
-LLM-assisted step (Task-T extraction, validations, Negotiation-T extraction). This module registers
-two drop-in providers:
+LLM-assisted step (Task-T extraction, validations, Negotiation-T extraction). This module provides:
 
 * :class:`TracedOpenAIClient` — live mode, captures the raw OpenAI response before the JSON
   validation of :class:`~a2a_t.llm.providers.openai.OpenAIClient`;
-* :class:`TracedScriptedClient` — offline mode, captures the deterministic canned response.
+* :class:`TracedStructuredMixin` — the span wrapper a provider (including the demo's offline
+  client) subclasses.
 
-Both share one :class:`_TracedStructuredMixin` that emits one ``llm`` span per call (request,
-raw content, parsed JSON, usage, latency, error) and **never changes behavior**: the wrapped
-response and every exception are returned/raised unchanged, and a failing trace is swallowed.
+The mixin emits one ``llm`` span per call (request, raw content, parsed JSON, usage, latency,
+error) and **never changes behavior**: the wrapped response and every exception are returned/raised
+unchanged, and a failing trace is swallowed.
 
-The stage of a call comes from :func:`~shared.trace.trace_stage` (preferred), then from the routed
-scripted stage, then from :func:`~shared.scripted_llm.route_structured_call`. Offline calls report
-``n/a (scripted)`` tokens instead of fabricating a zero usage.
+The stage of a call comes from :func:`~shared.trace.trace_stage` or the response metadata. Offline
+calls report ``n/a (scripted)`` tokens instead of fabricating a zero usage.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from a2a_t.llm.models import LLMResponse
 from a2a_t.llm.providers.openai import OpenAIClient
 
 from shared.json_text import first_json_object_text
-from shared.scripted_llm import SCRIPTED_PROVIDER_NAME, ScriptedLLMClient, route_structured_call
 from shared.trace import (
     current_trace,
     elapsed_ms,
@@ -57,12 +55,14 @@ def sdk_provider_name(*, offline: bool) -> str:
 
 
 def register_traced_providers() -> None:
-    """Register the traced providers with the SDK factory (idempotent)."""
+    """Register the traced OpenAI provider with the SDK factory (idempotent).
+
+    The offline traced provider belongs to the demo package and is registered by
+    :func:`demo.composition.install_offline_provider`; this module never imports it.
+    """
     available = set(LLMClientFactory.available_providers())
     if TRACED_OPENAI_PROVIDER not in available:
         LLMClientFactory.register(TRACED_OPENAI_PROVIDER, TracedOpenAIClient)
-    if TRACED_SCRIPTED_PROVIDER not in available:
-        LLMClientFactory.register(TRACED_SCRIPTED_PROVIDER, TracedScriptedClient)
 
 
 def is_traced_provider_registered(provider: str) -> bool:
@@ -84,11 +84,9 @@ def _metadata_stage(response: LLMResponse | None) -> str | None:
 
 
 def _infer_stage(messages: list[dict[str, str]], json_schema: dict[str, Any]) -> str | None:
-    """Infer the stage of one call from its output schema, ``None`` when unroutable."""
-    try:
-        return route_structured_call(messages, json_schema)
-    except ValueError:
-        return None
+    """Return ``None``: producers set their stage through ``trace_stage`` or response metadata."""
+    del messages, json_schema
+    return None
 
 
 def _parse_json(content: str | None) -> tuple[object | None, str | None]:
@@ -112,7 +110,7 @@ def _parse_json(content: str | None) -> tuple[object | None, str | None]:
 
 def _token_map(response: LLMResponse) -> dict[str, object]:
     """Render the token usage of one response; the scripted provider reports ``n/a``."""
-    if response.model == SCRIPTED_PROVIDER_NAME or "scripted_stage" in response.metadata:
+    if response.model == TRACED_SCRIPTED_PROVIDER or "scripted_stage" in response.metadata:
         return {
             "prompt": None,
             "completion": None,
@@ -156,7 +154,7 @@ def _request_detail(
     }
 
 
-class _TracedStructuredMixin:
+class TracedStructuredMixin:
     """``structured`` wrapper shared by the traced providers.
 
     Subclasses implement :meth:`_call_structured` by delegating to their provider implementation
@@ -258,7 +256,7 @@ class _TracedStructuredMixin:
         return response
 
 
-class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
+class TracedOpenAIClient(TracedStructuredMixin, OpenAIClient):
     """Live ``OpenAIClient`` that captures the raw response before JSON validation.
 
     The sample disables the OpenAI SDK's own HTTP retries: ``A2AT_LLM_MAX_ATTEMPTS`` is the
@@ -324,35 +322,12 @@ class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
         return OpenAIClient._parse_response(self, response)
 
 
-class TracedScriptedClient(_TracedStructuredMixin, ScriptedLLMClient):
-    """Offline ``ScriptedLLMClient`` that captures the canned response it served."""
-
-    _provider_label = TRACED_SCRIPTED_PROVIDER
-
-    def _call_structured(
-        self,
-        *,
-        messages: list[dict[str, str]],
-        json_schema: dict[str, Any],
-        temperature: float | None,
-        max_tokens: int | None,
-    ) -> LLMResponse:
-        """Delegate to the deterministic scripted implementation."""
-        return ScriptedLLMClient.structured(
-            self,
-            messages=messages,
-            json_schema=json_schema,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-
 __all__ = [
     "SCRIPTED_TOKENS_LABEL",
     "TRACED_OPENAI_PROVIDER",
     "TRACED_SCRIPTED_PROVIDER",
     "TracedOpenAIClient",
-    "TracedScriptedClient",
+    "TracedStructuredMixin",
     "is_traced_provider_registered",
     "register_traced_providers",
     "sdk_provider_name",

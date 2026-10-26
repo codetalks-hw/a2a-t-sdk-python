@@ -29,7 +29,6 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -53,14 +52,15 @@ from a2a.types import (
 from a2a.utils.constants import TransportProtocol
 from google.protobuf.json_format import MessageToDict, ParseDict
 from shared.agent_card import AGENT_CARD_ORGANIZATION, AGENT_CARD_PROVIDER_URL
-from shared.config import SampleConfig, load_config
+from shared.config import GATEWAY_SCENARIO_ENV_KEY, SampleConfig, load_config
 from shared.logging_setup import configure_logging, log_context
 from shared.registry_client import register_agentcard
 from starlette.applications import Starlette
 
-from protocol.client_runtime import MODE_AUTO, build_client_runtime
+from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import RunConflictError, RunManager, RunState
 from protocol.client_store import SqliteClientStore
+from protocol.run_spec import RunCatalog
 from protocol.transcript import DEFAULT_RUNS_DIR
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_gateway")
@@ -292,8 +292,18 @@ def build_gateway_service(
     *,
     config: SampleConfig,
     env_path: Path | None = None,
+    catalog: RunCatalog | None = None,
 ) -> RunManager:
     """Build the client service used by the gateway (and optionally by the Web UI)."""
+    if catalog is None:
+        from demo.catalog import DemoRunCatalog
+
+        catalog = DemoRunCatalog()
+    if config.gateway_scenario not in catalog.names:
+        raise ValueError(
+            f"Unsupported {GATEWAY_SCENARIO_ENV_KEY}: {config.gateway_scenario}; "
+            f"expected one of {catalog.names}"
+        )
     store = (
         SqliteClientStore(config.client_db_path) if config.client_db_path is not None else None
     )
@@ -305,16 +315,20 @@ def build_gateway_service(
         transport: str,
         discovery: str,
     ) -> Any:
-        return await build_client_runtime(
-            replace(resolved_config, discovery=discovery),
+        from demo.composition import build_demo_runtime
+
+        return await build_demo_runtime(
+            resolved_config,
             scenario,
             mode,
             transport,
+            discovery,
             env_path=env_path,
         )
 
     return RunManager(
         config=config,
+        catalog=catalog,
         runtime_factory=runtime_factory,
         runs_dir=DEFAULT_RUNS_DIR,
         store=store,

@@ -6,8 +6,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { EN } from "../../web/static/js/i18n/en.js";
-import { ZH_CN } from "../../web/static/js/i18n/zh-CN.js";
+import { EN } from "../../demo/web/static/js/i18n/en.js";
+import { ZH_CN } from "../../demo/web/static/js/i18n/zh-CN.js";
 import {
   DICTS,
   LOCALES,
@@ -19,10 +19,10 @@ import {
   setLocaleMode,
   t,
   translateTraceTitle,
-} from "../../web/static/js/i18n/index.js";
+} from "../../demo/web/static/js/i18n/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const staticDir = join(here, "..", "..", "web", "static");
+const staticDir = join(here, "..", "..", "demo", "web", "static");
 
 /** Flatten nested dictionaries to dotted keys. */
 function flatten(value, prefix = "") {

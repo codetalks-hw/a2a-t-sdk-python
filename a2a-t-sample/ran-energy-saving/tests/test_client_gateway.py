@@ -21,6 +21,7 @@ from a2a.types import (
     TaskStatusUpdateEvent,
 )
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from demo.catalog import DemoRunCatalog
 from google.protobuf.json_format import MessageToDict
 from protocol.client_flow import ClientFlowResult
 from protocol.client_gateway import ClientGatewayExecutor, build_gateway_app, build_gateway_service
@@ -142,6 +143,7 @@ def _manager(
     manager = RunManager(
         config=config,
         runtime_factory=factory,
+        catalog=DemoRunCatalog(),
         runs_dir=tmp_path / "runs",
         store=store,
     )
