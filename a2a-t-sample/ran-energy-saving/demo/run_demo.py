@@ -56,6 +56,7 @@ RUN_DIR = Path(tempfile.gettempdir()) / "a2at-ran-energy-saving-adk"
 PID_FILE = RUN_DIR / "pids.json"
 TASK_DB_PATH = CASE_DIR / "runs" / "task-status.sqlite3"
 CLIENT_DB_PATH = CASE_DIR / "runs" / "client-state.sqlite3"
+GATEWAY_TASK_DB_PATH = CASE_DIR / "runs" / "gateway-task-status.sqlite3"
 
 #: Source ``.env`` candidates, in resolution order.
 ENV_CANDIDATES = (CASE_DIR / ".env", SAMPLE_DIR / ".env", SAMPLE_DIR / "env.example")
@@ -241,6 +242,7 @@ def _write_run_env(
             "A2AT_SAMPLE_DIRECT_SERVER_URL": f"http://{server_host}:{server_port}",
             "A2AT_SAMPLE_TASK_DB": str(TASK_DB_PATH),
             "A2AT_SAMPLE_CLIENT_DB": str(CLIENT_DB_PATH),
+            "A2AT_SAMPLE_GATEWAY_TASK_DB": str(GATEWAY_TASK_DB_PATH),
             "A2AT_SAMPLE_GATEWAY_HOST": server_host,
             "A2AT_SAMPLE_GATEWAY_PORT": str(gateway_port),
             "A2AT_SAMPLE_GATEWAY_REGISTER": "1" if gateway_register else "0",

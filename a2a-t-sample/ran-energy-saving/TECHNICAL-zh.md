@@ -346,7 +346,9 @@ executor = build_negotiation_executor(
 
 ### 4.4 任务存储与状态
 
-`protocol/sqlite_task_store.py` 是一个最小 A2A `TaskStore`：`save/get/list/delete`，WAL + busy timeout，写失败只记录日志，不破坏协议执行。设置 `A2AT_SAMPLE_TASK_DB` 后，Web UI 以只读方式打开同一文件渲染任务表。生产环境替换为自有数据库即可。
+`protocol/sqlite_task_store.py` 是一个最小 A2A `TaskStore`：`save/get/list/delete`，WAL + busy timeout，写失败只记录日志，不破坏协议执行。设置 `A2AT_SAMPLE_TASK_DB` 后，Web UI 以只读方式打开同一文件渲染任务表。入站 Gateway 用同一个存储实现，由 `A2AT_SAMPLE_GATEWAY_TASK_DB` 指定文件，因此入站 Task 重启后仍在。
+
+两套数据库共用 `shared/sqlite.py`：统一的连接设置，以及记录在 `PRAGMA user_version` 中的有序迁移列表。旧版本数据库打开时自动升级；比当前代码更新的数据库会直接报错。新增迁移只需向对应 store 的 `_MIGRATIONS` 追加一个函数，不要修改已有迁移。
 
 ### 4.5 自检清单
 
@@ -452,6 +454,7 @@ executor = build_negotiation_executor(
 | `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` | 默认 `6`（>= 0） | 注入下一次决策提示词与 Task-T 生成的最近会话轮数。 |
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | 默认 `7`（>= 1） | 决策智能体会话作为审计数据保留的天数，到期由启动/定期清扫删除。 |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | 默认 `127.0.0.1` / `8001` | 可选入站 A2A Gateway 的绑定与 AgentCard 对外接口。 |
+| `A2AT_SAMPLE_GATEWAY_TASK_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/gateway-task-status.sqlite3` | 入站 Gateway 的 Task 存储绝对 SQLite 路径。 |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0`（默认）、`1` | 是否把 Gateway AgentCard 注册到注册中心。 |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | 默认 `information` | 入站 Gateway 请求使用的场景。 |
 | `A2AT_SAMPLE_PLANNER_MODEL` | 默认：ADK 模型去掉 `openai/` 前缀 | 服务端 planner 的 LangChain 模型 id。 |
@@ -492,7 +495,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §1.1 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（440 个测试）。覆盖范围：
+测试套件完全离线且确定性（446 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -515,6 +518,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置（含两套数据库、Gateway 与 planner 键）、场景定义、运行记录、运行时装配，以及服务端导入不加载 ADK。 |
 | `test_logging_setup.py` | text/JSON 格式、上下文向子任务传播、凭据脱敏、环境变量驱动配置。 |
 | `test_demo_boundary.py` | 全新解释器导入全部核心模块，断言不加载 `demo.*`；缺少 run catalog 时运行时直接拒绝。 |
+| `test_sqlite.py` | 共用连接设置、有序迁移、拒绝更新版本、只读访问不创建文件。 |
 | `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，外来监听则拒绝。 |
 
 JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
@@ -580,7 +584,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 本样例刻意保持原型性质。生产化之前：
 
-- **持久化。** 本样例有两个 SQLite 存储：服务端 Task（`protocol/sqlite_task_store.py`）与客户端会话/运行/协商（`protocol/client_store.py`）。生产应使用自有数据库与迁移。方案仍保存在进程内存储（`demo/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
+- **持久化。** 本样例的 SQLite 存储包括：服务端 Task（`protocol/sqlite_task_store.py`）、入站 Gateway Task（同一实现，独立文件）与客户端会话/运行/协商（`protocol/client_store.py`）。`shared/sqlite.py` 通过 `PRAGMA user_version` 执行有序 schema 迁移；生产仍应使用自有数据库与迁移工具。方案仍保存在进程内存储（`demo/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
 - **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。

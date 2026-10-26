@@ -393,8 +393,14 @@ takes the policy callable; the demo binds it to `RanDataPlanEvaluator` in `demo/
 
 `protocol/sqlite_task_store.py` is a minimal A2A `TaskStore`: `save/get/list/delete`, WAL plus a busy
 timeout, and persistence errors are logged rather than breaking protocol execution. With
-`A2AT_SAMPLE_TASK_DB` set, the Web UI opens the same file read-only to render the task table. Replace
-it with your own database in production.
+`A2AT_SAMPLE_TASK_DB` set, the Web UI opens the same file read-only to render the task table. The
+inbound gateway uses the same store with `A2AT_SAMPLE_GATEWAY_TASK_DB`, so an inbound Task also
+survives a restart.
+
+Both databases share `shared/sqlite.py`: one connection setup and an ordered migration list recorded
+in `PRAGMA user_version`. A database from an older build is upgraded on open; a database from a newer
+build fails loudly. Add a migration by appending one function to the store's `_MIGRATIONS`; never
+edit an existing one.
 
 ### 4.5 Self-check
 
@@ -520,6 +526,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_CLIENT_MEMORY_TURNS` | default `6` (>= 0) | Number of recent conversation turns injected into the next decision prompt and Task-T generation. |
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | default `7` (>= 1) | Days a decision-agent session is kept as audit data before the startup/periodic sweep removes it. |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | default `127.0.0.1` / `8001` | Optional inbound A2A gateway bind and advertised AgentCard interface. |
+| `A2AT_SAMPLE_GATEWAY_TASK_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/gateway-task-status.sqlite3` | Absolute SQLite path of the inbound gateway Task store. |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0` (default), `1` | Register the gateway AgentCard with the registry center. |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | default `information` | Scenario used for an inbound gateway request. |
 | `A2AT_SAMPLE_PLANNER_MODEL` | default: the ADK model without its `openai/` prefix | LangChain model id of the server planner. |
@@ -587,7 +594,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (440 tests). What it covers:
+The suite is fully offline and deterministic (446 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -610,6 +617,7 @@ The suite is fully offline and deterministic (440 tests). What it covers:
 | `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration (including both databases, gateway and planner keys), scenario definitions, transcripts, runtime assembly, and the server import that must not load ADK. |
 | `test_logging_setup.py` | Text/JSON format, context propagation into child tasks, credential redaction, and the environment-driven configuration. |
 | `test_demo_boundary.py` | A fresh interpreter imports every core module and must not load `demo.*`; the runtime rejects a call without a run catalog. |
+| `test_sqlite.py` | Shared connection settings, ordered migrations, newer-version rejection, read-only access that never creates the file. |
 | `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
 
 The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
@@ -685,9 +693,11 @@ contains the two-way timeline and the decisions table.
 
 The sample is deliberately a prototype. Before production:
 
-- **Persistence.** The two SQLite stores are the demo persistence layer: server Tasks
-  (`protocol/sqlite_task_store.py`) and client conversations/runs/negotiations
-  (`protocol/client_store.py`). Production should use your database and migrations. Plans still
+- **Persistence.** The SQLite stores are the demo persistence layer: server Tasks
+  (`protocol/sqlite_task_store.py`), inbound gateway Tasks (same store, its own file) and client
+  conversations/runs/negotiations (`protocol/client_store.py`). `shared/sqlite.py` applies ordered
+  schema migrations through `PRAGMA user_version`; production should still move to your database
+  and migration tooling. Plans still
   live in a process-local store (`demo/ran_data._PLANS`) and push configs use
   `InMemoryPushNotificationConfigStore`. Client ADK decision sessions are kept as audit data for
   `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` (default 7) and then swept; they contain prompts and tool
@@ -778,6 +788,7 @@ The sample is deliberately a prototype. Before production:
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision` (client `output_schema`) and the provider-facing proposal view. |
 | [`demo/scenario.py`](demo/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
+| [`shared/sqlite.py`](shared/sqlite.py) | Shared connection settings, read-only access, `user_version` and the ordered migration runner. |
 | [`demo/ran_data.py`](demo/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | In-memory RAN dataset, plan evaluation, and process-local plan store. |
 | [`demo/scripted_llm.py`](demo/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | Scripted SDK `LLMClient` registered with the official factory; schema-routed canned responses. |
 | [`demo/adk_fake_model.py`](demo/adk_fake_model.py) | Deterministic client ADK `BaseLlm` used offline and in tests. |

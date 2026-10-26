@@ -27,6 +27,7 @@ from protocol.client_flow import ClientFlowResult
 from protocol.client_gateway import ClientGatewayExecutor, build_gateway_app, build_gateway_service
 from protocol.client_service import RunManager
 from protocol.client_store import SqliteClientStore
+from protocol.sqlite_task_store import SqliteTaskStore, read_task_summaries
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
 
@@ -255,3 +256,22 @@ def test_build_gateway_service_uses_the_client_database(
     service = build_gateway_service(config=config, env_path=None)
     assert isinstance(service.store, SqliteClientStore)
     assert service.store.path == tmp_path / "client.sqlite3"
+
+
+async def test_gateway_uses_the_injected_persistent_task_store(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """The gateway handler is wired to the SQLite store instead of the in-memory one."""
+    manager, _ = _manager(tmp_path, offline_config)
+    database = tmp_path / "gateway-tasks.sqlite3"
+
+    app = build_gateway_app(
+        config=offline_config,
+        service=manager,
+        task_store=SqliteTaskStore(database),
+    )
+
+    assert isinstance(app.state.gateway_task_store, SqliteTaskStore)
+    assert app.state.gateway_task_store.path == database
+    assert read_task_summaries(database) == []

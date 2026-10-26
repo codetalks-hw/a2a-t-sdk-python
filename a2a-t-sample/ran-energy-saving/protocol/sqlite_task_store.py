@@ -28,6 +28,7 @@ from a2a.server.tasks.task_store import TaskStore
 from a2a.types import ListTasksRequest, ListTasksResponse, Task, TaskState
 from a2a_t.core.metadata import TASK_T_EXTENSION_URI
 from google.protobuf.json_format import MessageToDict
+from shared.sqlite import SchemaMigration, apply_migrations, connect, readonly_connection
 
 from protocol.messages import SAMPLE_RUN_ID_METADATA_KEY
 
@@ -39,8 +40,6 @@ DEFAULT_LIST_PAGE_SIZE: Final[int] = 50
 #: Longest summary shown in the UI/list response.
 SUMMARY_LIMIT: Final[int] = 200
 
-#: SQLite busy timeout in milliseconds.
-BUSY_TIMEOUT_MS: Final[int] = 5000
 
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -56,6 +55,15 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_owner_updated ON tasks(owner, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_context ON tasks(context_id);
 """
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    """Create the version-1 Task schema."""
+    connection.executescript(_SCHEMA)
+
+
+#: Ordered schema migrations; index ``i`` upgrades version ``i`` to ``i + 1``.
+_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema,)
 
 
 class SqliteTaskStore(TaskStore):
@@ -76,27 +84,16 @@ class SqliteTaskStore(TaskStore):
         """Return the backing SQLite file path."""
         return self._path
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open one connection with the sample's WAL/busy-timeout settings."""
-        connection = sqlite3.connect(str(self._path), timeout=BUSY_TIMEOUT_MS / 1000.0)
-        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        return connection
-
     @contextmanager
     def _connection(self) -> Generator[sqlite3.Connection]:
         """Yield one connection, commit on success, and always close it."""
-        connection = self._connect()
-        try:
+        with connect(self._path) as connection:
             yield connection
-            connection.commit()
-        finally:
-            connection.close()
 
     def _initialize(self) -> None:
-        """Create the schema and enable WAL mode."""
+        """Apply the schema migrations (WAL is enabled by the shared connection helper)."""
         with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(_SCHEMA)
+            apply_migrations(connection, _MIGRATIONS)
 
     async def save(self, task: Task, context: ServerCallContext) -> None:
         """Persist or update one Task.
@@ -378,16 +375,11 @@ def read_task_summaries(path: str | Path, limit: int = 100) -> list[dict[str, ob
     Returns:
         Summary rows, or an empty list when the file/table is absent.
     """
-    resolved_path = Path(path).expanduser()
-    if not resolved_path.is_file():
-        return []
     resolved_limit = max(1, min(limit, 500))
     try:
-        connection = sqlite3.connect(
-            f"{resolved_path.resolve().as_uri()}?mode=ro",
-            uri=True,
-            timeout=BUSY_TIMEOUT_MS / 1000.0,
-        )
+        connection = readonly_connection(path)
+        if connection is None:
+            return []
         try:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(

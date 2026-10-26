@@ -32,10 +32,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Protocol
 
+from shared.sqlite import SchemaMigration, apply_migrations, connect, readonly_connection
+
 _LOGGER = logging.getLogger("ran_energy_saving.client_store")
 
-#: SQLite busy timeout in milliseconds.
-BUSY_TIMEOUT_MS: Final[int] = 5000
 
 #: Longest user request/title shown in list responses.
 SUMMARY_LIMIT: Final[int] = 200
@@ -137,6 +137,16 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
 """
+
+
+def _create_schema(connection: sqlite3.Connection) -> None:
+    """Create the version-1 client schema."""
+    connection.executescript(_SCHEMA)
+
+
+#: Ordered schema migrations; index ``i`` upgrades version ``i`` to ``i + 1``.
+_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema,)
+
 
 #: Fields ``update_run`` may change (keeps the SQL dynamic but closed).
 _RUN_UPDATE_FIELDS: Final[frozenset[str]] = frozenset(
@@ -405,28 +415,16 @@ class SqliteClientStore:
         """Return the backing SQLite file path."""
         return self._path
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open one connection with the sample's WAL/busy-timeout settings."""
-        connection = sqlite3.connect(str(self._path), timeout=BUSY_TIMEOUT_MS / 1000.0)
-        connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        return connection
-
     @contextmanager
     def _connection(self) -> Generator[sqlite3.Connection]:
         """Yield one connection, commit on success, and always close it."""
-        connection = self._connect()
-        try:
+        with connect(self._path) as connection:
             yield connection
-            connection.commit()
-        finally:
-            connection.close()
 
     def _initialize(self) -> None:
-        """Create the schema and enable WAL mode."""
+        """Apply the schema migrations (WAL is enabled by the shared connection helper)."""
         with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(_SCHEMA)
-            connection.execute("PRAGMA user_version=1")
+            apply_migrations(connection, _MIGRATIONS)
 
     async def ensure_conversation(
         self,
@@ -966,10 +964,7 @@ class SqliteClientStore:
 
 def _readonly_connection(path: str | Path) -> sqlite3.Connection | None:
     """Open one read-only connection, ``None`` when the database is missing."""
-    database = Path(path).expanduser()
-    if not database.is_file():
-        return None
-    return sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    return readonly_connection(path)
 
 
 def read_client_run_summaries(path: str | Path, limit: int = 50) -> builtins.list[dict[str, object]]:

@@ -40,6 +40,7 @@ from a2a.server.events.event_queue import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_rest_routes
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
+from a2a.server.tasks.task_store import TaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.types import (
     AgentCapabilities,
@@ -61,6 +62,7 @@ from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import RunConflictError, RunManager, RunState
 from protocol.client_store import SqliteClientStore
 from protocol.run_spec import RunCatalog
+from protocol.sqlite_task_store import SqliteTaskStore
 from protocol.transcript import DEFAULT_RUNS_DIR
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_gateway")
@@ -254,17 +256,28 @@ def build_gateway_app(
     *,
     config: SampleConfig,
     service: RunManager,
+    task_store: TaskStore | None = None,
     host: str | None = None,
     port: int | None = None,
 ) -> Starlette:
-    """Build the inbound A2A Starlette app of the client gateway."""
+    """Build the inbound A2A Starlette app of the client gateway.
+
+    Args:
+        config: resolved sample configuration.
+        service: client application service owning the runs.
+        task_store: inbound Task store; defaults to the in-memory store. The demo launcher passes
+            the SQLite store configured by ``A2AT_SAMPLE_GATEWAY_TASK_DB``.
+        host: advertised host; defaults to the configured gateway host.
+        port: advertised port; defaults to the configured gateway port.
+    """
     resolved_host = host or config.gateway_host
     resolved_port = port or config.gateway_port
     card = build_gateway_agent_card(host=resolved_host, port=resolved_port)
     executor = ClientGatewayExecutor(service=service, config=config)
+    resolved_task_store = task_store or InMemoryTaskStore()
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
-        task_store=InMemoryTaskStore(),
+        task_store=resolved_task_store,
         agent_card=card,
     )
 
@@ -282,6 +295,7 @@ def build_gateway_app(
         lifespan=lifespan,
     )
     app.state.agent_card = card
+    app.state.gateway_task_store = resolved_task_store
     app.state.gateway_executor = executor
     app.state.client_service = service
     app.state.config = config
@@ -362,7 +376,12 @@ def run_gateway(
     """Serve the inbound A2A gateway until interrupted."""
     configure_logging()
     service = build_gateway_service(config=config, env_path=env_path)
-    app = build_gateway_app(config=config, service=service)
+    task_store = (
+        SqliteTaskStore(config.gateway_task_db_path)
+        if config.gateway_task_db_path is not None
+        else None
+    )
+    app = build_gateway_app(config=config, service=service, task_store=task_store)
     card = app.state.agent_card
     if config.gateway_register:
         asyncio.run(register_gateway_card(card, config=config, env_path=env_path))
