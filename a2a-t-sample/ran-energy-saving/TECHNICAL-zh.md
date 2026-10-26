@@ -124,7 +124,7 @@ flowchart LR
 | 5 | 决议 | 接受/拒绝/中止；接受时重填 Task-T | `client_flow.py`、`negotiation_gate.py` |
 | 6 | 网管执行 | 评估并下发节能方案 | `server_executor.py`、`demo/agents/server_agent/` |
 | 7 | 报告 | 发布报告 artifact，Task 进入 COMPLETED | `server_executor.py` |
-| 8 | 结束 | 写运行记录，UI 回放 | `client_service.py`、`demo/web/` |
+| 8 | 结束 | 写运行记录，UI 回放 | `protocol/client_service/`、`demo/web/` |
 
 ### 2.3 代码地图：按需求找入口
 
@@ -132,7 +132,7 @@ flowchart LR
 | --- | --- |
 | OSS 的决策逻辑 | `demo/agents/client_agent/` + `protocol/decision_provider.py` |
 | OSS 的协议循环 | `protocol/client_flow.py` |
-| OSS 的会话与运行记录 | `protocol/client_service.py`、`protocol/client_store.py` |
+| OSS 的会话与运行记录 | `protocol/client_service/`、`protocol/client_store/` |
 | 把 OSS 暴露成 A2A 后端 | `protocol/client_gateway.py` |
 | 网管的协商规则 | `protocol/negotiation_gate.py`、`protocol/negotiation_policy.py` |
 | 网管的执行流程 | `protocol/server_executor.py`、`demo/agents/server_agent/` |
@@ -586,7 +586,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 本样例刻意保持原型性质。生产化之前：
 
-- **持久化。** 本样例的 SQLite 存储包括：服务端 Task（`protocol/sqlite_task_store.py`）、入站 Gateway Task（同一实现，独立文件）与客户端会话/运行/协商（`protocol/client_store.py`）。`shared/sqlite.py` 通过 `PRAGMA user_version` 执行有序 schema 迁移；生产仍应使用自有数据库与迁移工具。方案仍保存在进程内存储（`demo/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
+- **持久化。** 本样例的 SQLite 存储包括：服务端 Task（`protocol/sqlite_task_store.py`）、入站 Gateway Task（同一实现，独立文件）与客户端会话/运行/协商（`protocol/client_store/`）。`shared/sqlite.py` 通过 `PRAGMA user_version` 执行有序 schema 迁移；生产仍应使用自有数据库与迁移工具。方案仍保存在进程内存储（`demo/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
 - **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
@@ -629,8 +629,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`protocol/server_app.py`](protocol/server_app.py) | 服务端装配：AgentCard（声明 `Task-T/v1` 与 `Negotiation-T/v1`）、请求处理器、Starlette 应用、注册中心注册。 |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | 客户端协议流程：初始 Task-T、多轮协商、accept 重填、SSE/webhook 终态处理。 |
 | [`protocol/client_runtime.py`](protocol/client_runtime.py) | 客户端单次运行装配：每次运行的 SDK `.env`、服务发现、SDK 客户端、传输、决策 Provider。 |
-| [`protocol/client_service.py`](protocol/client_service.py) | 客户端应用服务：会话、运行生命周期、记忆注入、每会话并发约束、持久化钩子。 |
-| [`protocol/client_store.py`](protocol/client_store.py) | 客户端 SQLite 库：会话、轮次、运行、协商审计、Task 快照。 |
+| [`protocol/client_service/`](protocol/client_service) | 客户端应用服务，拆为 `run_state.py`（运行状态、span、决策）与 `run_manager.py`（生命周期、会话、持久化钩子）。 |
+| [`protocol/client_store/`](protocol/client_store) | 客户端持久化，拆为 `store.py`（写入）与 `reader.py`（UI 只读查询）。 |
 | [`protocol/client_gateway.py`](protocol/client_gateway.py) | 可选入站 A2A Gateway：一条入站消息 -> 一次客户端运行 -> 最终报告 artifact。 |
 | [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted 三种实现。 |
 | [`protocol/discovery.py`](protocol/discovery.py) | 通过注册中心或 `/.well-known/agent-card.json` 发现 AgentCard。 |
@@ -674,8 +674,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | `demo/agents/client_agent/tools.py`（`get_sla_policy`、`evaluate_proposal_impact`） | **REPLACE** | 改为读取你的 SLA/目录系统，而不是进程内数据集。 |
 | `demo/scenario.py`（脚本化决策、用户请求） | **REPLACE** | 演示输入；仅离线演示/测试保留。 |
 | `protocol/client_runtime.py` | KEEP | 单次运行装配；通过配置调整 SDK 端点。 |
-| `protocol/client_service.py` | KEEP | 会话身份、运行生命周期、记忆与每会话并发约束。 |
-| `protocol/client_store.py` | KEEP | 最小持久化客户端库；生产环境可替换为自有数据库。 |
+| `protocol/client_service/` | KEEP | 会话身份、运行生命周期、记忆与每会话并发约束。 |
+| `protocol/client_store/` | KEEP | 最小持久化客户端库；生产环境可替换为自有数据库。 |
 | `protocol/client_gateway.py` | KEEP（调整 AgentCard/身份） | 可选入站 A2A 接口；替换演示卡片、鉴权与注册。 |
 | `demo/scripted_llm.py`、`demo/adk_fake_model.py`、`resources/mock_llm/` | KEEP（仅离线/测试） | 确定性测试；禁止用于生产。 |
 | `demo/web/app.py`、`demo/web/static/index.html` | KEEP 或 REPLACE | 开发者 UI；可替换为自有界面。 |

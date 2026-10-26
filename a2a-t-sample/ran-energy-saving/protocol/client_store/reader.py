@@ -1,0 +1,260 @@
+"""Read-only query helpers used by the Web UI and external consoles."""
+
+from __future__ import annotations
+
+import builtins
+import logging
+import sqlite3
+from pathlib import Path
+
+from shared.sqlite import readonly_connection
+
+from protocol.client_store.store import _load_json, _truncate
+
+_LOGGER = logging.getLogger("ran_energy_saving.client_store")
+
+
+def _readonly_connection(path: str | Path) -> sqlite3.Connection | None:
+    """Open one read-only connection, ``None`` when the database is missing."""
+    return readonly_connection(path)
+
+
+def read_client_run_summaries(path: str | Path, limit: int = 50) -> builtins.list[dict[str, object]]:
+    """Return UI rows for the newest client runs (never creates the database)."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return []
+    resolved_limit = max(1, min(limit, 500))
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT r.run_id, r.conversation_id, r.scenario, r.mode, r.status, r.final_state,
+                   r.user_request, r.error, r.created_at, r.updated_at, r.finished_at,
+                   (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = r.conversation_id)
+                       AS turn_count
+            FROM runs r
+            ORDER BY r.created_at DESC, r.run_id DESC
+            LIMIT ?
+            """,
+            (resolved_limit,),
+        ).fetchall()
+        return [
+            {
+                "runId": str(row["run_id"]),
+                "conversationId": row["conversation_id"],
+                "scenario": str(row["scenario"]),
+                "mode": str(row["mode"]),
+                "status": str(row["status"]),
+                "finalState": row["final_state"],
+                "userRequest": _truncate(str(row["user_request"])),
+                "error": row["error"],
+                "createdAt": str(row["created_at"]),
+                "updatedAt": str(row["updated_at"]),
+                "finishedAt": row["finished_at"],
+                "turnCount": int(row["turn_count"] or 0),
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as exc:
+        _LOGGER.warning("client run summary read failed: %s", exc)
+        return []
+    finally:
+        connection.close()
+
+
+def read_client_run_detail(path: str | Path, run_id: str) -> dict[str, object] | None:
+    """Return one run with its turns, negotiation events and Task snapshot."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return None
+    try:
+        connection.row_factory = sqlite3.Row
+        run = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if run is None:
+            return None
+        turns = connection.execute(
+            "SELECT * FROM turns WHERE conversation_id=? ORDER BY seq ASC",
+            (run["conversation_id"],),
+        ).fetchall()
+        events = connection.execute(
+            "SELECT * FROM negotiation_events WHERE run_id=? ORDER BY seq ASC",
+            (run_id,),
+        ).fetchall()
+        snapshot = connection.execute(
+            "SELECT * FROM task_snapshots WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return {
+            "runId": str(run["run_id"]),
+            "conversationId": run["conversation_id"],
+            "turnId": run["turn_id"],
+            "scenario": str(run["scenario"]),
+            "mode": str(run["mode"]),
+            "transport": str(run["transport"]),
+            "discovery": str(run["discovery"]),
+            "userRequest": str(run["user_request"]),
+            "status": str(run["status"]),
+            "finalState": run["final_state"],
+            "serverContextId": run["server_context_id"],
+            "serverTaskId": run["server_task_id"],
+            "error": run["error"],
+            "idempotencyKey": str(run["idempotency_key"]),
+            "transcriptJson": run["transcript_json"],
+            "transcriptMarkdown": run["transcript_markdown"],
+            "traceJson": run["trace_json"],
+            "createdAt": str(run["created_at"]),
+            "updatedAt": str(run["updated_at"]),
+            "finishedAt": run["finished_at"],
+            "turns": [
+                {
+                    "turnId": str(row["turn_id"]),
+                    "seq": int(row["seq"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "runId": row["run_id"],
+                    "createdAt": str(row["created_at"]),
+                }
+                for row in turns
+            ],
+            "negotiationEvents": [
+                {
+                    "eventId": str(row["event_id"]),
+                    "seq": int(row["seq"]),
+                    "negotiationId": row["negotiation_id"],
+                    "kind": row["kind"],
+                    "round": int(row["round"]) if row["round"] is not None else None,
+                    "performative": row["performative"],
+                    "direction": str(row["direction"]),
+                    "actor": str(row["actor"]),
+                    "content": _load_json(row["content_json"]),
+                    "decisionAction": row["decision_action"],
+                    "rationale": row["rationale"],
+                    "createdAt": str(row["created_at"]),
+                }
+                for row in events
+            ],
+            "taskSnapshot": (
+                {
+                    "taskId": snapshot["task_id"],
+                    "contextId": snapshot["context_id"],
+                    "state": snapshot["state"],
+                    "updatedAt": str(snapshot["updated_at"]),
+                    "payload": _load_json(snapshot["payload_json"]),
+                }
+                if snapshot is not None
+                else None
+            ),
+        }
+    except sqlite3.Error as exc:
+        _LOGGER.warning("client run detail read failed: %s", exc)
+        return None
+    finally:
+        connection.close()
+
+
+def read_conversation_summaries(
+    path: str | Path,
+    limit: int = 50,
+) -> builtins.list[dict[str, object]]:
+    """Return UI rows for the newest conversations."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return []
+    resolved_limit = max(1, min(limit, 500))
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT c.conversation_id, c.external_id, c.user_id, c.title, c.created_at,
+                   c.updated_at,
+                   (SELECT COUNT(*) FROM turns t WHERE t.conversation_id = c.conversation_id)
+                       AS turn_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.conversation_id)
+                       AS run_count
+            FROM conversations c
+            ORDER BY c.updated_at DESC, c.conversation_id DESC
+            LIMIT ?
+            """,
+            (resolved_limit,),
+        ).fetchall()
+        return [
+            {
+                "conversationId": str(row["conversation_id"]),
+                "externalId": str(row["external_id"]),
+                "userId": str(row["user_id"]),
+                "title": str(row["title"]),
+                "createdAt": str(row["created_at"]),
+                "updatedAt": str(row["updated_at"]),
+                "turnCount": int(row["turn_count"] or 0),
+                "runCount": int(row["run_count"] or 0),
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as exc:
+        _LOGGER.warning("conversation summary read failed: %s", exc)
+        return []
+    finally:
+        connection.close()
+
+
+def read_conversation_detail(
+    path: str | Path,
+    conversation_id: str,
+) -> dict[str, object] | None:
+    """Return one conversation with its turns and runs."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return None
+    try:
+        connection.row_factory = sqlite3.Row
+        conversation = connection.execute(
+            "SELECT * FROM conversations WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()
+        if conversation is None:
+            return None
+        turns = connection.execute(
+            "SELECT * FROM turns WHERE conversation_id=? ORDER BY seq ASC",
+            (conversation_id,),
+        ).fetchall()
+        runs = connection.execute(
+            "SELECT * FROM runs WHERE conversation_id=? ORDER BY created_at DESC",
+            (conversation_id,),
+        ).fetchall()
+        return {
+            "conversationId": str(conversation["conversation_id"]),
+            "externalId": str(conversation["external_id"]),
+            "userId": str(conversation["user_id"]),
+            "title": str(conversation["title"]),
+            "createdAt": str(conversation["created_at"]),
+            "updatedAt": str(conversation["updated_at"]),
+            "metadata": _load_json(conversation["metadata_json"]),
+            "turns": [
+                {
+                    "turnId": str(row["turn_id"]),
+                    "seq": int(row["seq"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "runId": row["run_id"],
+                    "createdAt": str(row["created_at"]),
+                }
+                for row in turns
+            ],
+            "runs": [
+                {
+                    "runId": str(row["run_id"]),
+                    "scenario": str(row["scenario"]),
+                    "status": str(row["status"]),
+                    "finalState": row["final_state"],
+                    "createdAt": str(row["created_at"]),
+                    "finishedAt": row["finished_at"],
+                }
+                for row in runs
+            ],
+        }
+    except sqlite3.Error as exc:
+        _LOGGER.warning("conversation detail read failed: %s", exc)
+        return None
+    finally:
+        connection.close()

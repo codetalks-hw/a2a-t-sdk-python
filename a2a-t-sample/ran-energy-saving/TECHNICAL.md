@@ -128,7 +128,7 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | 5 | Resolution | accept/reject/abort; an accept refills Task-T | `client_flow.py`, `negotiation_gate.py` |
 | 6 | NMS execution | evaluate and apply the plan | `server_executor.py`, `demo/agents/server_agent/` |
 | 7 | Report | publish the report artifact; the Task completes | `server_executor.py` |
-| 8 | Done | write the transcript; the UI replays it | `client_service.py`, `demo/web/` |
+| 8 | Done | write the transcript; the UI replays it | `protocol/client_service/`, `demo/web/` |
 
 ### 2.3 Code map: start from the change you need
 
@@ -136,7 +136,7 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | --- | --- |
 | OSS decision logic | `demo/agents/client_agent/` + `protocol/decision_provider.py` |
 | OSS protocol loop | `protocol/client_flow.py` |
-| OSS conversations and run history | `protocol/client_service.py`, `protocol/client_store.py` |
+| OSS conversations and run history | `protocol/client_service/`, `protocol/client_store/` |
 | expose the OSS as an A2A backend | `protocol/client_gateway.py` |
 | NMS negotiation rules | `protocol/negotiation_gate.py`, `protocol/negotiation_policy.py` |
 | NMS execution flow | `protocol/server_executor.py`, `demo/agents/server_agent/` |
@@ -697,7 +697,7 @@ The sample is deliberately a prototype. Before production:
 
 - **Persistence.** The SQLite stores are the demo persistence layer: server Tasks
   (`protocol/sqlite_task_store.py`), inbound gateway Tasks (same store, its own file) and client
-  conversations/runs/negotiations (`protocol/client_store.py`). `shared/sqlite.py` applies ordered
+  conversations/runs/negotiations (`protocol/client_store/`). `shared/sqlite.py` applies ordered
   schema migrations through `PRAGMA user_version`; production should still move to your database
   and migration tooling. Plans still
   live in a process-local store (`demo/ran_data._PLANS`) and push configs use
@@ -775,8 +775,8 @@ The sample is deliberately a prototype. Before production:
 | [`protocol/server_app.py`](protocol/server_app.py) | Server assembly: AgentCard (declares `Task-T/v1` and `Negotiation-T/v1`), request handler, Starlette app, registry registration. |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | Client protocol flow: initial Task-T, multi-round negotiation, accept refill, and terminal handling over SSE or webhook. |
 | [`protocol/client_runtime.py`](protocol/client_runtime.py) | Client per-run assembly: per-run SDK `.env`, discovery, SDK client, transport, and decision provider. |
-| [`protocol/client_service.py`](protocol/client_service.py) | Client application service: conversations, run lifecycle, memory injection, per-conversation concurrency, persistence hooks. |
-| [`protocol/client_store.py`](protocol/client_store.py) | Client SQLite store: conversations, turns, runs, negotiation audit, Task snapshots. |
+| [`protocol/client_service/`](protocol/client_service) | Client application service split into `run_state.py` (run state, spans, decisions) and `run_manager.py` (lifecycle, conversations, persistence hooks). |
+| [`protocol/client_store/`](protocol/client_store) | Client persistence split into `store.py` (writes) and `reader.py` (read-only UI queries). |
 | [`protocol/client_gateway.py`](protocol/client_gateway.py) | Optional inbound A2A gateway: one inbound message -> one client run -> final report artifact. |
 | [`protocol/decision_provider.py`](protocol/decision_provider.py) | Decision-provider protocol and the ADK, manual, and scripted implementations. |
 | [`protocol/discovery.py`](protocol/discovery.py) | AgentCard discovery through the registry center or `/.well-known/agent-card.json`. |
@@ -823,8 +823,8 @@ sample business content or demo-only machinery.
 | `demo/agents/client_agent/tools.py` (`get_sla_policy`, `evaluate_proposal_impact`) | **REPLACE** | Read your SLA/catalog systems instead of the in-memory dataset. |
 | `demo/scenario.py` (scripted decisions, user requests) | **REPLACE** | Demo inputs; keep only for offline demos/tests. |
 | `protocol/client_runtime.py` | KEEP | Per-run assembly; adapt the SDK endpoint values via configuration. |
-| `protocol/client_service.py` | KEEP | Conversation identity, run lifecycle, memory and per-conversation concurrency. |
-| `protocol/client_store.py` | KEEP | Minimal durable client store; swap for your database in production. |
+| `protocol/client_service/` | KEEP | Conversation identity, run lifecycle, memory and per-conversation concurrency. |
+| `protocol/client_store/` | KEEP | Minimal durable client store; swap for your database in production. |
 | `protocol/client_gateway.py` | KEEP (adapt the AgentCard/identity) | Optional inbound A2A surface; replace the demo agent card, auth and registration. |
 | `demo/scripted_llm.py`, `demo/adk_fake_model.py`, `resources/mock_llm/` | KEEP (offline/test only) | Deterministic tests; never use them in production. |
 | `demo/web/app.py`, `demo/web/static/index.html` | KEEP or REPLACE | Developer UI; replace with your own UI if needed. |
