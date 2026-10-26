@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
@@ -15,7 +16,14 @@ from protocol.decision_provider import (
     ScriptedDecisionProvider,
     build_decision_prompt,
 )
-from shared.adk_fake_model import build_fake_model
+from shared.adk_fake_model import (
+    CLIENT_AGENT_NAME,
+    PROGRESS_MODEL_TURNS,
+    FakeLlm,
+    FakeScript,
+    FakeTurn,
+    build_fake_model,
+)
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import SCENARIO_INFORMATION, SCENARIO_TARGET, get_scenario
 
@@ -154,6 +162,48 @@ async def test_adk_provider_returns_the_fake_model_decision() -> None:
     assert decision.action == "accept"
     assert decision.rationale
     assert decision is not OFFLINE_FALLBACK_DECISION
+
+
+def _scripted_model(*texts: str) -> FakeLlm:
+    """Build a fake model serving one client-agent turn per text."""
+    return build_fake_model(
+        (
+            FakeScript(
+                marker=CLIENT_AGENT_NAME,
+                turns=tuple(FakeTurn(text=text) for text in texts),
+                progress=PROGRESS_MODEL_TURNS,
+            ),
+        )
+    )
+
+
+async def test_adk_provider_extracts_a_decision_from_prose_and_fences() -> None:
+    """A live model may wrap the JSON in a sentence or a fence; the parser still finds it."""
+    payload = json.dumps({"action": "reject", "rationale": "The SLA cannot be met."})
+    provider = AdkDecisionProvider(
+        model=_scripted_model(f"Here is my decision:\n```json\n{payload}\n```\nDone."),
+    )
+
+    decision = await provider.respond(_view(), _session())
+
+    assert decision.action == "reject"
+    assert decision.rationale == "The SLA cannot be met."
+
+
+async def test_adk_provider_retries_once_when_the_model_returns_only_prose() -> None:
+    """One corrective turn recovers a model that ignored the output schema."""
+    payload = json.dumps({"action": "counter", "rationale": "Use a non-overlapping target."})
+    provider = AdkDecisionProvider(
+        model=_scripted_model(
+            "I need to check the policy before I answer.",
+            payload,
+        ),
+    )
+
+    decision = await provider.respond(_view("target"), _session())
+
+    assert decision.action == "counter"
+    assert decision.rationale == "Use a non-overlapping target."
 
 
 async def test_adk_provider_uses_the_offline_fallback_when_the_model_returns_no_decision() -> None:

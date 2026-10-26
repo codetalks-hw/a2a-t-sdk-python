@@ -83,6 +83,17 @@ def json_safe(value: object, depth: int = 0) -> object:
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, type):
+        # ``LlmAgent(output_schema=Model)`` keeps the class on ``config.response_schema``; LiteLLM
+        # converts it with ``model_json_schema()`` before calling the provider, so the trace must
+        # render the schema rather than ``<class '...'>``.
+        model_json_schema = getattr(value, "model_json_schema", None)
+        if callable(model_json_schema):
+            try:
+                return json_safe(model_json_schema(), depth + 1)
+            except Exception:  # noqa: BLE001 - serialization must never break the agent
+                return getattr(value, "__name__", str(value))
+        return getattr(value, "__name__", str(value))
     if depth >= _MAX_JSON_DEPTH:
         return str(value)
     if isinstance(value, Mapping):

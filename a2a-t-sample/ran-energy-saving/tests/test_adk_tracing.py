@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -25,6 +26,7 @@ from shared.adk_tracing import (
     serialize_llm_request,
     serialize_llm_response,
 )
+from shared.models import NegotiationDecision
 from shared.trace import (
     PHASE_EXECUTION,
     emit_span,
@@ -222,6 +224,19 @@ def test_serializers_tolerate_none_and_json_safe_objects() -> None:
     serialized = serialize_llm_request(request)
     assert serialized["tools"] == []
     assert serialized["responseSchema"] is None
+
+
+def test_response_schema_class_is_rendered_as_its_json_schema() -> None:
+    """``output_schema`` keeps a pydantic class on the request config, never a ``<class ...>``."""
+    request = _request()
+    request.config.response_schema = NegotiationDecision
+
+    schema = serialize_llm_request(request)["responseSchema"]
+
+    assert isinstance(schema, dict)
+    assert schema["title"] == "NegotiationDecision"
+    assert "action" in schema["properties"]
+    assert "<class" not in json.dumps(schema)
 
 
 @pytest.mark.asyncio

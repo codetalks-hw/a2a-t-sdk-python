@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
@@ -45,6 +45,13 @@ DEFAULT_MANUAL_TIMEOUT_SECONDS = 300.0
 OFFLINE_FALLBACK_DECISION = NegotiationDecision(
     action="accept",
     rationale="The offline model returned no parseable decision; the proposal is accepted.",
+)
+
+#: Corrective user turn sent once when a live model answers with prose instead of a decision.
+DECISION_RETRY_PROMPT = (
+    "Your previous message did not contain a valid NegotiationDecision JSON object. "
+    "Return exactly one JSON object with the decision fields and nothing else: no reasoning, "
+    "markdown fences, or prose outside the JSON."
 )
 
 
@@ -207,33 +214,44 @@ class AdkDecisionProvider:
             )
             self._sessions.add(session_id)
 
-        final_event: AdkEvent | None = None
-        async for event in self._runner.run_async(
-            user_id=self._user_id,
-            session_id=session_id,
-            new_message=types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        text=build_decision_prompt(
-                            propose,
-                            session,
-                            user_request=self._user_request,
-                            conversation_context=self._conversation_context,
-                        )
-                    )
-                ],
+        final_event = await self._run_turn(
+            session_id,
+            build_decision_prompt(
+                propose,
+                session,
+                user_request=self._user_request,
+                conversation_context=self._conversation_context,
             ),
-        ):
-            if event.is_final_response():
-                final_event = event
+        )
         if final_event is None:
             return self._fallback_or_raise("The ADK agent produced no final response.")
 
         decision = _decision_from_event(final_event)
         if decision is not None:
             return decision
+
+        # A live model can answer with prose even though the request carries a JSON schema (some
+        # OpenAI-compatible gateways drop ``response_format``). One corrective turn in the same ADK
+        # session is much cheaper than failing the run; the offline fallback still applies when the
+        # retry cannot produce a decision either.
+        retry_event = await self._run_turn(session_id, DECISION_RETRY_PROMPT)
+        if retry_event is not None:
+            decision = _decision_from_event(retry_event)
+            if decision is not None:
+                return decision
         return self._fallback_or_raise("The ADK agent produced no parseable NegotiationDecision.")
+
+    async def _run_turn(self, session_id: str, text: str) -> AdkEvent | None:
+        """Run one user turn in an existing session and return its final event."""
+        final_event: AdkEvent | None = None
+        async for event in self._runner.run_async(
+            user_id=self._user_id,
+            session_id=session_id,
+            new_message=types.Content(role="user", parts=[types.Part(text=text)]),
+        ):
+            if event.is_final_response():
+                final_event = event
+        return final_event
 
     def _session_id(self, negotiation_id: str) -> str:
         """Return the ADK session id of one negotiation session."""
@@ -269,17 +287,39 @@ def _decision_from_event(event: AdkEvent) -> NegotiationDecision | None:
 
 
 def _parse_decision_json(text: str) -> NegotiationDecision | None:
-    """Parse one JSON decision text, tolerating markdown code fences."""
+    """Parse one JSON decision text, tolerating code fences and surrounding prose."""
     candidate = text.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`")
         if candidate.startswith("json"):
             candidate = candidate.removeprefix("json")
         candidate = candidate.strip()
-    try:
-        return NegotiationDecision.model_validate(json.loads(candidate))
-    except (ValueError, TypeError):
-        return None
+    for payload in _json_object_candidates(candidate):
+        try:
+            return NegotiationDecision.model_validate(payload)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _json_object_candidates(text: str) -> Iterator[dict[str, object]]:
+    """Yield every JSON object embedded in one text, in reading order.
+
+    A model that ignores the output schema often wraps the decision in a sentence or a fence. The
+    scanner decodes from each ``{`` and resumes after a successful object, so a malformed brace in
+    the prose costs one attempt rather than the whole response.
+    """
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    while index != -1:
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except ValueError:
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(value, dict):
+            yield value
+        index = text.find("{", end)
 
 
 class ScriptedDecisionProvider:
