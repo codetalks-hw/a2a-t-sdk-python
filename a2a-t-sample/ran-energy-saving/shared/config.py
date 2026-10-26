@@ -61,6 +61,7 @@ GATEWAY_PORT_ENV_KEY = "A2AT_SAMPLE_GATEWAY_PORT"
 GATEWAY_REGISTER_ENV_KEY = "A2AT_SAMPLE_GATEWAY_REGISTER"
 GATEWAY_SCENARIO_ENV_KEY = "A2AT_SAMPLE_GATEWAY_SCENARIO"
 GATEWAY_TASK_DB_ENV_KEY = "A2AT_SAMPLE_GATEWAY_TASK_DB"
+AUTH_TOKEN_ENV_KEY = "A2AT_SAMPLE_AUTH_TOKEN"
 PLANNER_MODEL_ENV_KEY = "A2AT_SAMPLE_PLANNER_MODEL"
 PLANNER_API_BASE_ENV_KEY = "A2AT_SAMPLE_PLANNER_API_BASE"
 PLANNER_API_KEY_ENV_KEY = "A2AT_SAMPLE_PLANNER_API_KEY"
@@ -232,6 +233,8 @@ class SampleConfig:
         gateway_scenario: scenario used for an inbound gateway request.
         gateway_task_db_path: Absolute SQLite path of the inbound gateway Task store; ``None``
             keeps inbound Tasks in memory.
+        auth_token: bearer token required by the Web UI API and the inbound gateway; empty keeps
+            both open (loopback-only deployments).
         planner_model: LangChain model id of the server's LangGraph planner.
         planner_api_base: OpenAI-compatible endpoint of the planner.
         planner_api_key: API key of the planner endpoint.
@@ -265,6 +268,7 @@ class SampleConfig:
     gateway_register: bool = False
     gateway_scenario: str = DEFAULT_GATEWAY_SCENARIO
     gateway_task_db_path: str | None = None
+    auth_token: str = ""
     planner_model: str = ""
     planner_api_base: str = ""
     planner_api_key: str = ""
@@ -362,6 +366,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         gateway_register=_env_bool(values, GATEWAY_REGISTER_ENV_KEY, False),
         gateway_scenario=gateway_scenario,
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
+        auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         planner_model=_env_value(values, PLANNER_MODEL_ENV_KEY, planner_model_default),
         planner_api_base=_env_value(values, PLANNER_API_BASE_ENV_KEY, adk_model_api_base),
         planner_api_key=_env_value(values, PLANNER_API_KEY_ENV_KEY, adk_model_api_key),

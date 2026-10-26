@@ -629,6 +629,7 @@ def _run_ui(
         default_scenario=scenario,
         default_mode=mode,
         default_transport=transport,
+        bind_host=host,
     )
     trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(

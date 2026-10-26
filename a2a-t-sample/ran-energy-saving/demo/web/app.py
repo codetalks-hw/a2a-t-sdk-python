@@ -54,6 +54,12 @@ from shared.config import (
     SUPPORTED_TRANSPORTS,
     SampleConfig,
 )
+from shared.http_security import (
+    BearerAuthMiddleware,
+    install_health_routes,
+    sqlite_ready,
+    validate_bind_security,
+)
 from shared.models import NegotiationDecision
 from shared.trace import (
     PHASES,
@@ -61,6 +67,7 @@ from shared.trace import (
 )
 from sse_starlette.sse import EventSourceResponse
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -111,6 +118,7 @@ def create_app(
     default_transport: str | None = None,
     default_discovery: str | None = None,
     finished_grace_seconds: float = FINISHED_GRACE_SECONDS,
+    bind_host: str = "127.0.0.1",
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -132,6 +140,7 @@ def create_app(
         finished_grace_seconds: seconds an event stream stays open after ``finished`` to forward
             the server spans that a cross-process run posts just after completion; ``0`` closes
             immediately (tests that do not exercise the race).
+        bind_host: address the caller will bind; a non-loopback bind needs an auth token.
 
     Returns:
         The assembled Starlette application.
@@ -139,6 +148,7 @@ def create_app(
     Raises:
         ValueError: when an explicit default is not a supported value.
     """
+    validate_bind_security(bind_host, config.auth_token)
     if catalog is None:
         from demo.catalog import DemoRunCatalog
 
@@ -635,6 +645,16 @@ def create_app(
             Mount("/static", app=StaticFiles(directory=STATIC_DIR), name="static"),
         ],
         lifespan=lifespan,
+        middleware=(
+            [Middleware(BearerAuthMiddleware, token=config.auth_token, protected_prefixes=("/api/",))]
+            if config.auth_token
+            else []
+        ),
+    )
+    install_health_routes(
+        app,
+        service="ran-energy-saving-web",
+        checks={"client_store": lambda: sqlite_ready(config.client_db_path)},
     )
     app.state.run_manager = manager
     app.state.client_store = client_store

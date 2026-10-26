@@ -54,9 +54,16 @@ from a2a.utils.constants import TransportProtocol
 from google.protobuf.json_format import MessageToDict, ParseDict
 from shared.agent_card import AGENT_CARD_ORGANIZATION, AGENT_CARD_PROVIDER_URL
 from shared.config import GATEWAY_SCENARIO_ENV_KEY, SampleConfig, load_config
+from shared.http_security import (
+    BearerAuthMiddleware,
+    install_health_routes,
+    sqlite_ready,
+    validate_bind_security,
+)
 from shared.logging_setup import configure_logging, log_context
 from shared.registry_client import register_agentcard
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 
 from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import RunConflictError, RunManager, RunState
@@ -272,6 +279,7 @@ def build_gateway_app(
     """
     resolved_host = host or config.gateway_host
     resolved_port = port or config.gateway_port
+    validate_bind_security(resolved_host, config.auth_token)
     card = build_gateway_agent_card(host=resolved_host, port=resolved_port)
     executor = ClientGatewayExecutor(service=service, config=config)
     resolved_task_store = task_store or InMemoryTaskStore()
@@ -293,6 +301,25 @@ def build_gateway_app(
     app = Starlette(
         routes=[*create_agent_card_routes(card), *create_rest_routes(request_handler)],
         lifespan=lifespan,
+        middleware=(
+            [
+                Middleware(
+                    BearerAuthMiddleware,
+                    token=config.auth_token,
+                    protected_prefixes=("/message", "/tasks"),
+                )
+            ]
+            if config.auth_token
+            else []
+        ),
+    )
+    install_health_routes(
+        app,
+        service="ran-energy-saving-gateway",
+        checks={
+            "client_store": lambda: sqlite_ready(config.client_db_path),
+            "gateway_task_store": lambda: sqlite_ready(config.gateway_task_db_path),
+        },
     )
     app.state.agent_card = card
     app.state.gateway_task_store = resolved_task_store

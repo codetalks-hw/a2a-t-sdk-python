@@ -275,3 +275,25 @@ async def test_gateway_uses_the_injected_persistent_task_store(
     assert isinstance(app.state.gateway_task_store, SqliteTaskStore)
     assert app.state.gateway_task_store.path == database
     assert read_task_summaries(database) == []
+
+
+async def test_gateway_rejects_requests_without_the_token(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """A configured token guards the gateway A2A routes."""
+    import httpx
+
+    manager, _ = _manager(tmp_path, offline_config)
+    config = replace(offline_config, auth_token="secret")
+    app = build_gateway_app(config=config, service=manager)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        unauthorized = await client.get("/tasks")
+        authorized = await client.get("/tasks", headers={"Authorization": "Bearer secret"})
+        health = await client.get("/health")
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code != 401
+    assert health.status_code == 200

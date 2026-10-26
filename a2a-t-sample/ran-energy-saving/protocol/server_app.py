@@ -54,6 +54,7 @@ from shared.agent_card import (
     AGENT_CARD_SKILL_ID,
 )
 from shared.config import SampleConfig, load_config
+from shared.http_security import install_health_routes, sqlite_ready
 from shared.logging_setup import configure_logging
 from shared.registry_client import register_agentcard
 from shared.run_constants import MAX_ROUNDS
@@ -198,6 +199,7 @@ def build_rest_app(
     agent_card: AgentCard,
     executor: NegotiationAgentExecutor,
     task_store: TaskStore | None = None,
+    task_db_path: str | None = None,
     trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None,
 ) -> Starlette:
     """Build the Starlette app with the AgentCard routes and the A2A REST routes.
@@ -210,6 +212,7 @@ def build_rest_app(
         agent_card: card served at the well-known A2A route.
         executor: negotiation-aware AgentExecutor.
         task_store: A2A Task store; defaults to an in-memory store (tests/direct runs).
+        task_db_path: SQLite file backing the task store, used by the readiness check.
         trace_emitter: optional Run Explorer span emitter.
     """
     resolved_task_store: TaskStore = task_store if task_store is not None else InMemoryTaskStore()
@@ -237,6 +240,11 @@ def build_rest_app(
         *create_rest_routes(request_handler),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
+    install_health_routes(
+        app,
+        service="ran-energy-saving-server",
+        checks={"task_store": lambda: sqlite_ready(task_db_path)},
+    )
     app.state.request_handler = request_handler
     app.state.task_store = resolved_task_store
     return app
@@ -304,6 +312,7 @@ def build_server_runtime(
         agent_card=agent_card,
         executor=executor,
         task_store=task_store,
+        task_db_path=resolved_config.task_db_path,
         trace_emitter=trace_emitter,
     )
     app.state.config = resolved_config
