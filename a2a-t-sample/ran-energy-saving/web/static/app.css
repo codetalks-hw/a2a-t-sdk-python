@@ -796,7 +796,7 @@ body.inspector-closed .inspector {
   }
 }
 
-/* ---------- Persisted OSS task table ---------- */
+/* ---------- Persisted NMS task table ---------- */
 
 .task-history {
   flex: 0 0 auto;

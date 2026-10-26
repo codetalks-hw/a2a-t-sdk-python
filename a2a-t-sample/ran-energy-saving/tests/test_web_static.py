@@ -278,6 +278,26 @@ def test_every_element_id_used_by_main_exists_in_the_shell() -> None:
     assert not missing, missing
 
 
+def test_the_ui_names_the_client_oss_and_the_execution_side_nms() -> None:
+    """OSS is the client layer; the executing side is the RAN network management system."""
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    en = _module_source("i18n/en")
+    zh = _module_source("i18n/zh-CN")
+
+    # The history tab and side chips use the corrected role names.
+    assert 'tasks: "NMS tasks"' in en
+    assert 'tasks: "网管任务"' in zh
+    assert 'client: "OSS"' in en and 'server: "NMS"' in en
+    assert 'client: "OSS"' in zh and 'server: "网管"' in zh
+    # The old, wrong naming never reaches the page or the copy.
+    for source in (page, en, zh):
+        assert "OSS task" not in source
+        assert "OSS tasks" not in source
+        assert "OSS 任务" not in source
+        assert "OSS execution" not in source
+        assert "OSS 执行" not in source
+
+
 def test_css_implements_the_visual_spec() -> None:
     css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
     for token, value in (

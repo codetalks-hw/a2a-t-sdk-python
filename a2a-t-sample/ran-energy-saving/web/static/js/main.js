@@ -1343,7 +1343,7 @@ function taskTime(value) {
   return Number.isNaN(date.getTime()) ? EM_DASH : date.toLocaleString();
 }
 
-/** Render the persisted OSS task table from ``app.tasks``. */
+/** Render the persisted NMS task table from ``app.tasks``. */
 function renderTaskTable() {
   const body = $("task-table-body");
   if (!body) return;

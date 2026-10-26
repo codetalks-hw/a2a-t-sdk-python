@@ -70,7 +70,7 @@ export const ZH_CN = {
     title: "历史记录",
     aria: "持久化的任务、客户端运行与会话",
     tabs: {
-      tasks: "OSS 任务",
+      tasks: "网管任务",
       runs: "客户端运行",
       conversations: "会话",
     },
@@ -86,7 +86,7 @@ export const ZH_CN = {
     runsEmpty: "暂无持久化客户端运行。开始一次运行即可创建。",
     conversationsDisabled: "客户端持久化已关闭（未设置 A2AT_SAMPLE_CLIENT_DB）。",
     conversationsEmpty: "暂无会话。开始一次运行即可创建。",
-    taskCaption: "OSS 服务端持久化的 A2A 任务",
+    taskCaption: "RAN 网管系统持久化的 A2A 任务",
     runCaption: "持久化的客户端运行、会话与协商审计",
     conversationCaption: "持久化的客户端会话",
     columnTask: "任务",
@@ -139,7 +139,7 @@ export const ZH_CN = {
     task_validation: "Task-T 校验",
     negotiation: "协商",
     resolution: "决议",
-    execution: "任务执行",
+    execution: "网管执行",
     report: "报告",
     done: "完成",
   },
@@ -150,7 +150,7 @@ export const ZH_CN = {
     task_validation: "校验",
     negotiation: "协商",
     resolution: "决议",
-    execution: "执行",
+    execution: "网管",
     report: "报告",
     done: "完成",
   },
@@ -171,8 +171,8 @@ export const ZH_CN = {
   },
 
   side: {
-    client: "客户端",
-    server: "服务端",
+    client: "OSS",
+    server: "网管",
   },
 
   actor: {
@@ -634,7 +634,7 @@ export const ZH_CN = {
     plannerTurn: "规划器轮次",
     llmCall: "LLM 调用 · {stage}",
     toolCall: "工具调用 · {tool}",
-    ossExecution: "LangGraph OSS 任务执行",
+    nmsExecution: "RAN 网管任务执行",
   },
 
   error: {

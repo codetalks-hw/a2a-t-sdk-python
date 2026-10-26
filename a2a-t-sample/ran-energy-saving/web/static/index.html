@@ -65,7 +65,7 @@
       <li class="phase-step" data-phase="task_validation"><button type="button" class="phase-step-button" data-phase="task_validation"><span class="phase-step-index">03</span><span class="phase-step-label" data-i18n="phase.task_validation">Task validation</span><span class="phase-step-meta">pending</span></button></li>
       <li class="phase-step" data-phase="negotiation"><button type="button" class="phase-step-button" data-phase="negotiation"><span class="phase-step-index">04</span><span class="phase-step-label" data-i18n="phase.negotiation">Negotiation</span><span class="phase-step-meta">pending</span></button></li>
       <li class="phase-step" data-phase="resolution"><button type="button" class="phase-step-button" data-phase="resolution"><span class="phase-step-index">05</span><span class="phase-step-label" data-i18n="phase.resolution">Resolution</span><span class="phase-step-meta">pending</span></button></li>
-      <li class="phase-step" data-phase="execution"><button type="button" class="phase-step-button" data-phase="execution"><span class="phase-step-index">06</span><span class="phase-step-label" data-i18n="phase.execution">Execution</span><span class="phase-step-meta">pending</span></button></li>
+      <li class="phase-step" data-phase="execution"><button type="button" class="phase-step-button" data-phase="execution"><span class="phase-step-index">06</span><span class="phase-step-label" data-i18n="phase.execution">NMS execution</span><span class="phase-step-meta">pending</span></button></li>
       <li class="phase-step" data-phase="report"><button type="button" class="phase-step-button" data-phase="report"><span class="phase-step-index">07</span><span class="phase-step-label" data-i18n="phase.report">Report</span><span class="phase-step-meta">pending</span></button></li>
       <li class="phase-step" data-phase="done"><button type="button" class="phase-step-button" data-phase="done"><span class="phase-step-index">08</span><span class="phase-step-label" data-i18n="phase.done">Done</span><span class="phase-step-meta">pending</span></button></li>
     </ol>
@@ -313,7 +313,7 @@
         <span class="history-count" id="history-count">—</span>
       </button>
       <div class="history-tabs" id="history-tabs" role="tablist" aria-label="Persisted tasks, client runs and conversations" data-i18n-aria-label="history.aria">
-        <button type="button" role="tab" data-history-tab="tasks" aria-selected="true" aria-controls="history-panel-tasks" data-i18n="history.tabs.tasks">OSS tasks</button>
+        <button type="button" role="tab" data-history-tab="tasks" aria-selected="true" aria-controls="history-panel-tasks" data-i18n="history.tabs.tasks">NMS tasks</button>
         <button type="button" role="tab" data-history-tab="runs" aria-selected="false" aria-controls="history-panel-runs" data-i18n="history.tabs.runs">Client runs</button>
         <button type="button" role="tab" data-history-tab="conversations" aria-selected="false" aria-controls="history-panel-conversations" data-i18n="history.tabs.conversations">Conversations</button>
       </div>
@@ -327,7 +327,7 @@
         <p class="task-history-note" id="task-table-note">No persisted tasks yet.</p>
         <div class="task-table-scroll" hidden>
           <table class="task-table" id="task-table">
-            <caption class="sr-only" data-i18n="history.taskCaption">Persisted A2A tasks of the OSS server</caption>
+            <caption class="sr-only" data-i18n="history.taskCaption">Persisted A2A tasks of the RAN NMS server</caption>
             <thead>
               <tr>
                 <th scope="col" data-i18n="history.columnTask">Task</th>

@@ -71,7 +71,7 @@ export const EN = {
     title: "History",
     aria: "Persisted tasks, client runs and conversations",
     tabs: {
-      tasks: "OSS tasks",
+      tasks: "NMS tasks",
       runs: "Client runs",
       conversations: "Conversations",
     },
@@ -87,7 +87,7 @@ export const EN = {
     runsEmpty: "No persisted client runs yet. Start a run to create one.",
     conversationsDisabled: "Client persistence is disabled (A2AT_SAMPLE_CLIENT_DB is unset).",
     conversationsEmpty: "No conversations yet. Start a run to create one.",
-    taskCaption: "Persisted A2A tasks of the OSS server",
+    taskCaption: "Persisted A2A tasks of the RAN NMS server",
     runCaption: "Persisted client runs, conversations and negotiation audit",
     conversationCaption: "Persisted client conversations",
     columnTask: "Task",
@@ -140,7 +140,7 @@ export const EN = {
     task_validation: "Task validation",
     negotiation: "Negotiation",
     resolution: "Resolution",
-    execution: "Task execution",
+    execution: "NMS execution",
     report: "Report",
     done: "Done",
   },
@@ -151,7 +151,7 @@ export const EN = {
     task_validation: "Validation",
     negotiation: "Negotiation",
     resolution: "Resolution",
-    execution: "Execution",
+    execution: "NMS",
     report: "Report",
     done: "Done",
   },
@@ -172,8 +172,8 @@ export const EN = {
   },
 
   side: {
-    client: "client",
-    server: "server",
+    client: "OSS",
+    server: "NMS",
   },
 
   actor: {
@@ -637,7 +637,7 @@ export const EN = {
     plannerTurn: "Planner turn",
     llmCall: "LLM call · {stage}",
     toolCall: "Tool call · {tool}",
-    ossExecution: "LangGraph OSS task execution",
+    nmsExecution: "RAN NMS task execution",
   },
 
   error: {

@@ -236,7 +236,8 @@ const TRACE_TITLE_PATTERNS = [
   [/^Planner turn$/, () => t("trace.plannerTurn")],
   [/^LLM call · (.+)$/, (match) => t("trace.llmCall", { stage: match[1] })],
   [/^Tool call · (.+)$/, (match) => t("trace.toolCall", { tool: match[1] })],
-  [/^LangGraph OSS task execution$/, () => t("trace.ossExecution")],
+  [/^RAN NMS task execution$/, () => t("trace.nmsExecution")],
+  [/^LangGraph OSS task execution$/, () => t("trace.nmsExecution")],
 ];
 
 /**
