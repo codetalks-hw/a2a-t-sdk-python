@@ -147,11 +147,15 @@ async def test_run_persists_lifecycle_negotiation_and_task_snapshot(
     tmp_path: Path,
     offline_config: SampleConfig,
 ) -> None:
-    manager, store, _ = _manager(tmp_path, offline_config)
+    manager, store, runtimes = _manager(tmp_path, offline_config)
     run = await manager.start("information", "auto", "sse", user_request="please save energy")
     await _finish(manager, run.run_id)
 
     assert run.status == "finished"
+    # The finished run keeps its record, not its runtime: the provider, its ADK runner and the
+    # decision sessions are released so a long-lived process does not accumulate them.
+    assert run.runtime is None
+    assert runtimes[0].closed is True
     stored = await store.get_run(run.run_id)
     assert stored is not None
     assert stored.status == "finished"

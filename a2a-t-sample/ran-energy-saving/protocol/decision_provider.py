@@ -17,13 +17,20 @@ negotiation session for round/performative context; providers never advance roun
 from __future__ import annotations
 
 import asyncio
+import logging
+import sqlite3
+import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
 from google.adk.apps import App
 from google.adk.events import Event as AdkEvent
-from google.adk.runners import InMemoryRunner
+from google.adk.runners import Runner
+from google.adk.sessions.base_session_service import BaseSessionService
+from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from google.genai import types
 from shared.adk_tracing import TracePlugin
 from shared.config import build_traced_adk_model
@@ -31,6 +38,8 @@ from shared.json_text import iter_json_objects
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import Scenario, get_scenario
 from shared.trace import trace_scope
+
+_LOGGER = logging.getLogger("ran_energy_saving.decision_provider")
 
 #: ADK application name of the client decision agent.
 CLIENT_APP_NAME = "ran_energy_client"
@@ -53,6 +62,105 @@ DECISION_RETRY_PROMPT = (
     "Return exactly one JSON object with the decision fields and nothing else: no reasoning, "
     "markdown fences, or prose outside the JSON."
 )
+
+#: Age after which a decision session is treated as an orphan of a crashed process.
+#: A run deletes its own sessions when it ends, so only a crash leaves one behind; the grace
+#: period keeps a startup sweep from deleting sessions that another live client process is using.
+DEFAULT_SESSION_SWEEP_TTL_SECONDS = 24 * 60 * 60
+
+
+def build_session_service(db_path: str | None) -> tuple[BaseSessionService, bool]:
+    """Return the ADK session service of the client decision agent.
+
+    A configured database makes decision sessions durable across a restart; an unset path (unit
+    tests, an ephemeral run) keeps them in memory, matching the "no client database" behavior of
+    the rest of the sample. When the configured database cannot be opened, the provider degrades to
+    an in-memory service instead of failing the run: a decision must not depend on the audit store.
+
+    Args:
+        db_path: Absolute SQLite path of the client database, or ``None``.
+
+    Returns:
+        The session service and whether it is durable.
+    """
+    if not db_path:
+        return InMemorySessionService(), False
+    try:
+        path = Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as connection:
+            connection.execute("PRAGMA user_version")
+        return SqliteSessionService(str(path)), True
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        _LOGGER.warning(
+            "decision sessions fall back to in-memory storage: cannot open %s: %s", db_path, exc
+        )
+        return InMemorySessionService(), False
+
+
+def _has_session_tables(db_path: str) -> bool:
+    """Whether the client database already holds ADK session tables.
+
+    Starting the UI or the gateway must not create the ADK schema when no decision session was ever
+    stored; the tables appear on the first run that persists one.
+    """
+    try:
+        with sqlite3.connect(db_path) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        _LOGGER.warning("decision session sweep skipped: %s", exc)
+        return False
+    return row is not None
+
+
+async def sweep_stale_sessions(
+    db_path: str | None,
+    *,
+    app_name: str = CLIENT_APP_NAME,
+    ttl_seconds: float = DEFAULT_SESSION_SWEEP_TTL_SECONDS,
+) -> int:
+    """Delete decision sessions left behind by a crashed client process.
+
+    A run deletes its sessions when it ends, so anything older than ``ttl_seconds`` is an orphan.
+    The age guard matters because the Web UI and the gateway may share one client database: a
+    startup must never delete the live sessions of the other process.
+
+    Args:
+        db_path: Absolute SQLite path of the client database, or ``None``.
+        app_name: ADK application name owning the sessions.
+        ttl_seconds: Age after which a session counts as abandoned.
+
+    Returns:
+        Number of deleted sessions.
+    """
+    if not db_path or not Path(db_path).is_file():
+        return 0
+    if not await asyncio.to_thread(_has_session_tables, db_path):
+        return 0
+    cutoff = time.time() - ttl_seconds
+    try:
+        service = SqliteSessionService(str(db_path))
+        listing = await service.list_sessions(app_name=app_name)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        _LOGGER.warning("decision session sweep skipped: %s", exc)
+        return 0
+    deleted = 0
+    for session in listing.sessions:
+        if session.last_update_time >= cutoff:
+            continue
+        try:
+            await service.delete_session(
+                app_name=app_name, user_id=session.user_id, session_id=session.id
+            )
+        except Exception as exc:  # noqa: BLE001 - a stale row must not break the startup
+            _LOGGER.warning("decision session %s could not be deleted: %s", session.id, exc)
+            continue
+        deleted += 1
+    if deleted:
+        _LOGGER.info("deleted %d stale decision session(s) from %s", deleted, db_path)
+    return deleted
 
 
 class DecisionProviderError(RuntimeError):
@@ -124,9 +232,12 @@ class AdkDecisionProvider:
     """Decision provider backed by the ``agents.client_agent`` ADK agent.
 
     The provider keeps one ADK session per negotiation session id, so the agent sees the previous
-    proposals and decisions of the same negotiation. The structured ``NegotiationDecision`` is read
-    from the final event's ``output`` when ADK parsed it and from the final text content otherwise;
-    in offline mode an unparseable output falls back to :data:`OFFLINE_FALLBACK_DECISION`.
+    proposals and decisions of the same negotiation. Sessions live in the client database when one
+    is configured and in memory otherwise; either way :meth:`aclose` deletes them when the run ends,
+    so a long-running client process does not accumulate agent history. The structured
+    ``NegotiationDecision`` is read from the final event's ``output`` when ADK parsed it and from the
+    final text content otherwise; in offline mode an unparseable output falls back to
+    :data:`OFFLINE_FALLBACK_DECISION`.
     """
 
     def __init__(
@@ -140,6 +251,7 @@ class AdkDecisionProvider:
         offline: bool = False,
         user_request: str | None = None,
         conversation_context: str | None = None,
+        session_db_path: str | None = None,
     ) -> None:
         """Create one ADK-backed provider.
 
@@ -158,6 +270,9 @@ class AdkDecisionProvider:
                 prompt so target/feasibility proposals can be resolved without guessing.
             conversation_context: Recent turns of the same client conversation; included in every
                 decision prompt so a follow-up keeps the earlier intent.
+            session_db_path: Absolute SQLite path of the client database holding the decision
+                sessions; ``None`` keeps them in memory. An unopenable path degrades to memory
+                with a logged warning (see :func:`build_session_service`).
         """
         if agent is None:
             from agents.client_agent.agent import build_client_agent
@@ -166,21 +281,60 @@ class AdkDecisionProvider:
         # The tool plugin is attached through the ``App`` (the ``plugins=`` runner argument is
         # deprecated); it records one ``tool`` span per client-agent tool call.
         app = App(name=app_name, root_agent=agent, plugins=[TracePlugin()])
-        self._runner = InMemoryRunner(app=app, app_name=app_name)
+        session_service, durable = build_session_service(session_db_path)
+        # ``auto_create_session`` replaces the previous "remember which ids I created" set: a
+        # durable store may already hold the session (a restarted process), and creating it again
+        # raises ``AlreadyExistsError``.
+        self._runner = Runner(
+            app=app,
+            app_name=app_name,
+            session_service=session_service,
+            auto_create_session=True,
+        )
         self._user_id = user_id
         self._fallback = fallback_decision or (OFFLINE_FALLBACK_DECISION if offline else None)
         self._user_request = user_request
         self._conversation_context = conversation_context
-        self._sessions: set[str] = set()
+        self._durable_sessions = durable
+        self._session_ids: set[str] = set()
+        self._closed = False
 
     def set_conversation_context(self, conversation_context: str | None) -> None:
         """Set the recent-turn block used by the next decision prompts."""
         self._conversation_context = conversation_context
 
     @property
-    def runner(self) -> InMemoryRunner:
+    def runner(self) -> Runner:
         """The ADK runner serving the decision agent (test hook)."""
         return self._runner
+
+    @property
+    def durable_sessions(self) -> bool:
+        """Whether decision sessions are persisted in the client database."""
+        return self._durable_sessions
+
+    async def aclose(self) -> None:
+        """Delete the negotiation sessions of this provider and drop the runner.
+
+        A session holds the full prompt/response history of the decision agent, so keeping it after
+        the run ends would grow the process (in-memory service) or the database without a reader.
+        The audit trail lives in the client store and the run transcript instead. Failures are
+        logged: a cleanup problem must not turn a finished run into a failed one.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        session_ids = sorted(self._session_ids)
+        self._session_ids.clear()
+        for session_id in session_ids:
+            try:
+                await self._runner.session_service.delete_session(
+                    app_name=self._runner.app_name,
+                    user_id=self._user_id,
+                    session_id=session_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - cleanup must not fail the run
+                _LOGGER.warning("decision session %s could not be deleted: %s", session_id, exc)
 
     async def respond(
         self,
@@ -206,13 +360,9 @@ class AdkDecisionProvider:
     ) -> NegotiationDecision:
         """Run the decision agent and parse its structured decision."""
         session_id = self._session_id(propose.negotiation_id)
-        if session_id not in self._sessions:
-            await self._runner.session_service.create_session(
-                app_name=self._runner.app_name,
-                user_id=self._user_id,
-                session_id=session_id,
-            )
-            self._sessions.add(session_id)
+        # The runner creates the session on first use (``auto_create_session``) and reuses it on
+        # later rounds, so the agent still sees the previous proposals of this negotiation.
+        self._session_ids.add(session_id)
 
         final_event = await self._run_turn(
             session_id,

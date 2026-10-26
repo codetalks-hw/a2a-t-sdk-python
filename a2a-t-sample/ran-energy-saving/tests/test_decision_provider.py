@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import time
+from pathlib import Path
 
 import pytest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from google.adk.sessions.sqlite_session_service import SqliteSessionService
 from protocol.decision_provider import (
+    CLIENT_APP_NAME,
+    CLIENT_USER_ID,
     OFFLINE_FALLBACK_DECISION,
     AdkDecisionProvider,
     DecisionProviderError,
@@ -15,6 +21,7 @@ from protocol.decision_provider import (
     NegotiationDecisionProvider,
     ScriptedDecisionProvider,
     build_decision_prompt,
+    sweep_stale_sessions,
 )
 from shared.adk_fake_model import (
     CLIENT_AGENT_NAME,
@@ -221,3 +228,96 @@ def test_adk_provider_raises_without_a_fallback_on_unparseable_output() -> None:
 
     with pytest.raises(DecisionProviderError):
         provider._fallback_or_raise("no decision")
+
+
+async def test_adk_provider_persists_and_deletes_a_decision_session(tmp_path: Path) -> None:
+    """The decision session is durable during the run and gone once the run closes."""
+    provider = AdkDecisionProvider(
+        model=build_fake_model(),
+        session_db_path=str(tmp_path / "client.sqlite3"),
+    )
+    assert provider.durable_sessions is True
+
+    decision = await provider.respond(_view(), _session())
+    assert decision.action == "accept"
+
+    service = provider.runner.session_service
+    listed = await service.list_sessions(app_name=CLIENT_APP_NAME)
+    assert [session.id for session in listed.sessions] == ["ran-client-neg-1"]
+
+    await provider.aclose()
+
+    listed = await service.list_sessions(app_name=CLIENT_APP_NAME)
+    assert listed.sessions == []
+
+
+async def test_adk_provider_reuses_one_persisted_session_across_rounds(tmp_path: Path) -> None:
+    """A durable store already holds the session on the next round; it must load, not re-create."""
+    payload = json.dumps({"action": "accept", "rationale": "The plan is feasible."})
+    provider = AdkDecisionProvider(
+        model=_scripted_model(payload, payload),
+        session_db_path=str(tmp_path / "client.sqlite3"),
+    )
+
+    await provider.respond(_view(), _session(1))
+    await provider.respond(_view(), _session(2))
+
+    listed = await provider.runner.session_service.list_sessions(app_name=CLIENT_APP_NAME)
+    assert [session.id for session in listed.sessions] == ["ran-client-neg-1"]
+    await provider.aclose()
+
+
+async def test_adk_provider_falls_back_to_memory_when_the_database_cannot_be_opened(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("occupied", encoding="utf-8")
+    provider = AdkDecisionProvider(
+        model=build_fake_model(),
+        session_db_path=str(blocker / "client.sqlite3"),
+    )
+
+    assert provider.durable_sessions is False
+    decision = await provider.respond(_view(), _session())
+    assert decision.action == "accept"
+    await provider.aclose()
+
+
+async def test_sweep_stale_sessions_deletes_only_abandoned_sessions(tmp_path: Path) -> None:
+    db_path = tmp_path / "client.sqlite3"
+    service = SqliteSessionService(str(db_path))
+    await service.create_session(
+        app_name=CLIENT_APP_NAME, user_id=CLIENT_USER_ID, session_id="ran-client-old"
+    )
+    await service.create_session(
+        app_name=CLIENT_APP_NAME, user_id=CLIENT_USER_ID, session_id="ran-client-new"
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE sessions SET update_time = ? WHERE id = ?",
+            (time.time() - 3600, "ran-client-old"),
+        )
+        connection.commit()
+
+    deleted = await sweep_stale_sessions(str(db_path), ttl_seconds=600)
+
+    assert deleted == 1
+    remaining = await service.list_sessions(app_name=CLIENT_APP_NAME)
+    assert [session.id for session in remaining.sessions] == ["ran-client-new"]
+
+
+async def test_sweep_skips_a_database_without_session_tables(tmp_path: Path) -> None:
+    """Starting the UI must not create the ADK schema in a client database that never used it."""
+    db_path = tmp_path / "client.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE conversations (conversation_id TEXT PRIMARY KEY)")
+        connection.commit()
+
+    assert await sweep_stale_sessions(str(db_path)) == 0
+
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert "sessions" not in tables

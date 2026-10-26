@@ -145,6 +145,7 @@ def _decision_provider(config: SampleConfig, scenario: Scenario, mode: str) -> N
             model=build_traced_adk_model(config, model=model),
             offline=config.is_offline,
             user_request=resolve_user_request(scenario, config.language),
+            session_db_path=config.client_db_path,
         )
     raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
 
@@ -252,10 +253,15 @@ class ClientRuntime:
                 set_global_sink(self.trace_sink)
 
     async def aclose(self) -> None:
-        """Stop the webhook receiver, close the HTTP clients and remove the temporary SDK env."""
+        """Stop the provider, the webhook receiver and the HTTP clients; remove the SDK env."""
         if self._closed:
             return
         self._closed = True
+        # The ADK provider owns the decision-agent sessions; deleting them here keeps the client
+        # database and the process memory from growing with every finished run.
+        close_provider = getattr(self.provider, "aclose", None)
+        if callable(close_provider):
+            await close_provider()
         if self._webhook_receiver is not None:
             await self._webhook_receiver.stop()
         close_client = getattr(self.a2a_client, "close", None)

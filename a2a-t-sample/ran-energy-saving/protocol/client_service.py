@@ -928,6 +928,10 @@ class RunManager:
             if run.runtime is not None:
                 with suppress(asyncio.CancelledError, Exception):
                     await run.runtime.aclose()
+                # The runtime owns the ADK runner and its decision sessions; a finished run keeps
+                # only the transcript, traces and result, so a long-lived UI/gateway process does
+                # not accumulate one agent history per run.
+                run.runtime = None
             try:
                 run.paths = transcript.write(self._runs_dir)
             except OSError as exc:
