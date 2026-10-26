@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
@@ -65,6 +66,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+
+_LOGGER = logging.getLogger("ran_energy_saving.web")
 
 #: Static directory of the single page.
 STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
@@ -177,11 +180,18 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncGenerator[None, None]:
         del app
+        _LOGGER.info(
+            "web ui starting: language=%s model_mode=%s client_db=%s",
+            config.language,
+            config.model_mode,
+            config.client_db_path or "memory",
+        )
         await manager.mark_interrupted()
         # Apply the decision-session retention window before the first run of this process.
         await manager.sweep_sessions()
         yield
         await manager.shutdown()
+        _LOGGER.info("web ui stopped")
 
     async def index(request: Request) -> Response:
         del request
@@ -558,6 +568,7 @@ def create_app(
         if run is None:
             return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
         if not _trace_token_ok(request):
+            _LOGGER.warning("trace ingest rejected: invalid token")
             return JSONResponse(
                 {"error": "Invalid trace token.", "code": "trace_token_invalid"},
                 status_code=403,

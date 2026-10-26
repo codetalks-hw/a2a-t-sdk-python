@@ -427,7 +427,8 @@ flowchart LR
 | `A2AT_LLM_BASE_URL` | 默认 `http://127.0.0.1:31943/v1` | SDK 端点基础 URL。 |
 | `A2AT_LLM_MAX_TOKENS`、`A2AT_LLM_TEMPERATURE`、`A2AT_LLM_TIMEOUT_SECONDS` | SDK 默认值（`A2AT_LLM_TIMEOUT_SECONDS` 会按运行被覆盖） | 结构化调用限制。每次运行的 SDK `.env` 始终使用 `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` / `A2AT_SAMPLE_LLM_MAX_ATTEMPTS`。 |
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false`（默认） | 打印完整 LLM 载荷（调试；可能暴露敏感内容）。 |
-| `A2AT_SAMPLE_DEBUG` | `false`（默认） | 额外样例调试日志。 |
+| `A2AT_SAMPLE_LOG_LEVEL` | 默认 `INFO` | 根日志级别：`DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`。 |
+| `A2AT_SAMPLE_LOG_FORMAT` | 默认 `text`，可选 `json` | 每条记录一行；`json` 会把 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round` 作为顶层字段。 |
 
 **离线模式。** 在构造 `A2ATClient` / `A2ATServer` 之前，运行时注册 traced 包装（离线 `scripted_traced`、在线 `openai_traced`），并生成临时 SDK `.env`，写入 `A2AT_LLM_PROVIDER=scripted_traced`、`A2AT_LLM_MODEL=scripted`、`A2AT_LLM_API_KEY=not-needed`。源 `.env` 不会被修改。客户端 ADK agent 使用 `shared/adk_fake_model.py`；服务端 planner 使用 `ScriptedChatModel`，按顺序发出四个样例工具调用。日志与 Web UI 标注为 `offline (scripted)`。
 
@@ -471,6 +472,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
 | `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性客户端 ADK 模型。 |
 | `test_config.py`、`test_scenario.py`、`test_transcript.py`、`test_client_runtime.py` | 配置（含两套数据库、Gateway 与 planner 键）、场景定义、运行记录、运行时装配，以及服务端导入不加载 ADK。 |
+| `test_logging_setup.py` | text/JSON 格式、上下文向子任务传播、凭据脱敏、环境变量驱动配置。 |
 | `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，外来监听则拒绝。 |
 
 JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
@@ -537,6 +539,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 本样例刻意保持原型性质。生产化之前：
 
 - **持久化。** 本样例有两个 SQLite 存储：服务端 Task（`protocol/sqlite_task_store.py`）与客户端会话/运行/协商（`protocol/client_store.py`）。生产应使用自有数据库与迁移。方案仍保存在进程内存储（`shared/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
+- **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
 - **鉴权与 TLS。** 本样例的 A2A 服务端、入站 Gateway 与注册中心没有鉴权。应在网关或 A2A 层终止 TLS 并增加认证/授权；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。

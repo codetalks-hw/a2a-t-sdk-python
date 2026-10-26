@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from collections.abc import Callable
 
@@ -35,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from shared.logging_utils import format_stage_log
+_LOGGER = logging.getLogger("ran_energy_saving.webhook_receiver")
 
 #: Default bind address and port of the embedded receiver (mirrors the ``A2AT_SAMPLE_WEBHOOK_PORT``
 #: resolver default in ``client.scenario_data``).
@@ -102,13 +103,11 @@ class WebhookReceiver:
         on_event: Callable[[dict[str, object]], None],
         host: str = DEFAULT_WEBHOOK_HOST,
         port: int = DEFAULT_WEBHOOK_PORT,
-        log_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._token = token
         self._on_event = on_event
         self._host = host
         self._port = port
-        self._log_sink: Callable[[str], None] = log_sink if log_sink is not None else print
         self._resolved_port = port
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -214,4 +213,12 @@ class WebhookReceiver:
         return JSONResponse(content={"received": event_type})
 
     def _log(self, stage: str, detail: str) -> None:
-        self._log_sink(format_stage_log(role="webhook-receiver", stage=stage, detail=detail))
+        """Emit one receiver event at the level its operational meaning deserves."""
+        level = {
+            "token-rejected": logging.WARNING,
+            "body-rejected": logging.WARNING,
+            "stop-error": logging.ERROR,
+            "stop-timeout": logging.WARNING,
+            "event-received": logging.DEBUG,
+        }.get(stage, logging.INFO)
+        _LOGGER.log(level, "webhook %s: %s", stage, detail)

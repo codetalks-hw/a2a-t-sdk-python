@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import uvicorn
 from dotenv import dotenv_values
-from shared.logging_utils import format_stage_log
+from shared.logging_setup import configure_logging
 
 from registry.registry_routes import build_registry_app
+
+_LOGGER = logging.getLogger("ran_energy_saving.registry")
 
 
 def resolve_registry_bind(*, env_path: Path | None = None) -> tuple[str, int]:
@@ -34,9 +37,10 @@ def resolve_registry_bind(*, env_path: Path | None = None) -> tuple[str, int]:
 
 def main() -> None:
     """Start the mock registry center uvicorn server."""
+    configure_logging()
     env_path = Path.cwd() / ".env"
     host, port = resolve_registry_bind(env_path=env_path)
-    print(format_stage_log(role="registry", stage="startup", detail=f"host={host} port={port}"))
+    _LOGGER.info("registry starting: host=%s port=%s", host, port)
     app = build_registry_app()
     uvicorn.run(app, host=host, port=port)
 

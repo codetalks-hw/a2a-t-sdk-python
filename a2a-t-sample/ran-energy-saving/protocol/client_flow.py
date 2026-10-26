@@ -21,6 +21,7 @@ terminal Task state. Reject and abort never create a Task.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -55,6 +56,7 @@ from a2a_t.core.standard_templates import (
 )
 from google.protobuf.json_format import ParseDict
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
+from shared.logging_setup import log_context
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
@@ -91,6 +93,8 @@ from protocol.messages import (
     parse_negotiation_context,
 )
 from protocol.negotiation_policy import NegotiationKind, negotiation_kind_for_template_uri
+
+_LOGGER = logging.getLogger("ran_energy_saving.client_flow")
 
 #: Short label carried in the text part of every message (the protocol content lives in metadata).
 TASK_REQUEST_LABEL: Final[str] = "create ran energy saving task"
@@ -264,12 +268,9 @@ class SseClientTransport:
     which lets the Web UI show a round while the flow is still waiting for the next one.
     """
 
-    def __init__(
-        self, client: SendMessageClient, *, log_sink: Callable[[str], None] | None = None
-    ) -> None:
+    def __init__(self, client: SendMessageClient) -> None:
         """Create one SSE transport over an a2a-sdk client."""
         self._client = client
-        self._log_sink = log_sink
         self._event_sink: Callable[[dict[str, object]], None] | None = None
 
     def set_event_sink(self, event_sink: Callable[[dict[str, object]], None] | None) -> None:
@@ -294,8 +295,7 @@ class SseClientTransport:
             self._emit(event)
             if is_stop_event(event):
                 break
-        if self._log_sink is not None:
-            self._log_sink(f"[client] sse-received events={len(events)}")
+        _LOGGER.debug("sse phase finished: events=%d", len(events))
         return events
 
 
@@ -315,7 +315,6 @@ class WebhookClientTransport:
         push_url: str,
         push_token: str,
         idle_timeout: float = float(DEFAULT_WEBHOOK_IDLE_TIMEOUT),
-        log_sink: Callable[[str], None] | None = None,
     ) -> None:
         """Create one webhook transport.
 
@@ -325,14 +324,12 @@ class WebhookClientTransport:
             push_url: Receiver callback URL registered inline on every request.
             push_token: Push token checked by the receiver.
             idle_timeout: Backstop timeout waiting for pushed events.
-            log_sink: Optional log sink.
         """
         self._client = client
         self._queue = queue
         self._push_url = push_url
         self._push_token = push_token
         self._idle_timeout = idle_timeout
-        self._log_sink = log_sink
         self._event_sink: Callable[[dict[str, object]], None] | None = None
 
     def set_event_sink(self, event_sink: Callable[[dict[str, object]], None] | None) -> None:
@@ -368,8 +365,7 @@ class WebhookClientTransport:
             try:
                 payload = await asyncio.wait_for(self._queue.get(), timeout=self._idle_timeout)
             except TimeoutError:
-                if self._log_sink is not None:
-                    self._log_sink(f"[client] webhook-idle-timeout after {self._idle_timeout:g}s")
+                _LOGGER.info("webhook phase idle for %gs; treating it as complete", self._idle_timeout)
                 return events
             event = normalize_webhook_payload(payload)
             events.append(event)
@@ -388,7 +384,6 @@ def build_webhook_receiver(
     queue: asyncio.Queue[dict[str, object]],
     host: str = "127.0.0.1",
     port: int = 9000,
-    log_sink: Callable[[str], None] | None = None,
 ) -> WebhookReceiver:
     """Build the embedded receiver feeding one flow event queue."""
     return WebhookReceiver(
@@ -396,7 +391,6 @@ def build_webhook_receiver(
         on_event=queue.put_nowait,
         host=host,
         port=port,
-        log_sink=log_sink,
     )
 
 
@@ -563,19 +557,30 @@ async def run_client_flow(
         round_number=None,
         context_id=None,
     )
+    _LOGGER.info("client flow started: transport=%s", type(transport).__name__)
     batch = await transport.send(initial_request, initial_context)
     exchanges += 1
     collect(batch)
     context_id = context_id or _context_id_of(batch)
+
+    def finish(state: str) -> ClientFlowResult:
+        """Record the terminal state, fill the result and log the outcome."""
+        result.final_state = state
+        _fill_result(result, context_id)
+        _LOGGER.info(
+            "client flow finished: state=%s task_id=%s decisions=%d",
+            result.final_state,
+            result.task_id or "-",
+            len(result.decisions),
+        )
+        return result
 
     while True:
         inbound = _find_negotiation_message(batch)
         if inbound is None:
             # Only the last phase can terminate the flow: an earlier round's proposal must not be
             # mistaken for the end message (webhook phases end at the report artifact).
-            result.final_state = _final_state(batch)
-            _fill_result(result, context_id)
-            return result
+            return finish(_final_state(batch))
 
         event, metadata = inbound
         context_id = context_id or _string_field(event, "context_id")
@@ -585,9 +590,8 @@ async def run_client_flow(
         context_id = context_id or session.id
 
         if session.performative is NegotiationPerformative.ABORT:
-            result.final_state = FINAL_STATE_NEGOTIATION_ABORTED
-            _fill_result(result, context_id)
-            return result
+            _LOGGER.info("negotiation aborted by the server at round %s", session.round)
+            return finish(FINAL_STATE_NEGOTIATION_ABORTED)
         if session.performative is not NegotiationPerformative.PROPOSE:
             raise ClientFlowError(_ERROR_NO_PROPOSE)
 
@@ -610,9 +614,21 @@ async def run_client_flow(
                 "content": propose.content,
             },
         )
+        _LOGGER.info(
+            "proposal received: kind=%s round=%s/%s",
+            kind.value,
+            session.round,
+            session.max_rounds,
+        )
         if on_decision_requested is not None:
             on_decision_requested(propose, session)
-        decision = await provider.respond(propose, session)
+        with log_context(
+            negotiation_id=session.id or context_id,
+            round=session.round,
+            context_id=context_id,
+        ):
+            decision = await provider.respond(propose, session)
+        _LOGGER.info("decision made: action=%s round=%s", decision.action, session.round)
         # Exactly one timeline row per decision: a consumer callback (Web UI/transcript) records
         # the decision itself, so the synthetic span would be an adjacent duplicate. Without a
         # callback (CLI), the flow emits the span so the decision still reaches the trace.
@@ -701,13 +717,9 @@ async def run_client_flow(
         exchanges += 1
         collect(batch)
         if decision.action in ("reject", "abort"):
-            result.final_state = FINAL_STATE_NEGOTIATION_ENDED
-            _fill_result(result, context_id)
-            return result
+            return finish(FINAL_STATE_NEGOTIATION_ENDED)
         if decision.action == "accept":
-            result.final_state = _final_state(batch)
-            _fill_result(result, context_id)
-            return result
+            return finish(_final_state(batch))
 
 
 # ----------------------------------------------------------------------

@@ -27,7 +27,7 @@ import argparse
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -54,6 +54,7 @@ from a2a.utils.constants import TransportProtocol
 from google.protobuf.json_format import MessageToDict, ParseDict
 from shared.agent_card import AGENT_CARD_ORGANIZATION, AGENT_CARD_PROVIDER_URL
 from shared.config import SampleConfig, load_config
+from shared.logging_setup import configure_logging, log_context
 from shared.registry_client import register_agentcard
 from starlette.applications import Starlette
 
@@ -137,6 +138,15 @@ class ClientGatewayExecutor(AgentExecutor):
         self._runs_by_task: dict[str, RunState] = {}
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """Run one inbound request with its correlation fields bound."""
+        with log_context(
+            task_id=context.task_id,
+            context_id=context.context_id,
+            role="gateway",
+        ):
+            await self._execute(context, event_queue)
+
+    async def _execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Create an inbound Task, run the client flow, and publish the final artifact."""
         if context.current_task is not None:
             # One inbound message is one run; a follow-up on the same Task is not supported here.
@@ -155,6 +165,7 @@ class ClientGatewayExecutor(AgentExecutor):
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
+        _LOGGER.info("gateway inbound message accepted; starting a client run")
 
         request_text = _message_text(message) or "Create a RAN energy saving task."
         conversation_id = f"a2a-{context_id}"
@@ -170,6 +181,7 @@ class ClientGatewayExecutor(AgentExecutor):
                 user_id="a2a-caller",
             )
         except RunConflictError as exc:
+            _LOGGER.warning("gateway run rejected: %s", exc)
             await updater.failed(
                 message=updater.new_agent_message([Part(text=str(exc))])
             )
@@ -186,6 +198,11 @@ class ClientGatewayExecutor(AgentExecutor):
             self._runs_by_task.pop(task.id, None)
 
         result = run.result
+        _LOGGER.info(
+            "gateway run finished: status=%s final_state=%s",
+            run.status,
+            result.final_state if result is not None else "-",
+        )
         if run.status == "finished" and result is not None:
             report = result.report or {}
             summary = str(
@@ -275,7 +292,6 @@ def build_gateway_service(
     *,
     config: SampleConfig,
     env_path: Path | None = None,
-    log_sink: Callable[[str], None] | None = None,
 ) -> RunManager:
     """Build the client service used by the gateway (and optionally by the Web UI)."""
     store = (
@@ -297,7 +313,6 @@ def build_gateway_service(
             env_path=env_path,
         )
 
-    del log_sink
     return RunManager(
         config=config,
         runtime_factory=runtime_factory,
@@ -319,7 +334,6 @@ async def register_gateway_card(
         return await register_agentcard(
             registration_payload={"agentCards": [MessageToDict(card)]},
             env_path=env_path,
-            log_sink=print,
         )
     except Exception as exc:  # noqa: BLE001 - a registry outage must not stop the gateway
         _LOGGER.warning("gateway AgentCard registration failed: %s", exc)
@@ -332,6 +346,7 @@ def run_gateway(
     env_path: Path | None = None,
 ) -> int:
     """Serve the inbound A2A gateway until interrupted."""
+    configure_logging()
     service = build_gateway_service(config=config, env_path=env_path)
     app = build_gateway_app(config=config, service=service)
     card = app.state.agent_card

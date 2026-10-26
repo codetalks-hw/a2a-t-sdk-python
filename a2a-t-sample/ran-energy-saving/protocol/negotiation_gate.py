@@ -36,6 +36,7 @@ from a2a_t.core.metadata import (
     NegotiationPerformative,
 )
 from a2a_t.core.validation_pipeline import FilledParamData
+from shared.logging_setup import log_context
 from shared.scenario import MAX_ROUNDS
 from shared.task_schema import TASK_PARAM_SCHEMA
 from shared.trace import trace_stage
@@ -201,18 +202,23 @@ class NegotiationGate:
         Returns:
             Either a short-circuit message (no Task) or the request to hand to the deterministic executor.
         """
-        if context.current_task is not None:
-            return GateOutcome.execution(context)
+        with log_context(
+            task_id=context.task_id,
+            context_id=context.context_id,
+            role="server",
+        ):
+            if context.current_task is not None:
+                return GateOutcome.execution(context)
 
-        message = context.message
-        if message is None:
-            return GateOutcome.short(
-                build_error_message(context.context_id, "The request carries no A2A message.")
-            )
-        metadata = metadata_to_dict(message.metadata)
-        if is_negotiation_message(metadata):
-            return await self._handle_negotiation(context, metadata)
-        return await self._handle_initial_task(context, metadata)
+            message = context.message
+            if message is None:
+                return GateOutcome.short(
+                    build_error_message(context.context_id, "The request carries no A2A message.")
+                )
+            metadata = metadata_to_dict(message.metadata)
+            if is_negotiation_message(metadata):
+                return await self._handle_negotiation(context, metadata)
+            return await self._handle_initial_task(context, metadata)
 
     # ------------------------------------------------------------------
     # Initial Task-T
@@ -308,13 +314,15 @@ class NegotiationGate:
                 build_error_message(context_id, "The negotiation message carries no valid negotiationContext.")
             )
         performative = session.performative
-        if performative is NegotiationPerformative.ACCEPT:
-            return await self._handle_accept(context, metadata, session)
-        if performative is NegotiationPerformative.REJECT:
-            return await self._handle_terminal(context, metadata, session)
-        if performative is NegotiationPerformative.ABORT:
-            return await self._handle_terminal(context, metadata, session)
-        return await self._handle_counter_propose(context, metadata, session)
+        with log_context(negotiation_id=session.id, round=session.round):
+            self._logger.info("negotiation message received: %s", performative.value)
+            if performative is NegotiationPerformative.ACCEPT:
+                return await self._handle_accept(context, metadata, session)
+            if performative is NegotiationPerformative.REJECT:
+                return await self._handle_terminal(context, metadata, session)
+            if performative is NegotiationPerformative.ABORT:
+                return await self._handle_terminal(context, metadata, session)
+            return await self._handle_counter_propose(context, metadata, session)
 
     async def _handle_accept(
         self,

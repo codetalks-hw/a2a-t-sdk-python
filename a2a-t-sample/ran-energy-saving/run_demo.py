@@ -501,6 +501,7 @@ async def _run_client_foreground(
     from protocol.client_runtime import build_client_runtime
     from protocol.transcript import NegotiationTranscript
     from shared.config import load_config
+    from shared.logging_setup import log_context
     from shared.models import NegotiationProposeView
 
     config = load_config(env_path=env_path)
@@ -549,21 +550,21 @@ async def _run_client_foreground(
 
     runtime = None
     try:
-        runtime = await build_client_runtime(
-            config,
-            scenario,
-            mode,
-            transport,
-            env_path=env_path,
-            log_sink=print,
-        )
-        result = await runtime.run(
-            event_sink=event_sink,
-            on_decision_requested=on_decision_requested,
-            on_decision_made=on_decision_made,
-            trace_sink=trace_sink,
-            run_id=run_id,
-        )
+        with log_context(run_id=run_id, role="client"):
+            runtime = await build_client_runtime(
+                config,
+                scenario,
+                mode,
+                transport,
+                env_path=env_path,
+            )
+            result = await runtime.run(
+                event_sink=event_sink,
+                on_decision_requested=on_decision_requested,
+                on_decision_made=on_decision_made,
+                trace_sink=trace_sink,
+                run_id=run_id,
+            )
         for index, decision in enumerate(result.decisions):
             if index < len(transcript.decisions):
                 continue
@@ -602,8 +603,10 @@ def _run_ui(
     import uvicorn
     from protocol.client_store import SqliteClientStore
     from shared.config import load_config
+    from shared.logging_setup import configure_logging
     from web.app import create_app
 
+    configure_logging()
     config = load_config(env_path=env_path)
     client_store = (
         SqliteClientStore(config.client_db_path)
@@ -747,6 +750,10 @@ def main() -> int:
         default_gateway_port=_gateway_port_default(source_values),
     )
     args = parser.parse_args()
+
+    from shared.logging_setup import configure_logging
+
+    configure_logging()
 
     if args.stop:
         pids = _load_pids()

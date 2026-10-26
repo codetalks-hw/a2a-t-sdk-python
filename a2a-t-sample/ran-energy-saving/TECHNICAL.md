@@ -485,7 +485,8 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_LLM_BASE_URL` | default `http://127.0.0.1:31943/v1` | SDK endpoint base URL. |
 | `A2AT_LLM_MAX_TOKENS`, `A2AT_LLM_TEMPERATURE`, `A2AT_LLM_TIMEOUT_SECONDS` | SDK defaults (`A2AT_LLM_TIMEOUT_SECONDS` is overridden per run) | Structured-call limits. The per-run SDK `.env` always uses `A2AT_SAMPLE_LLM_TIMEOUT_SECONDS` / `A2AT_SAMPLE_LLM_MAX_ATTEMPTS`. |
 | `A2AT_LLM_DETAIL_LOG_ENABLED` | `false` (default) | Print full LLM payloads (debug; may expose sensitive content). |
-| `A2AT_SAMPLE_DEBUG` | `false` (default) | Extra sample debug logging. |
+| `A2AT_SAMPLE_LOG_LEVEL` | `INFO` (default) | Root log level: `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`. |
+| `A2AT_SAMPLE_LOG_FORMAT` | `text` (default) or `json` | One line per record; `json` carries `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round` as top-level fields. |
 
 **Offline mode.** Before constructing `A2ATClient` / `A2ATServer`, the runtimes register the traced
 wrappers (`scripted_traced`, live `openai_traced`) and build a temporary SDK `.env` with
@@ -556,6 +557,7 @@ The suite is fully offline and deterministic (420 tests). What it covers:
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
 | `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic client ADK model. |
 | `test_config.py`, `test_scenario.py`, `test_transcript.py`, `test_client_runtime.py` | Configuration (including both databases, gateway and planner keys), scenario definitions, transcripts, runtime assembly, and the server import that must not load ADK. |
+| `test_logging_setup.py` | Text/JSON format, context propagation into child tasks, credential redaction, and the environment-driven configuration. |
 | `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
 
 The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
@@ -640,6 +642,11 @@ The sample is deliberately a prototype. Before production:
   results, so set the window from your audit and data-protection requirements, and size the client
   database for it. The LangGraph NMS execution uses no persistent checkpointer; add one only if you
   need resume-after-restart semantics. The server has no ADK session.
+- **Logging.** One stdlib stream serves the client, the NMS and the gateway. Set
+  `A2AT_SAMPLE_LOG_FORMAT=json` for a collector; each record carries `runId` / `conversationId` /
+  `taskId` / `contextId` / `negotiationId` / `round`, so one negotiation can be followed across
+  processes. Credentials are redacted, and prompts or tool results are summarized rather than
+  dumped at `info`.
 - **Registry.** `registry/` is a mock. Use the deployment's real registry center or configure
   `direct` discovery with a stable AgentCard endpoint.
 - **Webhook security.** `A2AT_SAMPLE_WEBHOOK_TOKEN` is a static demo token. Use per-client secrets,

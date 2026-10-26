@@ -54,6 +54,7 @@ from shared.agent_card import (
     AGENT_CARD_SKILL_ID,
 )
 from shared.config import SampleConfig, load_config
+from shared.logging_setup import configure_logging
 from shared.registry_client import register_agentcard
 from shared.scenario import MAX_ROUNDS
 from shared.scripted_llm import register_scripted_provider
@@ -312,7 +313,6 @@ async def register_server_agent_card(
     config: SampleConfig,
     env_path: Path | None = None,
     tolerate_failure: bool = False,
-    log_sink: Any | None = print,
 ) -> dict[str, Any]:
     """Register the AgentCard with the registry center.
 
@@ -322,7 +322,6 @@ async def register_server_agent_card(
         env_path: optional ``.env`` path used by the registry client.
         tolerate_failure: when ``True``, a failed registration is logged and returned; otherwise it
             raises.
-        log_sink: optional log sink.
 
     Raises:
         RuntimeError: when registration fails and ``tolerate_failure`` is ``False``.
@@ -331,7 +330,6 @@ async def register_server_agent_card(
         registration_payload=build_registration_payload(agent_card),
         env_path=env_path,
         registry_center_url=config.registry_url,
-        log_sink=log_sink,
     )
     if result.get("status") != "success":
         message = str(result.get("message", "unknown error"))
@@ -345,7 +343,7 @@ async def register_server_agent_card(
 
 def main() -> None:
     """Entry point: assemble the runtime, register the card, and start uvicorn."""
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     env_path = Path.cwd() / ".env"
     resolved_env_path = env_path if env_path.exists() else None
     runtime = build_server_runtime(env_path=resolved_env_path)
@@ -354,7 +352,6 @@ def main() -> None:
             runtime.agent_card,
             config=runtime.config,
             env_path=resolved_env_path,
-            log_sink=print,
         )
     )
     _LOGGER.info(

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 from dotenv import dotenv_values
+
+_LOGGER = logging.getLogger("ran_energy_saving.registry_client")
 
 
 class _ResponseLike(Protocol):
@@ -59,7 +61,6 @@ async def register_agentcard(
     registry_center_url: str | None = None,
     timeout_seconds: float = 30.0,
     http_client: _HttpClientLike | None = None,
-    log_sink: Callable[[str], object] | None = None,
 ) -> dict[str, Any]:
     """POST an AgentCard registration payload to the registry center; returns success/failed status dict."""
     resolved_url = registry_center_url or resolve_registry_center_url(env_path=env_path)
@@ -71,19 +72,16 @@ async def register_agentcard(
     try:
         response = await client.post(uri, json=registration_payload)
         if response.status_code == 201:
-            if log_sink is not None:
-                log_sink("[registry-client] register: success")
+            _LOGGER.info("registry registration succeeded: %s", normalized_url)
             return {"status": "success", "message": "Agent card registered successfully"}
-        if log_sink is not None:
-            log_sink(f"[registry-client] register failed: status_code={response.status_code}")
+        _LOGGER.warning("registry registration failed: status=%s", response.status_code)
         return {
             "status": "failed",
             "message": f"Unexpected status code: {response.status_code}",
             "error": _safe_error_body(response),
         }
     except Exception as exc:
-        if log_sink is not None:
-            log_sink(f"[registry-client] register failed: {exc}")
+        _LOGGER.warning("registry registration failed: %s", exc)
         return {"status": "failed", "message": str(exc)}
     finally:
         if owns_client:
@@ -98,7 +96,6 @@ async def query_by_name_org(
     registry_center_url: str | None = None,
     timeout_seconds: float = 30.0,
     http_client: _HttpClientLike | None = None,
-    log_sink: Callable[[str], object] | None = None,
 ) -> dict[str, Any]:
     """GET an AgentCard from the registry center by organization and name; returns agentCards list."""
     resolved_url = registry_center_url or resolve_registry_center_url(env_path=env_path)
@@ -112,20 +109,15 @@ async def query_by_name_org(
         response = await client.get(uri)
         if response.status_code == 200:
             data = response.json()
-            if log_sink is not None:
-                count = len(data.get("agentCards", []))
-                log_sink(f"[registry-client] query-by-name: found {count} agent cards")
+            _LOGGER.debug("registry lookup: found %d card(s)", len(data.get("agentCards", [])))
             return data
         if response.status_code == 404:
-            if log_sink is not None:
-                log_sink(f"[registry-client] query-by-name: not found (name={name}, org={organization})")
+            _LOGGER.info("registry lookup: no card for %s/%s", organization, name)
             return {"agentCards": []}
-        if log_sink is not None:
-            log_sink(f"[registry-client] query-by-name failed: status_code={response.status_code}")
+        _LOGGER.warning("registry lookup failed: status=%s", response.status_code)
         return {"agentCards": []}
     except Exception as exc:
-        if log_sink is not None:
-            log_sink(f"[registry-client] query-by-name failed: {exc}")
+        _LOGGER.warning("registry lookup failed: %s", exc)
         return {"agentCards": []}
     finally:
         if owns_client:

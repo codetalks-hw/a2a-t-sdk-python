@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,6 +64,8 @@ from protocol.decision_provider import (
     ScriptedDecisionProvider,
 )
 from protocol.discovery import DiscoveredAgent, discover_agent
+
+_LOGGER = logging.getLogger("ran_energy_saving.client_runtime")
 
 #: Client decision modes.
 MODE_AUTO: Final[str] = "auto"
@@ -275,7 +278,6 @@ async def build_client_runtime(
     transport: str = TRANSPORT_SSE,
     *,
     env_path: Path | None = None,
-    log_sink: Callable[[str], None] | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
@@ -286,7 +288,6 @@ async def build_client_runtime(
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
         transport: event transport (``sse`` / ``webhook``).
         env_path: source ``.env`` used for discovery and for the per-run SDK ``.env``.
-        log_sink: optional log sink of the transports and the webhook receiver.
         trace_sink: optional Run Explorer sink attached **before** the SDK and ADK clients are
             built, so their LLM/tool producers are traced from the first call.
 
@@ -320,8 +321,7 @@ async def build_client_runtime(
         direct_base_url=_direct_base_url(config, env_path),
         env_path=env_path,
     )
-    if log_sink is not None:
-        log_sink(f"[client] agent-discovered: url={discovered.url} discovery={config.discovery}")
+    _LOGGER.info("agent discovered: url=%s discovery=%s", discovered.url, config.discovery)
 
     # One budget for both the transport and the per-call context (the SDK applies the context
     # timeout to every request, overriding the httpx client default).
@@ -340,22 +340,19 @@ async def build_client_runtime(
                 token=config.webhook_token,
                 queue=queue,
                 port=config.webhook_port,
-                log_sink=log_sink,
             )
             await receiver.start()
-            if log_sink is not None:
-                log_sink(f"[client] webhook-mode: push_url={receiver.url}")
+            _LOGGER.info("webhook mode: push_url=%s", receiver.url)
             flow_transport: ClientTransport = WebhookClientTransport(
                 a2a_client,
                 queue=queue,
                 push_url=receiver.url,
                 push_token=config.webhook_token,
                 idle_timeout=float(config.webhook_idle_timeout),
-                log_sink=log_sink,
             )
         else:
             receiver = None
-            flow_transport = SseClientTransport(a2a_client, log_sink=log_sink)
+            flow_transport = SseClientTransport(a2a_client)
     except Exception:
         await httpx_client.aclose()
         shutil.rmtree(sdk_env.directory, ignore_errors=True)

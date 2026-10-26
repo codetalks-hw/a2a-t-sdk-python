@@ -54,6 +54,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from shared.config import SampleConfig, load_config
+from shared.logging_setup import log_context
 from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
 from protocol.messages import (
@@ -351,40 +352,50 @@ class LangGraphTaskExecutor(AgentExecutor):
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
+        _LOGGER.info("task accepted; running the planner")
         execution_span_id = _emit_execution_span(context, task.id)
 
         negotiation_context = _negotiation_context(context)
-        try:
-            await self._run_graph(
-                context,
-                updater,
-                task.id,
-                execution_span_id,
-                negotiation_context,
-            )
-        except asyncio.CancelledError:
-            raise
-        except GraphRecursionError:
-            _LOGGER.warning("planner exceeded %s steps for task %s", self.recursion_limit, task.id)
-            await updater.failed(
-                message=updater.new_agent_message(
-                    [
-                        Part(
-                            text=(
-                                "The energy-saving planner exceeded "
-                                f"{self.recursion_limit} steps without completing the task."
+        with log_context(
+            task_id=task.id,
+            context_id=task.context_id,
+            run_id=run_id or None,
+            role="server",
+        ):
+            try:
+                await self._run_graph(
+                    context,
+                    updater,
+                    task.id,
+                    execution_span_id,
+                    negotiation_context,
+                )
+            except asyncio.CancelledError:
+                _LOGGER.info("task cancelled")
+                raise
+            except GraphRecursionError:
+                _LOGGER.warning(
+                    "planner exceeded %s steps for task %s", self.recursion_limit, task.id
+                )
+                await updater.failed(
+                    message=updater.new_agent_message(
+                        [
+                            Part(
+                                text=(
+                                    "The energy-saving planner exceeded "
+                                    f"{self.recursion_limit} steps without completing the task."
+                                )
                             )
-                        )
-                    ]
+                        ]
+                    )
                 )
-            )
-        except Exception as exc:  # noqa: BLE001 - the Task must always reach a terminal state
-            _LOGGER.exception("unexpected LangGraph executor failure")
-            await updater.failed(
-                message=updater.new_agent_message(
-                    [Part(text=f"The energy-saving task failed unexpectedly: {exc}")]
+            except Exception as exc:  # noqa: BLE001 - the Task must always reach a terminal state
+                _LOGGER.exception("unexpected LangGraph executor failure")
+                await updater.failed(
+                    message=updater.new_agent_message(
+                        [Part(text=f"The energy-saving task failed unexpectedly: {exc}")]
+                    )
                 )
-            )
 
     async def _run_graph(
         self,
@@ -476,6 +487,7 @@ class LangGraphTaskExecutor(AgentExecutor):
                 if not final_text
                 else "The planner stopped without generating a report."
             )
+            _LOGGER.warning("task failed: %s", reason)
             await updater.failed(
                 message=updater.new_agent_message([Part(text=reason)])
             )
@@ -495,6 +507,7 @@ class LangGraphTaskExecutor(AgentExecutor):
         final_message = updater.new_agent_message(
             [Part(text=FINAL_TASK_TEXT)], metadata=metadata
         )
+        _LOGGER.info("task completed: %s", summary[:120])
         await updater.update_status(
             TaskState.TASK_STATE_COMPLETED,
             message=final_message,

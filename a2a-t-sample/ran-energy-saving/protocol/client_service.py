@@ -26,6 +26,7 @@ from typing import Any, Final, Literal, Protocol, cast
 
 from a2a_t.core.metadata import NegotiationContext
 from shared.config import DISCOVERY_REGISTRY, SampleConfig
+from shared.logging_setup import log_context
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import get_scenario, resolve_user_request
 from shared.trace import (
@@ -797,8 +798,35 @@ class RunManager:
         )
         self._runs[run.run_id] = run
         self._active_by_conversation[resolved_conversation] = run
-        run.task = asyncio.create_task(self._execute(run), name=f"ran-client-run-{run.run_id}")
+        run.task = asyncio.create_task(
+            self._execute_in_context(run), name=f"ran-client-run-{run.run_id}"
+        )
         return run
+
+    async def _execute_in_context(self, run: RunState) -> None:
+        """Run one client run with its correlation fields bound for every log record."""
+        with log_context(
+            run_id=run.run_id,
+            conversation_id=run.conversation_id,
+            role="client",
+        ):
+            _LOGGER.info(
+                "run started: scenario=%s mode=%s transport=%s",
+                run.scenario,
+                run.mode,
+                run.transport,
+            )
+            started = time.monotonic()
+            try:
+                await self._execute(run)
+            finally:
+                _LOGGER.info(
+                    "run finished: status=%s final_state=%s task_id=%s duration=%.2fs",
+                    run.status,
+                    run.result.final_state if run.result is not None else "-",
+                    run.result.task_id if run.result is not None and run.result.task_id else "-",
+                    time.monotonic() - started,
+                )
 
     def _reuse_run(self, record: ClientRunRecord) -> RunState:
         """Build a read-only run view for an idempotent replay."""
