@@ -519,7 +519,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 在线模式下，**客户端** ADK 决策智能体使用 `ADK_MODEL_*`，两侧 A2A-T SDK 使用 `A2AT_LLM_*`，服务端 LangGraph planner 使用 `A2AT_SAMPLE_PLANNER_*`（未设置时默认沿用 ADK 端点/模型）。它们必须指向同一个 OpenAI-compatible 端点；`env.example` 默认使用本地代理 `http://127.0.0.1:31943/v1`。该命令可以端到端运行，但协商序列与 planner 的工具选择**依赖模型**：SDK 基于 LLM 的抽取与语义校验决定服务端最终收到什么，planner 决定 OSS 方案；工具本身仍是确定性且受顺序约束的。离线模式才是测试与 §4 使用的可复现基准；在线运行应视为集成 smoke，而不是验收测试。
 
-**在线模式为尽力而为，但有确定性护栏。** SDK 语义结论与客户端决策智能体由模型驱动，但样例在接受 Task-T 前会重新检查调用方 schema 的必填字段，以及设计中的冲突条件（目标时段重叠、背景停电期间仍要求保障速率）。客户端 accept 路径只回答被请求的信息项，并把目标规整到模板允许的三段式上限。如果决策模型返回散文而不是要求的 JSON（部分 OpenAI-compatible 网关会丢弃响应格式约束），Provider 会从代码围栏或正文中提取 JSON 对象；仍失败时在同一 ADK 会话里追加一次纠正性追问，然后才报错。离线模式仍是验收路径。
+**在线模式为尽力而为，但有确定性护栏。** SDK 语义结论与客户端决策智能体由模型驱动，但样例在接受 Task-T 前会重新检查调用方 schema 的必填字段，以及设计中的冲突条件（目标时段重叠、背景停电期间仍要求保障速率）。客户端 accept 路径只回答被请求的信息项，并把目标规整到模板允许的三段式上限。如果决策模型返回散文而不是要求的 JSON（部分 OpenAI-compatible 网关会丢弃响应格式约束），Provider 会从代码围栏或正文中提取 JSON 对象；仍失败时在同一 ADK 会话里追加一次纠正性追问，然后才报错。SDK 的结构化调用（参数提取、校验）采用同样的容忍策略：带围栏或被散文包裹的 JSON 对象会被接受，确实非法的 JSON 仍然失败。离线模式仍是验收路径。
 
 ### Web UI
 
@@ -933,7 +933,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 
 （`python` 必须是 §3 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（418 个测试）。覆盖范围：
+测试套件完全离线且确定性（419 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

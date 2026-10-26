@@ -29,6 +29,7 @@ from a2a_t.llm.factory import LLMClientFactory
 from a2a_t.llm.models import LLMResponse
 from a2a_t.llm.providers.openai import OpenAIClient
 
+from shared.json_text import first_json_object_text
 from shared.scripted_llm import SCRIPTED_PROVIDER_NAME, ScriptedLLMClient, route_structured_call
 from shared.trace import (
     current_trace,
@@ -91,11 +92,20 @@ def _infer_stage(messages: list[dict[str, str]], json_schema: dict[str, Any]) ->
 
 
 def _parse_json(content: str | None) -> tuple[object | None, str | None]:
-    """Return the parsed JSON object of one raw content and its parse error, if any."""
+    """Return the parsed JSON object of one raw content and its parse error, if any.
+
+    A model that wrapped the object in a fence is not a parse failure for the call: the traced
+    provider accepts it, so the display parses the same embedded object instead of flagging an
+    anomaly the run never hit.
+    """
     if not content:
         return None, None
     try:
         return json.loads(content), None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return json.loads(first_json_object_text(content)), None
     except (TypeError, ValueError) as exc:
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -266,6 +276,16 @@ class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
         client.max_retries = 0
         return client
 
+    def _extract_message_text(self, response: Any) -> str:
+        """Return the message text, tolerating a fenced or prose-wrapped JSON object.
+
+        Some OpenAI-compatible gateways ignore ``response_format`` and wrap the object in a
+        ```json fence (or a sentence). The SDK validates the returned text with ``json.loads``, so
+        handing it the embedded object keeps the call successful; the object must still decode, so
+        validation is not weakened.
+        """
+        return first_json_object_text(OpenAIClient._extract_message_text(self, response))
+
     def _call_structured(
         self,
         *,
@@ -288,7 +308,9 @@ class TracedOpenAIClient(_TracedStructuredMixin, OpenAIClient):
         capture = _RAW_RESPONSE.get()
         if capture is not None:
             try:
-                capture["rawContent"] = self._extract_message_text(response)
+                # Record what the model actually sent (fence included); the normalized text is what
+                # the SDK validates and returns as ``LLMResponse.content``.
+                capture["rawContent"] = OpenAIClient._extract_message_text(self, response)
             except Exception as exc:  # noqa: BLE001 - capture must never break the call
                 capture["rawTextError"] = str(exc)
             response_id = getattr(response, "id", None)

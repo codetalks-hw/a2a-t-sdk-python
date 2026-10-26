@@ -17,8 +17,7 @@ negotiation session for round/performative context; providers never advance roun
 from __future__ import annotations
 
 import asyncio
-import json
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from a2a_t.core.metadata import NegotiationContext
@@ -28,6 +27,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 from shared.adk_tracing import TracePlugin
 from shared.config import build_traced_adk_model
+from shared.json_text import iter_json_objects
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.scenario import Scenario, get_scenario
 from shared.trace import trace_scope
@@ -288,38 +288,12 @@ def _decision_from_event(event: AdkEvent) -> NegotiationDecision | None:
 
 def _parse_decision_json(text: str) -> NegotiationDecision | None:
     """Parse one JSON decision text, tolerating code fences and surrounding prose."""
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        candidate = candidate.strip("`")
-        if candidate.startswith("json"):
-            candidate = candidate.removeprefix("json")
-        candidate = candidate.strip()
-    for payload in _json_object_candidates(candidate):
+    for payload, _raw in iter_json_objects(text):
         try:
             return NegotiationDecision.model_validate(payload)
         except (ValueError, TypeError):
             continue
     return None
-
-
-def _json_object_candidates(text: str) -> Iterator[dict[str, object]]:
-    """Yield every JSON object embedded in one text, in reading order.
-
-    A model that ignores the output schema often wraps the decision in a sentence or a fence. The
-    scanner decodes from each ``{`` and resumes after a successful object, so a malformed brace in
-    the prose costs one attempt rather than the whole response.
-    """
-    decoder = json.JSONDecoder()
-    index = text.find("{")
-    while index != -1:
-        try:
-            value, end = decoder.raw_decode(text, index)
-        except ValueError:
-            index = text.find("{", index + 1)
-            continue
-        if isinstance(value, dict):
-            yield value
-        index = text.find("{", end)
 
 
 class ScriptedDecisionProvider:

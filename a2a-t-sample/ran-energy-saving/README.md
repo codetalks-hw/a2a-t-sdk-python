@@ -612,8 +612,9 @@ outage) before accepting a Task-T. The client accept path also answers only the 
 information item and normalizes the target to the template's three-segment limit. If the decision
 model answers with prose instead of the requested JSON (some OpenAI-compatible gateways drop the
 response format), the provider extracts a fenced or embedded JSON object and, when that still
-fails, makes one corrective turn in the same ADK session before raising. Offline mode remains the
-acceptance path.
+fails, makes one corrective turn in the same ADK session before raising. The SDK's structured calls
+(slot extraction, validation) apply the same tolerance: a fenced or prose-wrapped JSON object is
+accepted, while genuinely invalid JSON still fails. Offline mode remains the acceptance path.
 
 ### Web UI
 
@@ -1173,7 +1174,7 @@ python -m ruff check shared agents protocol web tests run_demo.py
 (`python` must be the environment activated in §3; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (418 tests). What it covers:
+The suite is fully offline and deterministic (419 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

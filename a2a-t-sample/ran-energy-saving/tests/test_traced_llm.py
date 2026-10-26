@@ -237,6 +237,28 @@ def test_traced_openai_client_captures_raw_content_and_usage(
     assert response_detail["finishReason"] == "stop"
 
 
+def test_traced_openai_client_accepts_a_fenced_json_object(
+    monkeypatch: pytest.MonkeyPatch,
+    spans: list[dict[str, object]],
+) -> None:
+    """Some gateways wrap the object in a fence despite ``response_format``."""
+    fenced = '```json\n{"semantic_verdict": true, "ok": 1}\n```'
+    client = TracedOpenAIClient(_client_config("test-model"))
+    raw = _openai_response(fenced)
+    monkeypatch.setattr(client, "_get_client", lambda: _fake_openai_client(raw))
+
+    with trace_scope(run_id="run-fenced", role="client"), trace_stage("negotiation_accept_validation"):
+        response = client.structured(messages=_valid_messages(), json_schema=_VALIDATION_SCHEMA)
+
+    assert response.content == '{"semantic_verdict": true, "ok": 1}'
+    detail = spans[0]["detail"]
+    assert isinstance(detail, dict)
+    response_detail = detail["response"]
+    assert response_detail["rawContent"] == fenced
+    assert response_detail["parsed"] == {"semantic_verdict": True, "ok": 1}
+    assert response_detail["parseError"] is None
+
+
 def test_traced_openai_client_stashes_the_raw_response_of_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
     spans: list[dict[str, object]],
