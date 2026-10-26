@@ -16,6 +16,8 @@ import {
   clear,
   el,
   fact,
+  sideBadge,
+  sideLabel,
   statusBadge,
 } from "./dom.js";
 import {
@@ -194,7 +196,9 @@ export class Inspector {
       phase: PHASE_INDEX[item.phase] || "?",
       phaseStep: item.phaseStep ?? "—",
     });
-    const kindParts = [actorLabel(item.actor), item.kind || "event"];
+    const kindParts = [sideLabel(item.side), actorLabel(item.actor), item.kind || "event"].filter(
+      Boolean,
+    );
     if (Number.isInteger(item.round)) kindParts.push(`R${item.round}`);
     kindLabel.textContent = kindParts.join(" · ");
     root.dataset.kind = item.kind || "event";
@@ -422,6 +426,7 @@ export class Inspector {
     append(
       heading,
       el("h2", "inspector-title", item.title),
+      sideBadge(item.side),
       el("span", `actor-badge ${actorClass(item.actor)}`, actorLabel(item.actor)),
       statusBadge(item.status),
     );
@@ -440,7 +445,8 @@ export class Inspector {
       fact(t("inspector.globalStep"), `#${String(item.number).padStart(2, "0")}`),
       fact(t("inspector.phaseLocal"), `P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep ?? EM_DASH}`),
       fact(t("inspector.phase"), phaseLabel(item.phase)),
-      fact(t("inspector.actorSide"), `${item.actor}${item.side ? ` · ${item.side}` : ""}`),
+      fact(t("inspector.actor"), item.actor),
+      item.side ? fact(t("inspector.side"), sideLabel(item.side) || item.side) : null,
       fact(t("inspector.kind"), item.kind),
       item.stage ? fact(t("inspector.stage"), item.stage) : null,
       item.durationMs !== null ? fact(t("inspector.duration"), formatDuration(item.durationMs)) : null,
@@ -557,7 +563,8 @@ export class Inspector {
       facts,
       fact(t("inspector.direction"), item.direction || EM_DASH),
       fact(t("inspector.phase"), phaseLabel(item.phase)),
-      fact(t("inspector.actorSide"), item.actor),
+      fact(t("inspector.actor"), item.actor),
+      item.side ? fact(t("inspector.side"), sideLabel(item.side) || item.side) : null,
       item.performative ? fact(t("inspector.performative"), item.performative) : null,
       item.negotiationType ? fact(t("inspector.negotiation"), item.negotiationType) : null,
       item.templateUri ? fact(t("inspector.templateUri"), item.templateUri) : null,

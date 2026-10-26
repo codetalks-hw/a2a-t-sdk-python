@@ -184,6 +184,12 @@ assert.deepEqual(
   [1, 2, 3, 4, 5, 6],
 );
 
+// Every row keeps the process that produced it, so the timeline can label client vs server.
+const llmRow = store.list().find((item) => item.kind === "llm");
+const toolRow = store.list().find((item) => item.kind === "tool");
+assert.equal(llmRow?.side, "client", "the client LLM span keeps its side");
+assert.equal(toolRow?.side, "server", "the server tool span keeps its side");
+
 const derived = store.derived();
 assert.equal(derived.groups.length, 8);
 assert.equal(derived.groups.find((group) => group.key === "negotiation").items.length, 1);

@@ -201,6 +201,8 @@ def test_timeline_renders_phases_rows_and_nesting() -> None:
     assert "phase-card" in source
     assert "tl-row" in source
     assert "actor-badge" in source
+    assert "sideBadge" in source
+    assert "side-badge" in _module_source("dom")
     assert "parentSpanId" in source
     assert "waterfall" in source
     assert "round-chip" in source
@@ -301,6 +303,7 @@ def test_css_implements_the_visual_spec() -> None:
         ".tl-row",
         ".tl-node",
         ".actor-badge",
+        ".side-badge",
         ".round-chip",
         ".status-pill",
         ".inspector-tabs",

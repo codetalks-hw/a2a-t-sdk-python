@@ -13,6 +13,8 @@ import {
   el,
   nodeClass,
   onActivate,
+  sideBadge,
+  sideLabel,
   statusBadge,
 } from "./dom.js";
 import {
@@ -276,6 +278,7 @@ export class TimelineView {
       t("timeline.rowAria", {
         number: item.number,
         title: item.title,
+        side: sideLabel(item.side) || "",
         actor: item.actor,
         status: item.status,
       }),
@@ -292,6 +295,7 @@ export class TimelineView {
     const line = el("div", "tl-line");
     append(
       line,
+      sideBadge(item.side),
       el("span", "actor-badge", actorLabel(item.actor)),
       this._kindBadge(item),
       el("span", "tl-title", truncate(item.title, 120)),
@@ -367,7 +371,6 @@ export class TimelineView {
     const meta = el("div", "tl-meta");
     const parts = [];
     if (item.stage) parts.push(t("timeline.stageLabel", { stage: item.stage }));
-    if (item.side) parts.push(item.side);
     if (Number.isInteger(item.round)) parts.push(`R${item.round}`);
     if (Number.isInteger(item.phaseStep)) parts.push(`P${PHASE_INDEX[item.phase] || "?"}.${item.phaseStep}`);
     if (item.contextId) parts.push(t("timeline.contextLabel", { id: shortId(item.contextId) }));

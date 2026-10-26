@@ -1653,6 +1653,31 @@ body.inspector-closed .inspector {
   white-space: nowrap;
 }
 
+/* Explicit client/server chip: every row says which process handled it. */
+.side-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.side-badge.side-client {
+  color: var(--actor-client);
+  background: var(--actor-client-tint);
+}
+
+.side-badge.side-server {
+  color: var(--actor-server);
+  background: var(--actor-server-tint);
+}
+
 .kind-badge {
   display: inline-flex;
   align-items: center;

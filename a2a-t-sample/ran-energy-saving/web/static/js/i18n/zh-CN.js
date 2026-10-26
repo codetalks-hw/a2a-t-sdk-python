@@ -170,6 +170,11 @@ export const ZH_CN = {
     paused: "已暂停",
   },
 
+  side: {
+    client: "客户端",
+    server: "服务端",
+  },
+
   actor: {
     client: "客户端",
     server: "服务端",
@@ -319,7 +324,7 @@ export const ZH_CN = {
     phaseIndex: "阶段 {index}",
     emptySkipped: "本次运行已跳过。",
     empty: "暂无步骤记录。",
-    rowAria: "第 {number} 步：{title}，{actor}，{status}",
+    rowAria: "第 {number} 步：{title}，{side}{actor}，{status}",
     roundResolved: "第 {round} 轮：已决议",
     roundState: "第 {round} 轮：{state}",
     args: "参数 {json}",
@@ -415,6 +420,7 @@ export const ZH_CN = {
     phaseLocal: "阶段内位置",
     phase: "阶段",
     actorSide: "角色 / 侧",
+    actor: "角色",
     kind: "类型",
     stage: "阶段标识",
     duration: "耗时",

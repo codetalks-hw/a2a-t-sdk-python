@@ -171,6 +171,11 @@ export const EN = {
     paused: "paused",
   },
 
+  side: {
+    client: "client",
+    server: "server",
+  },
+
   actor: {
     client: "client",
     server: "server",
@@ -321,7 +326,7 @@ export const EN = {
     phaseIndex: "PHASE {index}",
     emptySkipped: "Skipped in this run.",
     empty: "No steps recorded yet.",
-    rowAria: "Step {number}: {title}, {actor}, {status}",
+    rowAria: "Step {number}: {title}, {side} {actor}, {status}",
     roundResolved: "Round {round}: resolved",
     roundState: "Round {round}: {state}",
     args: "args {json}",
@@ -417,6 +422,7 @@ export const EN = {
     phaseLocal: "Phase-local",
     phase: "Phase",
     actorSide: "Actor / side",
+    actor: "Actor",
     kind: "Kind",
     stage: "Stage",
     duration: "Duration",

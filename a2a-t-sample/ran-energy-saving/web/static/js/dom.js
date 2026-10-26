@@ -64,6 +64,19 @@ export function statusInfo(status) {
   return { key, glyph: entry?.glyph ?? "•", label: entry ? t(entry.label) : key };
 }
 
+const SIDES = new Set(["client", "server"]);
+
+/** Return the localized client/server label, ``null`` when the span did not record a side. */
+export function sideLabel(side) {
+  return SIDES.has(side) ? t(`side.${side}`).toUpperCase() : null;
+}
+
+/** Return the explicit client/server chip of one row, ``null`` when no side was recorded. */
+export function sideBadge(side) {
+  const label = sideLabel(side);
+  return label === null ? null : el("span", `side-badge side-${side}`, label);
+}
+
 const ACTORS = new Set(["client", "server", "llm", "tool", "human", "system"]);
 
 /** Return the visible UPPERCASE actor label. */
