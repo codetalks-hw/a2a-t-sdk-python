@@ -16,6 +16,7 @@ Asserted per scenario (design §8):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import pytest
 from a2a.types import TaskState
@@ -189,3 +190,23 @@ async def test_server_abort_reason_names_the_server_and_the_round_limit(
     assert "The server ended the negotiation" in reason
     assert "maximum number of rounds (3)" in reason
     assert "client aborted" not in reason.lower()
+
+
+async def test_a_secured_server_completes_the_information_scenario(
+    english_language: None,
+) -> None:
+    """The real SDK client presents the service token on every A2A call."""
+    port = free_tcp_port()
+    server_config = replace(
+        offline_direct_config(port),
+        server_auth_token="server-secret",
+    )
+    client_config = replace(
+        offline_direct_config(port),
+        server_auth_token="server-secret",
+    )
+
+    with running_server(server_config):
+        result, _ = await run_scenario_flow(client_config, "information", "sse")
+
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
