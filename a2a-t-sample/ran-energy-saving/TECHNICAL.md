@@ -779,7 +779,9 @@ The sample is deliberately a prototype. Before production:
   credentials; plain HTTP only on loopback) and sends the A2A notification token. The SDK sender
   makes one POST per event and logs failures; production needs retry/queueing, a dead-letter path and
   an egress allowlist to prevent SSRF. Push registrations are stored in the gateway Task database, so
-  protect that file accordingly.
+  protect that file accordingly. The sample's bearer middleware authenticates the caller but does
+  not populate `ServerCallContext.user`, so every registration shares the empty owner partition; a
+  multi-tenant deployment must supply an authenticated user in the call context.
 - **Metrics.** `/metrics` serves Prometheus text on all three processes: client runs by status and
   final state, in-flight runs, run duration, negotiation rounds by side, and server task outcomes.
   The registry is per process, so scrape every process (or aggregate in your collector). The route

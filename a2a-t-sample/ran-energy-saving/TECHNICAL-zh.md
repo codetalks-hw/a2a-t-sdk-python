@@ -632,7 +632,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
 - **鉴权与 TLS。** 两个独立边界：`A2AT_SAMPLE_AUTH_TOKEN` 保护入站 Web UI `/api/*` 与 Gateway 路由；`A2AT_SAMPLE_SERVER_AUTH_TOKEN` 保护 A2A 服务端（客户端携带，卡片声明 scheme）。两者在绑定非回环地址却未配置时都会启动失败。trace ingest 路由使用每次运行的 trace token，而不是用户 Bearer。mock 注册中心仍为开放。应在部署网关终止 TLS；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
 - **健康检查。** Web UI、Gateway 与服务端都提供 `/health`（存活）与 `/ready`（SQLite 可访问）。平台探针应使用它们，而不是业务路由。
-- **推送投递。** Gateway 会校验调用方提供的 webhook（绝对 http(s) URL、无内嵌凭据；非回环只允许 HTTPS），并发送 A2A 通知 token。SDK sender 每个事件只 POST 一次并记录失败；生产需要重试/排队、死信路径与出站白名单以防止 SSRF。push 注册存放在 Gateway Task 数据库，应按敏感文件保护。
+- **推送投递。** Gateway 会校验调用方提供的 webhook（绝对 http(s) URL、无内嵌凭据；非回环只允许 HTTPS），并发送 A2A 通知 token。SDK sender 每个事件只 POST 一次并记录失败；生产需要重试/排队、死信路径与出站白名单以防止 SSRF。push 注册存放在 Gateway Task 数据库，应按敏感文件保护。样例的 Bearer 中间件只认证调用方，不填充 `ServerCallContext.user`，因此所有注册共享空 owner 分区；多租户部署必须在调用上下文中提供已认证用户。
 - **指标。** 三个进程都通过 `/metrics` 输出 Prometheus 文本：客户端运行状态/终态、在途运行、运行耗时、按侧与轮次的协商消息、服务端任务终态。指标注册表是进程内的，应逐个进程抓取（或由采集器聚合）。配置 token 时该路由受 Bearer 保护。
 - **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点，服务端 LangGraph planner 还会发送已接受的 Task-T 与工具结果。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
 - **协议正确性由确定性代码掌握。** round、performative、终态与 Task 生命周期必须留在确定性代码中；LLM 只负责意图、文本与工具调用。
