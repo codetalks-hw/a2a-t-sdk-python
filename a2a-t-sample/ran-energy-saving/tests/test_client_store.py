@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 from protocol.client_store import (
     ClientRunRecord,
     NegotiationEventRecord,
+    RunAlreadyActiveError,
     SqliteClientStore,
     TaskSnapshotRecord,
+    now_iso,
     read_client_run_detail,
     read_client_run_summaries,
     read_conversation_detail,
@@ -182,6 +185,102 @@ async def test_negotiation_events_and_task_snapshot(tmp_path: Path) -> None:
     assert snapshot.payload["state"] == "TASK_STATE_COMPLETED"
 
 
+async def test_claim_run_rejects_a_second_active_run(tmp_path: Path) -> None:
+    store = SqliteClientStore(tmp_path / "client.sqlite3")
+    first = ClientRunRecord(
+        run_id="run-1",
+        conversation_id="conv-1",
+        scenario="information",
+        mode="auto",
+        transport="sse",
+        discovery="registry",
+        user_request="first",
+    )
+    second = ClientRunRecord(
+        run_id="run-2",
+        conversation_id="conv-1",
+        scenario="information",
+        mode="auto",
+        transport="sse",
+        discovery="registry",
+        user_request="second",
+    )
+    await store.claim_run(first)
+
+    with pytest.raises(RunAlreadyActiveError) as conflict:
+        await store.claim_run(second)
+
+    assert conflict.value.run_id == "run-1"
+    assert await store.get_run("run-2") is None
+
+
+def test_v2_migration_dedupes_active_runs(tmp_path: Path) -> None:
+    """A legacy database with duplicate running rows upgrades to the unique index."""
+    from protocol.client_store.store import _MIGRATIONS
+    from shared.sqlite import apply_migrations, connect, schema_version
+
+    path = tmp_path / "client.sqlite3"
+    stamp = now_iso()
+    with connect(path) as connection:
+        assert apply_migrations(connection, _MIGRATIONS[:1]) == 1
+        for run_id in ("older", "newer"):
+            connection.execute(
+                """
+                INSERT INTO runs
+                    (run_id, conversation_id, scenario, mode, transport, discovery,
+                     user_request, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "conv-1",
+                    "information",
+                    "auto",
+                    "sse",
+                    "registry",
+                    "request",
+                    "running",
+                    stamp,
+                    stamp,
+                ),
+            )
+
+    # Constructing the store applies migration 2.
+    SqliteClientStore(path)
+    with connect(path) as connection:
+        assert schema_version(connection) == 2
+        statuses = {
+            str(run_id): str(status)
+            for run_id, status in connection.execute(
+                "SELECT run_id, status FROM runs"
+            ).fetchall()
+        }
+    assert statuses == {"older": "interrupted", "newer": "running"}
+
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        with connect(path) as connection:
+            connection.execute(
+                """
+                INSERT INTO runs
+                    (run_id, conversation_id, scenario, mode, transport, discovery,
+                     user_request, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "third",
+                    "conv-1",
+                    "information",
+                    "auto",
+                    "sse",
+                    "registry",
+                    "request",
+                    "running",
+                    stamp,
+                    stamp,
+                ),
+            )
+
+
 async def test_mark_running_interrupted(tmp_path: Path) -> None:
     store = SqliteClientStore(tmp_path / "client.sqlite3")
     await store.ensure_conversation(conversation_id="conv-1")
@@ -205,12 +304,12 @@ async def test_mark_running_interrupted(tmp_path: Path) -> None:
 
 async def test_mark_running_interrupted_keeps_live_process_runs(tmp_path: Path) -> None:
     store = SqliteClientStore(tmp_path / "client.sqlite3")
-    await store.ensure_conversation(conversation_id="conv-1")
     for run_id, owner_pid in (("live", os.getpid()), ("dead", 2**31 - 1)):
+        await store.ensure_conversation(conversation_id=f"conv-{run_id}")
         await store.create_run(
             ClientRunRecord(
                 run_id=run_id,
-                conversation_id="conv-1",
+                conversation_id=f"conv-{run_id}",
                 scenario="information",
                 mode="auto",
                 transport="sse",

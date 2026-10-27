@@ -339,6 +339,57 @@ async def test_shutdown_marks_running_run_interrupted(
     assert stored.status == "interrupted"
 
 
+async def test_second_manager_cannot_start_an_active_conversation(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """The database claim blocks a second process even when its local map is empty."""
+    wait = asyncio.Event()
+    first, store, _ = _manager(tmp_path, offline_config, wait=wait)
+    second, _, _ = _manager(tmp_path, offline_config)
+    run = await first.start(
+        "information", "auto", "sse", conversation_id="conv-shared"
+    )
+    while run.runtime is None:
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(RunConflictError, match="already has an active run"):
+        await second.start("information", "auto", "sse", conversation_id="conv-shared")
+
+    rows = await store.list_runs(limit=10, conversation_id="conv-shared")
+    assert [row.run_id for row in rows] == [run.run_id]
+
+    wait.set()
+    await _finish(first, run.run_id)
+
+
+async def test_a_dead_owner_run_is_reclaimed(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """A row left by a dead process does not block the next start."""
+    manager, store, _ = _manager(tmp_path, offline_config)
+    await store.ensure_conversation(conversation_id="conv-stale")
+    await store.create_run(
+        ClientRunRecord(
+            run_id="dead-run",
+            conversation_id="conv-stale",
+            scenario="information",
+            mode="auto",
+            transport="sse",
+            discovery="registry",
+            user_request="previous",
+            owner_pid=2**31 - 1,
+        )
+    )
+
+    run = await manager.start("information", "auto", "sse", conversation_id="conv-stale")
+    await _finish(manager, run.run_id)
+
+    stale = await store.get_run("dead-run")
+    assert stale is not None and stale.status == "interrupted"
+
+
 async def test_mark_interrupted_sweeps_previous_runs(
     tmp_path: Path,
     offline_config: SampleConfig,

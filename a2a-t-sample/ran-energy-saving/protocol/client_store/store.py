@@ -144,8 +144,40 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(_SCHEMA)
 
 
+def _enforce_one_active_run(connection: sqlite3.Connection) -> None:
+    """Add the partial unique index that guards one active run per conversation.
+
+    A database written before this migration may already hold duplicate ``running`` rows created
+    by two processes. The newest row of each conversation survives; older ones are marked
+    ``interrupted`` so the index can be created.
+    """
+    connection.execute(
+        """
+        UPDATE runs
+           SET status = 'interrupted',
+               error = 'Superseded by a newer active run during the schema upgrade.',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+               finished_at = COALESCE(
+                   finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               )
+         WHERE status = 'running'
+           AND rowid NOT IN (
+               SELECT MAX(rowid) FROM runs
+                WHERE status = 'running'
+                GROUP BY conversation_id
+           )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_active
+          ON runs(conversation_id) WHERE status = 'running'
+        """
+    )
+
+
 #: Ordered schema migrations; index ``i`` upgrades version ``i`` to ``i + 1``.
-_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema,)
+_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema, _enforce_one_active_run)
 
 
 #: Fields ``update_run`` may change (keeps the SQL dynamic but closed).
@@ -367,6 +399,10 @@ class ClientStore(Protocol):
 
     async def create_run(self, record: ClientRunRecord) -> None: ...
 
+    async def claim_run(self, record: ClientRunRecord) -> None:
+        """Persist one run, raising :class:`RunAlreadyActiveError` on a live conflict."""
+        ...
+
     async def update_run(self, run_id: str, **fields: object) -> None: ...
 
     async def get_run(self, run_id: str) -> ClientRunRecord | None: ...
@@ -395,6 +431,22 @@ class ClientStore(Protocol):
     async def get_task_snapshot(self, run_id: str) -> TaskSnapshotRecord | None: ...
 
     async def mark_running_interrupted(self) -> int: ...
+
+
+class RunAlreadyActiveError(RuntimeError):
+    """Raised when a conversation already has an active run owned by another process."""
+
+    def __init__(
+        self,
+        conversation_id: str,
+        run_id: str | None = None,
+        idempotency_key: str = "",
+    ) -> None:
+        self.conversation_id = conversation_id
+        self.run_id = run_id
+        self.idempotency_key = idempotency_key
+        suffix = f" ({run_id})" if run_id else ""
+        super().__init__(f"Conversation {conversation_id} already has an active run{suffix}.")
 
 
 class SqliteClientStore:
@@ -506,6 +558,29 @@ class SqliteClientStore:
         """Persist one new run."""
         try:
             await asyncio.to_thread(self._create_run, record)
+        except sqlite3.Error as exc:
+            _LOGGER.warning("run persistence failed for %s: %s", record.run_id, exc)
+
+    async def claim_run(self, record: ClientRunRecord) -> None:
+        """Persist one run, raising when the conversation already has an active run.
+
+        The partial unique index ``idx_runs_one_active`` makes the claim atomic across processes.
+        Other SQLite failures stay best-effort: the run continues without persistence rather than
+        failing a decision.
+        """
+        try:
+            await asyncio.to_thread(self._create_run, record)
+        except sqlite3.IntegrityError as exc:
+            existing = await asyncio.to_thread(
+                self._find_active_run, record.conversation_id or ""
+            )
+            if existing is not None:
+                raise RunAlreadyActiveError(
+                    record.conversation_id or "",
+                    existing.run_id,
+                    existing.idempotency_key,
+                ) from exc
+            _LOGGER.warning("run claim failed for %s: %s", record.run_id, exc)
         except sqlite3.Error as exc:
             _LOGGER.warning("run persistence failed for %s: %s", record.run_id, exc)
 
@@ -715,6 +790,19 @@ class SqliteClientStore:
             )
             for row in rows
         ]
+
+    def _find_active_run(self, conversation_id: str) -> ClientRunRecord | None:
+        """Return the running row of one conversation, when it exists."""
+        if not conversation_id:
+            return None
+        with self._connection() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT * FROM runs WHERE conversation_id=? AND status=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (conversation_id, RUN_STATUS_RUNNING),
+            ).fetchone()
+        return self._row_to_run(row) if row is not None else None
 
     def _create_run(self, record: ClientRunRecord) -> None:
         with self._connection() as connection:

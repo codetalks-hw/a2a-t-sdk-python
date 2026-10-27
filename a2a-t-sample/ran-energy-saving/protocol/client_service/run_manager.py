@@ -38,6 +38,7 @@ from protocol.client_store import (
     TURN_ROLE_USER,
     ClientRunRecord,
     ClientStore,
+    RunAlreadyActiveError,
     now_iso,
 )
 from protocol.decision_provider import sweep_stale_sessions
@@ -179,12 +180,47 @@ class RunManager:
                 for step in spec.expected_sequence
             ],
         )
+        try:
+            # Claim the conversation before scheduling any work: another process may hold the
+            # same conversation, and the database is the only authority both processes share.
+            await self._prepare_persistence(run)
+        except RunAlreadyActiveError as conflict:
+            reused = await self._reuse_idempotent_run(conflict, resolved_key)
+            if reused is not None:
+                self._runs[reused.run_id] = reused
+                return reused
+            if self._store is not None:
+                await self._store.mark_running_interrupted()
+            try:
+                await self._prepare_persistence(run)
+            except RunAlreadyActiveError as exc:
+                raise RunConflictError(
+                    f"Conversation {resolved_conversation} already has an active run "
+                    f"({exc.run_id or 'another process'}); wait for it to finish."
+                ) from exc
+
         self._runs[run.run_id] = run
         self._active_by_conversation[resolved_conversation] = run
         run.task = asyncio.create_task(
             self._execute_in_context(run), name=f"ran-client-run-{run.run_id}"
         )
         return run
+
+    async def _reuse_idempotent_run(
+        self,
+        conflict: RunAlreadyActiveError,
+        idempotency_key: str,
+    ) -> RunState | None:
+        """Return the existing run when a concurrent request reused the same idempotency key."""
+        if (
+            not idempotency_key
+            or self._store is None
+            or not conflict.run_id
+            or conflict.idempotency_key != idempotency_key
+        ):
+            return None
+        record = await self._store.get_run(conflict.run_id)
+        return self._reuse_run(record) if record is not None else None
 
     async def _execute_in_context(self, run: RunState) -> None:
         """Run one client run with its correlation fields bound for every log record."""
@@ -250,7 +286,6 @@ class RunManager:
         transcript = run.transcript
         assert transcript is not None
         await self.sweep_sessions(force=False)
-        await self._prepare_persistence(run)
 
         def event_sink(event: dict[str, object]) -> None:
             run.record_event(event)
@@ -375,7 +410,11 @@ class RunManager:
             run.emit_finished()
 
     async def _prepare_persistence(self, run: RunState) -> None:
-        """Create the conversation, load memory, append the user turn and persist the run row."""
+        """Claim the conversation, load memory and append the user turn.
+
+        The claim happens before the turn is appended so a rejected run leaves no duplicate turn
+        behind.
+        """
         if self._store is None or run.conversation_id is None:
             return
         request_text = run.user_request or self._catalog.spec(
@@ -390,19 +429,10 @@ class RunManager:
         if self._memory_turns > 0:
             turns = await self._store.list_recent_turns(run.conversation_id, self._memory_turns)
             run.conversation_context = _format_conversation_context(turns) or None
-        user_turn = await self._store.append_turn(
-            conversation_id=run.conversation_id,
-            role=TURN_ROLE_USER,
-            content=request_text,
-            run_id=run.run_id,
-        )
-        if user_turn is not None:
-            run._user_turn_id = user_turn.turn_id
-        await self._store.create_run(
+        await self._store.claim_run(
             ClientRunRecord(
                 run_id=run.run_id,
                 conversation_id=run.conversation_id,
-                turn_id=run._user_turn_id,
                 scenario=run.scenario,
                 mode=run.mode,
                 transport=run.transport,
@@ -413,6 +443,15 @@ class RunManager:
                 idempotency_key=run.idempotency_key,
             )
         )
+        user_turn = await self._store.append_turn(
+            conversation_id=run.conversation_id,
+            role=TURN_ROLE_USER,
+            content=request_text,
+            run_id=run.run_id,
+        )
+        if user_turn is not None:
+            run._user_turn_id = user_turn.turn_id
+            await self._store.update_run(run.run_id, turn_id=user_turn.turn_id)
 
     async def _finalize_persistence(self, run: RunState) -> None:
         """Persist the terminal run status and the assistant turn."""
