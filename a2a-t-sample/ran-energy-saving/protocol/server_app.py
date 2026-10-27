@@ -40,8 +40,12 @@ from a2a.types import (
     AgentExtension,
     AgentProvider,
     AgentSkill,
+    HTTPAuthSecurityScheme,
+    SecurityRequirement,
+    SecurityScheme,
+    StringList,
 )
-from a2a.utils.constants import TransportProtocol
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, TransportProtocol
 from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from a2a_t.server.a2at_server import A2ATServer
 from google.protobuf.json_format import MessageToDict
@@ -53,8 +57,13 @@ from shared.agent_card import (
     AGENT_CARD_PROVIDER_URL,
     AGENT_CARD_SKILL_ID,
 )
-from shared.config import SampleConfig, load_config
-from shared.http_security import install_health_routes, sqlite_ready
+from shared.config import SERVER_AUTH_TOKEN_ENV_KEY, SampleConfig, load_config
+from shared.http_security import (
+    BearerAuthMiddleware,
+    install_health_routes,
+    sqlite_ready,
+    validate_bind_security,
+)
 from shared.logging_setup import configure_logging
 from shared.registry_client import register_agentcard
 from shared.run_constants import MAX_ROUNDS
@@ -62,6 +71,7 @@ from shared.sdk_env import prepare_sdk_env
 from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
 from shared.traced_llm import register_traced_providers
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 
 from protocol.negotiation_gate import NegotiationGate
 from protocol.negotiation_policy import NegotiationState, PolicyDecision
@@ -73,6 +83,11 @@ from protocol.sqlite_task_store import SqliteTaskStore
 SERVER_ENV_PREFIX: Final[str] = "a2at-ran-energy-saving-env-"
 
 _LOGGER = logging.getLogger("ran_energy_saving.server_app")
+
+#: Routes that stay public when the server requires a bearer token.
+SERVER_PUBLIC_PATHS: Final[frozenset[str]] = frozenset(
+    {"/", "/health", "/ready", AGENT_CARD_WELL_KNOWN_PATH}
+)
 
 
 @dataclass(frozen=True)
@@ -116,12 +131,13 @@ def build_trace_emitter() -> HttpTraceEmitter | FileTraceEmitter | None:
     return None
 
 
-def build_agent_card(*, host: str, port: int) -> AgentCard:
+def build_agent_card(*, host: str, port: int, secured: bool = False) -> AgentCard:
     """Build the AgentCard with the Task-T and Negotiation-T extension declarations.
 
     Args:
         host: bind host advertised to clients.
         port: bind port advertised to clients.
+        secured: declare HTTP bearer authentication so a client discovers the requirement.
     """
     card = AgentCard(
         name=AGENT_CARD_NAME,
@@ -158,6 +174,18 @@ def build_agent_card(*, host: str, port: int) -> AgentCard:
                 examples=[AGENT_CARD_EXAMPLE],
             )
         ],
+        security_schemes=(
+            {
+                "bearer": SecurityScheme(
+                    http_auth_security_scheme=HTTPAuthSecurityScheme(scheme="bearer")
+                )
+            }
+            if secured
+            else {}
+        ),
+        security_requirements=(
+            [SecurityRequirement(schemes={"bearer": StringList()})] if secured else []
+        ),
     )
     card.supported_interfaces.add(
         url=f"http://{host}:{port}",
@@ -201,6 +229,7 @@ def build_rest_app(
     task_store: TaskStore | None = None,
     task_db_path: str | None = None,
     trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None,
+    auth_token: str = "",
 ) -> Starlette:
     """Build the Starlette app with the AgentCard routes and the A2A REST routes.
 
@@ -214,6 +243,8 @@ def build_rest_app(
         task_store: A2A Task store; defaults to an in-memory store (tests/direct runs).
         task_db_path: SQLite file backing the task store, used by the readiness check.
         trace_emitter: optional Run Explorer span emitter.
+        auth_token: bearer token every A2A route requires; the AgentCard and health routes stay
+            public so discovery and probes work.
     """
     resolved_task_store: TaskStore = task_store if task_store is not None else InMemoryTaskStore()
     push_config_store = InMemoryPushNotificationConfigStore()
@@ -239,7 +270,24 @@ def build_rest_app(
         *create_agent_card_routes(agent_card),
         *create_rest_routes(request_handler),
     ]
-    app = Starlette(routes=routes, lifespan=lifespan)
+    app = Starlette(
+        routes=routes,
+        lifespan=lifespan,
+        middleware=(
+            [
+                Middleware(
+                    BearerAuthMiddleware,
+                    token=auth_token,
+                    # Default-deny: the SDK also mounts a ``/{tenant}/...`` alias, so a prefix
+                    # allowlist would leave that copy of every route unprotected.
+                    protected_prefixes=("/",),
+                    public_paths=SERVER_PUBLIC_PATHS,
+                )
+            ]
+            if auth_token
+            else []
+        ),
+    )
     install_health_routes(
         app,
         service="ran-energy-saving-server",
@@ -279,6 +327,11 @@ def build_server_runtime(
     """
     resolved_logger = logger or _LOGGER
     resolved_config = config or load_config(env_path=env_path)
+    validate_bind_security(
+        resolved_config.host,
+        resolved_config.server_auth_token,
+        token_env_key=SERVER_AUTH_TOKEN_ENV_KEY,
+    )
     register_traced_providers()
     if resolved_config.is_offline:
         if install_offline_provider is None:
@@ -307,13 +360,19 @@ def build_server_runtime(
         if resolved_config.task_db_path
         else InMemoryTaskStore()
     )
-    agent_card = build_agent_card(host=resolved_config.host, port=resolved_config.port)
+    secured = bool(resolved_config.server_auth_token)
+    agent_card = build_agent_card(
+        host=resolved_config.host,
+        port=resolved_config.port,
+        secured=secured,
+    )
     app = build_rest_app(
         agent_card=agent_card,
         executor=executor,
         task_store=task_store,
         task_db_path=resolved_config.task_db_path,
         trace_emitter=trace_emitter,
+        auth_token=resolved_config.server_auth_token,
     )
     app.state.config = resolved_config
     app.state.prompt_server = prompt_server

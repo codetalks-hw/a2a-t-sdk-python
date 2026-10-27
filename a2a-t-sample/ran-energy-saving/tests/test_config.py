@@ -28,6 +28,7 @@ from shared.config import (
     PLANNER_MAX_STEPS_ENV_KEY,
     PLANNER_MODEL_ENV_KEY,
     PLANNER_TIMEOUT_ENV_KEY,
+    SERVER_AUTH_TOKEN_ENV_KEY,
     TASK_DB_ENV_KEY,
     SampleConfig,
     load_config,
@@ -46,6 +47,7 @@ _ENV_KEYS = (
     GATEWAY_REGISTER_ENV_KEY,
     GATEWAY_SCENARIO_ENV_KEY,
     GATEWAY_TASK_DB_ENV_KEY,
+    SERVER_AUTH_TOKEN_ENV_KEY,
     PLANNER_MODEL_ENV_KEY,
     PLANNER_TIMEOUT_ENV_KEY,
     PLANNER_MAX_STEPS_ENV_KEY,
@@ -127,6 +129,7 @@ def test_client_db_gateway_and_planner_settings(tmp_path: Path) -> None:
                 f"{GATEWAY_REGISTER_ENV_KEY}=yes",
                 f"{GATEWAY_SCENARIO_ENV_KEY}=target",
                 f"{GATEWAY_TASK_DB_ENV_KEY}={tmp_path / 'gateway-tasks.sqlite3'}",
+                f"{SERVER_AUTH_TOKEN_ENV_KEY}=server-secret",
                 f"{PLANNER_MODEL_ENV_KEY}=planner-model",
                 f"{PLANNER_TIMEOUT_ENV_KEY}=22",
                 f"{PLANNER_MAX_STEPS_ENV_KEY}=7",
@@ -144,6 +147,7 @@ def test_client_db_gateway_and_planner_settings(tmp_path: Path) -> None:
     assert config.gateway_register is True
     assert config.gateway_scenario == "target"
     assert config.gateway_task_db_path == str(tmp_path / "gateway-tasks.sqlite3")
+    assert config.server_auth_token == "server-secret"
     assert config.planner_model == "planner-model"
     assert config.planner_timeout_seconds == 22.0
     assert config.planner_max_steps == 7

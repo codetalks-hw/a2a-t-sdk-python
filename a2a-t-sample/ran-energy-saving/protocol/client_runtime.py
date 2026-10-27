@@ -118,6 +118,12 @@ def _direct_base_url(config: SampleConfig, env_path: Path | None) -> str:
     return configured or f"http://{config.host}:{config.port}"
 
 
+def _server_auth_headers(config: SampleConfig) -> dict[str, str]:
+    """Return the bearer header of the client-to-server A2A calls, empty when open."""
+    token = config.server_auth_token.strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _decision_provider(
     config: SampleConfig,
     run_spec: RunSpec,
@@ -341,7 +347,11 @@ async def build_client_runtime(
 
     # One budget for both the transport and the per-call context (the SDK applies the context
     # timeout to every request, overriding the httpx client default).
-    httpx_client = httpx.AsyncClient(timeout=config.http_timeout_seconds, trust_env=False)
+    httpx_client = httpx.AsyncClient(
+        timeout=config.http_timeout_seconds,
+        trust_env=False,
+        headers=_server_auth_headers(config),
+    )
     client_config = ClientConfig(
         streaming=transport == TRANSPORT_SSE,
         httpx_client=httpx_client,

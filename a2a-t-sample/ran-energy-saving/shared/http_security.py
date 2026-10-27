@@ -2,8 +2,9 @@
 
 The sample is loopback-first: a process may bind a non-loopback address only when a bearer token is
 configured, and the token then guards the API routes of the Web UI and the inbound gateway. The A2A
-server itself stays open in the sample (see the production checklist); an A2A deployment terminates
-authentication at its gateway.
+server uses a separate service token (`A2AT_SAMPLE_SERVER_AUTH_TOKEN`) that the client presents;
+when it is unset the server stays open, which is only appropriate behind a trusted deployment
+gateway (see the production checklist).
 """
 
 from __future__ import annotations
@@ -34,7 +35,12 @@ def is_loopback(host: str) -> bool:
     return host.strip().lower() in LOOPBACK_HOSTS
 
 
-def validate_bind_security(host: str, token: str) -> None:
+def validate_bind_security(
+    host: str,
+    token: str,
+    *,
+    token_env_key: str = "A2AT_SAMPLE_AUTH_TOKEN",
+) -> None:
     """Reject a non-loopback bind without a bearer token.
 
     Raises:
@@ -42,7 +48,7 @@ def validate_bind_security(host: str, token: str) -> None:
     """
     if not is_loopback(host) and not token.strip():
         raise ValueError(
-            f"Refusing to bind {host!r} without A2AT_SAMPLE_AUTH_TOKEN. "
+            f"Refusing to bind {host!r} without {token_env_key}. "
             "Bind a loopback address for a local demo, or configure a bearer token."
         )
 
