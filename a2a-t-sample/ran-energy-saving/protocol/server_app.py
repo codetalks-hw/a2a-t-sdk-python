@@ -2,7 +2,8 @@
 
 The module builds the AgentCard (declaring the Task-T and Negotiation-T extensions), the A2A
 request handler, the Starlette app and the registry registration. The server always runs the
-negotiation gate in front of the deterministic RAN NMS executor, so all negotiation happens before a
+pre-task negotiation handler in front of the deterministic RAN NMS executor, so all negotiation
+happens before a
 Task is created and the server uses no ADK agent.
 
 Offline mode registers the traced scripted SDK provider and points the SDK at a temporary ``.env``
@@ -74,8 +75,8 @@ from shared.traced_llm import register_traced_providers
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 
-from protocol.negotiation_gate import NegotiationGate
 from protocol.negotiation_policy import NegotiationState, PolicyDecision
+from protocol.pre_task_negotiation import PreTaskNegotiationHandler, TaskTPrecheck
 from protocol.server_agent_spec import ServerAgentFactory
 from protocol.server_executor import NegotiationAgentExecutor, build_negotiation_executor
 from protocol.sqlite_task_store import SqliteTaskStore
@@ -99,7 +100,7 @@ class ServerRuntime:
         config: resolved sample configuration.
         agent_card: card served at ``/.well-known/agent-card.json`` and registered.
         prompt_server: A2A-T SDK server facade.
-        gate: pre-task negotiation gate.
+        pre_task_handler: pre-task negotiation handler.
         executor: outer executor used by the request handler.
         task_store: Task store backing the A2A Task lifecycle (SQLite when configured).
         app: Starlette application.
@@ -109,7 +110,7 @@ class ServerRuntime:
     config: SampleConfig
     agent_card: AgentCard
     prompt_server: A2ATServer
-    gate: NegotiationGate
+    pre_task_handler: PreTaskNegotiationHandler
     executor: NegotiationAgentExecutor
     task_store: TaskStore
     app: Starlette
@@ -304,6 +305,7 @@ def build_server_runtime(
     *,
     agent_factory: ServerAgentFactory,
     policy: Callable[[NegotiationState], PolicyDecision] | None = None,
+    precheck: TaskTPrecheck | None = None,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
@@ -315,6 +317,8 @@ def build_server_runtime(
         agent_factory: builder of the NMS planner graph for one accepted task.
         policy: negotiation decision function bound to the deployment's plan evaluator;
             defaults to the unbound state machine.
+        precheck: deployment check of a semantically valid Task-T; defaults to trusting the SDK
+            verdict.
         config: resolved sample configuration; defaults to :func:`shared.config.load_config`.
         env_path: optional ``.env`` source path.
         logger: optional logger shared by the gate and the runtime.
@@ -346,14 +350,15 @@ def build_server_runtime(
         set_global_sink(trace_emitter)
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
-    gate = NegotiationGate(
+    pre_task_handler = PreTaskNegotiationHandler(
         prompt_server,
         max_rounds=MAX_ROUNDS,
         logger=resolved_logger,
         policy=policy,
+        precheck=precheck,
     )
     executor = build_negotiation_executor(
-        gate=gate,
+        handler=pre_task_handler,
         agent_factory=agent_factory,
         config=resolved_config,
     )
@@ -378,13 +383,13 @@ def build_server_runtime(
     )
     app.state.config = resolved_config
     app.state.prompt_server = prompt_server
-    app.state.gate = gate
+    app.state.pre_task_handler = pre_task_handler
     app.state.trace_emitter = trace_emitter
     return ServerRuntime(
         config=resolved_config,
         agent_card=agent_card,
         prompt_server=prompt_server,
-        gate=gate,
+        pre_task_handler=pre_task_handler,
         executor=executor,
         task_store=task_store,
         app=app,
@@ -396,6 +401,7 @@ def build_server_app(
     *,
     agent_factory: ServerAgentFactory,
     policy: Callable[[NegotiationState], PolicyDecision] | None = None,
+    precheck: TaskTPrecheck | None = None,
     config: SampleConfig | None = None,
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
@@ -405,6 +411,7 @@ def build_server_app(
     return build_server_runtime(
         agent_factory=agent_factory,
         policy=policy,
+        precheck=precheck,
         config=config,
         env_path=env_path,
         logger=logger,
@@ -452,11 +459,16 @@ def main() -> None:
     env_path = Path.cwd() / ".env"
     resolved_env_path = env_path if env_path.exists() else None
     from demo.agents.server_agent.factory import build_server_agent
-    from demo.composition import build_demo_negotiation_policy, install_offline_provider
+    from demo.composition import (
+        build_demo_negotiation_policy,
+        build_demo_task_t_precheck,
+        install_offline_provider,
+    )
 
     runtime = build_server_runtime(
         agent_factory=build_server_agent,
         policy=build_demo_negotiation_policy(),
+        precheck=build_demo_task_t_precheck(),
         env_path=resolved_env_path,
         install_offline_provider=install_offline_provider,
     )

@@ -36,7 +36,11 @@ from dotenv import dotenv_values
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 from protocol.messages import SAMPLE_PROPOSAL_METADATA_KEY, TASK_TEMPLATE_URI
-from protocol.negotiation_gate import GateOutcome, NegotiationContentServer, NegotiationGate
+from protocol.pre_task_negotiation import (
+    NegotiationContentServer,
+    NegotiationOutcome,
+    PreTaskNegotiationHandler,
+)
 from protocol.server_app import (
     build_agent_card,
     build_registration_payload,
@@ -91,11 +95,11 @@ class RecordingExecutor(AgentExecutor):
 class FixedGate:
     """Gate test double returning one fixed outcome."""
 
-    def __init__(self, outcome: GateOutcome) -> None:
+    def __init__(self, outcome: NegotiationOutcome) -> None:
         self.outcome = outcome
         self.contexts: list[RequestContext] = []
 
-    async def handle(self, context: RequestContext) -> GateOutcome:
+    async def handle(self, context: RequestContext) -> NegotiationOutcome:
         self.contexts.append(context)
         return self.outcome
 
@@ -143,9 +147,9 @@ def _make_context(
 async def test_executor_short_circuits_without_calling_the_inner_executor() -> None:
     message = Message(message_id="propose", role=Role.ROLE_AGENT, context_id=CONTEXT_ID)
     message.parts.add(text="propose")
-    gate = FixedGate(GateOutcome.short(message))
+    gate = FixedGate(NegotiationOutcome.short(message))
     inner = RecordingExecutor()
-    executor = NegotiationAgentExecutor(gate=cast(NegotiationGate, gate), inner=inner)
+    executor = NegotiationAgentExecutor(handler=cast(PreTaskNegotiationHandler, gate), inner=inner)
     queue = RecordingEventQueue()
 
     await executor.execute(_make_context(), queue)
@@ -156,9 +160,9 @@ async def test_executor_short_circuits_without_calling_the_inner_executor() -> N
 
 async def test_executor_delegates_the_gate_approved_request() -> None:
     context = _make_context()
-    gate = FixedGate(GateOutcome.execution(context))
+    gate = FixedGate(NegotiationOutcome.execution(context))
     inner = RecordingExecutor()
-    executor = NegotiationAgentExecutor(gate=cast(NegotiationGate, gate), inner=inner)
+    executor = NegotiationAgentExecutor(handler=cast(PreTaskNegotiationHandler, gate), inner=inner)
     queue = RecordingEventQueue()
 
     await executor.execute(context, queue)
@@ -169,9 +173,9 @@ async def test_executor_delegates_the_gate_approved_request() -> None:
 
 async def test_executor_enqueues_a_rejected_task_for_an_unmapped_validation_failure() -> None:
     server = cast(NegotiationContentServer, RejectingPromptServer())
-    gate = NegotiationGate(server)
+    gate = PreTaskNegotiationHandler(server)
     inner = RecordingExecutor()
-    executor = NegotiationAgentExecutor(gate=gate, inner=inner)
+    executor = NegotiationAgentExecutor(handler=gate, inner=inner)
     context = _make_context()
     queue = RecordingEventQueue()
 
@@ -188,9 +192,9 @@ async def test_executor_enqueues_a_rejected_task_for_an_unmapped_validation_fail
 
 async def test_executor_cancel_delegates_to_the_inner_executor() -> None:
     context = _make_context()
-    gate = FixedGate(GateOutcome.execution(context))
+    gate = FixedGate(NegotiationOutcome.execution(context))
     inner = RecordingExecutor()
-    executor = NegotiationAgentExecutor(gate=cast(NegotiationGate, gate), inner=inner)
+    executor = NegotiationAgentExecutor(handler=cast(PreTaskNegotiationHandler, gate), inner=inner)
 
     await executor.cancel(context, RecordingEventQueue())
 
@@ -272,15 +276,15 @@ async def test_langgraph_executor_fails_when_the_planner_cannot_generate_a_repor
 def test_build_negotiation_executor_wraps_the_langgraph_executor(
     offline_config: SampleConfig,
 ) -> None:
-    gate = cast(NegotiationGate, FixedGate(GateOutcome.execution(_make_context())))
+    gate = cast(PreTaskNegotiationHandler, FixedGate(NegotiationOutcome.execution(_make_context())))
 
     executor = build_negotiation_executor(
-        gate=gate, agent_factory=build_server_agent, config=offline_config
+        handler=gate, agent_factory=build_server_agent, config=offline_config
     )
 
     assert isinstance(executor, NegotiationAgentExecutor)
     assert isinstance(executor.inner, LangGraphTaskExecutor)
-    assert executor.gate is gate
+    assert executor.handler is gate
 
 
 def test_agent_card_declares_the_task_and_negotiation_extensions() -> None:

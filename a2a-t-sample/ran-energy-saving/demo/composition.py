@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from protocol.client_runtime import build_client_runtime
+from protocol.pre_task_negotiation import TaskTPrecheck
 from protocol.run_spec import RunSpec
 from shared.config import SampleConfig
 
@@ -31,6 +32,13 @@ def build_demo_negotiation_policy() -> Any:
     from demo.plan_evaluator import RanDataPlanEvaluator
 
     return partial(decide, evaluator=RanDataPlanEvaluator())
+
+
+def build_demo_task_t_precheck() -> TaskTPrecheck:
+    """Return the demo Task-T precheck injected into the pre-task negotiation handler."""
+    from demo.task_t_precheck import RanDataTaskTPrecheck
+
+    return RanDataTaskTPrecheck()
 
 
 def install_offline_provider() -> None:

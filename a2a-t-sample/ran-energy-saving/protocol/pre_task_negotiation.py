@@ -1,8 +1,8 @@
-"""Server-side A2A-T negotiation gate of the RAN energy-saving sample.
+"""Server-side pre-task A2A-T negotiation handler of the RAN energy-saving sample.
 
-The gate is the single protocol entry point of the server executor. It handles every request that
-arrives **before a Task exists** (``context.current_task is None``; ``context.task_id`` is not a
-reliable signal because ``RequestContext`` generates one in its constructor):
+The handler is the single protocol entry point of the server executor. It handles every request
+that arrives **before a Task exists** (``context.current_task is None``; ``context.task_id`` is not
+a reliable signal because ``RequestContext`` generates one in its constructor):
 
 * initial Task-T validation, mapped to an information/target/feasibility negotiation on failure;
 * client ``Accept``: validate the negotiation answer and the agreed Task-T prompt, then hand the
@@ -12,15 +12,17 @@ reliable signal because ``RequestContext`` generates one in its constructor):
 * client counter-``Propose``: validate it, let the deterministic policy decide the next proposal or
   the abort, then emit the standalone Negotiation-T message and create no Task.
 
-Every SDK call is synchronous (it may call the LLM), so the gate runs it in a worker thread with
-``asyncio.to_thread`` to keep the server event loop responsive.
+The handler owns protocol flow only. Two deployment hooks keep business rules out of it:
+:class:`TaskTPrecheck` decides whether a validated Task-T still needs a negotiation, and the
+injected policy decides the next negotiation step. Every SDK call is synchronous (it may call the
+LLM), so the handler runs it in a worker thread with ``asyncio.to_thread`` to keep the server event
+loop responsive.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
@@ -78,13 +80,13 @@ from protocol.negotiation_policy import (
 #: message and does not need extra extracted parameters, so the schema stays empty.
 NEGOTIATION_PARAM_SCHEMA: Final[dict[str, object]] = {"type": "object", "properties": {}}
 
-_LOGGER = logging.getLogger("ran_energy_saving.negotiation_gate")
+_LOGGER = logging.getLogger("ran_energy_saving.pre_task_negotiation")
 
 _ResultT = TypeVar("_ResultT")
 
 
 class NegotiationContentServer(Protocol):
-    """The subset of ``A2ATServer`` the gate depends on (also implemented by test fakes)."""
+    """The subset of ``A2ATServer`` the handler depends on (also implemented by test fakes)."""
 
     def validate_task_prompt_and_data_filling(
         self, prompt: str, schema: Mapping[str, object], template_uri: str
@@ -132,11 +134,11 @@ class NegotiationContentServer(Protocol):
 
 
 @dataclass(frozen=True)
-class GateOutcome:
-    """Result of one gate invocation.
+class NegotiationOutcome:
+    """Result of one pre-task negotiation invocation.
 
     Attributes:
-        short_circuit: ``True`` when the gate produced a standalone response that must be enqueued
+        short_circuit: ``True`` when the handler produced a standalone response that must be enqueued
             without running the agent.
         message: short-circuit message (plain end/error or negotiation message); ``None`` when
             execution continues or a terminal Task is returned.
@@ -151,23 +153,56 @@ class GateOutcome:
     terminal_task: Task | None = None
 
     @classmethod
-    def execution(cls, context: RequestContext) -> GateOutcome:
+    def execution(cls, context: RequestContext) -> NegotiationOutcome:
         """Return an outcome that lets the deterministic executor create and run the Task."""
         return cls(short_circuit=False, task_request=context)
 
     @classmethod
-    def short(cls, message: Message) -> GateOutcome:
+    def short(cls, message: Message) -> NegotiationOutcome:
         """Return an outcome that only enqueues the given message."""
         return cls(short_circuit=True, message=message)
 
     @classmethod
-    def rejected(cls, task: Task) -> GateOutcome:
+    def rejected(cls, task: Task) -> NegotiationOutcome:
         """Return an outcome that enqueues a terminal ``REJECTED`` Task without running the agent."""
         return cls(short_circuit=True, terminal_task=task)
 
 
-class NegotiationGate:
-    """Deterministic pre-task negotiation gate over the A2A-T SDK server facade."""
+@dataclass(frozen=True)
+class PrecheckFinding:
+    """Initial Task-T signal that a negotiation must open before the task is executed.
+
+    Attributes:
+        kind: negotiation kind the finding maps to.
+        missing_items: caller-schema fields the Task-T left empty, when the finding is an
+            information negotiation.
+        detail: short human-readable reason used in the log record.
+    """
+
+    kind: NegotiationKind
+    missing_items: tuple[str, ...] = ()
+    detail: str = ""
+
+
+class TaskTPrecheck(Protocol):
+    """Deployment hook deciding whether a validated Task-T still needs a negotiation.
+
+    A model-driven semantic validator may accept a Task-T that the deployment considers
+    incomplete or infeasible. The composition root injects a checker for those signals; without
+    one the handler trusts the SDK verdict.
+    """
+
+    def __call__(
+        self,
+        filled: FilledParamData,
+        schema: Mapping[str, object],
+    ) -> PrecheckFinding | None:
+        """Return a finding when the Task-T must open a negotiation, else ``None``."""
+        ...
+
+
+class PreTaskNegotiationHandler:
+    """Deterministic pre-task negotiation handler over the A2A-T SDK server facade."""
 
     def __init__(
         self,
@@ -178,8 +213,9 @@ class NegotiationGate:
         task_schema: Mapping[str, object] | None = None,
         logger: logging.Logger | None = None,
         policy: Callable[[NegotiationState], PolicyDecision] | None = None,
+        precheck: TaskTPrecheck | None = None,
     ) -> None:
-        """Create one gate.
+        """Create one handler.
 
         Args:
             prompt_server: A2A-T SDK server facade (or a test double).
@@ -189,6 +225,8 @@ class NegotiationGate:
             logger: optional logger; defaults to the module logger.
             policy: decision function of the negotiation state machine; a deployment injects one
                 bound to its plan evaluator.
+            precheck: optional deployment check of a semantically valid Task-T; without one the
+                handler trusts the SDK verdict.
         """
         self._prompt_server = prompt_server
         self._max_rounds = max_rounds
@@ -196,9 +234,10 @@ class NegotiationGate:
         self._task_schema: Mapping[str, object] = task_schema if task_schema is not None else TASK_PARAM_SCHEMA
         self._logger = logger or _LOGGER
         self._policy = policy or decide
+        self._precheck = precheck
 
-    async def handle(self, context: RequestContext) -> GateOutcome:
-        """Classify one inbound request and return the gate outcome.
+    async def handle(self, context: RequestContext) -> NegotiationOutcome:
+        """Classify one inbound request and return the pre-task outcome.
 
         Args:
             context: inbound A2A request context.
@@ -212,11 +251,11 @@ class NegotiationGate:
             role="server",
         ):
             if context.current_task is not None:
-                return GateOutcome.execution(context)
+                return NegotiationOutcome.execution(context)
 
             message = context.message
             if message is None:
-                return GateOutcome.short(
+                return NegotiationOutcome.short(
                     build_error_message(context.context_id, "The request carries no A2A message.")
                 )
             metadata = metadata_to_dict(message.metadata)
@@ -230,12 +269,12 @@ class NegotiationGate:
 
     async def _handle_initial_task(
         self, context: RequestContext, metadata: Mapping[str, object]
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """Validate the initial Task-T prompt and open a negotiation when it maps to one."""
         context_id = context.context_id
         missing = missing_extensions(context.requested_extensions, (TASK_T_EXTENSION_URI,))
         if missing:
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(
                     context_id,
                     f"The request does not declare the required A2A extension(s): {', '.join(missing)}.",
@@ -243,7 +282,7 @@ class NegotiationGate:
             )
         prompt = task_prompt_from_metadata(metadata)
         if not prompt.strip():
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, "The request carries no Task-T prompt.")
             )
         try:
@@ -257,7 +296,7 @@ class NegotiationGate:
         except ContentValidationError as exc:
             kind = negotiation_kind_for_errors(exc.errors)
             if kind is None:
-                return GateOutcome.rejected(self._build_rejected_task(context, exc))
+                return NegotiationOutcome.rejected(self._build_rejected_task(context, exc))
             state = NegotiationState(
                 kind=kind,
                 round=1,
@@ -266,42 +305,30 @@ class NegotiationGate:
             )
             return await self._emit_policy_decision(context_id, self._policy(state))
         except (A2ATError, ValueError) as exc:
-            return GateOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
+            return NegotiationOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
 
-        # The SDK's semantic verdict is model-dependent and may accept a prompt whose required
-        # caller-schema fields were extracted as null. Enforce the sample's required fields here so
-        # the information scenario still opens a negotiation on live models.
-        missing_required = _missing_required_params(filled, self._task_schema)
-        if missing_required:
+        # The SDK's semantic verdict is model-dependent. The deployment may still know signals
+        # (missing required fields, an infeasible plan) that must open a negotiation.
+        finding = (
+            self._precheck(filled, self._task_schema) if self._precheck is not None else None
+        )
+        if finding is not None:
+            self._logger.info(
+                "Task-T precheck opened a %s negotiation: %s",
+                finding.kind.value,
+                finding.detail or "no detail",
+            )
             state = NegotiationState(
-                kind=NegotiationKind.INFORMATION,
+                kind=finding.kind,
                 round=1,
                 max_rounds=self._max_rounds,
-                missing_items=missing_required,
-            )
-            self._logger.info(
-                "Task-T validation passed semantically but required fields are missing: %s",
-                ", ".join(missing_required),
-            )
-            return await self._emit_policy_decision(context_id, self._policy(state))
-
-        data = filled.data if isinstance(filled.data, Mapping) else {}
-        deterministic_kind = _deterministic_negotiation_kind(data)
-        if deterministic_kind is not None:
-            state = NegotiationState(
-                kind=deterministic_kind,
-                round=1,
-                max_rounds=self._max_rounds,
-            )
-            self._logger.info(
-                "Task-T validation passed semantically but the sample detected a %s conflict",
-                deterministic_kind.value,
+                missing_items=finding.missing_items,
             )
             return await self._emit_policy_decision(context_id, self._policy(state))
 
         self._rewrite_task_prompt(context, prompt)
         self._logger.info("initial Task-T validated; handing the request to the deterministic executor")
-        return GateOutcome.execution(context)
+        return NegotiationOutcome.execution(context)
 
     # ------------------------------------------------------------------
     # Negotiation messages
@@ -309,12 +336,12 @@ class NegotiationGate:
 
     async def _handle_negotiation(
         self, context: RequestContext, metadata: Mapping[str, object]
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """Dispatch one inbound negotiation message by performative."""
         context_id = context.context_id
         session = parse_negotiation_context(metadata)
         if session is None:
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, "The negotiation message carries no valid negotiationContext.")
             )
         performative = session.performative
@@ -333,13 +360,13 @@ class NegotiationGate:
         context: RequestContext,
         metadata: Mapping[str, object],
         session: NegotiationContext,
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """Validate the accept and hand the agreed Task-T prompt to the deterministic executor."""
         context_id = context.context_id
         prompt = negotiation_prompt_from_metadata(metadata)
         template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
         if not prompt.strip() or not isinstance(template_uri, str):
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, "The accept message carries no Negotiation-T content.")
             )
         try:
@@ -356,7 +383,7 @@ class NegotiationGate:
 
         task_prompt = task_prompt_from_metadata(metadata)
         if not task_prompt.strip():
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, "The accept message carries no agreed Task-T prompt.")
             )
         try:
@@ -374,14 +401,14 @@ class NegotiationGate:
 
         self._rewrite_task_prompt(context, task_prompt)
         self._logger.info("negotiation accepted at round %s; creating the task", session.round)
-        return GateOutcome.execution(context)
+        return NegotiationOutcome.execution(context)
 
     async def _handle_terminal(
         self,
         context: RequestContext,
         metadata: Mapping[str, object],
         session: NegotiationContext,
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """End a rejected/aborted negotiation with a plain message and no Task."""
         is_reject = session.performative is NegotiationPerformative.REJECT
         validator = (
@@ -404,20 +431,20 @@ class NegotiationGate:
             session.performative.value,
             session.round,
         )
-        return GateOutcome.short(build_end_message(context.context_id))
+        return NegotiationOutcome.short(build_end_message(context.context_id))
 
     async def _handle_counter_propose(
         self,
         context: RequestContext,
         metadata: Mapping[str, object],
         session: NegotiationContext,
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """Validate a client counter proposal and let the policy answer it."""
         context_id = context.context_id
         prompt = negotiation_prompt_from_metadata(metadata)
         template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
         if not prompt.strip() or not isinstance(template_uri, str):
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, "The counter proposal carries no Negotiation-T content.")
             )
         try:
@@ -436,7 +463,7 @@ class NegotiationGate:
 
         kind = negotiation_kind_for_template_uri(template_uri)
         if kind is None:
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_error_message(context_id, f"Unsupported negotiation template URI: {template_uri}")
             )
         sample = SampleProposal.try_parse(metadata.get(SAMPLE_PROPOSAL_METADATA_KEY))
@@ -482,11 +509,11 @@ class NegotiationGate:
             history=[message] if message is not None else [],
         )
 
-    async def _emit_policy_decision(self, context_id: str | None, decision: PolicyDecision) -> GateOutcome:
+    async def _emit_policy_decision(self, context_id: str | None, decision: PolicyDecision) -> NegotiationOutcome:
         """Turn one policy decision into a standalone negotiation message or an execution request."""
         content = decision.content
         if decision.action == "end":
-            return GateOutcome.short(build_end_message(context_id))
+            return NegotiationOutcome.short(build_end_message(context_id))
         if decision.action == "propose" and isinstance(content, ProposalContent):
             session = NegotiationContext(
                 id=context_id or "",
@@ -506,13 +533,13 @@ class NegotiationGate:
                 # A failed (e.g. timed-out) proposal generation must reach the client as a plain
                 # protocol message, not as a transport error: the client is still waiting for an
                 # event, and an unhandled exception would only surface as a connection failure.
-                return GateOutcome.short(
+                return NegotiationOutcome.short(
                     build_error_message(context_id, f"Negotiation proposal generation failed: {exc}")
                 )
             self._logger.info(
                 "server propose generated: kind=%s round=%s", content.kind.value, content.round
             )
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_negotiation_message(generated, context_id=session.id, text=PROPOSE_MESSAGE_TEXT)
             )
         if decision.action == "abort" and isinstance(content, AbortContent):
@@ -531,22 +558,22 @@ class NegotiationGate:
                     stage="negotiation_abort_extraction",
                 )
             except (A2ATError, ValueError) as exc:
-                return GateOutcome.short(
+                return NegotiationOutcome.short(
                     build_error_message(context_id, f"Negotiation abort generation failed: {exc}")
                 )
             self._logger.info("server abort generated at round %s", content.round)
-            return GateOutcome.short(
+            return NegotiationOutcome.short(
                 build_negotiation_message(generated, context_id=session.id, text=ABORT_MESSAGE_TEXT)
             )
         raise AssertionError(f"Unsupported policy decision: {decision.action}")
 
     async def _negotiation_failure(
         self, context_id: str | None, session: NegotiationContext, text: str
-    ) -> GateOutcome:
+    ) -> NegotiationOutcome:
         """Answer an invalid negotiation message with an abort beyond the round budget, else an error."""
         self._logger.warning("negotiation message rejected: %s", text)
         if session.round <= session.max_rounds:
-            return GateOutcome.short(build_error_message(context_id, text))
+            return NegotiationOutcome.short(build_error_message(context_id, text))
         self._logger.warning(
             "abort requested after an invalid answer beyond the round budget (round=%s)", session.round
         )
@@ -588,97 +615,6 @@ class NegotiationGate:
         message.ClearField("parts")
         message.parts.add(text=prompt)
         message.metadata[TASK_T_EXTENSION_URI] = prompt
-
-
-#: One ``HH:MM~HH:MM`` interval in a target or background-event string.
-_TIME_INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(\d{2}:\d{2})\s*(?:~|to|-)\s*(\d{2}:\d{2})", re.IGNORECASE
-)
-
-#: One ``HH:MM~HH:MM,<rate>Mbps`` target segment.
-_TARGET_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(\d{2}:\d{2})~(\d{2}:\d{2})\s*,\s*(\d+(?:\.\d+)?)\s*Mbps", re.IGNORECASE
-)
-
-#: Markers of a background outage in the sample's feasibility request.
-_OUTAGE_MARKERS: Final[tuple[str, ...]] = ("outage", "power", "停电")
-
-
-def _minutes(value: str) -> int:
-    """Convert one ``HH:MM`` value to minutes from midnight."""
-    hours, minutes = value.split(":", 1)
-    return int(hours) * 60 + int(minutes)
-
-
-def _span(start: str, end: str) -> tuple[int, int]:
-    """Return one interval in minutes, wrapping midnight for an end at or before the start."""
-    start_minutes = _minutes(start)
-    end_minutes = _minutes(end)
-    if end_minutes <= start_minutes:
-        end_minutes += 24 * 60
-    return start_minutes, end_minutes
-
-
-def _target_segments(data: Mapping[str, object]) -> list[tuple[int, int, float]]:
-    """Return the target segments of one Task-T parameter map."""
-    target = data.get("guaranteedThroughputTarget")
-    if not isinstance(target, str):
-        return []
-    return [
-        (*_span(match.group(1), match.group(2)), float(match.group(3)))
-        for match in _TARGET_SEGMENT_PATTERN.finditer(target)
-    ]
-
-
-def _overlaps(first: tuple[int, int], second: tuple[int, int]) -> bool:
-    """Return whether two half-open minute intervals overlap."""
-    return first[0] < second[1] and second[0] < first[1]
-
-
-def _deterministic_negotiation_kind(data: Mapping[str, object]) -> NegotiationKind | None:
-    """Detect the sample's target/feasibility triggers without relying on a model verdict.
-
-    Live semantic validation occasionally accepts an overlapping target or an impossible outage
-    guarantee. These deterministic checks keep the three designed negotiation scenarios stable.
-    """
-    segments = _target_segments(data)
-    for index, first in enumerate(segments):
-        for second in segments[index + 1 :]:
-            if _overlaps(first[:2], second[:2]):
-                return NegotiationKind.TARGET
-
-    background = data.get("backgroundEvent")
-    if isinstance(background, str) and any(marker in background.lower() for marker in _OUTAGE_MARKERS):
-        outage_match = _TIME_INTERVAL_PATTERN.search(background)
-        if outage_match is not None:
-            outage = _span(outage_match.group(1), outage_match.group(2))
-            if any(_overlaps(segment[:2], outage) and segment[2] > 2.0 for segment in segments):
-                return NegotiationKind.FEASIBILITY
-    return None
-
-
-def _missing_required_params(
-    filled: FilledParamData,
-    schema: Mapping[str, object],
-) -> tuple[str, ...]:
-    """Return required caller-schema fields that the semantic pass left empty.
-
-    The SDK's semantic verdict is model-driven; live models sometimes return ``verdict=true``
-    while extracting a required field as ``null``. This deterministic check keeps the sample's
-    negotiation trigger stable in both offline and live modes.
-    """
-    required = schema.get("required")
-    if not isinstance(required, list):
-        return ()
-    data = filled.data if isinstance(filled.data, dict) else {}
-    missing: list[str] = []
-    for name in required:
-        if not isinstance(name, str):
-            continue
-        value = data.get(name)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            missing.append(name)
-    return tuple(missing)
 
 
 def _missing_slot_names(errors: Sequence[SlotValidationError]) -> tuple[str, ...]:

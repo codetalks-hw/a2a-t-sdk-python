@@ -1,4 +1,4 @@
-"""Tests for the pre-task A2A-T negotiation gate."""
+"""Tests for the pre-task A2A-T negotiation handler."""
 
 from __future__ import annotations
 
@@ -37,13 +37,14 @@ from demo.scenario import (
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
 )
+from demo.task_t_precheck import RanDataTaskTPrecheck
 from google.protobuf.json_format import MessageToDict
 from protocol.messages import (
     END_MESSAGE_TEXT,
     SAMPLE_PROPOSAL_METADATA_KEY,
     STRUCTURED_ERRORS_METADATA_KEY,
 )
-from protocol.negotiation_gate import GateOutcome, NegotiationGate
+from protocol.pre_task_negotiation import NegotiationOutcome, PreTaskNegotiationHandler
 from protocol.server_app import prepare_sdk_env_path
 from shared.config import SampleConfig
 
@@ -224,12 +225,12 @@ def _negotiation_message(
     return message
 
 
-def _gate(server: FakePromptServer | None = None) -> tuple[NegotiationGate, FakePromptServer]:
+def _gate(server: FakePromptServer | None = None) -> tuple[PreTaskNegotiationHandler, FakePromptServer]:
     resolved = server or FakePromptServer()
-    return NegotiationGate(resolved), resolved
+    return PreTaskNegotiationHandler(resolved, precheck=RanDataTaskTPrecheck()), resolved
 
 
-def _assert_no_task(outcome: GateOutcome) -> Message:
+def _assert_no_task(outcome: NegotiationOutcome) -> Message:
     assert outcome.short_circuit is True
     assert outcome.task_request is None
     assert outcome.terminal_task is None
@@ -272,6 +273,23 @@ async def test_initial_task_with_a_missing_required_field_opens_information_nego
     proposal_text = server.propose_generations[0][0]
     assert isinstance(proposal_text, str)
     assert "guaranteedThroughputTarget" in proposal_text
+
+
+async def test_without_a_precheck_the_handler_trusts_the_sdk_verdict() -> None:
+    """The seam is optional: a deployment that injects nothing keeps the model verdict."""
+    server = FakePromptServer()
+    server.task_params = {
+        "operationType": "Create",
+        "region": "Songshanhu",
+        "guaranteedThroughputTarget": None,
+    }
+    handler = PreTaskNegotiationHandler(server)
+    context = _make_context(_initial_message())
+
+    outcome = await handler.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
 
 
 @pytest.mark.parametrize(
@@ -547,7 +565,7 @@ async def test_pre_task_detection_uses_current_task_not_the_generated_task_id() 
     assert len(server.task_calls) == 1
 
 
-async def test_existing_task_bypasses_the_negotiation_gate() -> None:
+async def test_existing_task_bypasses_the_pre_task_handler() -> None:
     gate, server = _gate()
     task = Task(id="task-1", context_id=CONTEXT_ID)
     context = _make_context(_initial_message(), current_task=task)
@@ -577,7 +595,7 @@ def real_server(offline_config: SampleConfig) -> A2ATServer:
 async def test_real_server_opens_the_matching_negotiation(
     real_server: A2ATServer, prompt: str, expected_uri: str
 ) -> None:
-    gate = NegotiationGate(real_server)
+    gate = PreTaskNegotiationHandler(real_server, precheck=RanDataTaskTPrecheck())
     context_id = str(uuid.uuid4())
 
     result = _assert_no_task(

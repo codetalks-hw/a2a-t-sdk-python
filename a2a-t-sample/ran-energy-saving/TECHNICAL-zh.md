@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 只想看效果 | 1 | 跑通离线协商，在 UI 里看懂一次交互 |
 | OSS 侧开发 | 1 → 2 → 3 | 接入 A2A-T 客户端，接上自己的决策逻辑 |
-| 网管侧开发 | 1 → 2 → 4 | 把协商网关、执行器与工具接到真实网管 |
+| 网管侧开发 | 1 → 2 → 4 | 把任务前协商处理器、执行器与工具接到真实网管 |
 | 查字段或参数 | 5 / 6 | 查到消息字段、配置项与默认值 |
 
 六个最常用的词（完整术语表见[附录 A](#附录-a-术语表)）：
@@ -119,9 +119,9 @@ flowchart LR
 | --- | --- | --- | --- |
 | 1 | 派发 | 客户端装配运行时、发现 AgentCard | `protocol/client_runtime.py` |
 | 2 | 任务生成 | 把自然语言请求转成 Task-T | `protocol/client_flow.py` |
-| 3 | 校验 | 网管校验 Task-T；失败则开启协商 | `protocol/negotiation_gate.py` |
-| 4 | 协商 | 提议、决策、反提议（最多 3 轮） | `negotiation_gate.py`、`decision_provider.py` |
-| 5 | 决议 | 接受/拒绝/中止；接受时重填 Task-T | `client_flow.py`、`negotiation_gate.py` |
+| 3 | 校验 | 网管校验 Task-T；失败则开启协商 | `protocol/pre_task_negotiation.py` |
+| 4 | 协商 | 提议、决策、反提议（最多 3 轮） | `pre_task_negotiation.py`、`decision_provider.py` |
+| 5 | 决议 | 接受/拒绝/中止；接受时重填 Task-T | `client_flow.py`、`pre_task_negotiation.py` |
 | 6 | 网管执行 | 评估并下发节能方案 | `server_executor.py`、`demo/agents/server_agent/` |
 | 7 | 报告 | 发布报告 artifact，Task 进入 COMPLETED | `server_executor.py` |
 | 8 | 结束 | 写运行记录，UI 回放 | `protocol/client_service/`、`demo/web/` |
@@ -134,7 +134,7 @@ flowchart LR
 | OSS 的协议循环 | `protocol/client_flow.py` |
 | OSS 的会话与运行记录 | `protocol/client_service/`、`protocol/client_store/` |
 | 把 OSS 暴露成 A2A 后端 | `protocol/client_gateway.py` |
-| 网管的协商规则 | `protocol/negotiation_gate.py`、`protocol/negotiation_policy.py` |
+| 网管的协商规则 | `protocol/pre_task_negotiation.py`、`protocol/negotiation_policy.py`、`demo/task_t_precheck.py` |
 | 网管的执行流程 | `protocol/server_executor.py`、`demo/agents/server_agent/` |
 | 接入真实网管接口 | `demo/agents/server_agent/tools.py` |
 | Task 持久化 | `protocol/sqlite_task_store.py` |
@@ -143,10 +143,11 @@ flowchart LR
 | accept 时填入哪些值 | 实现 `protocol/run_spec.py` 的 `ClientPolicy` |
 | planner 图与工具 | 实现 `protocol/server_agent_spec.py` 的 `ServerAgentFactory` |
 | 反提议方案的可行性 | 实现 `protocol/negotiation_policy.py` 的 `PlanEvaluator` |
+| 语义校验通过的 Task-T 是否仍需协商 | 实现 `protocol/pre_task_negotiation.py` 的 `TaskTPrecheck` |
 
 ### 2.4 哪些是样例，哪些要替换
 
-- **直接复用**：A2A-T 网关、确定性协议流程、客户端服务与存储、网管执行外壳、TaskStore 结构、日志与 trace 管线、运行规格接口。
+- **直接复用**：A2A-T 任务前协商处理器、确定性协议流程、客户端服务与存储、网管执行外壳、TaskStore 结构、日志与 trace 管线、运行规格接口。
 - **需要替换**：客户端决策 agent 与工具、网管的四个工具实现、planner 提示词/模型、会话与轮次 schema、演示用的方案评估器。
 - **仅演示（`demo/`）**：场景目录、数据集、fake/scripted 模型、mock 注册中心、Web UI、启动器与示例 agent。
 
@@ -162,6 +163,7 @@ flowchart LR
 | 客户端决策 agent | `agent_factory` | `demo/agents/client_agent/` |
 | 网管 planner | `ServerAgentFactory`（`protocol/server_agent_spec.py`） | `demo/agents/server_agent/factory.py` |
 | 方案可行性 | `PlanEvaluator`（`protocol/negotiation_policy.py`） | `demo/plan_evaluator.py` |
+| 初始 Task-T 预检 | `TaskTPrecheck`（`protocol/pre_task_negotiation.py`） | `demo/task_t_precheck.py` |
 
 `tests/test_demo_boundary.py` 会在全新解释器中导入全部核心模块，并断言没有任何 `demo.*` 被加载。演示入口是 `run_demo.py`（对 `demo/run_demo.py` 的兼容壳）、`demo/web/`、`demo/registry/`，以及 `protocol.server_app.main` 内的延迟导入。
 
@@ -266,12 +268,12 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `DecisionProviderError: ... no parseable NegotiationDecision` | 模型输出不是 JSON | 收紧提示词；保留一次纠正重试；离线用 fallback |
-| 网关拒绝 accept | 没有用协商结果重填 Task-T | 把 `filled_params` 交给 `generate_task_prompt_from_data_with_schema` |
+| 任务前协商处理器拒绝 accept | 没有用协商结果重填 Task-T | 把 `filled_params` 交给 `generate_task_prompt_from_data_with_schema` |
 | HTTP 409 `run_conflict` | 同一会话已有运行 | 等待结束或换会话；客户端数据库的部分唯一索引保证跨进程互斥 |
 
 ## 4. 网管侧开发指南（操作）
 
-**本节目标：** 把协商网关、执行器与工具接到真实网管系统。
+**本节目标：** 把任务前协商处理器、执行器与工具接到真实网管系统。
 **前置：** 读完第 1、2 节；知道 `protocol/server_app.py` 是应用装配入口。
 
 ### 4.1 你需要实现什么
@@ -284,17 +286,22 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 | 评估与下发 | 用真实网管接口替换样例工具 |
 | 报告 | 最终报告 artifact，带 A2A-T 元数据 |
 
-### 4.2 协商网关与策略
+### 4.2 任务前协商处理器与策略
 
-[`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) 是服务端唯一协议入口，只处理**任务前**请求（`context.current_task is None`；`context.task_id` 不是可靠信号，因为 `RequestContext` 构造时会生成一个）：
+[`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) 是服务端唯一协议入口，只处理**任务前**请求（`context.current_task is None`；`context.task_id` 不是可靠信号，因为 `RequestContext` 构造时会生成一个）：
 
 1. 初始 Task-T 请求通过 `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` 校验。
 2. 校验失败且首个错误码可映射到协商类型时，生成初始 `Propose`；不可映射时返回带结构化错误的终态 `REJECTED` Task。
 3. `Accept` 通过 `validate_accept_prompt_and_data_filling` 校验；随后再次校验协商确定的 Task-T 提示词并交给网管执行（LangGraph）。
-4. `Reject` 或 `Abort` 是终态：网关回一条普通消息，不创建 Task。
+4. `Reject` 或 `Abort` 是终态：处理器回一条普通消息，不创建 Task。
 5. 客户端反提议通过 `validate_propose_prompt_and_data_filling` 校验，再由策略引擎应答。
 
-所有 SDK 调用都是同步的，因此网关用 `asyncio.to_thread` 执行，避免阻塞服务端事件循环。
+处理器只负责协议流程。两个注入缝把业务规则挡在外面：
+
+- `TaskTPrecheck` 在 SDK 接受 Task-T 之后运行，仍可开启协商（必填字段缺失、目标时段冲突、不可行的停电保障）。演示实现是 `demo/task_t_precheck.py`；不注入时处理器直接信任 SDK 的结论。
+- 协商策略（见下）决定已开启协商的下一步。
+
+所有 SDK 调用都是同步的，因此处理器用 `asyncio.to_thread` 执行，避免阻塞服务端事件循环。
 
 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 是纯函数：输入状态，输出 `PolicyDecision`。它不调用 LLM，也不发送任何消息。
 
@@ -334,13 +341,17 @@ flowchart LR
 ```python
 # protocol/server_app.py（节选）
 executor = build_negotiation_executor(
-    gate=NegotiationGate(prompt_server, policy=negotiation_policy),
+    handler=PreTaskNegotiationHandler(
+        prompt_server,
+        policy=negotiation_policy,
+        precheck=task_t_precheck,
+    ),
     agent_factory=server_agent_factory,   # 为一次任务构建图、工具与提示词
     config=config,
 )
 ```
 
-`ServerAgentFactory` 返回 `ServerAgentSpec`（图、模型、系统提示词、报告工具名、初始消息、工具结果解析器）。演示实现是 `demo/agents/server_agent/factory.py`；真实网管返回自己的图。`NegotiationGate` 同样接收策略可调用对象，演示在 `demo/plan_evaluator.py` 用 `RanDataPlanEvaluator` 绑定。
+`ServerAgentFactory` 返回 `ServerAgentSpec`（图、模型、系统提示词、报告工具名、初始消息、工具结果解析器）。演示实现是 `demo/agents/server_agent/factory.py`；真实网管返回自己的图。演示在 `demo/plan_evaluator.py` 用 `RanDataPlanEvaluator` 绑定策略，在 `demo/task_t_precheck.py` 绑定 `RanDataTaskTPrecheck`。
 
 **如何验证：** 服务端 trace 出现四个工具 span；Task 以 `COMPLETED` 结束并带报告 artifact。
 
@@ -480,7 +491,7 @@ executor = build_negotiation_executor(
 
 **在线模式。** 两侧 SDK、客户端 ADK agent 与服务端 LangGraph planner 使用配置端点。工具保持确定性并受顺序约束；只有 planner 的工具选择与参数由模型驱动。Windows 下保持 `PYTHONUTF8=1`（`run_demo.py` 会为子进程设置）。在线输出依赖模型的抽取、语义校验与规划，见 §1.1。
 
-**超时预算。** 客户端每次 A2A 请求都通过 `ClientCallContext.timeout` 携带 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`（默认 300s），`httpx` 客户端使用同一预算。在线模式下服务端网关在发出任何事件前会执行多次 LLM 调用，因此客户端预算必须长于该最坏情况；原先固定的 60s 会让客户端在服务端仍在工作时提前放弃（`A2AClientTimeoutError`）。在线 LLM 调用拥有 **120s 单次调用预算**（SDK 结构化调用与客户端 ADK `LiteLlm` turn 共用；更慢的端点可继续调高）。每次运行的 SDK `.env` 写入 `A2AT_LLM_TIMEOUT_SECONDS=120` 与 `A2AT_LLM_MAX_ATTEMPTS=1`。traced Provider 关闭了 OpenAI SDK 自身的传输层重试，LiteLLM 也以 `num_retries=0` 构建，因此一次调用不会悄悄变成三次尝试；卡住的调用会在配置预算内失败，网关随后返回结构化的协议错误消息供客户端展示。离线模式不受影响（脚本化 Provider 不发起网络调用）。webhook 空闲兜底遵循同一原则，默认等于 300s 的 HTTP 预算，客户端仍在等待时不会提前结束阶段。
+**超时预算。** 客户端每次 A2A 请求都通过 `ClientCallContext.timeout` 携带 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`（默认 300s），`httpx` 客户端使用同一预算。在线模式下服务端任务前协商处理器在发出任何事件前会执行多次 LLM 调用，因此客户端预算必须长于该最坏情况；原先固定的 60s 会让客户端在服务端仍在工作时提前放弃（`A2AClientTimeoutError`）。在线 LLM 调用拥有 **120s 单次调用预算**（SDK 结构化调用与客户端 ADK `LiteLlm` turn 共用；更慢的端点可继续调高）。每次运行的 SDK `.env` 写入 `A2AT_LLM_TIMEOUT_SECONDS=120` 与 `A2AT_LLM_MAX_ATTEMPTS=1`。traced Provider 关闭了 OpenAI SDK 自身的传输层重试，LiteLLM 也以 `num_retries=0` 构建，因此一次调用不会悄悄变成三次尝试；卡住的调用会在配置预算内失败，处理器随后返回结构化的协议错误消息供客户端展示。离线模式不受影响（脚本化 Provider 不发起网络调用）。webhook 空闲兜底遵循同一原则，默认等于 300s 的 HTTP 预算，客户端仍在等待时不会提前结束阶段。
 
 已有的 `.env` 若设置了 `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` 或 `A2AT_LLM_TIMEOUT_SECONDS=60`，应更新或删除：新的样例键为 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`、`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`、`A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`。
 
@@ -498,19 +509,20 @@ uvx --from ty==0.0.92 ty check .
 
 （`python` 必须是 §1.1 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（467 个测试）。覆盖范围：
+测试套件完全离线且确定性（472 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
 | `test_policy.py` | 所有策略决策与轮次规则，包括 `maxRounds` 时的 abort 与错误码映射。 |
-| `test_negotiation_gate.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理，以及真实离线服务端。 |
+| `test_pre_task_negotiation.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理、预检注入，以及真实离线服务端。 |
+| `test_task_t_precheck.py` | 演示预检：必填字段缺失、目标时段重叠、不可行的停电保障，以及合法 Task-T。 |
 | `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
 | `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时、会话落盘、内存降级与保留期清扫。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态；另含带鉴权服务端与真实 SDK 客户端的组合。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
 | `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
 | `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页与 CSS token、`main.js` 用到的每个元素 id 都存在于页面；`node --check` 全部 JS，并运行仓库内 `tests/js` 的 store、i18n 与真实帧 harness（无 Node 时跳过）。 |
-| `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、网关委托、AgentCard 扩展、注册载荷。 |
+| `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、任务前处理器委托、AgentCard 扩展、注册载荷。 |
 | `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
 | `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、原子 claim 冲突、v1→v2 迁移、只读助手。 |
 | `test_client_service.py` | 运行持久化、会话记忆、两个 manager 之间的每会话单活跃运行、死进程回收、失败/中断处理、运行指标。 |
@@ -627,7 +639,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`env.example`](env.example) | 统一的、可直接离线运行的配置模板。 |
 | [`demo/agents/server_agent/`](demo/agents/server_agent) | 服务端 LangGraph 执行：`planner.py`（脚本化/在线模型 + 提示词）、`langgraph_tools.py`（受约束工具 + `PlanGuard`）、`graph.py`（ReAct 状态图）、`tools.py`（纯网管工具）；不使用 ADK。 |
 | [`demo/agents/client_agent/`](demo/agents/client_agent) | 客户端 ADK 决策智能体：`agent.py` 导出 `root_agent`；`tools.py` 为 SLA 与影响评估工具；`prompts/request_instruction.md` 为 instruction。 |
-| [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | 服务端唯一协议入口：识别任务前请求、校验 Task-T / Negotiation-T 消息，并转发被接受的请求。 |
+| [`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) | 服务端唯一协议入口：识别任务前请求、校验 Task-T / Negotiation-T 消息，并转发被接受的请求；声明 `TaskTPrecheck` 注入缝。 |
+| [`demo/task_t_precheck.py`](demo/task_t_precheck.py) | 演示 `TaskTPrecheck`：必填字段缺失、目标时段重叠、不可行的停电保障。 |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | 纯确定性服务端策略：`propose`、`abort`、`execute`、`end`，不调用 LLM。 |
 | [`protocol/server_executor.py`](protocol/server_executor.py) | 外层协商执行器与 `LangGraphTaskExecutor`：运行 ReAct planner 并发布 A2A Task 生命周期；不使用 ADK。 |
 | [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore`，持久化 A2A Task 状态并为 UI 提供任务摘要。 |
@@ -693,7 +706,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 | 文件 / 函数 | 结论 | 原因 |
 | --- | --- | --- |
-| `protocol/negotiation_gate.py`（`NegotiationGate`） | KEEP | 协议入口与校验/短路逻辑。 |
+| `protocol/pre_task_negotiation.py`（`PreTaskNegotiationHandler`） | KEEP | 协议入口、校验与短路逻辑；业务检查由注入的 `TaskTPrecheck` 提供。 |
+| `demo/task_t_precheck.py`（`RanDataTaskTPrecheck`） | **REPLACE** 预检规则 | 保留注入缝，按你的 Task-T schema 与可行性规则实现检查。 |
 | `protocol/server_executor.py`（`NegotiationAgentExecutor`、`LangGraphTaskExecutor`） | KEEP 外壳 | A2A 生命周期、图循环与网关接线可复用；planner 提示词/模型与工具属于业务逻辑。 |
 | `demo/agents/server_agent/planner.py` | **REPLACE** 提示词/模型策略 | 保留 `ScriptedChatModel` 供离线测试；把在线模型指向你的端点与提示词。 |
 | `demo/agents/server_agent/langgraph_tools.py`（`PlanGuard`、工具包装） | **REPLACE** 顺序规则 | 保留包装结构；调整业务前置条件。 |

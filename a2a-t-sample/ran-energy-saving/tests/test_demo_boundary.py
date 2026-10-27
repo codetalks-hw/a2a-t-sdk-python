@@ -22,7 +22,7 @@ _CORE_MODULES = (
     "protocol.client_service",
     "protocol.client_gateway",
     "protocol.decision_provider",
-    "protocol.negotiation_gate",
+    "protocol.pre_task_negotiation",
     "protocol.negotiation_policy",
     "protocol.server_app",
     "protocol.server_executor",

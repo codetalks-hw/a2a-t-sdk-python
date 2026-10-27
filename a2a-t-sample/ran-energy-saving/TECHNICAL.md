@@ -12,7 +12,7 @@ reading the protocol first.
 | --- | --- | --- |
 | just evaluating | 1 | run an offline negotiation and read the interaction in the UI |
 | an OSS developer | 1 → 2 → 3 | connect the A2A-T client and plug in your own decision logic |
-| an NMS developer | 1 → 2 → 4 | connect the negotiation gate, executor and tools to the real NMS |
+| an NMS developer | 1 → 2 → 4 | connect the pre-task negotiation handler, executor and tools to the real NMS |
 | looking up a field or setting | 5 / 6 | find message fields, configuration keys and defaults |
 
 Six terms you will meet immediately (the full glossary is [Appendix A](#appendix-a-glossary)):
@@ -123,9 +123,9 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | --- | --- | --- | --- |
 | 1 | Dispatch | the client assembles its runtime and discovers the AgentCard | `protocol/client_runtime.py` |
 | 2 | Task generation | the natural-language request becomes a Task-T | `protocol/client_flow.py` |
-| 3 | Validation | the NMS validates Task-T; a failure opens a negotiation | `protocol/negotiation_gate.py` |
-| 4 | Negotiation | propose, decide, counter (at most three rounds) | `negotiation_gate.py`, `decision_provider.py` |
-| 5 | Resolution | accept/reject/abort; an accept refills Task-T | `client_flow.py`, `negotiation_gate.py` |
+| 3 | Validation | the NMS validates Task-T; a failure opens a negotiation | `protocol/pre_task_negotiation.py` |
+| 4 | Negotiation | propose, decide, counter (at most three rounds) | `pre_task_negotiation.py`, `decision_provider.py` |
+| 5 | Resolution | accept/reject/abort; an accept refills Task-T | `client_flow.py`, `pre_task_negotiation.py` |
 | 6 | NMS execution | evaluate and apply the plan | `server_executor.py`, `demo/agents/server_agent/` |
 | 7 | Report | publish the report artifact; the Task completes | `server_executor.py` |
 | 8 | Done | write the transcript; the UI replays it | `protocol/client_service/`, `demo/web/` |
@@ -138,7 +138,7 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | OSS protocol loop | `protocol/client_flow.py` |
 | OSS conversations and run history | `protocol/client_service/`, `protocol/client_store/` |
 | expose the OSS as an A2A backend | `protocol/client_gateway.py` |
-| NMS negotiation rules | `protocol/negotiation_gate.py`, `protocol/negotiation_policy.py` |
+| NMS negotiation rules | `protocol/pre_task_negotiation.py`, `protocol/negotiation_policy.py`, `demo/task_t_precheck.py` |
 | NMS execution flow | `protocol/server_executor.py`, `demo/agents/server_agent/` |
 | connect the real NMS interfaces | `demo/agents/server_agent/tools.py` |
 | Task persistence | `protocol/sqlite_task_store.py` |
@@ -147,10 +147,11 @@ In one line: **A2A delivers it, A2A-T makes it meaningful, your business logic d
 | values filled into an accepted Task-T | implement `protocol/run_spec.py` `ClientPolicy` |
 | the planner graph and tools | implement `protocol/server_agent_spec.py` `ServerAgentFactory` |
 | plan feasibility of a counter proposal | implement `protocol/negotiation_policy.py` `PlanEvaluator` |
+| whether a valid Task-T still needs negotiation | implement `protocol/pre_task_negotiation.py` `TaskTPrecheck` |
 
 ### 2.4 What is sample code, what you replace
 
-- **Reuse as is:** the A2A-T gate, the deterministic client flow, the client service and store, the
+- **Reuse as is:** the pre-task negotiation handler, the deterministic client flow, the client service and store, the
   NMS execution shell, the TaskStore shape, the logging/trace plumbing and the run-spec interfaces.
 - **Replace:** the client decision agent and its tools, the four NMS tool bodies, the planner
   prompt/model, the conversation/turn schema, and the demo plan evaluator.
@@ -172,6 +173,7 @@ demo in explicitly:
 | client decision agent | `agent_factory` | `demo/agents/client_agent/` |
 | NMS planner | `ServerAgentFactory` (`protocol/server_agent_spec.py`) | `demo/agents/server_agent/factory.py` |
 | plan feasibility | `PlanEvaluator` (`protocol/negotiation_policy.py`) | `demo/plan_evaluator.py` |
+| initial Task-T precheck | `TaskTPrecheck` (`protocol/pre_task_negotiation.py`) | `demo/task_t_precheck.py` |
 
 `tests/test_demo_boundary.py` imports every core module in a fresh interpreter and asserts that no
 `demo.*` module is loaded. The demo entry points are `run_demo.py` (a shim over `demo/run_demo.py`),
@@ -295,12 +297,13 @@ One inbound `message:send` starts one client run and returns the final report ar
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `DecisionProviderError: ... no parseable NegotiationDecision` | the model did not return JSON | tighten the prompt; keep one corrective retry; offline uses a fallback |
-| the gate rejects an accept | Task-T was not refilled from the negotiation | pass `filled_params` through `generate_task_prompt_from_data_with_schema` |
+| the pre-task handler rejects an accept | Task-T was not refilled from the negotiation | pass `filled_params` through `generate_task_prompt_from_data_with_schema` |
 | HTTP 409 `run_conflict` | the conversation already has an active run | wait for it, or use another conversation; the claim is enforced by a partial unique index in the client database, so it also holds across processes |
 
 ## 4. NMS-side developer guide (how-to)
 
-**Goal:** connect the negotiation gate, executor and tools to the real network management system.
+**Goal:** connect the pre-task negotiation handler, executor and tools to the real network
+management system.
 **Before you start:** sections 1 and 2; you know `protocol/server_app.py` assembles the application.
 
 ### 4.1 What you implement
@@ -313,11 +316,12 @@ One inbound `message:send` starts one client run and returns the final report ar
 | evaluation and apply | replace the sample tools with real NMS interfaces |
 | report | final report artifact with A2A-T metadata |
 
-### 4.2 Negotiation gate and policy
+### 4.2 Pre-task negotiation handler and policy
 
-[`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) is the server's single protocol
-entry. It handles only **pre-task** requests (`context.current_task is None`; `context.task_id` is
-not a reliable signal because `RequestContext` generates one in its constructor):
+[`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) is the server's single
+protocol entry. It handles only **pre-task** requests (`context.current_task is None`;
+`context.task_id` is not a reliable signal because `RequestContext` generates one in its
+constructor):
 
 1. An initial Task-T request is validated with
    `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)`.
@@ -325,11 +329,18 @@ not a reliable signal because `RequestContext` generates one in its constructor)
    `Propose`; an unmappable failure becomes a terminal `REJECTED` Task with structured errors.
 3. An `Accept` is validated with `validate_accept_prompt_and_data_filling`; the agreed Task-T
    prompt is then validated again and handed to the LangGraph NMS execution.
-4. A `Reject` or `Abort` is terminal: the gate answers with a plain message and creates no Task.
+4. A `Reject` or `Abort` is terminal: the handler answers with a plain message and creates no Task.
 5. A client counter-`Propose` is validated with `validate_propose_prompt_and_data_filling`, then
    answered by the policy.
 
-Every SDK call is synchronous, so the gate runs it with `asyncio.to_thread` to keep the server
+The handler contains protocol flow only. Two hooks keep business rules out of it:
+
+- `TaskTPrecheck` runs after the SDK accepts a Task-T and may still open a negotiation (missing
+  required fields, an infeasible target combination). The demo implementation is
+  `demo/task_t_precheck.py`; without a check the handler trusts the SDK verdict.
+- the negotiation policy (see below) decides the next step of an open negotiation.
+
+Every SDK call is synchronous, so the handler runs it with `asyncio.to_thread` to keep the server
 event loop responsive.
 
 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) is a pure function: state in,
@@ -376,7 +387,11 @@ The executor shell takes the graph from outside:
 ```python
 # protocol/server_app.py (excerpt)
 executor = build_negotiation_executor(
-    gate=NegotiationGate(prompt_server, policy=negotiation_policy),
+    handler=PreTaskNegotiationHandler(
+        prompt_server,
+        policy=negotiation_policy,
+        precheck=task_t_precheck,
+    ),
     agent_factory=server_agent_factory,   # builds the graph, tools and prompt of one task
     config=config,
 )
@@ -384,8 +399,9 @@ executor = build_negotiation_executor(
 
 `ServerAgentFactory` returns a `ServerAgentSpec` (graph, model, system prompt, report tool name,
 initial messages, tool-result parser). The demo implementation is
-`demo/agents/server_agent/factory.py`; a real NMS returns its own graph. `NegotiationGate` likewise
-takes the policy callable; the demo binds it to `RanDataPlanEvaluator` in `demo/plan_evaluator.py`.
+`demo/agents/server_agent/factory.py`; a real NMS returns its own graph. The demo binds the policy
+to `RanDataPlanEvaluator` in `demo/plan_evaluator.py` and the precheck to
+`RanDataTaskTPrecheck` in `demo/task_t_precheck.py`.
 
 **Verify:** the server trace shows four tool spans; the Task ends `COMPLETED` with a report artifact.
 
@@ -562,13 +578,13 @@ children). Live output depends on the model's extraction, semantic validation an
 
 **Timeout budgets.** The client sends every A2A request with `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS`
 (300s default) in `ClientCallContext.timeout`, and the `httpx` client uses the same budget. In live
-mode the server gate performs several LLM calls before it emits any event, so the client budget must
+mode the server pre-task handler performs several LLM calls before it emits any event, so the client budget must
 outlast that worst case; the old fixed 60s made the client give up while the server was still
 working (`A2AClientTimeoutError`). Live LLM calls have a **120s per-call budget** (shared by SDK
 structured calls and client ADK `LiteLlm` turns; raise it for slower endpoints). The per-run SDK `.env`
 carries `A2AT_LLM_TIMEOUT_SECONDS=120` and `A2AT_LLM_MAX_ATTEMPTS=1`. The OpenAI SDK's own transport
 retries are disabled by the traced provider, and LiteLLM is built with `num_retries=0`, so one call
-cannot silently become three attempts; a stuck call fails within the configured budget and the gate
+cannot silently become three attempts; a stuck call fails within the configured budget and the pre-task handler
 answers with a structured protocol error message the client can display. Offline mode is unaffected
 (the scripted provider makes no network call). The webhook idle backstop follows the same rule and
 defaults to the 300s HTTP budget, so it cannot end a phase while the client is still waiting.
@@ -598,19 +614,20 @@ uvx --from ty==0.0.92 ty check .
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (467 tests). What it covers:
+The suite is fully offline and deterministic (472 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
 | `test_policy.py` | Every policy decision and round rule, including the abort at `maxRounds` and the error-code mapping. |
-| `test_negotiation_gate.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, and the real offline server. |
+| `test_pre_task_negotiation.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, precheck injection, and the real offline server. |
+| `test_task_t_precheck.py` | The demo precheck: missing required fields, overlapping targets, impossible outage guarantees, and a valid Task-T. |
 | `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
 | `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout, durable session storage, the in-memory fallback and the retention sweep. |
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state, plus a secured server with the real SDK client. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
 | `test_web_ui.py` | `/api/meta`, `/api/tasks`, `/api/client/runs`, `/api/client/conversations`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server planner/tool spans, `trace.json`) and a real manual decision flow. |
 | `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs and CSS tokens, every element id used by `main.js` exists in the shell; runs `node --check` on every JS module and the in-repo `tests/js` store, i18n and real-frame harnesses (skipped without Node). |
-| `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, gate delegation, AgentCard extensions, registry payload. |
+| `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, pre-task handler delegation, AgentCard extensions, registry payload. |
 | `test_server_planner.py` | Scripted planner sequence, guarded tool order, offline/live model selection, prompt content. |
 | `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, atomic claim conflicts, the v1→v2 migration, read-only helpers. |
 | `test_client_service.py` | Run persistence, conversation memory, one active run per conversation across two managers, dead-owner reclaim, failure/interrupt handling, run metrics. |
@@ -780,7 +797,8 @@ The sample is deliberately a prototype. Before production:
 | [`env.example`](env.example) | Unified offline-ready configuration template. |
 | [`demo/agents/server_agent/`](demo/agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure NMS tools). No ADK. |
 | [`demo/agents/client_agent/`](demo/agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |
-| [`protocol/negotiation_gate.py`](protocol/negotiation_gate.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. |
+| [`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. Declares the `TaskTPrecheck` seam. |
+| [`demo/task_t_precheck.py`](demo/task_t_precheck.py) | Demo `TaskTPrecheck`: missing required fields, overlapping target segments and impossible outage guarantees. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
 | [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `LangGraphTaskExecutor`: runs the ReAct planner and publishes the A2A Task lifecycle. No ADK. |
 | [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore` for persisted A2A Task state and the UI task summaries. |
@@ -847,8 +865,9 @@ sample business content or demo-only machinery.
 
 | File / function | Verdict | Why |
 | --- | --- | --- |
-| `protocol/negotiation_gate.py` (`NegotiationGate`) | KEEP | Protocol entry and validation/short-circuit logic. |
-| `protocol/server_executor.py` (`NegotiationAgentExecutor`, `LangGraphTaskExecutor`) | KEEP the shell | The A2A lifecycle, graph loop and gate wiring are reusable; the planner prompt/model and tools are business logic. |
+| `protocol/pre_task_negotiation.py` (`PreTaskNegotiationHandler`) | KEEP | Protocol entry, validation and short-circuit logic; the business checks come from the injected `TaskTPrecheck`. |
+| `protocol/server_executor.py` (`NegotiationAgentExecutor`, `LangGraphTaskExecutor`) | KEEP the shell | The A2A lifecycle, graph loop and pre-task handler wiring are reusable; the planner prompt/model and tools are business logic. |
+| `demo/task_t_precheck.py` (`RanDataTaskTPrecheck`) | **REPLACE** the precheck rules | Keep the seam; implement the checks of your Task-T schema and feasibility rules. |
 | `demo/agents/server_agent/planner.py` | **REPLACE** the prompt/model policy | Keep the `ScriptedChatModel` for offline tests; point the live model at your endpoint and prompt. |
 | `demo/agents/server_agent/langgraph_tools.py` (`PlanGuard`, tool wrappers) | **REPLACE** the order rules | Keep the wrapper shape; adapt the business preconditions. |
 | `protocol/sqlite_task_store.py` (`SqliteTaskStore`) | KEEP | Minimal durable A2A TaskStore; swap for your database in production. |

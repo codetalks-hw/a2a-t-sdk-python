@@ -1,10 +1,11 @@
 """LangGraph A2A task executor and the pre-task negotiation wrapper.
 
-The server deliberately uses **no ADK agent**. After the negotiation gate accepts a Task-T, the
-request is handed to :class:`LangGraphTaskExecutor`, which runs a small ReAct graph over the sample's
-four RAN NMS tools and publishes a standard A2A Task lifecycle. The protocol layer stays in
-:class:`NegotiationAgentExecutor`: it runs the gate first, enqueues standalone negotiation messages
-without creating a Task, and delegates only accepted work to the graph executor.
+The server deliberately uses **no ADK agent**. After the pre-task negotiation handler accepts a
+Task-T, the request is handed to :class:`LangGraphTaskExecutor`, which runs a small ReAct graph over
+the sample's four RAN NMS tools and publishes a standard A2A Task lifecycle. The protocol layer
+stays in :class:`NegotiationAgentExecutor`: it runs the pre-task phase first, enqueues standalone
+negotiation messages without creating a Task, and delegates only accepted work to the graph
+executor.
 
 The graph is sample business logic, not a protocol rule: it reads cell-001's profile, evaluates and
 applies a 30% saving plan in 00:00~06:00, and writes the report. A real deployment replaces the
@@ -53,7 +54,7 @@ from protocol.messages import (
     parse_negotiation_context,
     task_prompt_from_metadata,
 )
-from protocol.negotiation_gate import NegotiationGate
+from protocol.pre_task_negotiation import PreTaskNegotiationHandler
 from protocol.server_agent_spec import ServerAgentFactory
 
 #: Artifact names.
@@ -517,16 +518,16 @@ class LangGraphTaskExecutor(AgentExecutor):
 
 
 class NegotiationAgentExecutor(AgentExecutor):
-    """Outer executor: pre-task negotiation gate in front of the graph executor."""
+    """Outer executor: the pre-task negotiation handler in front of the graph executor."""
 
-    def __init__(self, *, gate: NegotiationGate, inner: AgentExecutor) -> None:
+    def __init__(self, *, handler: PreTaskNegotiationHandler, inner: AgentExecutor) -> None:
         """Create one executor.
 
         Args:
-            gate: pre-task negotiation gate.
+            handler: pre-task negotiation handler.
             inner: graph executor that runs an accepted Task.
         """
-        self._gate = gate
+        self._handler = handler
         self._inner = inner
         # The client sends its run id once, on the initial Task-T message; the follow-up
         # accept/reject/abort messages of the same context reuse it for trace correlation.
@@ -534,9 +535,9 @@ class NegotiationAgentExecutor(AgentExecutor):
         self._run_ids_lock = threading.Lock()
 
     @property
-    def gate(self) -> NegotiationGate:
-        """Return the pre-task negotiation gate."""
-        return self._gate
+    def handler(self) -> PreTaskNegotiationHandler:
+        """Return the pre-task negotiation handler."""
+        return self._handler
 
     @property
     def inner(self) -> AgentExecutor:
@@ -544,7 +545,7 @@ class NegotiationAgentExecutor(AgentExecutor):
         return self._inner
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        """Run the gate, then short-circuit or delegate to the graph executor.
+        """Run the pre-task handler, then short-circuit or delegate to the graph executor.
 
         Args:
             context: inbound A2A request context.
@@ -556,17 +557,19 @@ class NegotiationAgentExecutor(AgentExecutor):
             context_id=context.context_id,
             stage="server_execution_agent",
         ):
-            outcome = await self._gate.handle(context)
+            outcome = await self._handler.handle(context)
             if outcome.short_circuit:
                 if outcome.terminal_task is not None:
                     await event_queue.enqueue_event(outcome.terminal_task)
                     return
                 if outcome.message is None:
-                    raise ValueError("The gate short-circuited without a message or a terminal task")
+                    raise ValueError(
+                        "The pre-task handler short-circuited without a message or a terminal task"
+                    )
                 await event_queue.enqueue_event(outcome.message)
                 return
             if outcome.task_request is None:
-                raise ValueError("The gate approved execution without a request context")
+                raise ValueError("The pre-task handler approved execution without a request context")
             await self._inner.execute(outcome.task_request, event_queue)
 
     def _resolve_run_id(self, context: RequestContext) -> str | None:
@@ -588,19 +591,19 @@ class NegotiationAgentExecutor(AgentExecutor):
 
 def build_negotiation_executor(
     *,
-    gate: NegotiationGate,
+    handler: PreTaskNegotiationHandler,
     agent_factory: ServerAgentFactory,
     config: SampleConfig | None = None,
 ) -> NegotiationAgentExecutor:
     """Build the outer executor with the LangGraph executor inside.
 
     Args:
-        gate: pre-task negotiation gate.
+        handler: pre-task negotiation handler.
         agent_factory: builder of the planner graph of one accepted task.
         config: resolved sample configuration.
     """
     return NegotiationAgentExecutor(
-        gate=gate,
+        handler=handler,
         inner=LangGraphTaskExecutor(
             agent_factory=agent_factory,
             config=config,

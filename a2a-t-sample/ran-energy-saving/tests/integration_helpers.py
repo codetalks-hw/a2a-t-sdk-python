@@ -26,7 +26,12 @@ import uvicorn
 from a2a.client.client import ClientCallContext
 from a2a.types import SendMessageRequest
 from demo.agents.server_agent.factory import build_server_agent
-from demo.composition import build_demo_negotiation_policy, build_demo_runtime, install_offline_provider
+from demo.composition import (
+    build_demo_negotiation_policy,
+    build_demo_runtime,
+    build_demo_task_t_precheck,
+    install_offline_provider,
+)
 from demo.scenario import LANGUAGE_EN, ExpectedStep
 from protocol.client_flow import ClientFlowResult, ClientTransport
 from protocol.client_runtime import MODE_AUTO
@@ -104,6 +109,7 @@ def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]
     runtime = build_server_runtime(
         agent_factory=build_server_agent,
         policy=build_demo_negotiation_policy(),
+        precheck=build_demo_task_t_precheck(),
         install_offline_provider=install_offline_provider,
         config=config,
     )
