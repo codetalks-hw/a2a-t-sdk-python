@@ -296,7 +296,7 @@ One inbound `message:send` starts one client run and returns the final report ar
 | --- | --- | --- |
 | `DecisionProviderError: ... no parseable NegotiationDecision` | the model did not return JSON | tighten the prompt; keep one corrective retry; offline uses a fallback |
 | the gate rejects an accept | Task-T was not refilled from the negotiation | pass `filled_params` through `generate_task_prompt_from_data_with_schema` |
-| HTTP 409 `run_conflict` | the conversation already has an active run | wait for it, or use another conversation; the check is process-local |
+| HTTP 409 `run_conflict` | the conversation already has an active run | wait for it, or use another conversation; the claim is enforced by a partial unique index in the client database, so it also holds across processes |
 
 ## 4. NMS-side developer guide (how-to)
 
@@ -527,7 +527,8 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | default `7` (>= 1) | Days a decision-agent session is kept as audit data before the startup/periodic sweep removes it. |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | default `127.0.0.1` / `8001` | Optional inbound A2A gateway bind and advertised AgentCard interface. |
 | `A2AT_SAMPLE_GATEWAY_TASK_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/gateway-task-status.sqlite3` | Absolute SQLite path of the inbound gateway Task store. |
-| `A2AT_SAMPLE_AUTH_TOKEN` | unset = open (loopback only) | Bearer token for the Web UI `/api/*` routes and the inbound gateway A2A routes. A non-loopback bind without it fails at startup. |
+| `A2AT_SAMPLE_AUTH_TOKEN` | unset = open (loopback only) | Bearer token for the Web UI `/api/*` routes and the inbound gateway A2A routes. A non-loopback bind without it fails at startup. The trace ingest route is exempt because it carries the run-scoped `A2AT_SAMPLE_TRACE_TOKEN` instead. |
+| `A2AT_SAMPLE_SERVER_AUTH_TOKEN` | unset = open (loopback only) | Service bearer token of the A2A server. The client sends it on every A2A call; the server requires it on every route except the AgentCard and health endpoints, and declares the scheme on the card. A non-loopback server bind without it fails at startup. |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0` (default), `1` | Register the gateway AgentCard with the registry center. |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | default `information` | Scenario used for an inbound gateway request. |
 | `A2AT_SAMPLE_PLANNER_MODEL` | default: the ADK model without its `openai/` prefix | LangChain model id of the server planner. |
@@ -580,8 +581,9 @@ should be updated or removed: the new sample keys are `A2AT_SAMPLE_HTTP_TIMEOUT_
 optional A2A gateway `8001`, all on `127.0.0.1`. `run_demo.py` writes these into the per-run `.env`
 it hands to the child processes. The UI binds loopback by default; `--ui-host 0.0.0.0` (or
 `A2AT_SAMPLE_UI_HOST=0.0.0.0`) exposes it on all interfaces. The server-to-UI trace POST still
-targets `127.0.0.1`, which is correct when the UI and server run on the same host. The demo UI and
-gateway have no authentication, so only expose them on a trusted network.
+targets `127.0.0.1`, which is correct when the UI and server run on the same host. The UI, the
+gateway and the server stay open only on loopback: binding a non-loopback address requires the
+matching token (`A2AT_SAMPLE_AUTH_TOKEN` or `A2AT_SAMPLE_SERVER_AUTH_TOKEN`).
 
 ## 7. Testing and acceptance
 
@@ -589,13 +591,14 @@ Run from `a2a-t-sample/ran-energy-saving`, with the sample dependencies installe
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-python -m ruff check shared agents protocol web tests run_demo.py
+python -m ruff check shared protocol demo tests run_demo.py
+uvx --from ty==0.0.92 ty check .
 ```
 
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (452 tests). What it covers:
+The suite is fully offline and deterministic (467 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -603,14 +606,14 @@ The suite is fully offline and deterministic (452 tests). What it covers:
 | `test_negotiation_gate.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, and the real offline server. |
 | `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
 | `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout, durable session storage, the in-memory fallback and the retention sweep. |
-| `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state. |
+| `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state, plus a secured server with the real SDK client. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
 | `test_web_ui.py` | `/api/meta`, `/api/tasks`, `/api/client/runs`, `/api/client/conversations`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server planner/tool spans, `trace.json`) and a real manual decision flow. |
 | `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs and CSS tokens, every element id used by `main.js` exists in the shell; runs `node --check` on every JS module and the in-repo `tests/js` store, i18n and real-frame harnesses (skipped without Node). |
 | `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, gate delegation, AgentCard extensions, registry payload. |
 | `test_server_planner.py` | Scripted planner sequence, guarded tool order, offline/live model selection, prompt content. |
-| `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, read-only helpers. |
-| `test_client_service.py` | Run persistence, conversation memory, one active run per conversation, failure/interrupt handling. |
+| `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, atomic claim conflicts, the v1→v2 migration, read-only helpers. |
+| `test_client_service.py` | Run persistence, conversation memory, one active run per conversation across two managers, dead-owner reclaim, failure/interrupt handling, run metrics. |
 | `test_client_gateway.py` | Inbound A2A message -> one run -> report artifact, conflict handling, cancellation, gateway card. |
 | `test_sqlite_task_store.py` | Task save/get/delete, list filters/pagination, summaries/run ids, concurrent saves, read-only missing DB. |
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
@@ -619,8 +622,10 @@ The suite is fully offline and deterministic (452 tests). What it covers:
 | `test_logging_setup.py` | Text/JSON format, context propagation into child tasks, credential redaction, and the environment-driven configuration. |
 | `test_demo_boundary.py` | A fresh interpreter imports every core module and must not load `demo.*`; the runtime rejects a call without a run catalog. |
 | `test_sqlite.py` | Shared connection settings, ordered migrations, newer-version rejection, read-only access that never creates the file. |
-| `test_http_security.py` | Loopback bind policy, bearer middleware, `/health` and `/ready`, and the Web UI token wiring. |
-| `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, a foreign listener is refused. |
+| `test_http_security.py` | Loopback bind policy, bearer middleware, public path patterns, `/health` and `/ready`, and the Web UI token wiring. |
+| `test_server_auth.py` | Client→server bearer: default-deny on message/task and `/{tenant}` routes, public AgentCard and health, card security scheme, client header. |
+| `test_metrics.py` | Counter/gauge/summary rendering, label escaping, reset semantics, and the `/metrics` text exposition. |
+| `test_run_demo.py` | Launcher defaults and PID reuse: compatible metadata reuses, a model-mode/language/token mismatch restarts, both SQLite paths are written, a foreign listener is refused. |
 
 The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthetic frames and
 `frames.test.mjs` replays the real SSE frames of the offline integration run. Both run from
@@ -715,14 +720,19 @@ The sample is deliberately a prototype. Before production:
   `direct` discovery with a stable AgentCard endpoint.
 - **Webhook security.** `A2AT_SAMPLE_WEBHOOK_TOKEN` is a static demo token. Use per-client secrets,
   rotation, replay protection, and TLS; treat the receiver as an exposed HTTP endpoint.
-- **Authentication and TLS.** The Web UI `/api/*` routes and the inbound gateway A2A routes accept
-  an optional bearer token (`A2AT_SAMPLE_AUTH_TOKEN`); a non-loopback bind without it fails at
-  startup. The A2A server and the mock registry remain open in the sample. Terminate TLS and add
-  authentication/authorization for the A2A server at its gateway; `A2A-Version: 1.0` and the
+- **Authentication and TLS.** Two independent boundaries: `A2AT_SAMPLE_AUTH_TOKEN` guards the
+  inbound Web UI `/api/*` and gateway routes, and `A2AT_SAMPLE_SERVER_AUTH_TOKEN` guards the A2A
+  server (the client presents it, the card declares the scheme). Both fail a non-loopback bind when
+  unset. The trace ingest route keeps its run-scoped token instead of the user bearer. The mock
+  registry remains open. Terminate TLS at the deployment gateway; `A2A-Version: 1.0` and the
   AgentCard are not security controls.
 - **Health and readiness.** The Web UI, the gateway and the server expose `/health` (liveness) and
   `/ready` (SQLite reachable). Wire them into the platform probe instead of probing a business
   route.
+- **Metrics.** `/metrics` serves Prometheus text on all three processes: client runs by status and
+  final state, in-flight runs, run duration, negotiation rounds by side, and server task outcomes.
+  The registry is per process, so scrape every process (or aggregate in your collector). The route
+  is bearer-protected whenever a token is configured.
 - **Model governance.** Live mode sends prompts and extracted parameters to the configured model
   endpoint, and the server LangGraph planner sends the accepted Task-T plus tool results. Apply data
   classification, redaction, rate limits, and provider agreements. Keep
@@ -733,9 +743,11 @@ The sample is deliberately a prototype. Before production:
   `resources/mock_llm/`, and `demo/scenario.py` exist to make demos and tests reproducible; do
   not ship them as production paths.
 - **Run concurrency.** The client service allows one active run per conversation and independent
-  conversations concurrently; the Web UI is still a developer tool, not a multi-tenant console.
-  Multi-process deployments also need a shared concurrency/locking mechanism beyond the per-process
-  check.
+  conversations concurrently. A partial unique index in the client database makes the claim atomic
+  across processes sharing that database (the Web UI and the gateway). Liveness of the owning
+  process is checked through its PID, so this guarantee is same-host only; for multiple hosts use an
+  external lease (for example a database row with a heartbeat) and do not reuse PIDs as identity.
+  The Web UI is still a developer tool, not a multi-tenant console.
 - **SDK scope.** This sample does not modify `src/a2a_t/`. SDK defects should be handled as
   separate SDK changes, not patched inside the sample.
 - **Gemini Enterprise.** Gemini Enterprise consumes an A2A AgentCard registered in Google Cloud
@@ -796,7 +808,8 @@ The sample is deliberately a prototype. Before production:
 | [`demo/scenario.py`](demo/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
 | [`shared/sqlite.py`](shared/sqlite.py) | Shared connection settings, read-only access, `user_version` and the ordered migration runner. |
-| [`shared/http_security.py`](shared/http_security.py) | Loopback bind policy, bearer middleware, `/health` and `/ready` helpers. |
+| [`shared/http_security.py`](shared/http_security.py) | Loopback bind policy, bearer middleware, `/health`, `/ready` and `/metrics` helpers. |
+| [`shared/metrics.py`](shared/metrics.py) | Dependency-free counter/gauge/summary registry and the Prometheus text renderer. |
 | [`demo/ran_data.py`](demo/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | In-memory RAN dataset, plan evaluation, and process-local plan store. |
 | [`demo/scripted_llm.py`](demo/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | Scripted SDK `LLMClient` registered with the official factory; schema-routed canned responses. |
 | [`demo/adk_fake_model.py`](demo/adk_fake_model.py) | Deterministic client ADK `BaseLlm` used offline and in tests. |

@@ -267,7 +267,7 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 | --- | --- | --- |
 | `DecisionProviderError: ... no parseable NegotiationDecision` | 模型输出不是 JSON | 收紧提示词；保留一次纠正重试；离线用 fallback |
 | 网关拒绝 accept | 没有用协商结果重填 Task-T | 把 `filled_params` 交给 `generate_task_prompt_from_data_with_schema` |
-| HTTP 409 `run_conflict` | 同一会话已有运行 | 等待结束或换会话；并发检查是进程内的 |
+| HTTP 409 `run_conflict` | 同一会话已有运行 | 等待结束或换会话；客户端数据库的部分唯一索引保证跨进程互斥 |
 
 ## 4. 网管侧开发指南（操作）
 
@@ -455,7 +455,8 @@ executor = build_negotiation_executor(
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | 默认 `7`（>= 1） | 决策智能体会话作为审计数据保留的天数，到期由启动/定期清扫删除。 |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | 默认 `127.0.0.1` / `8001` | 可选入站 A2A Gateway 的绑定与 AgentCard 对外接口。 |
 | `A2AT_SAMPLE_GATEWAY_TASK_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/gateway-task-status.sqlite3` | 入站 Gateway 的 Task 存储绝对 SQLite 路径。 |
-| `A2AT_SAMPLE_AUTH_TOKEN` | 未设置 = 开放（仅回环） | Web UI `/api/*` 与入站 Gateway A2A 路由的 Bearer token。绑定非回环地址却未配置时启动失败。 |
+| `A2AT_SAMPLE_AUTH_TOKEN` | 未设置 = 开放（仅回环） | Web UI `/api/*` 与入站 Gateway A2A 路由的 Bearer token。绑定非回环地址却未配置时启动失败。trace ingest 路由例外，它使用每次运行独立的 `A2AT_SAMPLE_TRACE_TOKEN`。 |
+| `A2AT_SAMPLE_SERVER_AUTH_TOKEN` | 未设置 = 开放（仅回环） | A2A 服务端的服务 token。客户端在每次 A2A 调用中携带；服务端除 AgentCard 与健康检查外都要求它，并在卡片上声明 bearer scheme。服务端绑定非回环地址却未配置时启动失败。 |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0`（默认）、`1` | 是否把 Gateway AgentCard 注册到注册中心。 |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | 默认 `information` | 入站 Gateway 请求使用的场景。 |
 | `A2AT_SAMPLE_PLANNER_MODEL` | 默认：ADK 模型去掉 `openai/` 前缀 | 服务端 planner 的 LangChain 模型 id。 |
@@ -483,7 +484,7 @@ executor = build_negotiation_executor(
 
 已有的 `.env` 若设置了 `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` 或 `A2AT_LLM_TIMEOUT_SECONDS=60`，应更新或删除：新的样例键为 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`、`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`、`A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`。
 
-**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`、可选 A2A Gateway `8001`（均绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给子进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。演示 UI 与 Gateway 没有认证，请只在可信网络中暴露。
+**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`、可选 A2A Gateway `8001`（均绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给子进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。UI、Gateway 与服务端只在回环地址上开放；绑定非回环地址必须配置对应 token（`A2AT_SAMPLE_AUTH_TOKEN` 或 `A2AT_SAMPLE_SERVER_AUTH_TOKEN`）。
 
 ## 7. 测试与验收
 
@@ -491,12 +492,13 @@ executor = build_negotiation_executor(
 
 ```bash
 PYTHONPATH=. python -m pytest tests -q
-python -m ruff check shared agents protocol web tests run_demo.py
+python -m ruff check shared protocol demo tests run_demo.py
+uvx --from ty==0.0.92 ty check .
 ```
 
 （`python` 必须是 §1.1 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（452 个测试）。覆盖范围：
+测试套件完全离线且确定性（467 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -504,14 +506,14 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_negotiation_gate.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理，以及真实离线服务端。 |
 | `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
 | `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时、会话落盘、内存降级与保留期清扫。 |
-| `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态。 |
+| `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态；另含带鉴权服务端与真实 SDK 客户端的组合。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
 | `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
 | `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页与 CSS token、`main.js` 用到的每个元素 id 都存在于页面；`node --check` 全部 JS，并运行仓库内 `tests/js` 的 store、i18n 与真实帧 harness（无 Node 时跳过）。 |
 | `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、网关委托、AgentCard 扩展、注册载荷。 |
 | `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
-| `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、只读助手。 |
-| `test_client_service.py` | 运行持久化、会话记忆、每会话单活跃运行、失败/中断处理。 |
+| `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、原子 claim 冲突、v1→v2 迁移、只读助手。 |
+| `test_client_service.py` | 运行持久化、会话记忆、两个 manager 之间的每会话单活跃运行、死进程回收、失败/中断处理、运行指标。 |
 | `test_client_gateway.py` | 入站 A2A 消息 -> 一次运行 -> 报告 artifact、冲突处理、取消、Gateway 卡片。 |
 | `test_sqlite_task_store.py` | Task save/get/delete、列表过滤/分页、摘要/run id、并发保存、缺失 DB 的只读行为。 |
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
@@ -520,8 +522,10 @@ python -m ruff check shared agents protocol web tests run_demo.py
 | `test_logging_setup.py` | text/JSON 格式、上下文向子任务传播、凭据脱敏、环境变量驱动配置。 |
 | `test_demo_boundary.py` | 全新解释器导入全部核心模块，断言不加载 `demo.*`；缺少 run catalog 时运行时直接拒绝。 |
 | `test_sqlite.py` | 共用连接设置、有序迁移、拒绝更新版本、只读访问不创建文件。 |
-| `test_http_security.py` | 回环绑定策略、Bearer 中间件、`/health` 与 `/ready`、Web UI token 接线。 |
-| `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，外来监听则拒绝。 |
+| `test_http_security.py` | 回环绑定策略、Bearer 中间件、公开路径模式、`/health` 与 `/ready`、Web UI token 接线。 |
+| `test_server_auth.py` | 客户端→服务端 Bearer：message/task 与 `/{tenant}` 路由默认拒绝、AgentCard 与健康检查公开、卡片安全声明、客户端请求头。 |
+| `test_metrics.py` | Counter/Gauge/Summary 渲染、标签转义、reset 语义、`/metrics` 文本输出。 |
+| `test_run_demo.py` | 启动器默认值与 PID 复用：元数据匹配则复用，模型模式/语言/token 不一致则重启，两套 SQLite 路径都会写入，外来监听则拒绝。 |
 
 JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
 
@@ -590,12 +594,13 @@ python run_demo.py --scenario target --mode auto --model-mode live
 - **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
-- **鉴权与 TLS。** Web UI 的 `/api/*` 与入站 Gateway 的 A2A 路由支持可选 Bearer token（`A2AT_SAMPLE_AUTH_TOKEN`）；绑定非回环地址却未配置时启动失败。A2A 服务端与 mock 注册中心在本样例中仍为开放。应在 A2A 服务端前置网关终止 TLS 并增加认证/授权；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
+- **鉴权与 TLS。** 两个独立边界：`A2AT_SAMPLE_AUTH_TOKEN` 保护入站 Web UI `/api/*` 与 Gateway 路由；`A2AT_SAMPLE_SERVER_AUTH_TOKEN` 保护 A2A 服务端（客户端携带，卡片声明 scheme）。两者在绑定非回环地址却未配置时都会启动失败。trace ingest 路由使用每次运行的 trace token，而不是用户 Bearer。mock 注册中心仍为开放。应在部署网关终止 TLS；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
 - **健康检查。** Web UI、Gateway 与服务端都提供 `/health`（存活）与 `/ready`（SQLite 可访问）。平台探针应使用它们，而不是业务路由。
+- **指标。** 三个进程都通过 `/metrics` 输出 Prometheus 文本：客户端运行状态/终态、在途运行、运行耗时、按侧与轮次的协商消息、服务端任务终态。指标注册表是进程内的，应逐个进程抓取（或由采集器聚合）。配置 token 时该路由受 Bearer 保护。
 - **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点，服务端 LangGraph planner 还会发送已接受的 Task-T 与工具结果。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
 - **协议正确性由确定性代码掌握。** round、performative、终态与 Task 生命周期必须留在确定性代码中；LLM 只负责意图、文本与工具调用。
 - **离线机制仅供测试。** `demo/scripted_llm.py`、`demo/adk_fake_model.py`、`resources/mock_llm/` 与 `demo/scenario.py` 用于可复现的演示与测试，不要作为生产路径发布。
-- **运行并发。** 客户端服务允许每个会话一个活跃运行，不同会话可并发；Web UI 仍是开发者工具，不是多租户控制台。多进程部署还需要进程外的共享并发/锁机制。
+- **运行并发。** 客户端服务允许每个会话一个活跃运行，不同会话可并发。客户端数据库的部分唯一索引使 claim 在共享该数据库的多个进程（Web UI 与 Gateway）之间也是原子的。owner 进程的存活通过 PID 判断，因此该保证仅限同机；多主机部署应使用外部租约（例如带心跳的数据库行），不要把 PID 当作身份。Web UI 仍是开发者工具，不是多租户控制台。
 - **SDK 范围。** 本样例不修改 `src/a2a_t/`。SDK 缺陷应作为独立 SDK 变更处理，不要在样例内打补丁。
 - **Gemini Enterprise。** Gemini Enterprise 通过 Google Cloud Agent Registry 消费 A2A AgentCard；卡片声明服务 URL 与接口，而对话连续性仍由智能体自己负责（`contextId`/`taskId` + 持久化会话存储）。本样例的可选 Gateway 就是这个入站接口，客户端 `conversations`/`turns` 库就是记忆缝。参考官方注册指南：<https://docs.cloud.google.com/gemini/enterprise/docs/register-and-manage-an-adk-agent>。
 
@@ -646,6 +651,9 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`demo/plan_evaluator.py`](demo/plan_evaluator.py) | `RanDataPlanEvaluator`：反提议方案的可行性与修订。 |
 | [`shared/agent_card.py`](shared/agent_card.py) | 客户端（服务发现）与服务端（构建 AgentCard）共享的身份常量。 |
 | [`shared/sdk_env.py`](shared/sdk_env.py) | 两个运行时共用的每次运行 SDK `.env` 构建器（消除 client↔server 导入）。 |
+| [`shared/sqlite.py`](shared/sqlite.py) | 共用连接设置、只读访问、`user_version` 与有序迁移执行器。 |
+| [`shared/http_security.py`](shared/http_security.py) | 回环绑定策略、Bearer 中间件、`/health`、`/ready` 与 `/metrics` 助手。 |
+| [`shared/metrics.py`](shared/metrics.py) | 无依赖的 Counter/Gauge/Summary 注册表与 Prometheus 文本渲染。 |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision`（客户端 `output_schema`）与 Provider 视角的提议视图。 |
 | [`demo/scenario.py`](demo/scenario.py) | 五个场景定义：请求、期望 performative/round 序列、终态、离线决策。 |
 | [`shared/task_schema.py`](shared/task_schema.py) | 服务端校验与客户端 accept 重填共用的调用方参数 schema。 |
