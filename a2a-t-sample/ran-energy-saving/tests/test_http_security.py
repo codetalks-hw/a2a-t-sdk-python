@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import httpx
@@ -66,6 +67,34 @@ async def test_protected_routes_require_the_bearer_token() -> None:
     assert wrong.status_code == 401
     assert authorized.status_code == 200
     assert health.status_code == 200
+
+
+async def test_public_path_patterns_bypass_the_bearer_token() -> None:
+    async def endpoint(request: object) -> JSONResponse:
+        del request
+        return JSONResponse({"ok": True})
+
+    app = Starlette(
+        routes=[
+            Route("/api/runs/{run_id}/trace", endpoint, methods=["POST"]),
+            Route("/api/other", endpoint),
+        ],
+        middleware=[
+            Middleware(
+                BearerAuthMiddleware,
+                token="secret",
+                protected_prefixes=("/api/",),
+                public_path_patterns=(re.compile(r"/api/runs/[^/]+/trace"),),
+            )
+        ],
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        trace = await client.post("/api/runs/run-1/trace", json={})
+        other = await client.get("/api/other")
+
+    assert trace.status_code == 200
+    assert other.status_code == 401
 
 
 async def test_health_and_readiness_reflect_the_dependency() -> None:

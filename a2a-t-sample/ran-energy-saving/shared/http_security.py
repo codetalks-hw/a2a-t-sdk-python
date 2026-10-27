@@ -9,6 +9,7 @@ authentication at its gateway.
 from __future__ import annotations
 
 import hmac
+import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from typing import Any, Final
@@ -59,10 +60,14 @@ class BearerAuthMiddleware:
         *,
         token: str,
         protected_prefixes: tuple[str, ...] = ("/api/",),
+        public_paths: frozenset[str] | None = None,
+        public_path_patterns: tuple[re.Pattern[str], ...] = (),
     ) -> None:
         self._app = app
         self._token = token.strip()
         self._protected_prefixes = protected_prefixes
+        self._public_paths = PUBLIC_PATHS if public_paths is None else public_paths
+        self._public_path_patterns = public_path_patterns
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         """Authenticate one HTTP request before delegating to the wrapped app."""
@@ -70,7 +75,7 @@ class BearerAuthMiddleware:
             await self._app(scope, receive, send)
             return
         path = str(scope.get("path", ""))
-        if path in PUBLIC_PATHS or not self._is_protected(path):
+        if self._is_public(path) or not self._is_protected(path):
             await self._app(scope, receive, send)
             return
         supplied = _bearer_token(scope.get("headers", ()))
@@ -83,6 +88,12 @@ class BearerAuthMiddleware:
             headers={"WWW-Authenticate": "Bearer"},
         )
         await response(scope, receive, send)
+
+    def _is_public(self, path: str) -> bool:
+        """Return whether ``path`` is exempt from the bearer token."""
+        return path in self._public_paths or any(
+            pattern.fullmatch(path) for pattern in self._public_path_patterns
+        )
 
     def _is_protected(self, path: str) -> bool:
         """Return whether ``path`` belongs to a protected prefix."""

@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -74,6 +75,9 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 _LOGGER = logging.getLogger("ran_energy_saving.web")
+
+#: Trace ingest path; it is exempt from the user bearer and authenticated by the trace token.
+TRACE_INGEST_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"/api/runs/[^/]+/trace")
 
 #: Static directory of the single page.
 STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
@@ -647,7 +651,16 @@ def create_app(
         ],
         lifespan=lifespan,
         middleware=(
-            [Middleware(BearerAuthMiddleware, token=config.auth_token, protected_prefixes=("/api/",))]
+            [
+                Middleware(
+                    BearerAuthMiddleware,
+                    token=config.auth_token,
+                    protected_prefixes=("/api/",),
+                    # The trace ingest route carries the run-scoped local trace token instead of
+                    # the user bearer; the handler still rejects a wrong or absent trace token.
+                    public_path_patterns=(TRACE_INGEST_PATH_PATTERN,),
+                )
+            ]
             if config.auth_token
             else []
         ),

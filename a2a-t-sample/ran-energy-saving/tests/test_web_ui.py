@@ -870,6 +870,44 @@ async def test_live_decision_is_recorded_before_the_task_events(client: httpx.As
     assert entries[decision_index]["spanId"]
 
 
+async def test_trace_ingestion_stays_reachable_when_api_auth_is_enabled(
+    offline_config: SampleConfig,
+    factory: Callable[..., Any],
+    tmp_path: Path,
+) -> None:
+    """The run-scoped trace token works on its own; every other API route keeps the bearer."""
+    app = create_app(
+        replace(offline_config, auth_token="secret"),
+        runs_dir=tmp_path,
+        runtime_factory=factory,
+        finished_grace_seconds=0.0,
+    )
+    manager = app.state.run_manager
+    run = await manager.start("information", "auto", "sse")
+    deadline = time.monotonic() + 5.0
+    while not run.finished() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert run.finished()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        accepted = await client.post(
+            f"/api/runs/{run.run_id}/trace",
+            json=[{"spanId": "server-span-auth", "kind": "tool", "phase": "execution"}],
+            headers={"x-a2at-trace-token": TRACE_TOKEN},
+        )
+        rejected = await client.post(
+            f"/api/runs/{run.run_id}/trace",
+            json=[{"spanId": "server-span-bad", "kind": "tool", "phase": "execution"}],
+            headers={"x-a2at-trace-token": "wrong"},
+        )
+        other = await client.get("/api/meta")
+
+    assert accepted.status_code == 202
+    assert rejected.status_code == 403
+    assert other.status_code == 401
+
+
 async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -> None:
     start = await client.post(
         "/api/runs", json={"scenario": "information", "mode": "auto", "transport": "sse"}
