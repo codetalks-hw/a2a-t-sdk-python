@@ -24,6 +24,7 @@ from protocol.client_store import (
 )
 from protocol.decision_provider import CLIENT_APP_NAME, CLIENT_USER_ID
 from shared.config import SampleConfig
+from shared.metrics import render_prometheus, reset_metrics
 from shared.models import NegotiationDecision, NegotiationProposeView
 
 
@@ -337,6 +338,23 @@ async def test_shutdown_marks_running_run_interrupted(
     stored = await store.get_run(run.run_id)
     assert stored is not None
     assert stored.status == "interrupted"
+
+
+async def test_a_finished_run_records_metrics(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    reset_metrics()
+    manager, _, _ = _manager(tmp_path, offline_config)
+    run = await manager.start("information", "auto", "sse", user_request="measure")
+    await _finish(manager, run.run_id)
+
+    text = render_prometheus()
+    assert 'a2at_client_runs_total{status="finished",final_state="task_completed"} 1' in text
+    assert "a2at_client_runs_in_flight 0" in text
+    assert "a2at_client_run_duration_seconds_count 1" in text
+    assert 'a2at_negotiation_rounds_total{role="server",round="1"} 1' in text
+    assert 'a2at_negotiation_rounds_total{role="client",round="1"} 1' in text
 
 
 async def test_second_manager_cannot_start_an_active_conversation(

@@ -51,6 +51,7 @@ from protocol.server_executor import (
     build_negotiation_executor,
 )
 from shared.config import MODEL_MODE_LIVE, SampleConfig
+from shared.metrics import render_prometheus, reset_metrics
 
 CONTEXT_ID = "ctx-executor"
 TASK_PROMPT = "Create a RAN energy saving task in the Songshanhu area."
@@ -200,6 +201,7 @@ async def test_langgraph_executor_publishes_task_artifacts_and_report(
     offline_config: SampleConfig,
 ) -> None:
     ran_data.reset()
+    reset_metrics()
     context = _make_context(
         negotiation={"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
     )
@@ -212,6 +214,8 @@ async def test_langgraph_executor_publishes_task_artifacts_and_report(
         await executor.execute(context, queue)
     finally:
         ran_data.reset()
+
+    assert 'a2at_server_tasks_total{state="completed"} 1' in render_prometheus()
 
     tasks = [event for event in queue.events if isinstance(event, Task)]
     artifacts = [event for event in queue.events if isinstance(event, TaskArtifactUpdateEvent)]
@@ -243,6 +247,7 @@ async def test_langgraph_executor_publishes_task_artifacts_and_report(
 async def test_langgraph_executor_fails_when_the_planner_cannot_generate_a_report(
     offline_config: SampleConfig,
 ) -> None:
+    reset_metrics()
     context = _make_context()
     executor = LangGraphTaskExecutor(
         agent_factory=server_agent_factory(
@@ -261,6 +266,7 @@ async def test_langgraph_executor_fails_when_the_planner_cannot_generate_a_repor
         isinstance(event, TaskArtifactUpdateEvent) and event.artifact.name == REPORT_ARTIFACT_NAME
         for event in queue.events
     )
+    assert 'a2at_server_tasks_total{state="failed"} 1' in render_prometheus()
 
 
 def test_build_negotiation_executor_wraps_the_langgraph_executor(

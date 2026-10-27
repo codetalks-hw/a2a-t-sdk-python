@@ -61,6 +61,7 @@ from shared.config import SERVER_AUTH_TOKEN_ENV_KEY, SampleConfig, load_config
 from shared.http_security import (
     BearerAuthMiddleware,
     install_health_routes,
+    install_metrics_route,
     sqlite_ready,
     validate_bind_security,
 )
@@ -293,6 +294,7 @@ def build_rest_app(
         service="ran-energy-saving-server",
         checks={"task_store": lambda: sqlite_ready(task_db_path)},
     )
+    install_metrics_route(app)
     app.state.request_handler = request_handler
     app.state.task_store = resolved_task_store
     return app

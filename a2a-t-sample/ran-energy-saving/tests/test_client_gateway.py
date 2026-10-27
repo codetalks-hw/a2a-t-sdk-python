@@ -293,7 +293,9 @@ async def test_gateway_rejects_requests_without_the_token(
         unauthorized = await client.get("/tasks")
         authorized = await client.get("/tasks", headers={"Authorization": "Bearer secret"})
         health = await client.get("/health")
+        metrics = await client.get("/metrics")
 
     assert unauthorized.status_code == 401
     assert authorized.status_code != 401
     assert health.status_code == 200
+    assert metrics.status_code == 401

@@ -40,6 +40,7 @@ async def test_a2a_routes_require_the_server_bearer() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         card = await client.get("/.well-known/agent-card.json")
         health = await client.get("/health")
+        metrics = await client.get("/metrics")
         anonymous = await client.post("/message:send", json={})
         tenant = await client.post("/tenant-a/message:send", json={})
         authorized = await client.post(
@@ -50,6 +51,7 @@ async def test_a2a_routes_require_the_server_bearer() -> None:
 
     assert card.status_code == 200
     assert health.status_code == 200
+    assert metrics.status_code == 401
     assert anonymous.status_code == 401
     assert tenant.status_code == 401
     assert authorized.status_code != 401

@@ -42,6 +42,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from shared.config import SampleConfig
 from shared.logging_setup import log_context
+from shared.metrics import SERVER_TASKS_TOTAL
 from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
 from protocol.messages import (
@@ -359,6 +360,7 @@ class LangGraphTaskExecutor(AgentExecutor):
                 _LOGGER.warning(
                     "planner exceeded %s steps for task %s", self.recursion_limit, task.id
                 )
+                SERVER_TASKS_TOTAL.inc({"state": "failed"})
                 await updater.failed(
                     message=updater.new_agent_message(
                         [
@@ -373,6 +375,7 @@ class LangGraphTaskExecutor(AgentExecutor):
                 )
             except Exception as exc:  # noqa: BLE001 - the Task must always reach a terminal state
                 _LOGGER.exception("unexpected LangGraph executor failure")
+                SERVER_TASKS_TOTAL.inc({"state": "failed"})
                 await updater.failed(
                     message=updater.new_agent_message(
                         [Part(text=f"The energy-saving task failed unexpectedly: {exc}")]
@@ -469,6 +472,7 @@ class LangGraphTaskExecutor(AgentExecutor):
                 else "The planner stopped without generating a report."
             )
             _LOGGER.warning("task failed: %s", reason)
+            SERVER_TASKS_TOTAL.inc({"state": "failed"})
             await updater.failed(
                 message=updater.new_agent_message([Part(text=reason)])
             )
@@ -489,6 +493,7 @@ class LangGraphTaskExecutor(AgentExecutor):
             [Part(text=FINAL_TASK_TEXT)], metadata=metadata
         )
         _LOGGER.info("task completed: %s", summary[:120])
+        SERVER_TASKS_TOTAL.inc({"state": "completed"})
         await updater.update_status(
             TaskState.TASK_STATE_COMPLETED,
             message=final_message,
@@ -507,6 +512,7 @@ class LangGraphTaskExecutor(AgentExecutor):
             context.task_id or "",
             context.context_id or "",
         )
+        SERVER_TASKS_TOTAL.inc({"state": "cancelled"})
         await updater.cancel()
 
 

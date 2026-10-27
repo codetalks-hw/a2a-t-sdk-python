@@ -57,6 +57,7 @@ from shared.config import GATEWAY_SCENARIO_ENV_KEY, SampleConfig, load_config
 from shared.http_security import (
     BearerAuthMiddleware,
     install_health_routes,
+    install_metrics_route,
     sqlite_ready,
     validate_bind_security,
 )
@@ -306,7 +307,7 @@ def build_gateway_app(
                 Middleware(
                     BearerAuthMiddleware,
                     token=config.auth_token,
-                    protected_prefixes=("/message", "/tasks"),
+                    protected_prefixes=("/message", "/tasks", "/metrics"),
                 )
             ]
             if config.auth_token
@@ -321,6 +322,7 @@ def build_gateway_app(
             "gateway_task_store": lambda: sqlite_ready(config.gateway_task_db_path),
         },
     )
+    install_metrics_route(app)
     app.state.agent_card = card
     app.state.gateway_task_store = resolved_task_store
     app.state.gateway_executor = executor

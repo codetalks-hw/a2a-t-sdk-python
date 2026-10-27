@@ -58,6 +58,7 @@ from shared.config import (
 from shared.http_security import (
     BearerAuthMiddleware,
     install_health_routes,
+    install_metrics_route,
     sqlite_ready,
     validate_bind_security,
 )
@@ -655,7 +656,7 @@ def create_app(
                 Middleware(
                     BearerAuthMiddleware,
                     token=config.auth_token,
-                    protected_prefixes=("/api/",),
+                    protected_prefixes=("/api/", "/metrics"),
                     # The trace ingest route carries the run-scoped local trace token instead of
                     # the user bearer; the handler still rejects a wrong or absent trace token.
                     public_path_patterns=(TRACE_INGEST_PATH_PATTERN,),
@@ -670,6 +671,7 @@ def create_app(
         service="ran-energy-saving-web",
         checks={"client_store": lambda: sqlite_ready(config.client_db_path)},
     )
+    install_metrics_route(app)
     app.state.run_manager = manager
     app.state.client_store = client_store
     app.state.config = config

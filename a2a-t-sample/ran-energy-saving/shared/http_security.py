@@ -17,8 +17,9 @@ from typing import Any, Final
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
+from shared.metrics import render_prometheus
 from shared.sqlite import readonly_connection
 
 #: Hosts treated as local (no token required to bind them).
@@ -147,6 +148,20 @@ def install_health_routes(
     app.state.readiness_checks = dict(checks)
     app.router.routes.insert(0, Route("/health", health))
     app.router.routes.insert(1, Route("/ready", ready))
+
+
+def install_metrics_route(app: Starlette) -> None:
+    """Register ``GET /metrics`` with the Prometheus text exposition of this process."""
+    from starlette.routing import Route
+
+    async def metrics(request: Request) -> Response:
+        del request
+        return Response(
+            render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    app.router.routes.insert(0, Route("/metrics", metrics))
 
 
 async def health(request: Request) -> JSONResponse:

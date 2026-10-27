@@ -303,6 +303,14 @@ def _assert_seq_order(payloads: list[dict[str, Any]]) -> None:
     assert seqs == list(range(1, len(payloads) + 1))
 
 
+async def test_metrics_endpoint_is_served(client: httpx.AsyncClient) -> None:
+    response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "a2at_client_runs_total" in response.text
+
+
 async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/meta")
 
@@ -902,10 +910,12 @@ async def test_trace_ingestion_stays_reachable_when_api_auth_is_enabled(
             headers={"x-a2at-trace-token": "wrong"},
         )
         other = await client.get("/api/meta")
+        metrics = await client.get("/metrics")
 
     assert accepted.status_code == 202
     assert rejected.status_code == 403
     assert other.status_code == 401
+    assert metrics.status_code == 401
 
 
 async def test_trace_json_span_lookup_and_ingestion(client: httpx.AsyncClient) -> None:

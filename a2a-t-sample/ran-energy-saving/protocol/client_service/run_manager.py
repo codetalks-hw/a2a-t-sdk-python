@@ -15,6 +15,12 @@ from typing import Any, cast
 from a2a_t.core.metadata import NegotiationContext
 from shared.config import DISCOVERY_REGISTRY, SampleConfig
 from shared.logging_setup import log_context
+from shared.metrics import (
+    CLIENT_RUN_DURATION_SECONDS,
+    CLIENT_RUNS_IN_FLIGHT,
+    CLIENT_RUNS_TOTAL,
+    NEGOTIATION_ROUNDS_TOTAL,
+)
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.trace import (
     PHASE_DISPATCH,
@@ -235,16 +241,28 @@ class RunManager:
                 run.mode,
                 run.transport,
             )
+            CLIENT_RUNS_IN_FLIGHT.inc()
             started = time.monotonic()
             try:
                 await self._execute(run)
             finally:
+                duration = time.monotonic() - started
+                CLIENT_RUNS_IN_FLIGHT.dec()
+                CLIENT_RUN_DURATION_SECONDS.observe(duration)
+                CLIENT_RUNS_TOTAL.inc(
+                    {
+                        "status": run.status,
+                        "final_state": (
+                            run.result.final_state if run.result is not None else "none"
+                        ),
+                    }
+                )
                 _LOGGER.info(
                     "run finished: status=%s final_state=%s task_id=%s duration=%.2fs",
                     run.status,
                     run.result.final_state if run.result is not None else "-",
                     run.result.task_id if run.result is not None and run.result.task_id else "-",
-                    time.monotonic() - started,
+                    duration,
                 )
 
     def _reuse_run(self, record: ClientRunRecord) -> RunState:
@@ -295,6 +313,7 @@ class RunManager:
             # provider decisions; a manual decision panel only exists in manual mode.
             run.record_proposal(propose, session)
             run.proposals.append(propose)
+            NEGOTIATION_ROUNDS_TOTAL.inc({"role": "server", "round": session.round})
             if run.mode != MODE_MANUAL:
                 return
             run.pending_decision = True
@@ -325,6 +344,7 @@ class RunManager:
             session: NegotiationContext,
         ) -> None:
             run.record_decision(decision, propose, session=session)
+            NEGOTIATION_ROUNDS_TOTAL.inc({"role": "client", "round": session.round})
 
         def trace_sink(span: dict[str, object]) -> None:
             run.record_trace(span)
