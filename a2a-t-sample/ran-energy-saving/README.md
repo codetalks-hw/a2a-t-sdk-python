@@ -112,6 +112,10 @@ python run_demo.py --ui --scenario information --mode auto --model-mode offline
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 ```
 
+With `--gateway`, the OSS side is itself an A2A agent: an external caller such as Gemini Enterprise
+sends one request and receives progress notifications (negotiation and execution milestones) before
+the final energy-saving report, either on a stream or through a registered webhook.
+
 The page shows the run as a timeline: dispatch → task generation → validation → negotiation →
 resolution → NMS execution → report. Every row is labelled **OSS** or **NMS**, and the inspector
 shows the message or decision behind it. Installation, environment variables and the full command

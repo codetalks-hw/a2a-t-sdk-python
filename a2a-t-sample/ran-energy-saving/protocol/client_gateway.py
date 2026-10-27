@@ -14,8 +14,12 @@ external caller (Gemini Enterprise / console)
 ```
 
 One inbound message maps to one client run. The gateway deliberately supports only automatic
-decisions (the ADK agent); manual decisions belong to the Web UI. Negotiation progress is kept in
-the client store and the Web UI timeline; the inbound A2A Task returns the final report.
+decisions (the ADK agent); manual decisions belong to the Web UI.
+
+The inbound Task is not silent while the client negotiates: a mapper translates the run's internal
+milestones into outer ``WORKING`` status updates, so both ``message:stream`` callers and callers
+that registered a push-notification webhook receive negotiation and execution progress before the
+final report artifact. Raw proposals, prompts and tool results are never forwarded.
 
 The gateway is optional: the Web UI and the CLI work without it. ``run_demo.py --gateway`` starts it
 on ``A2AT_SAMPLE_GATEWAY_PORT`` (default 8001).
@@ -28,10 +32,11 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Final
 
+import httpx
 import uvicorn
 from a2a.helpers.proto_helpers import new_task_from_user_message
 from a2a.server.agent_execution.agent_executor import AgentExecutor
@@ -39,7 +44,13 @@ from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_rest_routes
+from a2a.server.tasks.base_push_notification_sender import BasePushNotificationSender
+from a2a.server.tasks.inmemory_push_notification_config_store import (
+    InMemoryPushNotificationConfigStore,
+)
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
+from a2a.server.tasks.push_notification_config_store import PushNotificationConfigStore
+from a2a.server.tasks.push_notification_sender import PushNotificationSender
 from a2a.server.tasks.task_store import TaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.types import (
@@ -69,7 +80,10 @@ from starlette.middleware import Middleware
 from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import RunConflictError, RunManager, RunState
 from protocol.client_store import SqliteClientStore
+from protocol.gateway_progress import GatewayProgressMapper
+from protocol.gateway_push import ValidatingPushConfigStore
 from protocol.run_spec import RunCatalog
+from protocol.sqlite_push_config_store import SqlitePushNotificationConfigStore
 from protocol.sqlite_task_store import SqliteTaskStore
 from protocol.transcript import DEFAULT_RUNS_DIR
 
@@ -79,7 +93,8 @@ _LOGGER = logging.getLogger("ran_energy_saving.client_gateway")
 GATEWAY_AGENT_NAME: Final[str] = "ran-energy-saving-client-gateway"
 GATEWAY_AGENT_DESCRIPTION: Final[str] = (
     "Client-side RAN energy-saving agent. Accepts a natural-language request, negotiates the "
-    "A2A-T Task-T with the RAN server, and returns the final energy-saving report."
+    "A2A-T Task-T with the RAN server, publishes progress, and returns the final energy-saving "
+    "report."
 )
 GATEWAY_SKILL_ID: Final[str] = "ran-energy-saving-request"
 GATEWAY_ARTIFACT_NAME: Final[str] = "energy saving intent report"
@@ -106,7 +121,7 @@ def build_gateway_agent_card(*, host: str, port: int) -> AgentCard:
         description=GATEWAY_AGENT_DESCRIPTION,
         version="1.0.0",
         provider=AgentProvider(organization=AGENT_CARD_ORGANIZATION, url=AGENT_CARD_PROVIDER_URL),
-        capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+        capabilities=AgentCapabilities(streaming=True, push_notifications=True),
         default_input_modes=["text/plain", "application/json"],
         default_output_modes=["text/plain", "application/json"],
         skills=[
@@ -198,6 +213,13 @@ class ClientGatewayExecutor(AgentExecutor):
             return
 
         self._runs_by_task[task.id] = run
+        # Publish the negotiation/execution milestones on the outer Task while the run is still
+        # in flight. The same status updates feed both message:stream and push notifications.
+        snapshot, queue = run.subscribe()
+        pump = asyncio.create_task(
+            self._publish_progress(snapshot, queue, updater),
+            name=f"gateway-progress-{task.id}",
+        )
         try:
             if run.task is not None:
                 await run.task
@@ -205,6 +227,9 @@ class ClientGatewayExecutor(AgentExecutor):
             await updater.cancel()
             raise
         finally:
+            with suppress(asyncio.CancelledError, Exception):
+                await pump
+            run.unsubscribe(queue)
             self._runs_by_task.pop(task.id, None)
 
         result = run.result
@@ -246,6 +271,52 @@ class ClientGatewayExecutor(AgentExecutor):
             message=updater.new_agent_message([Part(text=f"The request failed: {reason}")])
         )
 
+    async def _publish_progress(
+        self,
+        snapshot: list[dict[str, object]],
+        queue: asyncio.Queue[dict[str, object]],
+        updater: TaskUpdater,
+    ) -> None:
+        """Translate the run's broadcast messages into outer Task progress until it finishes.
+
+        Progress must never break the run: a mapping or transport error is logged and the pump
+        stops publishing, while the final report path continues.
+        """
+        mapper = GatewayProgressMapper()
+        try:
+            for message in snapshot:
+                await self._publish_progress_message(message, mapper, updater)
+                if message.get("type") == "finished":
+                    return
+            while True:
+                message = await queue.get()
+                await self._publish_progress_message(message, mapper, updater)
+                if message.get("type") == "finished":
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - progress must not fail the inbound Task
+            _LOGGER.exception("gateway progress publishing failed")
+
+    async def _publish_progress_message(
+        self,
+        message: dict[str, object],
+        mapper: GatewayProgressMapper,
+        updater: TaskUpdater,
+    ) -> None:
+        """Publish one mapped milestone, when it produces one."""
+        update = mapper.map(message)
+        if update is None:
+            return
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING,
+            message=updater.new_agent_message(
+                [Part(text=update.text)],
+                metadata=update.metadata,
+            ),
+        )
+        _LOGGER.info("gateway progress: %s", update.text)
+
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Cancel the client run backing one inbound Task."""
         del event_queue
@@ -265,6 +336,8 @@ def build_gateway_app(
     config: SampleConfig,
     service: RunManager,
     task_store: TaskStore | None = None,
+    push_config_store: PushNotificationConfigStore | None = None,
+    push_sender: PushNotificationSender | None = None,
     host: str | None = None,
     port: int | None = None,
 ) -> Starlette:
@@ -275,6 +348,10 @@ def build_gateway_app(
         service: client application service owning the runs.
         task_store: inbound Task store; defaults to the in-memory store. The demo launcher passes
             the SQLite store configured by ``A2AT_SAMPLE_GATEWAY_TASK_DB``.
+        push_config_store: webhook registration store; defaults to SQLite in the gateway Task
+            database, or memory when no database is configured.
+        push_sender: push-notification sender; defaults to the SDK sender over an owned httpx
+            client. Tests inject one over a mock transport.
         host: advertised host; defaults to the configured gateway host.
         port: advertised port; defaults to the configured gateway port.
     """
@@ -284,10 +361,23 @@ def build_gateway_app(
     card = build_gateway_agent_card(host=resolved_host, port=resolved_port)
     executor = ClientGatewayExecutor(service=service, config=config)
     resolved_task_store = task_store or InMemoryTaskStore()
+    inner_push_store = push_config_store or _build_push_config_store(config)
+    resolved_push_store = ValidatingPushConfigStore(inner_push_store)
+    owned_push_client: httpx.AsyncClient | None = None
+    if push_sender is None:
+        owned_push_client = httpx.AsyncClient(trust_env=False)
+        resolved_push_sender: PushNotificationSender = BasePushNotificationSender(
+            owned_push_client,
+            resolved_push_store,
+        )
+    else:
+        resolved_push_sender = push_sender
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=resolved_task_store,
         agent_card=card,
+        push_config_store=resolved_push_store,
+        push_sender=resolved_push_sender,
     )
 
     @asynccontextmanager
@@ -298,6 +388,8 @@ def build_gateway_app(
         await service.sweep_sessions()
         yield
         await service.shutdown()
+        if owned_push_client is not None:
+            await owned_push_client.aclose()
 
     app = Starlette(
         routes=[*create_agent_card_routes(card), *create_rest_routes(request_handler)],
@@ -325,10 +417,19 @@ def build_gateway_app(
     install_metrics_route(app)
     app.state.agent_card = card
     app.state.gateway_task_store = resolved_task_store
+    app.state.push_config_store = resolved_push_store
+    app.state.push_sender = resolved_push_sender
     app.state.gateway_executor = executor
     app.state.client_service = service
     app.state.config = config
     return app
+
+
+def _build_push_config_store(config: SampleConfig) -> PushNotificationConfigStore:
+    """Build the default webhook registration store of the gateway."""
+    if config.gateway_task_db_path:
+        return SqlitePushNotificationConfigStore(config.gateway_task_db_path)
+    return InMemoryPushNotificationConfigStore()
 
 
 def build_gateway_service(

@@ -283,6 +283,32 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 One inbound `message:send` starts one client run and returns the final report artifact; the inbound
 `contextId` becomes the client conversation. The gateway does not replace the outbound A2A-T flow.
 
+#### Progress notifications
+
+The inbound Task is not silent while the client negotiates with the RAN server. The gateway maps a
+small, stable set of internal milestones to outer `WORKING` status updates:
+
+| Milestone | Status text | Metadata |
+| --- | --- | --- |
+| request accepted | Request accepted. Negotiating with the RAN server. | `phase=dispatch` |
+| negotiation proposal | Negotiation round N: the RAN server proposed an `<kind>` negotiation. | `phase=negotiation`, `round`, `performative`, `kind` |
+| client decision | Negotiation round N: the client chose `<action>`. | `phase=negotiation`, `round`, `action` |
+| RAN task started | The RAN server accepted the task and started execution. | `phase=execution`, `state` |
+
+Both delivery paths carry the same events: `message:stream` forwards them on the open stream, and a
+`message:send` caller receives them through a webhook registered inline
+(`configuration.taskPushNotificationConfig`) or with `POST /tasks/{id}/pushNotificationConfigs`.
+The final report artifact and the terminal status are unchanged.
+
+Limits: at most 8 progress updates per Task, deduplicated by milestone. Trace spans, prompts, tool
+results and raw proposal content are never forwarded.
+
+The webhook URL is validated (absolute http(s), no embedded credentials; plain HTTP only on
+loopback). Registrations live in the gateway Task database table `push_notification_configs`
+(schema version 2) and survive a restart; without `A2AT_SAMPLE_GATEWAY_TASK_DB` they are in memory.
+The SDK sender attempts one POST per event and logs failures; production should add retry/queueing
+and an egress allowlist (SSRF).
+
 ### 3.5 Self-check
 
 - [ ] can discover the NMS AgentCard (registry or direct)
@@ -614,7 +640,7 @@ uvx --from ty==0.0.92 ty check .
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (472 tests). What it covers:
+The suite is fully offline and deterministic (484 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |
@@ -631,7 +657,9 @@ The suite is fully offline and deterministic (472 tests). What it covers:
 | `test_server_planner.py` | Scripted planner sequence, guarded tool order, offline/live model selection, prompt content. |
 | `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, atomic claim conflicts, the v1→v2 migration, read-only helpers. |
 | `test_client_service.py` | Run persistence, conversation memory, one active run per conversation across two managers, dead-owner reclaim, failure/interrupt handling, run metrics. |
-| `test_client_gateway.py` | Inbound A2A message -> one run -> report artifact, conflict handling, cancellation, gateway card. |
+| `test_client_gateway.py` | Inbound A2A message -> one run -> report artifact, progress statuses, `message:stream` delivery, inline push config to a webhook, conflict handling, cancellation, gateway card. |
+| `test_gateway_progress.py` | Milestone mapping, deduplication, progress cap, and ignoring traces/artifacts. |
+| `test_sqlite_push_config_store.py` | Push registration CRUD, owner scoping, dispatch across owners, restart survival, schema version 2. |
 | `test_sqlite_task_store.py` | Task save/get/delete, list filters/pagination, summaries/run ids, concurrent saves, read-only missing DB. |
 | `test_server_tools.py`, `test_ran_data.py` | The four tools and the in-memory dataset. |
 | `test_scripted_llm.py`, `test_adk_fake_model.py` | Schema routing and the deterministic client ADK model. |
@@ -722,8 +750,9 @@ The sample is deliberately a prototype. Before production:
   conversations/runs/negotiations (`protocol/client_store/`). `shared/sqlite.py` applies ordered
   schema migrations through `PRAGMA user_version`; production should still move to your database
   and migration tooling. Plans still
-  live in a process-local store (`demo/ran_data._PLANS`) and push configs use
-  `InMemoryPushNotificationConfigStore`. Client ADK decision sessions are kept as audit data for
+  live in a process-local store (`demo/ran_data._PLANS`). Inbound push registrations are persisted
+  in the gateway Task database; without that database they fall back to the SDK's in-memory store.
+  Client ADK decision sessions are kept as audit data for
   `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` (default 7) and then swept; they contain prompts and tool
   results, so set the window from your audit and data-protection requirements, and size the client
   database for it. The LangGraph NMS execution uses no persistent checkpointer; add one only if you
@@ -746,6 +775,11 @@ The sample is deliberately a prototype. Before production:
 - **Health and readiness.** The Web UI, the gateway and the server expose `/health` (liveness) and
   `/ready` (SQLite reachable). Wire them into the platform probe instead of probing a business
   route.
+- **Push delivery.** The gateway validates a caller-supplied webhook (absolute http(s), no embedded
+  credentials; plain HTTP only on loopback) and sends the A2A notification token. The SDK sender
+  makes one POST per event and logs failures; production needs retry/queueing, a dead-letter path and
+  an egress allowlist to prevent SSRF. Push registrations are stored in the gateway Task database, so
+  protect that file accordingly.
 - **Metrics.** `/metrics` serves Prometheus text on all three processes: client runs by status and
   final state, in-flight runs, run duration, negotiation rounds by side, and server task outcomes.
   The registry is per process, so scrape every process (or aggregate in your collector). The route
@@ -801,13 +835,16 @@ The sample is deliberately a prototype. Before production:
 | [`demo/task_t_precheck.py`](demo/task_t_precheck.py) | Demo `TaskTPrecheck`: missing required fields, overlapping target segments and impossible outage guarantees. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
 | [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `LangGraphTaskExecutor`: runs the ReAct planner and publishes the A2A Task lifecycle. No ADK. |
-| [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore` for persisted A2A Task state and the UI task summaries. |
+| [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore` for persisted A2A Task state and the UI task summaries; schema v2 also owns the gateway push-configuration table. |
 | [`protocol/server_app.py`](protocol/server_app.py) | Server assembly: AgentCard (declares `Task-T/v1` and `Negotiation-T/v1`), request handler, Starlette app, registry registration. |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | Client protocol flow: initial Task-T, multi-round negotiation, accept refill, and terminal handling over SSE or webhook. |
 | [`protocol/client_runtime.py`](protocol/client_runtime.py) | Client per-run assembly: per-run SDK `.env`, discovery, SDK client, transport, and decision provider. |
 | [`protocol/client_service/`](protocol/client_service) | Client application service split into `run_state.py` (run state, spans, decisions) and `run_manager.py` (lifecycle, conversations, persistence hooks). |
 | [`protocol/client_store/`](protocol/client_store) | Client persistence split into `store.py` (writes) and `reader.py` (read-only UI queries). |
-| [`protocol/client_gateway.py`](protocol/client_gateway.py) | Optional inbound A2A gateway: one inbound message -> one client run -> final report artifact. |
+| [`protocol/client_gateway.py`](protocol/client_gateway.py) | Optional inbound A2A gateway: one inbound message -> one client run -> progress statuses and the final report artifact. |
+| [`protocol/gateway_progress.py`](protocol/gateway_progress.py) | Maps run milestones to outer `WORKING` status updates (deduplicated, capped, no raw payloads). |
+| [`protocol/gateway_push.py`](protocol/gateway_push.py) | Webhook URL validation and the validating push-config store wrapper. |
+| [`protocol/sqlite_push_config_store.py`](protocol/sqlite_push_config_store.py) | SQLite push registrations in the gateway Task database, owner-scoped reads and dispatch across owners. |
 | [`protocol/decision_provider.py`](protocol/decision_provider.py) | Decision-provider protocol and the ADK, manual, and scripted implementations. |
 | [`protocol/discovery.py`](protocol/discovery.py) | AgentCard discovery through the registry center or `/.well-known/agent-card.json`. |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T metadata helpers: extension URIs, `templateUri`, `negotiationContext`, end message, sample-only metadata. |

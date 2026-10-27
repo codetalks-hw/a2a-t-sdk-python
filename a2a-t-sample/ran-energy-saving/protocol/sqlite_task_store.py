@@ -62,8 +62,34 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(_SCHEMA)
 
 
+#: Push-notification configurations registered by inbound A2A gateway callers.
+_PUSH_CONFIG_SCHEMA: Final[str] = """
+CREATE TABLE IF NOT EXISTS push_notification_configs (
+  task_id     TEXT NOT NULL,
+  config_id   TEXT NOT NULL,
+  owner       TEXT NOT NULL,
+  updated_at  REAL NOT NULL DEFAULT 0,
+  config_blob BLOB NOT NULL,
+  PRIMARY KEY (task_id, owner, config_id)
+);
+CREATE INDEX IF NOT EXISTS idx_push_configs_task
+  ON push_notification_configs(task_id);
+"""
+
+
+def _add_push_configs(connection: sqlite3.Connection) -> None:
+    """Create the version-2 push-notification configuration table."""
+    connection.executescript(_PUSH_CONFIG_SCHEMA)
+
+
 #: Ordered schema migrations; index ``i`` upgrades version ``i`` to ``i + 1``.
-_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema,)
+_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema, _add_push_configs)
+
+
+def ensure_task_db(path: str | Path) -> None:
+    """Create or upgrade the Task database, including the push-notification table."""
+    with connect(path) as connection:
+        apply_migrations(connection, _MIGRATIONS)
 
 
 class SqliteTaskStore(TaskStore):
@@ -92,8 +118,7 @@ class SqliteTaskStore(TaskStore):
 
     def _initialize(self) -> None:
         """Apply the schema migrations (WAL is enabled by the shared connection helper)."""
-        with self._connection() as connection:
-            apply_migrations(connection, _MIGRATIONS)
+        ensure_task_db(self._path)
 
     async def save(self, task: Task, context: ServerCallContext) -> None:
         """Persist or update one Task.

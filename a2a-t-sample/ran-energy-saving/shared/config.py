@@ -232,8 +232,8 @@ class SampleConfig:
         gateway_port: bind port of the optional inbound A2A gateway.
         gateway_register: whether the gateway registers its AgentCard in the registry center.
         gateway_scenario: scenario used for an inbound gateway request.
-        gateway_task_db_path: Absolute SQLite path of the inbound gateway Task store; ``None``
-            keeps inbound Tasks in memory.
+        gateway_task_db_path: Absolute SQLite path of the inbound gateway Task store and its push
+            notification registrations; ``None`` keeps both in memory.
         auth_token: bearer token required by the Web UI API and the inbound gateway; empty keeps
             both open (loopback-only deployments).
         server_auth_token: bearer token the client presents to the A2A server and the server

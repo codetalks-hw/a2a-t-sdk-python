@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+import pytest
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext, UnauthenticatedUser
 from a2a.server.events import Event as A2AEvent
 from a2a.server.events.event_queue import EventQueue
+from a2a.server.tasks.base_push_notification_sender import BasePushNotificationSender
 from a2a.types import (
     Message,
     Role,
@@ -20,6 +24,7 @@ from a2a.types import (
     TaskState,
     TaskStatusUpdateEvent,
 )
+from a2a.utils.errors import InvalidParamsError
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
 from demo.catalog import DemoRunCatalog
 from google.protobuf.json_format import MessageToDict
@@ -27,6 +32,8 @@ from protocol.client_flow import ClientFlowResult
 from protocol.client_gateway import ClientGatewayExecutor, build_gateway_app, build_gateway_service
 from protocol.client_service import RunManager
 from protocol.client_store import SqliteClientStore
+from protocol.gateway_push import validate_push_url
+from protocol.sqlite_push_config_store import SqlitePushNotificationConfigStore
 from protocol.sqlite_task_store import SqliteTaskStore, read_task_summaries
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
@@ -244,8 +251,25 @@ async def test_gateway_app_advertises_a_plain_a2a_agent(
     card = app.state.agent_card
     assert card.name == "ran-energy-saving-client-gateway"
     assert card.capabilities.streaming is True
+    assert card.capabilities.push_notifications is True
     assert [interface.url for interface in card.supported_interfaces] == ["http://127.0.0.1:8001"]
     assert app.state.client_service is manager
+
+
+async def test_gateway_persists_push_registrations_when_a_database_is_configured(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    manager, _ = _manager(tmp_path, offline_config)
+    database = tmp_path / "gateway.sqlite3"
+    config = replace(offline_config, gateway_task_db_path=str(database))
+    app = build_gateway_app(config=config, service=manager)
+
+    async with app.router.lifespan_context(app):
+        store = app.state.push_config_store
+        assert isinstance(store.inner, SqlitePushNotificationConfigStore)
+        assert store.inner.path == database
+        assert app.state.push_sender is not None
 
 
 def test_build_gateway_service_uses_the_client_database(
@@ -282,8 +306,6 @@ async def test_gateway_rejects_requests_without_the_token(
     offline_config: SampleConfig,
 ) -> None:
     """A configured token guards the gateway A2A routes."""
-    import httpx
-
     manager, _ = _manager(tmp_path, offline_config)
     config = replace(offline_config, auth_token="secret")
     app = build_gateway_app(config=config, service=manager)
@@ -299,3 +321,163 @@ async def test_gateway_rejects_requests_without_the_token(
     assert authorized.status_code != 401
     assert health.status_code == 200
     assert metrics.status_code == 401
+
+
+def _is_phase_status(event: A2AEvent, phase: str) -> bool:
+    """Return whether an event is a progress status of one phase."""
+    return (
+        isinstance(event, TaskStatusUpdateEvent)
+        and event.status.state == TaskState.TASK_STATE_WORKING
+        and event.status.HasField("message")
+        and event.status.message.HasField("metadata")
+        and MessageToDict(event.status.message.metadata).get("phase") == phase
+    )
+
+
+async def test_gateway_publishes_progress_before_the_final_report(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """The inbound Task shows negotiation and execution milestones, then the report."""
+    manager, _ = _manager(tmp_path, offline_config)
+    executor = ClientGatewayExecutor(service=manager, config=offline_config)
+    queue = RecordingEventQueue()
+
+    await executor.execute(_context(), queue)
+
+    phases = {
+        str(MessageToDict(event.status.message.metadata)["phase"])
+        for event in queue.events
+        if isinstance(event, TaskStatusUpdateEvent)
+        and event.status.state == TaskState.TASK_STATE_WORKING
+        and event.status.HasField("message")
+        and event.status.message.HasField("metadata")
+    }
+    assert {"dispatch", "negotiation", "execution"} <= phases
+
+    progress_indexes = [
+        index for index, event in enumerate(queue.events) if _is_phase_status(event, "negotiation")
+    ]
+    completed_index = next(
+        index
+        for index, event in enumerate(queue.events)
+        if isinstance(event, TaskStatusUpdateEvent)
+        and event.status.state == TaskState.TASK_STATE_COMPLETED
+    )
+    assert progress_indexes
+    assert max(progress_indexes) < completed_index
+
+
+async def test_gateway_pushes_progress_and_the_report_to_a_webhook(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """An inline taskPushNotificationConfig receives every milestone plus the final artifact."""
+    manager, _ = _manager(tmp_path, offline_config)
+    posted: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        posted.append(request)
+        return httpx.Response(200)
+
+    push_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    push_store = SqlitePushNotificationConfigStore(tmp_path / "gateway-push.sqlite3")
+    sender = BasePushNotificationSender(push_client, push_store)
+    app = build_gateway_app(
+        config=offline_config,
+        service=manager,
+        push_config_store=push_store,
+        push_sender=sender,
+    )
+    message = Message(message_id="message-1", role=Role.ROLE_USER, context_id=CONTEXT_ID)
+    message.parts.add(text="Save energy in Songshanhu.")
+    request = SendMessageRequest(message=message)
+    request.configuration.task_push_notification_config.url = "https://caller.example/hook"
+    request.configuration.task_push_notification_config.token = "hook-token"
+    body = MessageToDict(request)
+
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/message:send",
+                json=body,
+                headers={"A2A-Version": "1.0"},
+            )
+    finally:
+        await push_client.aclose()
+
+    assert response.status_code == 200
+    assert posted
+    assert all(item.headers.get("x-a2a-notification-token") == "hook-token" for item in posted)
+    payloads = [json.loads(item.content) for item in posted]
+    states = [
+        str(payload["statusUpdate"]["status"]["state"])
+        for payload in payloads
+        if "statusUpdate" in payload
+    ]
+    assert "TASK_STATE_WORKING" in states
+    assert "TASK_STATE_COMPLETED" in states
+    artifact_names = [
+        str(payload["artifactUpdate"]["artifact"]["name"])
+        for payload in payloads
+        if "artifactUpdate" in payload
+    ]
+    assert "energy saving intent report" in artifact_names
+
+    task_id = str(response.json()["task"]["id"])
+    stored = await push_store.get_info_for_dispatch(task_id)
+    assert [config.url for config in stored] == ["https://caller.example/hook"]
+
+
+async def test_gateway_streams_progress_before_the_report(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """message:stream carries the same milestones to a streaming caller."""
+    manager, _ = _manager(tmp_path, offline_config)
+    app = build_gateway_app(config=offline_config, service=manager)
+    message = Message(message_id="message-1", role=Role.ROLE_USER, context_id=CONTEXT_ID)
+    message.parts.add(text="Save energy in Songshanhu.")
+    body = MessageToDict(SendMessageRequest(message=message))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/message:stream",
+            json=body,
+            headers={"A2A-Version": "1.0"},
+        )
+
+    assert response.status_code == 200
+    payloads = [
+        json.loads(line[len("data:") :].strip())
+        for line in response.text.splitlines()
+        if line.startswith("data:")
+    ]
+    phases = [
+        payload["statusUpdate"]["status"]["message"]["metadata"]["phase"]
+        for payload in payloads
+        if "statusUpdate" in payload
+        and "message" in payload["statusUpdate"]["status"]
+        and "metadata" in payload["statusUpdate"]["status"]["message"]
+    ]
+    assert {"dispatch", "negotiation", "execution"} <= set(phases)
+    assert any(
+        payload.get("statusUpdate", {}).get("status", {}).get("state")
+        == "TASK_STATE_COMPLETED"
+        for payload in payloads
+    )
+    assert any("artifactUpdate" in payload for payload in payloads)
+
+
+def test_push_url_validation_rejects_unsafe_destinations() -> None:
+    validate_push_url("https://caller.example/hook")
+    validate_push_url("http://127.0.0.1:9000/hook")
+
+    with pytest.raises(InvalidParamsError, match="absolute http"):
+        validate_push_url("ftp://caller.example/hook")
+    with pytest.raises(InvalidParamsError, match="credentials"):
+        validate_push_url("https://user:secret@caller.example/hook")
+    with pytest.raises(InvalidParamsError, match="loopback"):
+        validate_push_url("http://caller.example/hook")

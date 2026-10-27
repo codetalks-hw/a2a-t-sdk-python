@@ -254,6 +254,28 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 
 一条入站 `message:send` 启动一次客户端运行，返回最终报告 artifact；入站 `contextId` 映射为客户端会话。Gateway 不替代出站 A2A-T 流程。
 
+#### 进度通知
+
+客户端与网管协商期间，入站 Task 不再静默。网关把一组稳定的内部里程碑映射为外层 `WORKING` 状态更新：
+
+| 里程碑 | 状态文本 | metadata |
+| --- | --- | --- |
+| 请求已接收 | Request accepted. Negotiating with the RAN server. | `phase=dispatch` |
+| 协商提议 | Negotiation round N: the RAN server proposed an `<kind>` negotiation. | `phase=negotiation`、`round`、`performative`、`kind` |
+| 客户端决策 | Negotiation round N: the client chose `<action>`. | `phase=negotiation`、`round`、`action` |
+| 网管任务开始 | The RAN server accepted the task and started execution. | `phase=execution`、`state` |
+
+两种投递方式消费同一组事件：`message:stream` 在打开的流上转发；`message:send` 调用方通过内联
+`configuration.taskPushNotificationConfig` 或 `POST /tasks/{id}/pushNotificationConfigs` 注册 webhook
+接收。最终报告 artifact 与终态保持不变。
+
+约束：每个 Task 最多 8 条进度，按里程碑去重；trace span、提示词、工具结果与原始提案内容不外发。
+
+webhook URL 会校验（必须是绝对 http(s) URL、不得内嵌凭据；非回环地址只允许 HTTPS）。注册信息存放在
+Gateway Task 数据库的 `push_notification_configs` 表（schema 版本 2），重启不丢；未配置
+`A2AT_SAMPLE_GATEWAY_TASK_DB` 时使用内存。SDK sender 对每个事件只尝试一次 POST，失败记录日志；
+生产应增加重试/排队与出站白名单（SSRF）。
+
 ### 3.5 自检清单
 
 - [ ] 能发现网管 AgentCard（registry 或 direct）
@@ -509,7 +531,7 @@ uvx --from ty==0.0.92 ty check .
 
 （`python` 必须是 §1.1 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（472 个测试）。覆盖范围：
+测试套件完全离线且确定性（484 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |
@@ -526,7 +548,9 @@ uvx --from ty==0.0.92 ty check .
 | `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
 | `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、原子 claim 冲突、v1→v2 迁移、只读助手。 |
 | `test_client_service.py` | 运行持久化、会话记忆、两个 manager 之间的每会话单活跃运行、死进程回收、失败/中断处理、运行指标。 |
-| `test_client_gateway.py` | 入站 A2A 消息 -> 一次运行 -> 报告 artifact、冲突处理、取消、Gateway 卡片。 |
+| `test_client_gateway.py` | 入站 A2A 消息 -> 一次运行 -> 报告 artifact、进度状态、`message:stream` 投递、内联 push 配置到 webhook、冲突处理、取消、Gateway 卡片。 |
+| `test_gateway_progress.py` | 里程碑映射、去重、进度上限，以及忽略 trace/artifact。 |
+| `test_sqlite_push_config_store.py` | push 注册 CRUD、owner 隔离、跨 owner 分发、重启后保留、schema 版本 2。 |
 | `test_sqlite_task_store.py` | Task save/get/delete、列表过滤/分页、摘要/run id、并发保存、缺失 DB 的只读行为。 |
 | `test_server_tools.py`、`test_ran_data.py` | 四个工具与进程内数据集。 |
 | `test_scripted_llm.py`、`test_adk_fake_model.py` | schema 路由与确定性客户端 ADK 模型。 |
@@ -602,12 +626,13 @@ python run_demo.py --scenario target --mode auto --model-mode live
 
 本样例刻意保持原型性质。生产化之前：
 
-- **持久化。** 本样例的 SQLite 存储包括：服务端 Task（`protocol/sqlite_task_store.py`）、入站 Gateway Task（同一实现，独立文件）与客户端会话/运行/协商（`protocol/client_store/`）。`shared/sqlite.py` 通过 `PRAGMA user_version` 执行有序 schema 迁移；生产仍应使用自有数据库与迁移工具。方案仍保存在进程内存储（`demo/ran_data._PLANS`），push 配置使用 `InMemoryPushNotificationConfigStore`。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
+- **持久化。** 本样例的 SQLite 存储包括：服务端 Task（`protocol/sqlite_task_store.py`）、入站 Gateway Task（同一实现，独立文件）与客户端会话/运行/协商（`protocol/client_store/`）。`shared/sqlite.py` 通过 `PRAGMA user_version` 执行有序 schema 迁移；生产仍应使用自有数据库与迁移工具。方案仍保存在进程内存储（`demo/ran_data._PLANS`）。入站 push 注册持久化在 Gateway Task 数据库；未配置该数据库时回退到 SDK 的内存存储。客户端 ADK 决策会话按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）作为审计数据保留，到期清扫；其中包含提示词与工具结果，保留窗口应按审计与数据合规要求设定，并据此规划客户端数据库容量。网管执行不引入持久 checkpointer，只有需要断点恢复时才增加；服务端没有 ADK 会话。
 - **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
 - **鉴权与 TLS。** 两个独立边界：`A2AT_SAMPLE_AUTH_TOKEN` 保护入站 Web UI `/api/*` 与 Gateway 路由；`A2AT_SAMPLE_SERVER_AUTH_TOKEN` 保护 A2A 服务端（客户端携带，卡片声明 scheme）。两者在绑定非回环地址却未配置时都会启动失败。trace ingest 路由使用每次运行的 trace token，而不是用户 Bearer。mock 注册中心仍为开放。应在部署网关终止 TLS；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
 - **健康检查。** Web UI、Gateway 与服务端都提供 `/health`（存活）与 `/ready`（SQLite 可访问）。平台探针应使用它们，而不是业务路由。
+- **推送投递。** Gateway 会校验调用方提供的 webhook（绝对 http(s) URL、无内嵌凭据；非回环只允许 HTTPS），并发送 A2A 通知 token。SDK sender 每个事件只 POST 一次并记录失败；生产需要重试/排队、死信路径与出站白名单以防止 SSRF。push 注册存放在 Gateway Task 数据库，应按敏感文件保护。
 - **指标。** 三个进程都通过 `/metrics` 输出 Prometheus 文本：客户端运行状态/终态、在途运行、运行耗时、按侧与轮次的协商消息、服务端任务终态。指标注册表是进程内的，应逐个进程抓取（或由采集器聚合）。配置 token 时该路由受 Bearer 保护。
 - **模型治理。** 在线模式会把提示词与抽取参数发送到配置的模型端点，服务端 LangGraph planner 还会发送已接受的 Task-T 与工具结果。应落实数据分级、脱敏、限流与供应商协议。非调试场景保持 `A2AT_LLM_DETAIL_LOG_ENABLED=false`。
 - **协议正确性由确定性代码掌握。** round、performative、终态与 Task 生命周期必须留在确定性代码中；LLM 只负责意图、文本与工具调用。
@@ -643,13 +668,16 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`demo/task_t_precheck.py`](demo/task_t_precheck.py) | 演示 `TaskTPrecheck`：必填字段缺失、目标时段重叠、不可行的停电保障。 |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | 纯确定性服务端策略：`propose`、`abort`、`execute`、`end`，不调用 LLM。 |
 | [`protocol/server_executor.py`](protocol/server_executor.py) | 外层协商执行器与 `LangGraphTaskExecutor`：运行 ReAct planner 并发布 A2A Task 生命周期；不使用 ADK。 |
-| [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore`，持久化 A2A Task 状态并为 UI 提供任务摘要。 |
+| [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore`，持久化 A2A Task 状态并为 UI 提供任务摘要；schema v2 同时拥有 Gateway push 配置表。 |
 | [`protocol/server_app.py`](protocol/server_app.py) | 服务端装配：AgentCard（声明 `Task-T/v1` 与 `Negotiation-T/v1`）、请求处理器、Starlette 应用、注册中心注册。 |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | 客户端协议流程：初始 Task-T、多轮协商、accept 重填、SSE/webhook 终态处理。 |
 | [`protocol/client_runtime.py`](protocol/client_runtime.py) | 客户端单次运行装配：每次运行的 SDK `.env`、服务发现、SDK 客户端、传输、决策 Provider。 |
 | [`protocol/client_service/`](protocol/client_service) | 客户端应用服务，拆为 `run_state.py`（运行状态、span、决策）与 `run_manager.py`（生命周期、会话、持久化钩子）。 |
 | [`protocol/client_store/`](protocol/client_store) | 客户端持久化，拆为 `store.py`（写入）与 `reader.py`（UI 只读查询）。 |
-| [`protocol/client_gateway.py`](protocol/client_gateway.py) | 可选入站 A2A Gateway：一条入站消息 -> 一次客户端运行 -> 最终报告 artifact。 |
+| [`protocol/client_gateway.py`](protocol/client_gateway.py) | 可选入站 A2A Gateway：一条入站消息 -> 一次客户端运行 -> 进度状态与最终报告 artifact。 |
+| [`protocol/gateway_progress.py`](protocol/gateway_progress.py) | 把运行里程碑映射为外层 `WORKING` 状态（去重、限流、不外发原始载荷）。 |
+| [`protocol/gateway_push.py`](protocol/gateway_push.py) | webhook URL 校验与带校验的 push 配置存储包装。 |
+| [`protocol/sqlite_push_config_store.py`](protocol/sqlite_push_config_store.py) | Gateway Task 数据库中的 SQLite push 注册，owner 隔离读取与跨 owner 分发。 |
 | [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted 三种实现。 |
 | [`protocol/discovery.py`](protocol/discovery.py) | 通过注册中心或 `/.well-known/agent-card.json` 发现 AgentCard。 |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T 元数据助手：扩展 URI、`templateUri`、`negotiationContext`、结束消息、样例专用元数据。 |

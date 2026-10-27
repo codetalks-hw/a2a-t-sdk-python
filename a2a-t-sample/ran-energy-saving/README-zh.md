@@ -109,6 +109,9 @@ python run_demo.py --ui --scenario information --mode auto --model-mode offline
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 ```
 
+使用 `--gateway` 时，OSS 侧本身就是一个 A2A Agent：Gemini Enterprise 之类的外部调用方发送一次请求后，
+会在最终节能报告之前收到协商与执行里程碑的进度通知——可以走流式连接，也可以注册 webhook。
+
 打开 Web UI 后，时间线按「派发 → 任务生成 → 校验 → 协商 → 决议 → 网管执行 → 报告」展开；每一行标注该步骤属于 **OSS** 还是 **网管**，右侧可查看消息与决策内容。安装、环境变量与完整参数见[技术指南](TECHNICAL-zh.md)。
 
 ## 5. 集成边界
