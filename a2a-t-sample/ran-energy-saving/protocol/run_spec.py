@@ -51,7 +51,7 @@ class ClientPolicy:
     """
 
     filled_params: Callable[[str, str], dict[str, object]] = _no_filled_params
-    accept_text: Callable[[str, str], str] = _no_accept_text
+    accept_text: Callable[[str, str], str | None] = _no_accept_text
 
 
 DEFAULT_CLIENT_POLICY: ClientPolicy = ClientPolicy()

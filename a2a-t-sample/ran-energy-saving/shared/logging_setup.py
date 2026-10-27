@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Final, TextIO
@@ -103,7 +103,7 @@ def redact_mapping(value: object) -> object:
 
 
 @contextmanager
-def log_context(**fields: object) -> Iterator[None]:
+def log_context(**fields: object) -> Generator[None]:
     """Bind correlation fields for every log record emitted inside the block.
 
     Fields with ``None``/empty values are ignored, so callers can pass an optional id directly.

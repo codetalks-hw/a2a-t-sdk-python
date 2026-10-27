@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from langchain_core.language_models.base import LanguageModelInput
@@ -208,7 +208,10 @@ def build_system_prompt(*, dataset_catalog: str | None = None) -> str:
     )
 
 
-def build_planner_input(task_prompt: str, negotiation_context: dict[str, object] | None) -> str:
+def build_planner_input(
+    task_prompt: str,
+    negotiation_context: Mapping[str, object] | None,
+) -> str:
     """Build the human message that carries the accepted Task-T into the graph."""
     context_block = ""
     if negotiation_context:

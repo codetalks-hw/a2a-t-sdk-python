@@ -153,7 +153,8 @@ def create_app(
         from demo.catalog import DemoRunCatalog
 
         catalog = DemoRunCatalog()
-    scenario_names = catalog.names
+    resolved_catalog: RunCatalog = catalog
+    scenario_names = resolved_catalog.names
     resolved_default_scenario = _resolve_default(
         default_scenario, scenario_names, scenario_names[0], "scenario"
     )
@@ -191,7 +192,7 @@ def create_app(
     manager = RunManager(
         config=config,
         runtime_factory=runtime_factory or default_factory,
-        catalog=catalog,
+        catalog=resolved_catalog,
         runs_dir=runs_dir,
         store=client_store,
         memory_turns=memory_turns,
@@ -226,7 +227,7 @@ def create_app(
                 "modelLabel": config.model_label,
                 "scenarios": list(scenario_names),
                 "scenarioRequests": {
-                    name: catalog.spec(name, language=config.language).user_request
+                    name: resolved_catalog.spec(name, language=config.language).user_request
                     for name in scenario_names
                 },
                 "modes": list(UI_MODES),

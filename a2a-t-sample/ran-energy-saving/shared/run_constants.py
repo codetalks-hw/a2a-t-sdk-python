@@ -18,13 +18,6 @@ LANGUAGE_ZH: Final[str] = "zh-CN"
 SUPPORTED_LANGUAGES: Final[tuple[str, ...]] = (LANGUAGE_EN, LANGUAGE_ZH)
 
 #: Terminal client outcomes.
-FINAL_STATE_TASK_COMPLETED: Final[str] = "task_completed"
-FINAL_STATE_NEGOTIATION_ENDED: Final[str] = "no_task_negotiation_ended"
-FINAL_STATE_NEGOTIATION_ABORTED: Final[str] = "no_task_negotiation_aborted"
-FINAL_STATE_TASK_REJECTED: Final[str] = "task_rejected"
-FINAL_STATE_TASK_FAILED: Final[str] = "task_failed"
-FINAL_STATE_INCOMPLETE: Final[str] = "incomplete"
-
 FinalState = Literal[
     "task_completed",
     "no_task_negotiation_ended",
@@ -33,3 +26,10 @@ FinalState = Literal[
     "task_failed",
     "incomplete",
 ]
+
+FINAL_STATE_TASK_COMPLETED: Final[FinalState] = "task_completed"
+FINAL_STATE_NEGOTIATION_ENDED: Final[FinalState] = "no_task_negotiation_ended"
+FINAL_STATE_NEGOTIATION_ABORTED: Final[FinalState] = "no_task_negotiation_aborted"
+FINAL_STATE_TASK_REJECTED: Final[FinalState] = "task_rejected"
+FINAL_STATE_TASK_FAILED: Final[FinalState] = "task_failed"
+FINAL_STATE_INCOMPLETE: Final[FinalState] = "incomplete"
