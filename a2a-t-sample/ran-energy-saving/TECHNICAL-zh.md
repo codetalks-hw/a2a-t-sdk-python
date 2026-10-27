@@ -531,7 +531,7 @@ uvx --from ty==0.0.92 ty check .
 
 （`python` 必须是 §1.1 中激活的环境；若未激活，Windows 使用 `../../.venv/Scripts/python.exe`，Linux/macOS 使用 `../../.venv/bin/python`。）
 
-测试套件完全离线且确定性（484 个测试）。覆盖范围：
+测试套件完全离线且确定性（485 个测试）。覆盖范围：
 
 | 测试模块 | 覆盖内容 |
 | --- | --- |

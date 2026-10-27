@@ -640,7 +640,7 @@ uvx --from ty==0.0.92 ty check .
 (`python` must be the environment activated in §1.1; without activation use
 `../../.venv/Scripts/python.exe` on Windows or `../../.venv/bin/python` on Linux/macOS.)
 
-The suite is fully offline and deterministic (484 tests). What it covers:
+The suite is fully offline and deterministic (485 tests). What it covers:
 
 | Test module | Coverage |
 | --- | --- |

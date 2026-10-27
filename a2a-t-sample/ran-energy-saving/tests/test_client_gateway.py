@@ -471,6 +471,47 @@ async def test_gateway_streams_progress_before_the_report(
     assert any("artifactUpdate" in payload for payload in payloads)
 
 
+async def test_a_failing_webhook_does_not_fail_the_run(
+    tmp_path: Path,
+    offline_config: SampleConfig,
+) -> None:
+    """Push delivery is best-effort: a 500 from the caller still yields the completed report."""
+    manager, _ = _manager(tmp_path, offline_config)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(500)
+
+    push_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    push_store = SqlitePushNotificationConfigStore(tmp_path / "gateway-push.sqlite3")
+    sender = BasePushNotificationSender(push_client, push_store)
+    app = build_gateway_app(
+        config=offline_config,
+        service=manager,
+        push_config_store=push_store,
+        push_sender=sender,
+    )
+    message = Message(message_id="message-1", role=Role.ROLE_USER, context_id=CONTEXT_ID)
+    message.parts.add(text="Save energy in Songshanhu.")
+    request = SendMessageRequest(message=message)
+    request.configuration.task_push_notification_config.url = "https://caller.example/hook"
+    body = MessageToDict(request)
+
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/message:send",
+                json=body,
+                headers={"A2A-Version": "1.0"},
+            )
+    finally:
+        await push_client.aclose()
+
+    assert response.status_code == 200
+    assert response.json()["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
 def test_push_url_validation_rejects_unsafe_destinations() -> None:
     validate_push_url("https://caller.example/hook")
     validate_push_url("http://127.0.0.1:9000/hook")
