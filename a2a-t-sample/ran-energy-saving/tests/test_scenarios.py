@@ -25,6 +25,7 @@ from demo.scenario import (
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
     FINAL_STATE_TASK_COMPLETED,
+    LANGUAGE_ZH,
     SUPPORTED_SCENARIO_NAMES,
     Scenario,
     get_scenario,
@@ -115,6 +116,29 @@ async def test_scenario_matches_the_design_sequence(
     assert result.task_id is None
     assert result.report is None
     assert _completed_status_seen(result) is False
+
+
+@pytest.mark.parametrize("scenario_name", ("information", "target", "feasibility"))
+async def test_accept_scenarios_complete_in_chinese(
+    scenario_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The zh-CN accept refill passes the server's revalidation and reaches a report.
+
+    The rendered zh-CN task context writes the outage without a space (``在00:00~18:00停电``);
+    the refill routing has to recognise that spelling or the feasibility accept is rejected.
+    """
+    monkeypatch.setenv("A2AT_LANGUAGE", LANGUAGE_ZH)
+    scenario = get_scenario(scenario_name)
+    config = replace(offline_direct_config(free_tcp_port()), language=LANGUAGE_ZH)
+
+    with running_server(config):
+        result, exchange = await run_scenario_flow(config, scenario_name, "sse")
+
+    assert exchange.steps == list(scenario.expected_sequence)
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    assert result.task_id
+    assert result.report
 
 
 @pytest.mark.parametrize(

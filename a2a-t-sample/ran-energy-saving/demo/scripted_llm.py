@@ -131,8 +131,18 @@ _FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
 _COMPLETE_THROUGHPUT_MARKER = "07:00~17:30,10Mbps"
 
 #: From-data Task-T refill markers (the accepted values are the only distinguishing text).
+#:
+#: The feasibility refill carries the outage in both spellings: the filled parameter uses a space
+#: (``00:00~18:00 停电``), while the canned slot extraction renders the task context without one
+#: (``在00:00~18:00停电``). Content validation reads the rendered Task-T, so it needs the second
+#: spelling; the failing input still routes to its own feasibility stage first through the
+#: ``06:00~18:00,10Mbps`` marker.
 _TARGET_REFILL_MARKERS = ("23:00~23:59,10Mbps",)
-_FEASIBILITY_REFILL_MARKERS = ("power outage from 00:00 to 18:00", "00:00~18:00 停电")
+_FEASIBILITY_REFILL_MARKERS = (
+    "power outage from 00:00 to 18:00",
+    "00:00~18:00 停电",
+    "00:00~18:00停电",
+)
 
 #: Negotiation-T extraction signatures routed most-specific property set first, pinned to the
 #: property sets of ``a2a_t.negotiation.generation.json_schema_builder.build_extraction_schema``.
