@@ -80,21 +80,45 @@ function applyEvent(state, entry) {
       action: normaliseAction(entry.kind),
       round,
       maxRounds,
+      summary: typeof entry.summary === "string" ? entry.summary : "",
+      detail: isObject(entry.detail) ? entry.detail : null,
     });
     return state;
   }
 
   switch (entry.kind) {
     case "propose":
-      state.negotiation.push({ side: "nms", action: "propose", round, maxRounds });
+      state.negotiation.push({
+        side: "nms",
+        action: "propose",
+        round,
+        maxRounds,
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        content: typeof entry.content === "string" ? entry.content : "",
+        negotiationType: typeof entry.negotiationType === "string" ? entry.negotiationType : null,
+      });
       break;
     case "abort":
-      state.negotiation.push({ side: "nms", action: "abort", round, maxRounds });
+      state.negotiation.push({
+        side: "nms",
+        action: "abort",
+        round,
+        maxRounds,
+        summary: typeof entry.summary === "string" ? entry.summary : "",
+        content: typeof entry.content === "string" ? entry.content : "",
+      });
       break;
     case "message":
       if (entry.phase === "negotiation") {
         state.negotiationEnded = true;
-        state.negotiation.push({ side: "nms", action: "end", round, maxRounds });
+        state.negotiation.push({
+          side: "nms",
+          action: "end",
+          round,
+          maxRounds,
+          summary: typeof entry.summary === "string" ? entry.summary : "",
+          content: typeof entry.content === "string" ? entry.content : "",
+        });
       }
       break;
     case "status": {

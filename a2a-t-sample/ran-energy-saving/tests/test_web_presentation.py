@@ -47,7 +47,9 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
         'data-node="oss"',
         'data-node="nms"',
         'data-node="cells"',
-        'data-act="negotiation"',
+        'id="rail"',
+        'id="turns"',
+        'id="rail-status"',
         'data-act="execution"',
         'data-act="result"',
     ):

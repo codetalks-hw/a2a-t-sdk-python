@@ -227,6 +227,9 @@ class NegotiationTranscript:
             "negotiationType": _negotiation_type(template_uri),
             "performative": performative,
             "summary": _event_summary(event, performative, negotiation_text),
+            # The full negotiation content (not the truncated summary), so an audience-facing view
+            # can show what the NMS actually asked for without re-reading the raw message.
+            "content": negotiation_text or None,
             "rationale": None,
             "status": status or "ok",
             "durationMs": duration_ms,

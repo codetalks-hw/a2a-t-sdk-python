@@ -96,6 +96,8 @@ def test_record_event_extracts_round_performative_and_kind() -> None:
     assert entry["contextId"] == CONTEXT_ID
     assert entry["templateUri"] == "Negotiation-T/information-negotiation/propose/v1"
     assert "missing items" in str(entry["summary"])
+    # The full content survives next to the truncated summary for an audience-facing view.
+    assert entry["content"] == "Please provide the following missing items: region."
     assert entry["rationale"] is None
     assert transcript.context_id == CONTEXT_ID
 

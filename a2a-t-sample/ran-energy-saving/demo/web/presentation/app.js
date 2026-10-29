@@ -1,8 +1,9 @@
 /** Presentation page: one request, one negotiation, one report.
  *
- * The page is audience-facing. It renders the story of a single energy-saving request and keeps
- * every transport, model and trace detail out of the way (the raw frames stay in the collapsed
- * "technical details" section).
+ * The page is audience-facing. The left column carries the engineer's request, the flow map and
+ * the execution result; the right rail carries the negotiation itself, including the full content
+ * of every proposal. Transport, model and trace details stay out of the way (only the collapsed
+ * "technical details" section keeps the raw frames).
  */
 
 import {
@@ -51,27 +52,27 @@ const els = {
   negotiationLink: byId("negotiation-link"),
   applyLink: byId("apply-link"),
   reportLink: byId("report-link"),
-  negotiationName: byId("act-negotiation-name"),
+  rail: byId("rail"),
+  railTitle: byId("rail-title-text"),
+  railStatus: byId("rail-status"),
+  railEmpty: byId("rail-empty"),
+  roundDots: byId("round-dots"),
+  turns: byId("turns"),
   executionName: byId("act-execution-name"),
   resultName: byId("act-result-name"),
-  negotiationMeta: byId("negotiation-meta"),
   executionMeta: byId("execution-meta"),
   resultMeta: byId("result-meta"),
-  roundDots: byId("round-dots"),
-  negotiationEmpty: byId("negotiation-empty"),
-  messages: byId("messages"),
   taskLine: byId("task-line"),
   steps: byId("steps"),
   resultBody: byId("result-body"),
+  leftHint: byId("left-hint"),
   techSummary: byId("tech-summary"),
   techLog: byId("tech-log"),
   acts: {
-    negotiation: byId("act-negotiation"),
     execution: byId("act-execution"),
     result: byId("act-result"),
   },
   bodies: {
-    negotiation: byId("act-negotiation-body"),
     execution: byId("act-execution-body"),
     result: byId("act-result-body"),
   },
@@ -84,7 +85,8 @@ const ui = {
   view: createState(),
   source: null,
   lastStage: null,
-  renderedMessages: 0,
+  renderedTurns: 0,
+  selectedTurn: -1,
   busy: false,
 };
 
@@ -130,12 +132,14 @@ function applyStaticCopy() {
   els.nmsSide.textContent = copy.map.nmsSide;
   els.cellsRole.textContent = copy.map.cellsRole;
   els.cellsSide.textContent = copy.map.cellsSide;
-  els.negotiationName.textContent = copy.acts.negotiation;
-  els.executionName.textContent = copy.acts.execution;
-  els.resultName.textContent = copy.acts.result;
   els.negotiationLink.textContent = copy.map.negotiationIdle;
   els.applyLink.textContent = copy.map.applyIdle;
   els.reportLink.textContent = copy.map.report;
+  els.railTitle.textContent = copy.railTitle;
+  els.railEmpty.textContent = copy.railEmpty;
+  els.leftHint.textContent = copy.leftHint;
+  els.executionName.textContent = copy.acts.execution;
+  els.resultName.textContent = copy.acts.result;
   els.techSummary.textContent = copy.tech;
   for (const step of els.steps.querySelectorAll("[data-step]")) {
     step.querySelector(".step-name").textContent = copy.steps[step.dataset.step] || "";
@@ -192,8 +196,7 @@ async function startRun() {
   ui.view.scenario = ui.selected;
   ui.view.status = STATUS.RUNNING;
   ui.lastStage = null;
-  ui.renderedMessages = 0;
-  els.messages.replaceChildren();
+  resetActs();
   els.techLog.replaceChildren();
   setBusy(true);
 
@@ -268,9 +271,10 @@ function render() {
   const stage = stageOf(ui.view);
   applyStageTransitions(stage);
   renderMap(stage);
-  renderNegotiation(stage);
+  renderRail(stage);
   renderExecution(stage);
   renderResult(stage);
+  els.leftHint.hidden = !(els.acts.execution.hidden && els.acts.result.hidden);
   els.start.disabled = ui.busy;
 }
 
@@ -278,18 +282,15 @@ function applyStageTransitions(stage) {
   if (stage === ui.lastStage) return;
   ui.lastStage = stage;
   if (stage === "idle" || stage === "negotiating") {
-    showAct("negotiation", true, true);
     showAct("execution", false, true);
     showAct("result", false, true);
     return;
   }
   if (stage === "executing") {
-    showAct("negotiation", true, false);
     showAct("execution", true, true);
     showAct("result", false, true);
     return;
   }
-  showAct("negotiation", true, false);
   showAct("execution", ui.view.taskCreated, false);
   showAct("result", true, true);
 }
@@ -319,17 +320,18 @@ function bindActHeads() {
 }
 
 function resetActs() {
-  ui.renderedMessages = 0;
-  els.messages.replaceChildren();
-  els.negotiationEmpty.hidden = false;
+  ui.renderedTurns = 0;
+  ui.selectedTurn = -1;
+  els.turns.replaceChildren();
+  els.railEmpty.hidden = false;
+  els.railStatus.textContent = ui.copy.railIdle;
+  els.railStatus.dataset.state = "idle";
+  els.roundDots.replaceChildren();
   els.taskLine.hidden = true;
   els.resultBody.replaceChildren();
-  els.roundDots.replaceChildren();
-  els.negotiationMeta.textContent = "";
   els.executionMeta.textContent = "";
   els.resultMeta.textContent = "";
   for (const step of els.steps.querySelectorAll("[data-step]")) step.dataset.state = "pending";
-  showAct("negotiation", true, true);
   showAct("execution", false, true);
   showAct("result", false, true);
 }
@@ -424,8 +426,11 @@ function setLink(name, state, label) {
   link.querySelector(".link-label").textContent = label;
 }
 
-function renderNegotiation(stage) {
+function renderRail(stage) {
+  const copy = ui.copy;
+  const resolution = resolutionOf(ui.view);
   const { round, maxRounds } = roundInfo(ui.view);
+
   els.roundDots.replaceChildren();
   for (let index = 1; index <= maxRounds; index += 1) {
     const dot = el("span", "round-dot");
@@ -433,53 +438,146 @@ function renderNegotiation(stage) {
     els.roundDots.append(dot);
   }
 
-  const resolution = resolutionOf(ui.view);
-  if (resolution === "rejected" || resolution === "aborted") {
-    els.negotiationMeta.textContent = ui.copy.map.negotiationEnded;
-  } else if (stage === "negotiating" || stage === "executing") {
-    els.negotiationMeta.textContent = resolution === "accepted"
-      ? ui.copy.map.negotiationAgreed
-      : maxRounds > 0
-        ? ui.copy.round(Math.max(round, 1), maxRounds)
-        : "";
-  } else if (stage === "done") {
-    els.negotiationMeta.textContent = resolution === "accepted" ? ui.copy.map.negotiationAgreed : "";
-  } else if (stage === "ended" || stage === "failed") {
-    els.negotiationMeta.textContent = ui.copy.map.negotiationEnded;
-  } else {
-    els.negotiationMeta.textContent = "";
+  let status = copy.railIdle;
+  let state = "idle";
+  if (resolution === "rejected" || resolution === "aborted" || stage === "ended") {
+    status = copy.map.negotiationEnded;
+    state = "muted";
+  } else if (stage === "done" || stage === "executing" || resolution === "accepted") {
+    status = copy.map.negotiationAgreed;
+    state = "done";
+  } else if (stage === "negotiating") {
+    status = maxRounds > 0
+      ? `${copy.railNegotiating} · ${copy.round(Math.max(round, 1), maxRounds)}`
+      : copy.railNegotiating;
+    state = "active";
+  } else if (stage === "failed") {
+    status = copy.map.negotiationEnded;
+    state = "muted";
+  }
+  els.railStatus.textContent = status;
+  els.railStatus.dataset.state = state;
+  els.railEmpty.textContent = stage === "idle" ? copy.railEmpty : copy.railWaiting;
+
+  renderTurns();
+}
+
+function renderTurns() {
+  if (ui.renderedTurns > ui.view.negotiation.length) {
+    els.turns.replaceChildren();
+    ui.renderedTurns = 0;
+    ui.selectedTurn = -1;
+  }
+  const appended = ui.view.negotiation.length > ui.renderedTurns;
+  for (let index = ui.renderedTurns; index < ui.view.negotiation.length; index += 1) {
+    els.turns.append(turnNode(ui.view.negotiation[index], index));
+  }
+  if (appended) ui.selectedTurn = ui.view.negotiation.length - 1;
+  ui.renderedTurns = ui.view.negotiation.length;
+
+  updateTurnExpansion();
+  els.railEmpty.hidden = ui.view.negotiation.length > 0;
+  if (appended) scrollToTurn(ui.selectedTurn);
+}
+
+function turnNode(message, index) {
+  const node = el("li", "turn");
+  node.dataset.side = message.side;
+  node.dataset.action = message.action;
+
+  const head = el("button", "turn-head");
+  head.type = "button";
+  const meta = el("span", "turn-meta");
+  meta.append(
+    el("span", "turn-who", ui.copy.who[message.side] || ""),
+    el("span", "turn-action", actionLabel(ui.copy, message.action)),
+    el("span", "turn-round", message.round ? ui.copy.roundShort(message.round) : ""),
+  );
+  head.append(meta, el("span", "turn-text", messageText(message)));
+  head.addEventListener("click", () => {
+    ui.selectedTurn = ui.selectedTurn === index ? -1 : index;
+    updateTurnExpansion();
+  });
+
+  const body = el("div", "turn-body");
+  for (const child of turnBody(message)) body.append(child);
+
+  node.append(head, body);
+  return node;
+}
+
+function turnBody(message) {
+  const nodes = [];
+  if (message.side === "nms") {
+    if (message.action === "end") {
+      nodes.push(el("p", "content-line", ui.copy.endLine));
+      return nodes;
+    }
+    if (message.action === "abort") {
+      nodes.push(el("p", "content-line", ui.copy.abortLine));
+      return nodes;
+    }
+    const content = message.content || message.summary;
+    if (content) {
+      nodes.push(...renderContent(content));
+      return nodes;
+    }
+    nodes.push(el("p", "content-line", messageText(message)));
+    return nodes;
   }
 
-  if (ui.renderedMessages > ui.view.negotiation.length) {
-    els.messages.replaceChildren();
-    ui.renderedMessages = 0;
-  }
-  for (let index = ui.renderedMessages; index < ui.view.negotiation.length; index += 1) {
-    els.messages.append(messageNode(ui.view.negotiation[index]));
-  }
-  ui.renderedMessages = ui.view.negotiation.length;
+  const detail = isObject(message.detail) ? message.detail : {};
+  appendParams(nodes, ui.copy.filledParams, detail.filledParams);
+  appendParams(nodes, ui.copy.counterParams, detail.counterParams);
+  if (nodes.length === 0) nodes.push(el("p", "content-line", ui.copy.sentToNms));
+  return nodes;
+}
 
-  if (ui.view.negotiation.length === 0) {
-    els.negotiationEmpty.hidden = false;
-    els.negotiationEmpty.textContent =
-      stage === "idle" ? ui.copy.emptyNegotiation : ui.copy.emptyNegotiationRunning;
-  } else {
-    els.negotiationEmpty.hidden = true;
-    scrollMessages();
+function appendParams(nodes, label, params) {
+  if (!isObject(params)) return;
+  const entries = Object.entries(params).filter(([, value]) => value !== null && value !== undefined);
+  if (entries.length === 0) return;
+  nodes.push(el("h5", "content-heading", label));
+  const list = el("dl", "turn-params");
+  for (const [key, value] of entries) {
+    list.append(
+      el("dt", "", key),
+      el("dd", "", typeof value === "string" ? value : JSON.stringify(value)),
+    );
+  }
+  nodes.push(list);
+}
+
+function renderContent(text) {
+  const nodes = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.replace(/\*\*/g, "").trim();
+    if (!line) continue;
+    if (line.startsWith("### ")) nodes.push(el("h5", "content-heading", line.slice(4)));
+    else if (line.startsWith("## ")) nodes.push(el("h4", "content-heading", line.slice(3)));
+    else if (line.startsWith("# ")) nodes.push(el("h3", "content-heading", line.slice(2)));
+    else nodes.push(el("p", "content-line", line));
+  }
+  return nodes;
+}
+
+function updateTurnExpansion() {
+  for (const [index, node] of [...els.turns.children].entries()) {
+    const expanded = index === ui.selectedTurn;
+    node.dataset.expanded = String(expanded);
+    node.querySelector(".turn-head").setAttribute("aria-expanded", String(expanded));
+    node.querySelector(".turn-body").hidden = !expanded;
   }
 }
 
-function messageNode(message) {
-  const node = el("div", "msg");
-  node.dataset.side = message.side;
-  node.dataset.action = message.action;
-  node.append(
-    el("span", "msg-who", ui.copy.who[message.side] || ""),
-    el("span", "msg-action", actionLabel(ui.copy, message.action)),
-    el("span", "msg-round", message.round ? ui.copy.roundShort(message.round) : ""),
-    el("span", "msg-text", messageText(message)),
-  );
-  return node;
+function scrollToTurn(index) {
+  const node = els.turns.children[index];
+  if (!node || els.rail === null) return;
+  const top = node.offsetTop;
+  const bottom = top + node.offsetHeight;
+  if (top < els.rail.scrollTop || bottom > els.rail.scrollTop + els.rail.clientHeight) {
+    els.rail.scrollTop = Math.max(bottom - els.rail.clientHeight, 0);
+  }
 }
 
 function messageText(message) {
@@ -490,11 +588,6 @@ function messageText(message) {
   if (message.action === "abort") return ui.copy.abortLine;
   if (message.action === "end") return ui.copy.endLine;
   return decisionLine(ui.copy, scenario, message.round) || actionLabel(ui.copy, message.action);
-}
-
-function scrollMessages() {
-  if (els.bodies.negotiation.hidden) return;
-  els.bodies.negotiation.scrollTop = els.bodies.negotiation.scrollHeight;
 }
 
 function renderExecution(stage) {

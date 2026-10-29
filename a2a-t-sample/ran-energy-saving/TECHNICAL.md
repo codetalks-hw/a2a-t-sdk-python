@@ -87,10 +87,10 @@ python run_demo.py --ui --scenario information --model-mode offline
 The page opens on the presentation view. Pick a scenario, edit the network operations engineer's
 request if needed, and press **Start the energy-saving task**:
 
-- the middle of the page is the live OSS ↔ RAN NMS negotiation: every proposal, counter-proposal,
-  accept, reject and abort with its round;
-- the request card is the only editable input; transport, model and language come from the CLI;
-- the result act shows the applied plan and the energy-saving report.
+- the right-hand panel is the live OSS ↔ RAN NMS negotiation: every proposal, counter-proposal,
+  accept, reject and abort with its round, and the full content of the selected turn;
+- the left column tracks the flow map, the NMS execution and the result;
+- the request card is the only editable input; transport, model and language come from the CLI.
 
 For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
 use the Run Explorer's left rail, timeline and inspector.

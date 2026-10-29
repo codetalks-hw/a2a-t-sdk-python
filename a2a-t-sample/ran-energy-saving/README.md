@@ -117,11 +117,11 @@ sends one request and receives progress notifications (negotiation and execution
 the final energy-saving report, either on a stream or through a registered webhook.
 
 The Web UI opens on the presentation view. Choose one of the five demo scenarios, edit the network
-operations engineer's request, and start it. The page then follows the live negotiation between the
-OSS and the RAN NMS — every proposal, counter-proposal, accept, reject and abort with its round —
-and ends with the applied plan and the energy-saving report. Transport, model and language are
-fixed when the process starts, so the page itself only offers the scenario switcher and the request
-text.
+operations engineer's request, and start it. The right-hand panel then follows the live negotiation
+between the OSS and the RAN NMS — every proposal, counter-proposal, accept, reject and abort with
+its round, and the full content of the selected turn — while the left column tracks the flow map,
+the NMS execution and the energy-saving report. Transport, model and language are fixed when the
+process starts, so the page itself only offers the scenario switcher and the request text.
 
 For the protocol-level view (phases, LLM and tool calls, raw payloads, run history), start the same
 command with `--ui-mode explorer`. Installation, environment variables and the full command

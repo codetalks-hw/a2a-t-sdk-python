@@ -25,10 +25,11 @@ function proposal(seq, round, maxRounds = 3) {
     round,
     maxRounds,
     performative: "PROPOSE",
+    content: `full proposal ${round}`,
   });
 }
 
-function decision(seq, action, round, maxRounds = 3) {
+function decision(seq, action, round, maxRounds = 3, detail = null) {
   return event({
     seq,
     entryType: "decision",
@@ -37,6 +38,7 @@ function decision(seq, action, round, maxRounds = 3) {
     round,
     maxRounds,
     performative: action.toUpperCase(),
+    detail,
   });
 }
 
@@ -63,12 +65,14 @@ assert.equal(stageOf(accepted), "negotiating");
 
 applyFrame(accepted, proposal(1, 1));
 assert.deepEqual(roundInfo(accepted), { round: 1, maxRounds: 3 });
+assert.equal(accepted.negotiation[0].content, "full proposal 1");
 
 // The same frame replayed after a reconnect must not duplicate the row.
 applyFrame(accepted, proposal(1, 1));
 assert.equal(accepted.negotiation.length, 1);
 
-applyFrame(accepted, decision(2, "counter", 1));
+applyFrame(accepted, decision(2, "counter", 1, 3, { counterParams: { window: "00:00~06:00" } }));
+assert.deepEqual(accepted.negotiation[1].detail.counterParams, { window: "00:00~06:00" });
 applyFrame(accepted, proposal(3, 2));
 applyFrame(accepted, decision(4, "accept", 2));
 assert.equal(resolutionOf(accepted), "accepted");
