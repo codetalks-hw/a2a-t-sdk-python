@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>RAN energy saving · pre-task negotiation</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <div class="connection-banner" id="connection-banner" role="status" hidden>
+    <span id="connection-text">连接中断，正在重连…</span>
+  </div>
+
+  <header class="top">
+    <h1 id="title">RAN 节能 · 任务前协商</h1>
+    <p class="story" id="story"></p>
+  </header>
+
+  <main>
+    <section class="scenarios" aria-labelledby="scenarios-label">
+      <span class="scenarios-label" id="scenarios-label">演示场景</span>
+      <div class="chips" id="scenario-chips" role="group" aria-labelledby="scenarios-label"></div>
+    </section>
+
+    <section class="request" aria-labelledby="request-title">
+      <div class="request-head">
+        <h2 id="request-title">网络操作工程师的请求</h2>
+        <span class="request-hint" id="request-hint"></span>
+      </div>
+      <textarea id="request-text" rows="4" spellcheck="false" aria-labelledby="request-title"></textarea>
+      <div class="request-actions">
+        <button type="button" class="ghost" id="reset-request">恢复默认请求</button>
+        <button type="button" class="primary" id="start">发起节能任务</button>
+      </div>
+      <p class="error" id="request-error" role="alert" hidden></p>
+    </section>
+
+    <div class="map-scroll">
+      <section class="map" aria-label="协作流程">
+        <div class="node" data-node="oss" data-state="idle">
+          <span class="node-role" id="oss-role">OSS / BSS</span>
+          <span class="node-side" id="oss-side">客户侧</span>
+          <span class="node-state" id="oss-state">待发起</span>
+        </div>
+        <div class="link" data-link="negotiation" data-state="idle">
+          <span class="link-line" aria-hidden="true"></span>
+          <span class="link-label" id="negotiation-link">任务前协商</span>
+          <span class="link-return">◀ <span id="report-link">状态 + 报告</span></span>
+        </div>
+        <div class="node" data-node="nms" data-state="idle">
+          <span class="node-role" id="nms-role">RAN 网管</span>
+          <span class="node-side" id="nms-side">执行侧</span>
+          <span class="node-state" id="nms-state">待发起</span>
+        </div>
+        <div class="link" data-link="apply" data-state="idle">
+          <span class="link-line" aria-hidden="true"></span>
+          <span class="link-label" id="apply-link">方案下发</span>
+        </div>
+        <div class="node" data-node="cells" data-state="idle">
+          <span class="node-role" id="cells-role">小区 / 基站</span>
+          <span class="node-side" id="cells-side">执行结果</span>
+          <span class="node-state" id="cells-state">待发起</span>
+        </div>
+      </section>
+    </div>
+
+    <section class="acts" id="acts">
+      <article class="act" data-act="negotiation" id="act-negotiation">
+        <button class="act-head" type="button" aria-expanded="true" aria-controls="act-negotiation-body">
+          <span class="act-index" aria-hidden="true">①</span>
+          <span class="act-name" id="act-negotiation-name">协商</span>
+          <span class="act-meta" id="negotiation-meta"></span>
+          <span class="act-rounds" id="round-dots" aria-hidden="true"></span>
+          <span class="act-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="act-body" id="act-negotiation-body">
+          <p class="act-empty" id="negotiation-empty"></p>
+          <div class="messages" id="messages"></div>
+        </div>
+      </article>
+
+      <article class="act" data-act="execution" id="act-execution" hidden>
+        <button class="act-head" type="button" aria-expanded="false" aria-controls="act-execution-body">
+          <span class="act-index" aria-hidden="true">②</span>
+          <span class="act-name" id="act-execution-name">网管执行</span>
+          <span class="act-meta" id="execution-meta"></span>
+          <span class="act-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="act-body" id="act-execution-body" hidden>
+          <p class="task-line" id="task-line" hidden></p>
+          <ol class="steps" id="steps">
+            <li data-step="evaluate"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
+            <li data-step="apply"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
+            <li data-step="report"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
+          </ol>
+        </div>
+      </article>
+
+      <article class="act" data-act="result" id="act-result" hidden>
+        <button class="act-head" type="button" aria-expanded="false" aria-controls="act-result-body">
+          <span class="act-index" aria-hidden="true">③</span>
+          <span class="act-name" id="act-result-name">结果</span>
+          <span class="act-meta" id="result-meta"></span>
+          <span class="act-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div class="act-body" id="act-result-body" hidden>
+          <div id="result-body"></div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <details class="tech" id="tech">
+    <summary id="tech-summary">技术详情</summary>
+    <pre id="tech-log"></pre>
+  </details>
+</body>
+</html>

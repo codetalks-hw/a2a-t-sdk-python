@@ -106,8 +106,8 @@ The other two outcomes are simple conclusions:
 ```bash
 # CLI (offline, deterministic, no key)
 python run_demo.py --scenario information --mode auto --model-mode offline
-# Web UI
-python run_demo.py --ui --scenario information --mode auto --model-mode offline
+# Web UI (presentation view)
+python run_demo.py --ui --scenario information --model-mode offline
 # Optional: expose the OSS side as an A2A backend
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 ```
@@ -116,9 +116,15 @@ With `--gateway`, the OSS side is itself an A2A agent: an external caller such a
 sends one request and receives progress notifications (negotiation and execution milestones) before
 the final energy-saving report, either on a stream or through a registered webhook.
 
-The page shows the run as a timeline: dispatch → task generation → validation → negotiation →
-resolution → NMS execution → report. Every row is labelled **OSS** or **NMS**, and the inspector
-shows the message or decision behind it. Installation, environment variables and the full command
+The Web UI opens on the presentation view. Choose one of the five demo scenarios, edit the network
+operations engineer's request, and start it. The page then follows the live negotiation between the
+OSS and the RAN NMS — every proposal, counter-proposal, accept, reject and abort with its round —
+and ends with the applied plan and the energy-saving report. Transport, model and language are
+fixed when the process starts, so the page itself only offers the scenario switcher and the request
+text.
+
+For the protocol-level view (phases, LLM and tool calls, raw payloads, run history), start the same
+command with `--ui-mode explorer`. Installation, environment variables and the full command
 reference are in the [technical guide](TECHNICAL.md).
 
 ## 5. Integration boundary

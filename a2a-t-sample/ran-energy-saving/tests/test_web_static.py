@@ -57,7 +57,12 @@ async def static_client(
     tmp_path: Path,
 ) -> AsyncIterator[httpx.AsyncClient]:
     """HTTP client bound to the ASGI app (no run is started)."""
-    app = create_app(offline_config, runs_dir=tmp_path, finished_grace_seconds=0.0)
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        finished_grace_seconds=0.0,
+        ui_mode="explorer",
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client

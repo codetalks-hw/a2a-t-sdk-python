@@ -80,18 +80,23 @@ Offline mode needs no `.env` and no API key: `run_demo.py` falls back to `env.ex
 ### 1.3 Read the interaction in the UI
 
 ```bash
-python run_demo.py --ui --scenario information --mode auto --model-mode offline
+python run_demo.py --ui --scenario information --model-mode offline
 # open http://127.0.0.1:8080
 ```
 
-Press **Start run** in the left rail, then read the timeline:
+The page opens on the presentation view. Pick a scenario, edit the network operations engineer's
+request if needed, and press **Start the energy-saving task**:
 
-- every row carries an **OSS** or **NMS** chip — that is who handled the step;
-- the negotiation phase shows proposal → decision → accept;
-- the execution phase shows the four tool calls;
-- clicking a row opens the message or decision behind it.
+- the middle of the page is the live OSS ↔ RAN NMS negotiation: every proposal, counter-proposal,
+  accept, reject and abort with its round;
+- the request card is the only editable input; transport, model and language come from the CLI;
+- the result act shows the applied plan and the energy-saving report.
 
-**Verify:** the timeline shows both OSS and NMS chips and ends in the completed state.
+For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
+use the Run Explorer's left rail, timeline and inspector.
+
+**Verify:** the presentation view ends with the energy-saving report, or with "no task created" for
+the reject and abort scenarios.
 
 ## 2. Architecture at a glance (explanation)
 
@@ -874,7 +879,7 @@ The sample is deliberately a prototype. Before production:
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | Embedded webhook push receiver with token validation. |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
 | [`demo/registry/`](demo/registry) | Mock registry center (AgentCard register/query, port 5001). |
-| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`) and the single-page front end (`static/index.html`). |
+| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`), the presentation front end (`presentation/`, `--ui-mode presentation`, default) and the Run Explorer (`static/`, `--ui-mode explorer`). |
 | [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
 
 ### B.2 Replace checklist

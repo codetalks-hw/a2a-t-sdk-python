@@ -2,7 +2,8 @@
 
 The Starlette app observes and steers the client flow, it never re-implements protocol logic:
 
-* ``GET /`` serves the single page (native JS + ``EventSource``) and ``/static`` its assets;
+* ``GET /`` serves the page selected by ``ui_mode`` (``presentation`` for an audience,
+  ``explorer`` for protocol-level debugging) and ``/static`` its assets;
 * ``POST /api/runs`` starts one background client run (one concurrent run, a second start is 409);
 * ``GET /api/runs/{id}/events`` streams the normalized events, ``decision_requested`` prompts and
   the ``finished`` outcome as Server-Sent Events;
@@ -80,8 +81,16 @@ _LOGGER = logging.getLogger("ran_energy_saving.web")
 #: Trace ingest path; it is exempt from the user bearer and authenticated by the trace token.
 TRACE_INGEST_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"/api/runs/[^/]+/trace")
 
-#: Static directory of the single page.
+#: Static directory of the Run Explorer page.
 STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
+
+#: Static directory of the presentation page served to an audience.
+PRESENTATION_DIR: Final[Path] = Path(__file__).resolve().parent / "presentation"
+
+#: Web UI variants: the audience-facing presentation and the technical Run Explorer.
+WEB_UI_PRESENTATION: Final[str] = "presentation"
+WEB_UI_EXPLORER: Final[str] = "explorer"
+WEB_UI_MODES: Final[tuple[str, ...]] = (WEB_UI_PRESENTATION, WEB_UI_EXPLORER)
 
 #: Seconds an SSE stream stays open after ``finished`` so late cross-process server spans arrive.
 #:
@@ -124,6 +133,7 @@ def create_app(
     default_discovery: str | None = None,
     finished_grace_seconds: float = FINISHED_GRACE_SECONDS,
     bind_host: str = "127.0.0.1",
+    ui_mode: str = WEB_UI_PRESENTATION,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -146,13 +156,18 @@ def create_app(
             the server spans that a cross-process run posts just after completion; ``0`` closes
             immediately (tests that do not exercise the race).
         bind_host: address the caller will bind; a non-loopback bind needs an auth token.
+        ui_mode: ``presentation`` (audience-facing page) or ``explorer`` (technical Run
+            Explorer); both serve the same API and event stream.
 
     Returns:
         The assembled Starlette application.
 
     Raises:
-        ValueError: when an explicit default is not a supported value.
+        ValueError: when an explicit default is not a supported value, or ``ui_mode`` is unknown.
     """
+    if ui_mode not in WEB_UI_MODES:
+        raise ValueError(f"Unsupported ui mode: {ui_mode}; expected one of {WEB_UI_MODES}")
+    static_dir = PRESENTATION_DIR if ui_mode == WEB_UI_PRESENTATION else STATIC_DIR
     validate_bind_security(bind_host, config.auth_token)
     if catalog is None:
         from demo.catalog import DemoRunCatalog
@@ -221,7 +236,7 @@ def create_app(
 
     async def index(request: Request) -> Response:
         del request
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(static_dir / "index.html")
 
     async def meta(request: Request) -> Response:
         del request
@@ -242,6 +257,7 @@ def create_app(
                 "defaultMode": resolved_default_mode,
                 "defaultTransport": resolved_default_transport,
                 "defaultDiscovery": resolved_default_discovery,
+                "uiMode": ui_mode,
                 # The UI must keep its stream open at least as long as the backend grace window,
                 # otherwise the server's last trace batch is posted to a closed subscriber.
                 "finishedGraceMs": int(round(finished_grace_seconds * 1000)),
@@ -648,7 +664,7 @@ def create_app(
             Route("/api/runs/{run_id}/trace", ingest_trace, methods=["POST"]),
             Route("/api/runs/{run_id}/trace.json", run_trace_json),
             Route("/api/runs/{run_id}/spans/{span_id}", run_span),
-            Mount("/static", app=StaticFiles(directory=STATIC_DIR), name="static"),
+            Mount("/static", app=StaticFiles(directory=static_dir), name="static"),
         ],
         lifespan=lifespan,
         middleware=(

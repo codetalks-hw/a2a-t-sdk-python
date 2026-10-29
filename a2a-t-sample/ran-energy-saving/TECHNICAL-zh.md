@@ -77,18 +77,20 @@ python run_demo.py --scenario information --mode auto --model-mode offline
 ### 1.3 在 UI 里看懂交互
 
 ```bash
-python run_demo.py --ui --scenario information --mode auto --model-mode offline
+python run_demo.py --ui --scenario information --model-mode offline
 # 打开 http://127.0.0.1:8080
 ```
 
-在左侧点 **Start run**，然后看时间线：
+页面默认打开演示视图。先选场景，必要时修改网络操作工程师的请求，再点 **发起节能任务**：
 
-- 每一行左侧有 **OSS** 或 **网管** 徽标，这就是“谁在处理”；
-- 协商阶段能看到“提议 → 决策 → 接受”；
-- 网管执行阶段能看到四个工具调用；
-- 点任意一行，右侧显示消息原文与决策内容。
+- 页面中间实时呈现 OSS 与 RAN 网管的协商：每次提议、反提议、接受、拒绝或中止，并标注轮次；
+- 请求卡是唯一可编辑的输入；传输、模型和语言都来自启动参数；
+- 结果区显示已下发的方案与节能报告。
 
-**如何验证：** 时间线同时出现 OSS 与网管徽标；最终状态是“已完成”。
+需要阶段、LLM 与工具调用、原始报文和历史记录时，加 `--ui-mode explorer`，使用 Run Explorer 的
+左侧栏、时间线与检查器。
+
+**如何验证：** 演示视图最终出现节能报告；拒绝与中止场景显示“未创建任务”。
 
 ## 2. 架构速览（解释）
 
@@ -138,7 +140,7 @@ flowchart LR
 | 网管的执行流程 | `protocol/server_executor.py`、`demo/agents/server_agent/` |
 | 接入真实网管接口 | `demo/agents/server_agent/tools.py` |
 | Task 持久化 | `protocol/sqlite_task_store.py` |
-| Web UI | `demo/web/` |
+| Web UI | `demo/web/`（`presentation/` 演示视图，`static/` Run Explorer） |
 | 部署暴露哪些运行 | 实现 `protocol/run_spec.py` 的 `RunCatalog` |
 | accept 时填入哪些值 | 实现 `protocol/run_spec.py` 的 `ClientPolicy` |
 | planner 图与工具 | 实现 `protocol/server_agent_spec.py` 的 `ServerAgentFactory` |

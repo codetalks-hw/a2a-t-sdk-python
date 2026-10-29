@@ -602,6 +602,7 @@ def _run_ui(
     scenario: str,
     mode: str,
     transport: str,
+    ui_mode: str = "presentation",
     host: str = "127.0.0.1",
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
@@ -630,10 +631,11 @@ def _run_ui(
         default_mode=mode,
         default_transport=transport,
         bind_host=host,
+        ui_mode=ui_mode,
     )
     trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(
-        f"[run_demo] Web UI on http://{host}:{ui_port} "
+        f"[run_demo] Web UI on http://{host}:{ui_port} (ui_mode={ui_mode}) "
         f"(language={config.language}, model_mode={config.model_mode} [{config.model_label}], "
         f"provider={config.adk_model_provider}, "
         f"defaults: scenario={scenario}, mode={mode}, transport={transport}, "
@@ -680,7 +682,10 @@ def _build_parser(
         "--mode",
         default="auto",
         choices=cli_modes,
-        help="client decision mode: ADK agent (auto) or Web UI decisions (manual; requires --ui)",
+        help=(
+            "client decision mode: ADK agent (auto) or Web UI decisions "
+            "(manual; requires --ui --ui-mode explorer)"
+        ),
     )
     parser.add_argument(
         "--transport",
@@ -707,6 +712,15 @@ def _build_parser(
         help="offline (scripted + fake ADK model) or live (OpenAI-compatible endpoint)",
     )
     parser.add_argument("--ui", action="store_true", help="serve the Web UI instead of the CLI client")
+    parser.add_argument(
+        "--ui-mode",
+        default="presentation",
+        choices=("presentation", "explorer"),
+        help=(
+            "Web UI variant: presentation (audience-facing demo, default) or explorer "
+            "(protocol-level Run Explorer)"
+        ),
+    )
     parser.add_argument(
         "--ui-port",
         type=int,
@@ -778,6 +792,10 @@ def main() -> int:
 
     if args.mode == "manual" and not args.ui:
         parser.error("--mode manual requires --ui (the decision form lives in the Web UI)")
+    if args.mode == "manual" and args.ui_mode != "explorer":
+        parser.error(
+            "--mode manual requires --ui-mode explorer (the presentation view has no decision form)"
+        )
 
     python = sys.executable
     if not _preflight(python, source_env):
@@ -995,6 +1013,7 @@ def main() -> int:
                 scenario=args.scenario,
                 mode=args.mode,
                 transport=args.transport,
+                ui_mode=args.ui_mode,
             )
         else:
             print(

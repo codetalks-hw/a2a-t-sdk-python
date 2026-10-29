@@ -262,6 +262,7 @@ async def client(
         runs_dir=tmp_path,
         runtime_factory=factory,
         finished_grace_seconds=0.0,
+        ui_mode="explorer",
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
