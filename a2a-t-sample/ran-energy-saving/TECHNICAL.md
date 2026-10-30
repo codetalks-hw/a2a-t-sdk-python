@@ -97,8 +97,10 @@ approval 2 (MML in MIE) → apply and report. The right column shows what the OS
 (with the 24-hour throughput chart), the negotiation turns, an **On the wire** inspector, and the
 merged session trace. The inspector shows the real A2A request headers and JSON body with the
 Task-T metadata; its **Plain A2A** toggle replaces the Task-T fields with one natural-language
-sentence and drops the extension header. It is a format comparison only, not a second run. Clicking
-a trace row selects that message in the inspector.
+sentence and drops the extension header. It is a format comparison only, not a second run. Every
+trace row is clickable: a message row opens it in the inspector, a span row shows its fields, and a
+decision row without a message opens a readable summary. The clicked row stays highlighted and the
+list stops following the newest row until you scroll back to the bottom.
 
 Two human approvals can be enabled at startup:
 
@@ -391,8 +393,11 @@ constructor):
 
 1. An initial Task-T request is validated with
    `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)`.
-2. A validation failure whose first error code maps to a negotiation type becomes the initial
+2. A validation failure whose error codes map to a negotiation type becomes the initial
    `Propose`; an unmappable failure becomes a terminal `REJECTED` Task with structured errors.
+   Concrete codes (a missing value, a disallowed value, a rule violation) outrank the
+   model-judged `content.semantic_conflict`, so a model that reports an overlap before the
+   missing target still opens the information negotiation.
 3. An `Accept` is validated with `validate_accept_prompt_and_data_filling`; the agreed Task-T
    prompt is then validated again and handed to the LangGraph NMS execution.
 4. A `Reject` or `Abort` is terminal: the handler answers with a plain message and creates no Task.
@@ -558,11 +563,15 @@ Notes:
 - `reject` and `abort` never create a Task. `reject` ends with a plain A2A `Message` that carries
   no Negotiation-T metadata; `abort` is generated with the common abort template at
   `round = maxRounds = 3`.
-- The mapping from the first Task-T validation error code to a negotiation type
+- The mapping from Task-T validation error codes to a negotiation type
   (`content.param_missing` → information, `content.value_not_allowed` → target,
   `content.rule_violation` → feasibility) is a **sample convention**, not an A2A-T contract. It is
   implemented in `NEGOTIATION_KIND_BY_ERROR_CODE` in
-  [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py).
+  [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py). `content.semantic_conflict`
+  is classified last (its facts split target from feasibility) and never hides a concrete code.
+- The accepted Task-T prompt is checked before sending: when the refill model drops a segment of
+  the agreed throughput target, the client writes the target into the task-context section so the
+  server cannot reject the value the OSS just supplied.
 
 ### 5.4 `sampleProposal`: a sample-only convention
 

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   applyFrame,
   createState,
+  endingOf,
   executionSteps,
   pendingHuman,
   resolutionOf,
@@ -16,6 +17,7 @@ import {
 } from "../../demo/web/presentation/js/state.js";
 import { sceneFor } from "../../demo/web/presentation/js/scenes.js";
 import { createPlayer } from "../../demo/web/presentation/js/player.js";
+import { entryOfRow, rowKey } from "../../demo/web/presentation/js/trace.js";
 import { parseIntent, plainSentence } from "../../demo/web/presentation/js/intent.js";
 import {
   approvalCard,
@@ -144,6 +146,33 @@ applyFrame(rejected, finished("no_task_negotiation_ended"));
 assert.equal(resolutionOf(rejected), "rejected");
 assert.equal(stageOf(rejected), "ended");
 assert.equal(rejected.taskCreated, false);
+assert.equal(endingOf(rejected).resolution, "rejected");
+
+// --- An accepted negotiation the peer ended keeps the peer's own text ----
+
+const endedAfterAccept = createState();
+applyFrame(endedAfterAccept, {
+  type: "run_started",
+  runId: "r5",
+  scenario: "information",
+  mode: "confirm",
+});
+applyFrame(endedAfterAccept, proposal(1, 1));
+applyFrame(endedAfterAccept, decision(2, "accept", 1));
+applyFrame(
+  endedAfterAccept,
+  event({
+    seq: 3,
+    entryType: "event",
+    kind: "message",
+    phase: "negotiation",
+    summary: "Accept validation failed: guaranteedThroughputTarget is missing.",
+  }),
+);
+applyFrame(endedAfterAccept, finished("no_task_negotiation_ended"));
+assert.equal(endingOf(endedAfterAccept).resolution, "accepted");
+assert.match(endingOf(endedAfterAccept).detail, /Accept validation failed/);
+assert.equal(stageOf(endedAfterAccept), "ended");
 
 // --- Aborted negotiation: the NMS abort wins over the last counter ------
 
@@ -427,5 +456,23 @@ assert.equal(outage.slots.length, 3);
 const requestedAt = new Date(Date.now() - 10_000).toISOString();
 const left = remainingSeconds(requestedAt, 120);
 assert.ok(left !== null && left <= 111 && left >= 109, left);
+
+// --- Trace rows are all viewable ----------------------------------------
+
+assert.equal(rowKey({ entry: { spanId: "s1" } }, 0), "span:s1");
+assert.equal(rowKey({ entry: { seq: 7 } }, 0), "seq:7");
+assert.equal(rowKey({ title: "Decision requested" }, 12), "row:12");
+
+const synthetic = entryOfRow({
+  title: "Decision requested",
+  sub: "round 1 · information",
+  tag: "a2at",
+});
+assert.equal(synthetic.entryType, "trace");
+assert.equal(synthetic.title, "Decision requested");
+assert.equal(synthetic.summary, "round 1 · information");
+
+const real = { kind: "message_sent", seq: 3 };
+assert.equal(entryOfRow({ entry: real }), real);
 
 console.log("presentation model harness: ok");

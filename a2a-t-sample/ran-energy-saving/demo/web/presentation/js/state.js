@@ -329,6 +329,23 @@ export function resolutionOf(state) {
   return null;
 }
 
+/** Ending of a run that stopped without a task: the resolution plus the peer's last text.
+ *
+ * A plain terminal message from the RAN Agent is the only place its real reason survives (for
+ * example a failed accept validation); a rejected or aborted negotiation carries its own copy.
+ */
+export function endingOf(state) {
+  let detail = "";
+  for (let index = state.negotiation.length - 1; index >= 0; index -= 1) {
+    const message = state.negotiation[index];
+    if (message.side === "nms" && message.action === "end") {
+      detail = String(message.summary || message.content || "").trim();
+      break;
+    }
+  }
+  return { resolution: resolutionOf(state), detail };
+}
+
 /** The NMS execution milestones and their live status. */
 export function executionSteps(state) {
   // The NMS publishes one artifact per tool: profile, evaluate, apply. The report is separate.

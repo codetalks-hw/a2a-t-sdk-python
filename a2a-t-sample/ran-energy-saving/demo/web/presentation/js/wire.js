@@ -11,12 +11,17 @@ import { el, isObject } from "./dom.js";
 import { parseIntent, plainSentence } from "./intent.js";
 
 export function createWire(els, getCopy, getUi) {
+  let lastKey = null;
+  let lastFormat = null;
+
   function render(state) {
     const ui = getUi();
     const copy = getCopy();
     const entry = ui.wireEntry || latestWireEntry(state);
     const model = entry ? buildWireModel(entry, state, ui.wireFormat, copy) : null;
     if (model === null) {
+      lastKey = null;
+      lastFormat = null;
       els.title.textContent = copy.wire.emptyTitle;
       els.code.replaceChildren(el("span", "wire-empty", copy.wire.empty));
       els.note.hidden = true;
@@ -24,8 +29,16 @@ export function createWire(els, getCopy, getUi) {
       return;
     }
     if (!model.alternate) ui.wireFormat = "t";
+    // Rebuild the panel on every frame so it follows the live state, but keep the reader's
+    // scroll position unless the shown message or the format actually changed.
+    const key = wireKey(entry);
+    const changed = key !== lastKey || ui.wireFormat !== lastFormat;
+    const scroll = els.code.scrollTop;
     els.title.textContent = model.title;
     els.code.replaceChildren(...model.nodes);
+    els.code.scrollTop = changed ? 0 : scroll;
+    lastKey = key;
+    lastFormat = ui.wireFormat;
     els.note.textContent = model.note || "";
     els.note.hidden = !model.note;
     setFormat(copy, ui.wireFormat, model.alternate);
@@ -49,6 +62,15 @@ export function createWire(els, getCopy, getUi) {
   }
 
   return { render, showEntry };
+}
+
+/** Stable identity of one displayed entry; a changed entry resets the panel scroll. */
+export function wireKey(entry) {
+  if (!entry || typeof entry !== "object") return "";
+  if (entry.spanId) return `span:${entry.spanId}`;
+  if (entry.seq !== undefined && entry.seq !== null) return `seq:${entry.seq}`;
+  if (entry.messageId) return `msg:${entry.messageId}`;
+  return `${entry.entryType || ""}:${entry.kind || ""}:${entry.title || entry.summary || ""}`;
 }
 
 /** Return the last outbound message span, so the wire tab has content without a click. */
@@ -153,6 +175,20 @@ export function buildWireModel(entry, state, format, copy) {
         0,
       ),
     };
+  }
+  // Trace spans (and the stand-in built for a row without an entry) are not wire messages:
+  // show the span fields so a click on any trace row always has something to read.
+  if (entry.entryType === "trace" || (entry.entryType === undefined && entry.spanId)) {
+    const detail = isObject(entry.detail) ? entry.detail : {};
+    const payload = { kind: entry.kind || "trace", title: entry.title || "" };
+    if (entry.summary) payload.detail = entry.summary;
+    if (entry.purpose) payload.purpose = entry.purpose;
+    if (detail.toolName) payload.tool = detail.toolName;
+    if (detail.promptText) payload.promptText = String(detail.promptText);
+    if (Object.keys(detail).length > 0 && !detail.toolName && !detail.promptText) {
+      payload.detailFields = detail;
+    }
+    return { title: copy.wire.traceTitle, alternate: false, note: "", nodes: jsonNodes(payload, 0) };
   }
   return {
     title: copy.wire.eventTitle,

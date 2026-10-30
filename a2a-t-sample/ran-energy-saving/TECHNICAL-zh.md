@@ -89,7 +89,8 @@ Task-T → 审批 1（意图）→ 下发 Task-T → 需要时协商 → 策略�
 → 审批 2（MIE 中的 MML）→ 下发与报告。右侧展示 OSS Agent 理解到的任务（含 24 小时保障速率图）、协商
 轮次、**On the wire** 报文检查器以及合并后的会话轨迹。检查器展示真实的 A2A 请求头、JSON body 和
 Task-T metadata；切换到 **普通 A2A** 时，Task-T 字段被替换成一句自然语言，扩展头也被去掉。这里只做
-格式对照，不是第二次运行。点击会话轨迹的一行会在检查器中选中该消息。
+格式对照，不是第二次运行。会话轨迹的每一行都可点击：消息行在检查器中打开该消息，轨迹点行显示该
+轨迹点的字段，没有消息的决策行显示可读摘要；被点击的行保持高亮，列表停止跟随最新一行，直到你滚回底部。
 
 启动时可开启两次人工审批：
 
@@ -337,7 +338,7 @@ Gateway Task 数据库的 `push_notification_configs` 表（schema 版本 2）�
 [`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) 是服务端唯一协议入口，只处理**任务前**请求（`context.current_task is None`；`context.task_id` 不是可靠信号，因为 `RequestContext` 构造时会生成一个）：
 
 1. 初始 Task-T 请求通过 `validate_task_prompt_and_data_filling(prompt, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)` 校验。
-2. 校验失败且首个错误码可映射到协商类型时，生成初始 `Propose`；不可映射时返回带结构化错误的终态 `REJECTED` Task。
+2. 校验失败且错误码可映射到协商类型时，生成初始 `Propose`；不可映射时返回带结构化错误的终态 `REJECTED` Task。具体错误码（缺值、取值不允许、规则冲突）优先于模型判定的 `content.semantic_conflict`，因此模型先报“时段重叠”再报“缺参数”时仍然打开 information 协商。
 3. `Accept` 通过 `validate_accept_prompt_and_data_filling` 校验；随后再次校验协商确定的 Task-T 提示词并交给网管执行（LangGraph）。
 4. `Reject` 或 `Abort` 是终态：处理器回一条普通消息，不创建 Task。
 5. 客户端反提议通过 `validate_propose_prompt_and_data_filling` 校验，再由策略引擎应答。
@@ -472,7 +473,8 @@ executor = build_negotiation_executor(
 
 - `target` 中客户端反提议保持第 1 轮；只有服务端修订方案进入第 2 轮，客户端 `Accept` 也保持第 2 轮。
 - `reject` 与 `abort` 都不创建 Task。`reject` 以一条不含 Negotiation-T 元数据的普通 A2A `Message` 结束；`abort` 使用通用 abort 模板，在 `round = maxRounds = 3` 发出。
-- 首个 Task-T 校验错误码到协商类型的映射（`content.param_missing` → information、`content.value_not_allowed` → target、`content.rule_violation` → feasibility）是**样例约定**，不是 A2A-T 契约。实现位于 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 的 `NEGOTIATION_KIND_BY_ERROR_CODE`。
+- Task-T 校验错误码到协商类型的映射（`content.param_missing` → information、`content.value_not_allowed` → target、`content.rule_violation` → feasibility）是**样例约定**，不是 A2A-T 契约。实现位于 [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) 的 `NEGOTIATION_KIND_BY_ERROR_CODE`。`content.semantic_conflict` 最后才参与判定（其 facts 区分 target 与 feasibility），不会被模型先列出的顺序掩盖具体错误码。
+- 接受前会检查回填的 Task-T：如果回填模型漏掉协商一致的速率目标片段，客户端会把目标写回任务上下文，避免服务端反过来判定 OSS 已提供的值无效。
 
 ### 5.4 `sampleProposal`：仅样例约定
 

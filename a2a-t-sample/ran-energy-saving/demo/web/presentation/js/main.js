@@ -13,12 +13,12 @@ import {
   scenarioStory,
   scenarioTag,
 } from "../copy.js";
-import { applyFrame, createState, pendingHuman, resolutionOf, stageOf } from "./state.js";
+import { applyFrame, createState, endingOf, pendingHuman, stageOf } from "./state.js";
 import { STEP_KEYS, sceneFor } from "./scenes.js";
 import { createPlayer } from "./player.js";
 import { createStage, setStageCopy } from "./stage.js";
 import { createRail } from "./rail.js";
-import { createTrace } from "./trace.js";
+import { createTrace, entryOfRow } from "./trace.js";
 import { createWire } from "./wire.js";
 import { renderIntent } from "./intent.js";
 import {
@@ -190,7 +190,11 @@ const wire = createWire(
 const trace = createTrace(
   { body: els.traceBody, rows: els.traceRows, empty: els.traceEmpty },
   () => ui.copy,
-  (entry) => {
+  (row) => {
+    const entry = entryOfRow(row);
+    if (!row.entry && row.titleKey && ui.copy.trace[row.titleKey]) {
+      entry.title = ui.copy.trace[row.titleKey];
+    }
     ui.wirePinned = true;
     wire.showEntry(entry);
     setTab("wire");
@@ -441,6 +445,7 @@ function selectScenario(name, { start = false } = {}) {
   ui.looping = false;
   els.requestText.value = ui.meta?.scenarioRequests?.[name] || "";
   stage.reset();
+  trace.reset();
   hideError();
   for (const chip of els.chips.children) {
     chip.setAttribute("aria-pressed", String(chip.dataset.scenario === name));
@@ -482,6 +487,7 @@ async function startRun() {
   ui.deadline = null;
   ui.looping = false;
   stage.reset();
+  trace.reset();
   clear(els.techLog);
   setBusy(true);
   render();
@@ -972,13 +978,22 @@ function renderResult() {
   } else if (ui.view.report) {
     card.append(reportCard(ui.view.report, ui.copy));
   } else if (stage === "ended") {
-    const resolution = resolutionOf(ui.view);
+    const ending = endingOf(ui.view);
     const reason =
-      resolution === "aborted" ? ui.copy.result.aborted : ui.copy.result.rejected;
+      ending.resolution === "aborted"
+        ? ui.copy.result.aborted
+        : ending.resolution === "rejected"
+          ? ui.copy.result.rejected
+          : ui.copy.result.endedGeneric;
     card.append(
       el("h3", "result-title", ui.copy.result.endedTitle),
       el("p", "result-reason", reason),
     );
+    // Rejection and abort carry their own copy; every other ending is a peer stop whose text
+    // names the real cause (for example a failed accept validation).
+    if (ending.detail && ending.resolution !== "rejected" && ending.resolution !== "aborted") {
+      card.append(el("p", "result-detail", ending.detail));
+    }
   } else if (stage === "failed") {
     card.append(
       el("h3", "result-title", ui.copy.result.failedTitle),
