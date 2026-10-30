@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol, TypeVar
@@ -196,8 +197,17 @@ class TaskTPrecheck(Protocol):
         self,
         filled: FilledParamData,
         schema: Mapping[str, object],
+        *,
+        prompt: str | None = None,
     ) -> PrecheckFinding | None:
-        """Return a finding when the Task-T must open a negotiation, else ``None``."""
+        """Return a finding when the Task-T must open a negotiation, else ``None``.
+
+        Args:
+            filled: parameters of the validated Task-T (partial when validation failed).
+            schema: caller parameter schema of the Task-T validation.
+            prompt: rendered Task-T prompt, when the caller has it; a failed validation nulls the
+                rejected slot in ``filled``, so the prompt is the only place that value survives.
+        """
         ...
 
 
@@ -285,6 +295,7 @@ class PreTaskNegotiationHandler:
             return NegotiationOutcome.short(
                 build_error_message(context_id, "The request carries no Task-T prompt.")
             )
+        verified = False
         try:
             filled = await self._call(
                 self._prompt_server.validate_task_prompt_and_data_filling,
@@ -297,20 +308,41 @@ class PreTaskNegotiationHandler:
             kind = negotiation_kind_for_errors(exc.errors)
             if kind is None:
                 return NegotiationOutcome.rejected(self._build_rejected_task(context, exc))
-            state = NegotiationState(
-                kind=kind,
-                round=1,
-                max_rounds=self._max_rounds,
-                missing_items=_missing_slot_names(exc.errors),
-            )
-            return await self._emit_policy_decision(context_id, self._policy(state))
+            verified = False
+            if kind is not NegotiationKind.INFORMATION and _TARGET_SEGMENT_PATTERN.search(prompt):
+                # A conflict verdict is model-judged. When the sample's own check of the Task-T
+                # finds no conflict, the request is valid and must run: a live model sometimes
+                # reports an overlap that the prompt does not contain. A prompt without a target
+                # leaves nothing to check against, so the verdict stands.
+                confirmed = self._verified_conflict_kind(exc, prompt)
+                if confirmed is not None:
+                    kind = confirmed
+                else:
+                    self._logger.warning(
+                        "Task-T validation reported a %s conflict (%s) that the sample data does "
+                        "not confirm; continuing with the request",
+                        kind.value,
+                        ", ".join(str(error.code) for error in exc.errors),
+                    )
+                    filled = _filled_from_error(exc)
+                    verified = True
+            if not verified:
+                state = NegotiationState(
+                    kind=kind,
+                    round=1,
+                    max_rounds=self._max_rounds,
+                    missing_items=_missing_slot_names(exc.errors),
+                )
+                return await self._emit_policy_decision(context_id, self._policy(state))
         except (A2ATError, ValueError) as exc:
             return NegotiationOutcome.short(build_error_message(context_id, f"Task-T validation failed: {exc}"))
 
         # The SDK's semantic verdict is model-dependent. The deployment may still know signals
         # (missing required fields, an infeasible plan) that must open a negotiation.
         finding = (
-            self._precheck(filled, self._task_schema) if self._precheck is not None else None
+            None
+            if verified
+            else (self._precheck(filled, self._task_schema, prompt=prompt) if self._precheck is not None else None)
         )
         if finding is not None:
             self._logger.info(
@@ -393,6 +425,23 @@ class PreTaskNegotiationHandler:
                 self._task_schema,
                 self._task_template_uri,
                 stage="task_t_accept_validation",
+            )
+        except ContentValidationError as exc:
+            kind = negotiation_kind_for_errors(exc.errors)
+            confirmable = (
+                kind is not None
+                and kind is not NegotiationKind.INFORMATION
+                and _TARGET_SEGMENT_PATTERN.search(task_prompt) is not None
+            )
+            if not confirmable or self._verified_conflict_kind(exc, task_prompt) is not None:
+                return await self._negotiation_failure(
+                    context_id, session, f"Accepted Task-T validation failed: {exc}"
+                )
+            self._logger.warning(
+                "accepted Task-T validation reported a %s conflict (%s) that the sample data does "
+                "not confirm; creating the task",
+                kind.value,
+                ", ".join(str(error.code) for error in exc.errors),
             )
         except (A2ATError, ValueError) as exc:
             return await self._negotiation_failure(
@@ -567,6 +616,25 @@ class PreTaskNegotiationHandler:
             )
         raise AssertionError(f"Unsupported policy decision: {decision.action}")
 
+    def _verified_conflict_kind(
+        self,
+        exc: ContentValidationError,
+        prompt: str,
+    ) -> NegotiationKind | None:
+        """Return the conflict the sample's own Task-T check confirms, or ``None``.
+
+        The failed validation's parameters are not trustworthy for this check: the validator nulls
+        the slot it rejected, so the prompt is the only source that still carries the target and
+        the background event. A ``None`` answer means the model reported a conflict the sample's
+        data does not have.
+        """
+        if self._precheck is None:
+            return None
+        finding = self._precheck(_filled_from_error(exc), self._task_schema, prompt=prompt)
+        if finding is None or finding.kind is NegotiationKind.INFORMATION:
+            return None
+        return finding.kind
+
     async def _negotiation_failure(
         self, context_id: str | None, session: NegotiationContext, text: str
     ) -> NegotiationOutcome:
@@ -625,6 +693,18 @@ def _missing_slot_names(errors: Sequence[SlotValidationError]) -> tuple[str, ...
         if slot_name.strip() and slot_name not in names:
             names.append(slot_name)
     return tuple(names)
+
+
+#: One ``HH:MM~HH:MM,<rate>Mbps`` target segment in a rendered Task-T prompt.
+_TARGET_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\d{2}:\d{2}~\d{2}:\d{2}\s*,\s*\d+(?:\.\d+)?\s*Mbps", re.IGNORECASE
+)
+
+
+def _filled_from_error(exc: ContentValidationError) -> FilledParamData:
+    """Return the parameters a failed validation extracted (empty when it carries none)."""
+    params = exc.params if isinstance(exc.params, Mapping) else {}
+    return FilledParamData(dict(params))
 
 
 def _structured_errors(errors: Sequence[SlotValidationError]) -> list[dict[str, object]]:

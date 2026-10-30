@@ -30,6 +30,11 @@ _TARGET_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
 #: Markers of a background outage in the sample's feasibility request.
 _OUTAGE_MARKERS: Final[tuple[str, ...]] = ("outage", "power", "停电")
 
+#: Sentence carrying the background event of a rendered Task-T prompt.
+_OUTAGE_SENTENCE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[^\n。；;]*(?:outage|停电)[^\n。；;]*", re.IGNORECASE
+)
+
 
 def _minutes(value: str) -> int:
     """Convert one ``HH:MM`` value to minutes from midnight."""
@@ -82,6 +87,41 @@ def _deterministic_negotiation_kind(data: Mapping[str, object]) -> NegotiationKi
     return None
 
 
+def _conflict_data(
+    data: Mapping[str, object],
+    prompt: str | None,
+) -> Mapping[str, object]:
+    """Merge the values a rendered Task-T prompt still carries into one parameter map.
+
+    A failed semantic validation nulls the slot it rejected in its extracted parameters, so the
+    conflict check reads the target segments and the background-event sentence from the prompt.
+    """
+    if not prompt:
+        return data
+    merged = dict(data)
+    # Only override a field the prompt actually carries: a stub prompt in a unit test must not
+    # hide the parameters it was given.
+    if _TARGET_SEGMENT_PATTERN.search(prompt):
+        merged["guaranteedThroughputTarget"] = prompt
+    sentence = _OUTAGE_SENTENCE_PATTERN.search(prompt)
+    if sentence is not None:
+        merged["backgroundEvent"] = _outage_clause(sentence.group(0))
+    return merged
+
+
+def _outage_clause(text: str) -> str:
+    """Return the clause of one sentence that names the outage.
+
+    A Task-T context line may list the target segments and the background event together; the
+    outage interval must come from the clause after the marker, not from the first interval of
+    the line (which is a target segment).
+    """
+    for part in re.split(r"[，,；;。.!！?？]", text):
+        if re.search(r"outage|停电", part, re.IGNORECASE):
+            return part
+    return text
+
+
 def _missing_required_params(
     filled: FilledParamData,
     schema: Mapping[str, object],
@@ -108,8 +148,21 @@ class RanDataTaskTPrecheck:
         self,
         filled: FilledParamData,
         schema: Mapping[str, object],
+        *,
+        prompt: str | None = None,
     ) -> PrecheckFinding | None:
-        """Return the negotiation the sample opens for one semantically valid Task-T."""
+        """Return the negotiation the sample opens for one Task-T."""
+        data = filled.data if isinstance(filled.data, Mapping) else {}
+        # With the prompt at hand, check the conflict first: a failed validation nulls the
+        # rejected slot, so the parameters alone would look incomplete even when the prompt
+        # carries a target that genuinely overlaps.
+        if prompt:
+            kind = _deterministic_negotiation_kind(_conflict_data(data, prompt))
+            if kind is not None:
+                return PrecheckFinding(
+                    kind=kind,
+                    detail=f"the sample detected a {kind.value} conflict",
+                )
         missing = _missing_required_params(filled, schema)
         if missing:
             return PrecheckFinding(
@@ -117,7 +170,8 @@ class RanDataTaskTPrecheck:
                 missing_items=missing,
                 detail=f"required fields are missing: {', '.join(missing)}",
             )
-        data = filled.data if isinstance(filled.data, Mapping) else {}
+        if prompt:
+            return None
         kind = _deterministic_negotiation_kind(data)
         if kind is None:
             return None

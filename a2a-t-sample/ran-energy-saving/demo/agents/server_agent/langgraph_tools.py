@@ -37,10 +37,17 @@ REPORT_TOOL_NAME: str = "generate_energy_saving_report"
 
 @dataclass
 class PlanGuard:
-    """Per-execution state used to enforce the plan order."""
+    """Per-execution state used to enforce the plan order.
 
-    profile: dict[str, object] | None = None
-    evaluation: dict[str, object] | None = None
+    The execution covers a cluster, not a single cell: a planner may read several cell profiles and
+    evaluate more than one candidate while it chooses the plan. Profiles and evaluations are
+    therefore kept per cell / per plan; remembering only the last one would reject a valid
+    evaluation or application of a plan that another candidate was inspected after (the live
+    planner's exploration of ``cell-001`` and ``cell-002``).
+    """
+
+    profiles: dict[str, dict[str, object]] = field(default_factory=dict)
+    evaluations: dict[tuple[str, str, str], dict[str, object]] = field(default_factory=dict)
     applied: dict[str, object] | None = None
     report: dict[str, object] | None = None
     tool_calls: list[str] = field(default_factory=list)
@@ -76,23 +83,6 @@ def _rate_key(value: object) -> str:
         return text
 
 
-def _same_plan(
-    result: dict[str, object] | None,
-    *,
-    cell_id: object,
-    window: object,
-    target_rate: object,
-) -> bool:
-    """Return whether a stored result describes exactly one plan."""
-    if result is None:
-        return False
-    return (
-        str(result.get("cell_id")) == str(cell_id)
-        and str(result.get("window")) == str(window)
-        and _rate_key(result.get("target_rate")) == _rate_key(target_rate)
-    )
-
-
 def build_execution_tools(
     guard: PlanGuard,
     *,
@@ -118,10 +108,17 @@ def build_execution_tools(
         guard.record("get_cell_energy_profile")
         result = get_cell_energy_profile(cell_id, date)
         if result.get("ok") is True:
-            guard.profile = result
-            guard.evaluation = None
-            guard.applied = None
-            guard.report = None
+            cell_key = str(cell_id)
+            guard.profiles[cell_key] = result
+            # Re-reading a cell invalidates the evaluations and the applied plan derived from
+            # older data of that cell. Reading another cell must not: the planner compares cells
+            # before it evaluates or applies one of them.
+            guard.evaluations = {
+                key: value for key, value in guard.evaluations.items() if key[0] != cell_key
+            }
+            if guard.applied is not None and str(guard.applied.get("cell_id")) == cell_key:
+                guard.applied = None
+                guard.report = None
         return _json(result)
 
     @tool("evaluate_energy_saving_plan")
@@ -131,7 +128,7 @@ def build_execution_tools(
         Requires the profile of the same cell to have been read first.
         """
         guard.record("evaluate_energy_saving_plan")
-        if guard.profile is None or str(guard.profile.get("cell_id")) != str(cell_id):
+        if str(cell_id) not in guard.profiles:
             return _violation(
                 "evaluate_energy_saving_plan",
                 "Read get_cell_energy_profile for this cell before evaluating a plan.",
@@ -139,9 +136,7 @@ def build_execution_tools(
             )
         result = evaluate_energy_saving_plan(cell_id, window, target_rate)
         if result.get("ok") is True:
-            guard.evaluation = result
-            guard.applied = None
-            guard.report = None
+            guard.evaluations[(str(cell_id), str(window), _rate_key(target_rate))] = result
         return _json(result)
 
     @tool("apply_energy_saving_plan")
@@ -152,12 +147,8 @@ def build_execution_tools(
         configures a human gate, the engineer's approval before anything is written.
         """
         guard.record("apply_energy_saving_plan")
-        if not _same_plan(
-            guard.evaluation,
-            cell_id=cell_id,
-            window=window,
-            target_rate=target_rate,
-        ):
+        evaluation = guard.evaluations.get((str(cell_id), str(window), _rate_key(target_rate)))
+        if evaluation is None:
             return _violation(
                 "apply_energy_saving_plan",
                 "Evaluate this exact cell/window/rate successfully before applying it.",
@@ -166,7 +157,7 @@ def build_execution_tools(
                 target_rate=str(target_rate),
             )
         if approval_gate is not None:
-            approved = await approval_gate(cell_id, window, target_rate, guard.evaluation)
+            approved = await approval_gate(cell_id, window, target_rate, evaluation)
             if not approved:
                 return _json(
                     {

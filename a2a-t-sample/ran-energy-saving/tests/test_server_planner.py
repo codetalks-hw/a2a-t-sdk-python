@@ -144,6 +144,44 @@ async def test_tool_guard_accepts_the_full_sequence() -> None:
         ran_data.reset()
 
 
+async def test_tool_guard_keeps_a_profile_per_cell() -> None:
+    """Reading another cell does not invalidate the cell being evaluated.
+
+    The live planner reads every dataset cell before it evaluates one of them. Keeping only the
+    last profile made ``evaluate`` reject a valid cell-001 plan after cell-002 was read, so the
+    planner retried until it hit the step limit.
+    """
+    ran_data.reset()
+    try:
+        guard = PlanGuard()
+        tools = {tool.name: tool for tool in build_execution_tools(guard)}
+        date = ran_data.dataset_date()
+        for cell_id in ("cell-001", "cell-002"):
+            profile = tool_result_from_text(
+                await tools["get_cell_energy_profile"].ainvoke({"cell_id": cell_id, "date": date})
+            )
+            assert profile["ok"] is True
+        for cell_id, window, rate in (
+            ("cell-001", "00:00~06:00", "30%"),
+            ("cell-002", "01:00~05:00", "20%"),
+        ):
+            evaluation = tool_result_from_text(
+                await tools["evaluate_energy_saving_plan"].ainvoke(
+                    {"cell_id": cell_id, "window": window, "target_rate": rate}
+                )
+            )
+            assert evaluation["ok"] is True
+        # The candidate evaluated last is cell-002; applying the first one must still work.
+        applied = tool_result_from_text(
+            await tools["apply_energy_saving_plan"].ainvoke(
+                {"cell_id": "cell-001", "window": "00:00~06:00", "target_rate": "30"}
+            )
+        )
+        assert applied["ok"] is True
+    finally:
+        ran_data.reset()
+
+
 def test_build_planner_model_offline_returns_the_scripted_model(
     offline_config: SampleConfig,
 ) -> None:

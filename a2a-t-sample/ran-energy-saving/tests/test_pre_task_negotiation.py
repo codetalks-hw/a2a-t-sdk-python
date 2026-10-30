@@ -177,6 +177,26 @@ def _content_error(code: str, slot_name: str = "region") -> ContentValidationErr
     )
 
 
+def _conflict_error(target: str) -> ContentValidationError:
+    """A live-validator verdict that the target has overlapping segments."""
+    return ContentValidationError(
+        ErrorCatalog.CONTENT_SEMANTIC_CONFLICT,
+        {"section_label": "task_context", "reason": "overlapping segments"},
+        errors=[
+            SlotValidationError(
+                slot_name="guaranteedThroughputTarget",
+                code="content.semantic_conflict",
+                message="overlap",
+            )
+        ],
+        params={
+            "operationType": "Create",
+            "region": "Songshanhu",
+            "guaranteedThroughputTarget": target,
+        },
+    )
+
+
 def _make_context(
     message: Message,
     *,
@@ -273,6 +293,45 @@ async def test_initial_task_with_a_missing_required_field_opens_information_nego
     proposal_text = server.propose_generations[0][0]
     assert isinstance(proposal_text, str)
     assert "guaranteedThroughputTarget" in proposal_text
+
+
+_NON_OVERLAPPING_PROMPT = (
+    "## Task Context\n\nGuaranteed throughput target: {00:00~17:30,10Mbps}, "
+    "{17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}."
+)
+
+_OVERLAPPING_PROMPT = (
+    "## Task Context\n\nGuaranteed throughput target: {17:30~23:00,20Mbps}, "
+    "{20:00~00:00,10Mbps}."
+)
+
+
+async def test_a_false_conflict_verdict_does_not_open_a_negotiation() -> None:
+    """A live validator can claim an overlap the Task-T prompt does not have."""
+    gate, server = _gate()
+    server.task_error = _conflict_error(
+        "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
+    )
+    context = _make_context(_initial_message(prompt=_NON_OVERLAPPING_PROMPT))
+
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
+    assert server.propose_generations == []
+
+
+async def test_a_verified_conflict_still_opens_the_target_negotiation() -> None:
+    """The deterministic check keeps the real overlap case working."""
+    gate, server = _gate()
+    server.task_error = _conflict_error("{17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}")
+
+    message = _assert_no_task(
+        await gate.handle(_make_context(_initial_message(prompt=_OVERLAPPING_PROMPT)))
+    )
+
+    metadata = _metadata(message)
+    assert metadata[TEMPLATE_URI_METADATA_KEY] == TARGET_NEGOTIATION_PROPOSE_URI
 
 
 async def test_without_a_precheck_the_handler_trusts_the_sdk_verdict() -> None:
@@ -434,6 +493,26 @@ async def test_accept_validates_and_hands_the_agreed_task_prompt_to_the_executor
     assert len(server.task_calls) == 1
     assert context.message is not None
     assert context.message.parts[0].text == TASK_PROMPT
+
+
+async def test_a_false_conflict_verdict_does_not_end_a_valid_accept() -> None:
+    """The same false verdict must not turn an accepted negotiation into a terminal error."""
+    gate, server = _gate()
+    server.task_error = _conflict_error(
+        "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
+    )
+    message = _negotiation_message(
+        NegotiationPerformative.ACCEPT,
+        round_number=1,
+        template_uri=INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI,
+        task_prompt=_NON_OVERLAPPING_PROMPT,
+    )
+    context = _make_context(message)
+
+    outcome = await gate.handle(context)
+
+    assert outcome.short_circuit is False
+    assert outcome.task_request is context
 
 
 async def test_accept_validation_failure_returns_an_error_without_a_task() -> None:

@@ -345,7 +345,7 @@ Gateway Task 数据库的 `push_notification_configs` 表（schema 版本 2）�
 
 处理器只负责协议流程。两个注入缝把业务规则挡在外面：
 
-- `TaskTPrecheck` 在 SDK 接受 Task-T 之后运行，仍可开启协商（必填字段缺失、目标时段冲突、不可行的停电保障）。演示实现是 `demo/task_t_precheck.py`；不注入时处理器直接信任 SDK 的结论。
+- `TaskTPrecheck` 在 SDK 接受 Task-T 之后运行，仍可开启协商（必填字段缺失、目标时段冲突、不可行的停电保障）。演示实现是 `demo/task_t_precheck.py`；不注入时处理器直接信任 SDK 的结论。同一个检查也会复核失败的校验结论：live 模型报告目标或可行性冲突、但渲染出的 Task-T prompt 里并没有该冲突时，请求（或已接受的 Task-T）视为有效并继续执行。这里以 prompt 为准，因为校验失败时提取参数中对应槽位会被置空。
 - 协商策略（见下）决定已开启协商的下一步。
 
 所有 SDK 调用都是同步的，因此处理器用 `asyncio.to_thread` 执行，避免阻塞服务端事件循环。
@@ -381,7 +381,7 @@ flowchart LR
 | `apply_energy_saving_plan` | 同一方案已评估成功 | 下发方案（样例写入进程内存储） |
 | `generate_energy_saving_report` | 已成功下发 | 生成最终报告 |
 
-工具顺序由 `PlanGuard` 强制；越序返回 `tool_order_violation`，planner 可在步数预算内纠正。把 `demo/agents/server_agent/tools.py` 替换为真实网管调用即可，图外壳与顺序约束保留。
+工具顺序由 `PlanGuard` 强制；越序返回 `tool_order_violation`，planner 可在步数预算内纠正。guard 按小区和按方案保存状态（profile 与成功评估结果），而不是只记最后一个：演示集群有多个小区，live planner 会先读两个小区的 profile、评估多个候选方案，再应用其中一个；只记最后一个会把刚评估过的方案判为越序，最终撞上步数上限。把 `demo/agents/server_agent/tools.py` 替换为真实网管调用即可，图外壳与顺序约束保留。
 
 执行器从外部接收图：
 

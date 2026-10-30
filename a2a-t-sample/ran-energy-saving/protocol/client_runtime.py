@@ -153,7 +153,11 @@ def _decision_provider(
         # conflict but not the concrete throughput target, so the model cannot resolve them alone.
         provider = AdkDecisionProvider(
             model=build_traced_adk_model(config, model=model),
-            offline=config.is_offline,
+            # The demo supplies a scripted decision model whose script covers the run's expected
+            # proposals. An unexpected proposal (for example a live validator that opens the wrong
+            # negotiation kind) has no scripted answer; falling back to accept keeps the run alive
+            # instead of failing it with an unparseable decision.
+            offline=config.is_offline or model is not None,
             user_request=run_spec.user_request,
             session_db_path=config.client_db_path,
             agent_factory=client_agent_factory,

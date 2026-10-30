@@ -408,7 +408,11 @@ The handler contains protocol flow only. Two hooks keep business rules out of it
 
 - `TaskTPrecheck` runs after the SDK accepts a Task-T and may still open a negotiation (missing
   required fields, an infeasible target combination). The demo implementation is
-  `demo/task_t_precheck.py`; without a check the handler trusts the SDK verdict.
+  `demo/task_t_precheck.py`; without a check the handler trusts the SDK verdict. The same check
+  also cross-checks a failed verdict: when a live model reports a target or feasibility conflict
+  but the rendered Task-T prompt does not contain one, the request (or the accepted Task-T) is
+  valid and proceeds. The prompt is the source of truth here because a failed validation nulls the
+  rejected slot in its extracted parameters.
 - the negotiation policy (see below) decides the next step of an open negotiation.
 
 Every SDK call is synchronous, so the handler runs it with `asyncio.to_thread` to keep the server
@@ -450,8 +454,11 @@ flowchart LR
 | `generate_energy_saving_report` | the plan was applied | produce the final report |
 
 `PlanGuard` enforces the order; an out-of-order call returns `tool_order_violation`, and the planner
-may correct itself within its step budget. Replacing `demo/agents/server_agent/tools.py` with real
-NMS calls keeps the graph shell and the order guard.
+may correct itself within its step budget. The guard keeps state per cell and per plan (profiles
+and successful evaluations), not just the last one: the demo cluster has several cells, and a live
+planner reads both profiles and evaluates several candidates before applying one. A single-slot
+guard rejected the plan the planner had just evaluated and drove it into the step limit. Replacing
+`demo/agents/server_agent/tools.py` with real NMS calls keeps the graph shell and the order guard.
 
 The executor shell takes the graph from outside:
 
