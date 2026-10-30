@@ -294,3 +294,22 @@ def test_record_error_marks_the_run_failed() -> None:
     assert document["finalState"] == FINAL_STATE_FAILED
     assert document["error"] == "RuntimeError: boom"
     assert document["finishedAt"] is not None
+
+
+def test_record_event_exposes_the_tool_of_a_tool_artifact() -> None:
+    transcript = _transcript()
+
+    entry = transcript.record_event(
+        {
+            "kind": "artifact",
+            "task_id": "task-1",
+            "context_id": CONTEXT_ID,
+            "artifact_id": "artifact-apply",
+            "name": "tool_result",
+            "text": '{"ok": true, "plan_id": "plan-1"}',
+            "metadata": {"toolName": "apply_energy_saving_plan"},
+        }
+    )
+
+    assert entry["detail"] == {"toolName": "apply_energy_saving_plan"}
+    assert entry["kind"] == "artifact"

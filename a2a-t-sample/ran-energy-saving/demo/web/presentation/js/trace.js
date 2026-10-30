@@ -16,6 +16,11 @@ export function createTrace(els, getCopy, onSelect) {
   // Programmatic scrolls also fire ``scroll``; ignore them so a click near the bottom does not
   // silently re-enable following and yank the list away on the next frame.
   let quietUntil = 0;
+  // Rows are only appended during a run, so the list is built incrementally. Replacing every
+  // row on each frame made the whole panel flash whenever a span arrived.
+  let renderedCount = 0;
+  let renderedFirst = null;
+  let selectedApplied = undefined;
 
   els.body.addEventListener("scroll", () => {
     if (Date.now() < quietUntil) return;
@@ -32,23 +37,36 @@ export function createTrace(els, getCopy, onSelect) {
     const copy = getCopy();
     const rows = state.trace.slice(-200);
     const offset = state.trace.length - rows.length;
-    const scroll = els.body.scrollTop;
-    els.rows.replaceChildren();
     els.empty.hidden = rows.length > 0;
-    rows.forEach((row, index) => {
+    const first = rows.length > 0 ? rowKey(rows[0], offset) : null;
+    if (rows.length < renderedCount || first !== renderedFirst) {
+      // A rewind or a new run: the window no longer extends what is on screen.
+      els.rows.replaceChildren();
+      renderedCount = 0;
+      selectedApplied = undefined;
+      els.body.scrollTop = 0;
+    }
+    let appended = 0;
+    for (let index = renderedCount; index < rows.length; index += 1) {
+      const row = rows[index];
       const key = rowKey(row, offset + index);
       els.rows.append(rowNode(row, copy, key, () => select(key, row)));
-    });
-    for (const node of els.rows.children) {
-      node.classList.toggle("sel", node.dataset.key === selectedKey);
+      appended += 1;
     }
-    if (follow) {
+    renderedCount = rows.length;
+    renderedFirst = first;
+
+    if (selectedApplied !== selectedKey) {
+      for (const node of els.rows.children) {
+        node.classList.toggle("sel", node.dataset.key === selectedKey);
+      }
+      selectedApplied = selectedKey;
+    }
+    if (follow && appended > 0) {
       scrollTo(els.body.scrollHeight);
-    } else {
-      scrollTo(scroll);
     }
     const selected = selectNode(els.rows, selectedKey);
-    if (selected !== null) {
+    if (selected !== null && appended > 0) {
       quietUntil = Date.now() + 150;
       keepVisible(els.body, selected);
     }
@@ -64,6 +82,10 @@ export function createTrace(els, getCopy, onSelect) {
   function reset() {
     selectedKey = null;
     follow = true;
+    renderedCount = 0;
+    renderedFirst = null;
+    selectedApplied = undefined;
+    els.rows.replaceChildren();
   }
 
   return { render, reset };

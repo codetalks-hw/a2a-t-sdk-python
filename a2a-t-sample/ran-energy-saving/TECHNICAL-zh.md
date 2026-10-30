@@ -96,8 +96,8 @@ Task-T metadata；切换到 **普通 A2A** 时，Task-T 字段被替换成一句
 
 - `--mode confirm`：审批 1 在 Task-T 离开 OSS Agent 之前停住，工程师确认结构化意图（或修改请求）；
   同一模式下，OSS Agent 也会先给出协商决策建议，再由工程师确认、改判、接受 RAN Agent 方案或拒绝；
-- `--approval-gate`：审批 2 是 MIE 的 MML 审核。RAN Agent 在下发前发布 `INPUT_REQUIRED`，页面请工程师
-  在 MIE 中导出、检查并确认 MML 建议；驳回则不下发、不出报告，以未变更结束。
+- `--approval-gate`：审批 2 是 MIE 的 MML 审核。RAN Agent 在下发前发布 `INPUT_REQUIRED`，页面直接展示
+  MML 建议，请工程师在 MIE 中审核并确认；驳回则不下发、不出报告，以未变更结束。
 
 数据采集步骤由三条真实 `WORKING` 状态驱动（started / in progress / completed）；页面把第 1–8 天做成
 动画，网络侧气泡明确写 “No MML applied yet”，RAN Agent 在 MIE 审核开始前保持 “Data collection
@@ -105,7 +105,10 @@ completed”。绿色 `MML commands` 包只在最后的 apply 步骤出现，即
 2 个数据集小区（`cell-001`、`cell-002`）加 4 个同一测试集群的示意站点。
 
 播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。传输、
-模型和语言都来自启动参数。
+模型和语言都来自启动参数。舞台只跟随客户端的 A2A 事件（状态更新与 artifact）；服务端 trace span
+只作为右侧面板的证据，不会重放舞台步骤——它们按批上报，可能晚于所解释的事件。artifact 按产生它
+的工具分类，因此在线规划器读取多个小区、评估多个候选时，MML 仍然只在 MIE 审核通过并出现 apply
+artifact 之后才下发。
 
 需要阶段、LLM 与工具调用、原始报文和历史记录时，加 `--ui-mode explorer`，使用 Run Explorer 的
 左侧栏、时间线与检查器。

@@ -207,6 +207,13 @@ class NegotiationTranscript:
         explicit_detail = detail if detail is not None else event.get("detail")
         if not isinstance(explicit_detail, Mapping):
             explicit_detail = None
+        if explicit_detail is None and _text(event.get("kind")) == "artifact":
+            # The NMS stamps every tool artifact with the tool that produced it. A presentation
+            # must not guess which artifact is the applied plan from its position: the planner may
+            # read several profiles and evaluate several candidates before it applies one.
+            tool_name = metadata_map.get("toolName")
+            if isinstance(tool_name, str) and tool_name:
+                explicit_detail = {"toolName": tool_name}
         resolved_phase = phase or infer_event_phase(event)
         resolved_step = phase_step if phase_step is not None else self._count_phase(resolved_phase)
         entry: dict[str, object] = {
@@ -220,6 +227,9 @@ class NegotiationTranscript:
             "direction": direction,
             "kind": _event_kind(_text(event.get("kind")), performative),
             "eventKind": _text(event.get("kind")),
+            # The Task state name. The human-readable text of a status is localized business
+            # copy, so consumers must never infer the state from the text.
+            "state": _text(event.get("state")) or None,
             "round": session.round if session is not None else None,
             "maxRounds": session.max_rounds if session is not None else None,
             "contextId": _text(event.get("context_id")) or (session.id if session is not None else None) or None,

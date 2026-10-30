@@ -1,7 +1,14 @@
 /** The live stage: four actors, two zones, the A2A-T channel, bubbles and flying packets. */
 
 import { format, proposalLine, decisionLine } from "../copy.js";
-import { executionSteps, pendingHuman, resolutionOf, roundInfo, stageOf } from "./state.js";
+import {
+  executionSteps,
+  negotiationExpected,
+  pendingHuman,
+  resolutionOf,
+  roundInfo,
+  stageOf,
+} from "./state.js";
 import { svg } from "./dom.js";
 
 const REDUCED =
@@ -133,7 +140,8 @@ export function createStage(els) {
 
     if (key === "request") {
       fly("lane-request", copy.start, "req", 900);
-      note("eng", copy.roles.eng, copy.states.engWriting);
+      // Put the real request on the stage: the audience should see the ask, not only "typing".
+      note("eng", copy.roles.eng, (state.userRequest || "").trim() || copy.states.engWriting);
       return;
     }
     if (key === "understand") {
@@ -199,12 +207,16 @@ export function createStage(els) {
       fly("lane-return", copy.approval.reviewNeeded, "neg", 1100);
       note("nms", copy.roles.nms, copy.approval.suggestions, true);
       note("oss", copy.roles.oss, copy.approval.waiting, true);
-      note("eng", copy.roles.eng, copy.approval.exporting, true);
+      note("eng", copy.roles.eng, copy.approval.checkingMml, true);
       fly("lane-approval", copy.approval.reviewInMie, "neg", 2000);
       note("cells", copy.roles.cells, copy.approval.policy, true);
       return;
     }
     if (key === "apply") {
+      // Nothing reaches the network while the MIE review is open. The client events already
+      // order the approval before the apply artifact; this guard keeps a stray frame from
+      // showing the MML anyway.
+      if (state.approvalState === "waiting") return;
       fly("lane-apply", copy.approval.mmlCommands, "cfg", 1200);
       note("nms", copy.roles.nms, copy.approval.sendingMml);
       note("cells", copy.roles.cells, copy.states.cellsApplying);
@@ -245,13 +257,26 @@ export function createStage(els) {
 
     if (stage === "negotiating") {
       eng = { cls: "ok", text: copy.states.engSent };
-      oss = { cls: "active", text: copy.states.ossNegotiating };
-      nms = {
-        cls: "active",
-        text: maxRounds > 0
-          ? format(copy.states.nmsNegotiating, { round: Math.max(round, 1), max: maxRounds })
-          : copy.states.nmsValidating,
-      };
+      if (negotiationExpected(state)) {
+        oss = { cls: "active", text: copy.states.ossNegotiating };
+        nms = {
+          cls: "active",
+          text: maxRounds > 0
+            ? format(copy.states.nmsNegotiating, {
+                round: Math.max(round, 1),
+                max: maxRounds,
+              })
+            : copy.states.nmsValidating,
+        };
+      } else if (state.protocol === "plain") {
+        oss = { cls: "active", text: copy.states.ossSendingPlain };
+        nms = { cls: "active", text: copy.states.nmsPlainReading };
+      } else {
+        // The request is complete: the OSS is only waiting for the Task-T check, and the RAN
+        // Agent is validating it. There is no negotiation to display.
+        oss = { cls: "active", text: copy.states.ossWaitingAck };
+        nms = { cls: "active", text: copy.states.nmsValidating };
+      }
     } else if (stage === "executing") {
       eng = { cls: "ok", text: copy.states.engApproved };
       oss = { cls: "ok", text: copy.states.ossFollowing };

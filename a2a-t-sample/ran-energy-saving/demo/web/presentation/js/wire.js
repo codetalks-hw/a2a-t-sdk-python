@@ -13,15 +13,23 @@ import { parseIntent, plainSentence } from "./intent.js";
 export function createWire(els, getCopy, getUi) {
   let lastKey = null;
   let lastFormat = null;
+  let lastSignature = null;
 
   function render(state) {
     const ui = getUi();
     const copy = getCopy();
     const entry = ui.wireEntry || latestWireEntry(state);
+    const signature = entry
+      ? `${wireKey(entry)}|${ui.wireFormat}|${state.runId || ""}|${copy.lang}|${state.intentText || ""}`
+      : "empty";
+    // The page renders on every frame; the message only changes when the shown entry, the
+    // format or the rendered intent changes.
+    if (signature === lastSignature) return;
     const model = entry ? buildWireModel(entry, state, ui.wireFormat, copy) : null;
     if (model === null) {
       lastKey = null;
       lastFormat = null;
+      lastSignature = "empty";
       els.title.textContent = copy.wire.emptyTitle;
       els.code.replaceChildren(el("span", "wire-empty", copy.wire.empty));
       els.note.hidden = true;
@@ -29,8 +37,6 @@ export function createWire(els, getCopy, getUi) {
       return;
     }
     if (!model.alternate) ui.wireFormat = "t";
-    // Rebuild the panel on every frame so it follows the live state, but keep the reader's
-    // scroll position unless the shown message or the format actually changed.
     const key = wireKey(entry);
     const changed = key !== lastKey || ui.wireFormat !== lastFormat;
     const scroll = els.code.scrollTop;
@@ -39,6 +45,7 @@ export function createWire(els, getCopy, getUi) {
     els.code.scrollTop = changed ? 0 : scroll;
     lastKey = key;
     lastFormat = ui.wireFormat;
+    lastSignature = `${key}|${ui.wireFormat}|${state.runId || ""}|${copy.lang}|${state.intentText || ""}`;
     els.note.textContent = model.note || "";
     els.note.hidden = !model.note;
     setFormat(copy, ui.wireFormat, model.alternate);

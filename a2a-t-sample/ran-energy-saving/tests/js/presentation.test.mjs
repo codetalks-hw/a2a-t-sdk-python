@@ -62,8 +62,14 @@ function status(seq, summary) {
   return event({ seq, entryType: "event", kind: "status", phase: "execution", summary });
 }
 
-function artifact(seq, phase) {
-  return event({ seq, entryType: "event", kind: "artifact", phase });
+function artifact(seq, phase, tool = null) {
+  return event({
+    seq,
+    entryType: "event",
+    kind: "artifact",
+    phase,
+    detail: tool ? { toolName: tool } : null,
+  });
 }
 
 function finished(finalState, report = null, error = null) {
@@ -104,23 +110,35 @@ assert.deepEqual(
   [false, false, false],
 );
 
-applyFrame(accepted, artifact(6, "execution"));
+applyFrame(accepted, artifact(6, "execution", "get_cell_energy_profile"));
 assert.deepEqual(
   executionSteps(accepted).map((step) => step.done),
   [false, false, false],
 );
-applyFrame(accepted, artifact(7, "execution"));
+// The live planner may read several cells and evaluate several candidates. Position in the
+// artifact stream says nothing about applying a plan.
+applyFrame(accepted, artifact(7, "execution", "get_cell_energy_profile"));
+assert.deepEqual(
+  executionSteps(accepted).map((step) => step.done),
+  [false, false, false],
+);
+applyFrame(accepted, artifact(8, "execution", "evaluate_energy_saving_plan"));
 assert.deepEqual(
   executionSteps(accepted).map((step) => step.done),
   [true, false, false],
 );
-applyFrame(accepted, artifact(8, "execution"));
+applyFrame(accepted, artifact(9, "execution", "evaluate_energy_saving_plan"));
+assert.deepEqual(
+  executionSteps(accepted).map((step) => step.done),
+  [true, false, false],
+);
+applyFrame(accepted, artifact(10, "execution", "apply_energy_saving_plan"));
 assert.deepEqual(
   executionSteps(accepted).map((step) => step.done),
   [true, true, false],
 );
 
-applyFrame(accepted, artifact(9, "report"));
+applyFrame(accepted, artifact(11, "report"));
 assert.deepEqual(
   executionSteps(accepted).map((step) => step.done),
   [true, true, true],
@@ -273,11 +291,12 @@ assert.equal(approval.approvalState, "waiting");
 assert.equal(pendingHuman(approval), "approval");
 const approvalModel = approvalCard(approval, copy);
 assert.ok(approvalModel);
-assert.ok(approvalModel.options.some((option) => option.action === "export"));
-approval.approvalExported = true;
-const exported = approvalCard(approval, copy);
-assert.ok(exported.options.some((option) => option.action === "approve"));
-assert.ok(exported.mml.text.includes("SET ENERGYSAVING"));
+// Review is one step: approve or reject, with the commands visible immediately.
+assert.deepEqual(
+  approvalModel.options.map((option) => option.action),
+  ["approve", "reject"],
+);
+assert.ok(approvalModel.mml.text.includes("SET ENERGYSAVING"));
 
 applyFrame(approval, {
   type: "trace",
@@ -298,9 +317,42 @@ applyFrame(approval, {
 assert.equal(approval.approval.cellId, "cell-001");
 assert.equal(approvalCard(approval, copy).text.includes("cell-001"), true);
 
+// The status text names the plan even when the approval span has not arrived yet.
+const namedApproval = createState();
+applyFrame(namedApproval, { type: "run_started", runId: "r70", scenario: "night", mode: "confirm" });
+applyFrame(
+  namedApproval,
+  event({
+    seq: 1,
+    entryType: "event",
+    kind: "status",
+    phase: "execution",
+    state: "TASK_STATE_INPUT_REQUIRED",
+    summary:
+      "Waiting for the engineer's approval before applying the plan: cell-002, 23:00~24:00, 20%.",
+  }),
+);
+assert.equal(namedApproval.approval.cellId, "cell-002");
+assert.equal(namedApproval.approval.window, "23:00~24:00");
+assert.equal(approvalCard(namedApproval, copy).mml.text.includes("cell-002"), true);
+assert.equal(approvalCard(namedApproval, copy).options.length, 2);
+
 applyFrame(approval, status(5, "TASK_STATE_WORKING"));
 assert.equal(approval.approvalState, "approved");
 assert.equal(pendingHuman(approval), null);
+
+// A late approval-requested span (server spans arrive in batches) must not reopen the gate.
+applyFrame(approval, {
+  type: "trace",
+  event: {
+    seq: 6,
+    kind: "approval",
+    title: "Approval requested",
+    detail: { cellId: "cell-001", approvalState: "requested", timeoutSeconds: 120 },
+  },
+});
+assert.equal(approval.approvalState, "approved");
+assert.equal(approvalCard(approval, copy), null);
 
 const notApplied = createState();
 applyFrame(notApplied, { type: "run_started", runId: "r8", scenario: "information", mode: "confirm" });
@@ -348,6 +400,50 @@ assert.equal(
 );
 assert.equal(sceneFor({ type: "finished", finalState: "task_completed" }, sceneState).key, "finish");
 
+// Server spans are evidence, not story beats: a late batch must not replay a step.
+assert.equal(
+  sceneFor(
+    {
+      type: "trace",
+      event: {
+        kind: "tool",
+        side: "server",
+        title: "apply_energy_saving_plan",
+        detail: { toolName: "apply_energy_saving_plan" },
+      },
+    },
+    sceneState,
+  ),
+  null,
+);
+
+// Artifacts are classified by the tool that produced them, never by their position.
+const artifactState = createState();
+applyFrame(artifactState, { type: "run_started", runId: "s2", scenario: "night", mode: "confirm" });
+assert.equal(
+  sceneFor(artifact(20, "execution", "get_cell_energy_profile"), artifactState).key,
+  "collect-done",
+);
+assert.equal(
+  sceneFor(artifact(21, "execution", "get_cell_energy_profile"), artifactState).key,
+  "collect-done",
+);
+assert.equal(
+  sceneFor(artifact(22, "execution", "evaluate_energy_saving_plan"), artifactState).key,
+  "approval-ready",
+);
+assert.equal(
+  sceneFor(artifact(23, "execution", "evaluate_energy_saving_plan"), artifactState).key,
+  "approval-ready",
+);
+// While the MIE review is open, an apply artifact is evidence only.
+artifactState.approvalState = "waiting";
+assert.equal(sceneFor(artifact(24, "execution", "apply_energy_saving_plan"), artifactState).key, "trace");
+artifactState.approvalState = "approved";
+assert.equal(sceneFor(artifact(25, "execution", "apply_energy_saving_plan"), artifactState).key, "apply");
+// An unknown artifact is never mistaken for an applied plan.
+assert.equal(sceneFor(artifact(26, "execution"), artifactState).key, "trace");
+
 // --- Player: a hold waits for the engineer, then resumes ----------------
 
 const applied = [];
@@ -363,6 +459,9 @@ assert.equal(player.status().hold, true);
 player.enqueue({ key: "propose", step: 3, duration: 0, hold: false, frame: { id: 2 } });
 assert.deepEqual(applied, [1]);
 player.release();
+// The release waits one short beat so the next scene does not snap in under the click.
+assert.deepEqual(applied, [1]);
+await new Promise((resolve) => setTimeout(resolve, 600));
 assert.deepEqual(applied, [1, 2]);
 assert.equal(player.status().hold, false);
 

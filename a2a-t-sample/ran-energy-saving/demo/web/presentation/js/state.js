@@ -23,10 +23,14 @@ export const APPROVAL = {
 export function createState() {
   return {
     status: STATUS.IDLE,
+    started: false,
     runId: null,
     scenario: null,
     mode: null,
     protocol: "a2a-t",
+    userRequest: null,
+    expectedSequence: [],
+    artifactTools: [],
     negotiation: [],
     seen: new Set(),
     taskCreated: false,
@@ -45,7 +49,6 @@ export function createState() {
     decision: null,
     approval: null,
     approvalState: null,
-    approvalExported: false,
     nmsTool: null,
     lastStatusText: "",
   };
@@ -57,11 +60,14 @@ export function applyFrame(state, frame) {
   switch (frame.type) {
     case "run_started": {
       if (state.runId !== null && frame.runId !== state.runId) return state;
+      state.started = true;
       state.runId = typeof frame.runId === "string" ? frame.runId : state.runId;
       if (typeof frame.scenario === "string") state.scenario = frame.scenario;
       if (typeof frame.mode === "string") state.mode = frame.mode;
       if (frame.protocol === "plain") state.protocol = "plain";
       else if (frame.protocol === "a2a-t") state.protocol = "a2a-t";
+      if (typeof frame.userRequest === "string") state.userRequest = frame.userRequest;
+      if (Array.isArray(frame.expectedSequence)) state.expectedSequence = frame.expectedSequence;
       if (state.status === STATUS.IDLE) state.status = STATUS.RUNNING;
       return state;
     }
@@ -145,7 +151,10 @@ function applyEvent(state, entry) {
     tag: traceTag(entry),
     title: traceTitle(entry, summary),
     titleKey:
-      entry.kind === "status" && summary.includes("INPUT_REQUIRED") ? "approval" : null,
+      entry.kind === "status" &&
+      (entry.state === "TASK_STATE_INPUT_REQUIRED" || summary.includes("INPUT_REQUIRED"))
+        ? "approval"
+        : null,
     sub: traceSub(entry),
     chip: entry.performative || entry.kind || "",
     chipKind: chipKind(entry),
@@ -204,29 +213,48 @@ function applyEvent(state, entry) {
       break;
     case "status": {
       const label = summary || "";
+      const taskState = typeof entry.state === "string" ? entry.state : "";
       if (label) state.lastStatusText = label;
       if (label.includes("Data collection started")) state.dataCollection = "started";
       if (label.includes("Data collection in progress")) state.dataCollection = "progress";
       if (label.includes("Data collection completed")) state.dataCollection = "completed";
-      if (label.includes("SUBMITTED") || label.includes("WORKING") || label.includes("INPUT_REQUIRED")) {
+      const inputRequired =
+        taskState === "TASK_STATE_INPUT_REQUIRED" || label.includes("INPUT_REQUIRED");
+      const working = taskState === "TASK_STATE_WORKING" || label.includes("WORKING");
+      if (
+        taskState === "TASK_STATE_SUBMITTED" ||
+        label.includes("SUBMITTED") ||
+        working ||
+        inputRequired
+      ) {
         state.taskCreated = true;
       }
-      if (label.includes("INPUT_REQUIRED")) {
-        if (state.approval === null) state.approval = { generic: true };
-        state.approvalState = APPROVAL.WAITING;
-      } else if (label.includes("WORKING") && state.approvalState === APPROVAL.WAITING) {
+      if (inputRequired) {
+        if (state.approval === null) {
+          // The status text already names the plan; the approval span (which also carries the
+          // timeout) may arrive a moment later. Show the real plan immediately either way.
+          state.approval = approvalFromText(label) || { generic: true };
+        }
+        // A replay or a late span must not reopen a gate the engineer already resolved.
+        if (state.approvalState !== APPROVAL.APPROVED && state.approvalState !== APPROVAL.REJECTED) {
+          state.approvalState = APPROVAL.WAITING;
+        }
+      } else if (working && state.approvalState === APPROVAL.WAITING) {
         // A WORKING update after the gate means the change was approved (or the gate was off).
         state.approvalState = APPROVAL.APPROVED;
-      } else if (label.includes("REJECTED")) {
+      } else if (taskState === "TASK_STATE_REJECTED" || label.includes("REJECTED")) {
         state.approvalState = APPROVAL.REJECTED;
       }
       if (label) state.taskState = label;
       break;
     }
-    case "artifact":
+    case "artifact": {
       if (entry.phase === "report") state.reportArtifact = true;
       else state.executionArtifacts += 1;
+      const tool = artifactTool(entry);
+      if (tool) state.artifactTools.push(tool);
       break;
+    }
     default:
       break;
   }
@@ -283,8 +311,10 @@ function applyTrace(state, span) {
               : null,
         generic: false,
       };
-      state.approvalState = APPROVAL.WAITING;
-      state.approvalExported = false;
+      // The resolved span (or the engineer's click) may already have settled this gate.
+      if (state.approvalState !== APPROVAL.APPROVED && state.approvalState !== APPROVAL.REJECTED) {
+        state.approvalState = APPROVAL.WAITING;
+      }
     } else if (approved) {
       state.approvalState = APPROVAL.APPROVED;
     } else if (detail && detail.approvalState === "rejected") {
@@ -352,12 +382,32 @@ export function endingOf(state) {
   return { resolution: resolutionOf(state), detail };
 }
 
+/** Whether this run can open a pre-task negotiation at all.
+ *
+ * A complete request has an empty expected sequence: the RAN Agent validates the Task-T and
+ * creates the task directly. The presentation must not show a negotiation phase for it.
+ */
+export function negotiationExpected(state) {
+  return (
+    state.protocol !== "plain" &&
+    (state.expectedSequence.length > 0 || state.negotiation.length > 0)
+  );
+}
+
+/** The tool that produced one artifact, or ``""`` when the frame carries no tool metadata. */
+export function artifactTool(entry) {
+  const detail = isObject(entry?.detail) ? entry.detail : null;
+  return detail && typeof detail.toolName === "string" ? detail.toolName : "";
+}
+
 /** The NMS execution milestones and their live status. */
 export function executionSteps(state) {
-  // The NMS publishes one artifact per tool: profile, evaluate, apply. The report is separate.
+  // The NMS publishes one artifact per tool call. Classify them by the tool that produced them:
+  // the live planner may read several profiles and evaluate several candidates, so the artifact
+  // position says nothing about whether a plan was applied.
   const steps = [
-    { key: "evaluate", done: state.executionArtifacts >= 2 },
-    { key: "apply", done: state.executionArtifacts >= 3 },
+    { key: "evaluate", done: state.artifactTools.includes("evaluate_energy_saving_plan") },
+    { key: "apply", done: state.artifactTools.includes("apply_energy_saving_plan") },
     { key: "report", done: state.reportArtifact || state.report !== null },
   ];
   const activeIndex =
@@ -416,6 +466,24 @@ function chipKind(entry) {
   if (entry.entryType === "decision") return "neg";
   if (entry.kind === "reject" || entry.kind === "abort") return "no";
   return "";
+}
+
+//: ``cell-001, 00:00~06:00, 30%`` inside the INPUT_REQUIRED status text.
+const APPROVAL_PLAN_PATTERN = /([A-Za-z0-9_-]+),\s*(\d{2}:\d{2}\s*[~-]\s*\d{2}:\d{2}),\s*([\d.]+%)/;
+
+/** Read the plan the approval status names, or ``null`` when the text carries none. */
+function approvalFromText(text) {
+  const match = APPROVAL_PLAN_PATTERN.exec(text);
+  if (!match) return null;
+  return {
+    cellId: match[1],
+    window: match[2].replace(/\s+/g, ""),
+    rate: match[3],
+    taskId: null,
+    timeoutSeconds: null,
+    requestedAt: null,
+    generic: false,
+  };
 }
 
 function normaliseAction(value) {

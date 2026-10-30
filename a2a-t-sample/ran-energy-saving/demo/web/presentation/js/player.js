@@ -5,6 +5,12 @@
  * next, speed, and a hold for a pending engineer decision.
  */
 
+//: Pause after each story beat, so consecutive scenes read as separate steps instead of a burst.
+const BEAT_MS = 260;
+
+//: Pause after the engineer answers, so the next scene does not snap in under the click.
+const RELEASE_MS = 420;
+
 export function createPlayer({ onApply, onRewind, onChange, onScene }) {
   let scenes = [];
   let playhead = 0;
@@ -38,7 +44,7 @@ export function createPlayer({ onApply, onRewind, onChange, onScene }) {
       return;
     }
     onChange();
-    if (mode === "step") {
+    if (mode === "step" && !scene.evidence) {
       waitingNext = true;
       onChange();
       return;
@@ -47,10 +53,11 @@ export function createPlayer({ onApply, onRewind, onChange, onScene }) {
       drain();
       return;
     }
+    const delay = scene.evidence ? scene.duration : scene.duration / speed + BEAT_MS;
     timer = setTimeout(() => {
       timer = null;
       drain();
-    }, scene.duration / speed);
+    }, delay);
   }
 
   function pause() {
@@ -115,7 +122,11 @@ export function createPlayer({ onApply, onRewind, onChange, onScene }) {
     if (!hold) return;
     hold = false;
     onChange();
-    drain();
+    // The click resolved the hold; let the confirmation land before the next beat starts.
+    timer = setTimeout(() => {
+      timer = null;
+      drain();
+    }, RELEASE_MS);
   }
 
   function reset() {

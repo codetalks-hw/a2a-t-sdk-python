@@ -109,25 +109,30 @@ Two human approvals can be enabled at startup:
   negotiation decision before the engineer confirms, overrides, accepts the RAN Agent proposal or
   rejects it;
 - `--approval-gate`: approval 2 is the MIE MML review. The RAN Agent publishes `INPUT_REQUIRED`
-  before applying a plan; the page asks the engineer to export, check and acknowledge the MML
-  suggestion in MIE. A rejection applies nothing and ends the run without a report.
+  before applying a plan; the page shows the MML suggestion and asks the engineer to approve it in
+  MIE. A rejection applies nothing and ends the run without a report.
 
 The data-collection step is driven by three real `WORKING` status updates (started, in progress,
 completed); the page animates days 1–8, shows the network-side bubble "No MML applied yet", and
 keeps the RAN Agent at "Data collection completed" until the MIE review starts. The green
-`MML commands` packet only appears in the apply step, after the engineer acknowledges the suggestion
+`MML commands` packet only appears in the apply step, after the engineer approves the suggestion
 in MIE. The stage shows six radio sites: the two dataset cells (`cell-001`, `cell-002`) plus four
 illustrative sites of the same test cluster.
 
 The playback controls (auto / step, speed, pause, previous / next, loop) pace the presentation only;
-the backend run is real. Transport, model and language come from the CLI.
+the backend run is real. Transport, model and language come from the CLI. The stage follows the
+client's A2A events (status updates and artifacts); server-side trace spans are evidence for the
+right-hand panels and never replay a stage beat, because they are posted in batches and can arrive
+after the events they explain. Artifacts are classified by the tool that produced them, so a live
+planner that reads several cells and evaluates several candidates still shows MML only after the
+MIE approval and the apply artifact.
 
 For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
 use the Run Explorer's left rail, timeline and inspector.
 
 **Verify:** the presentation view ends with the energy-saving report; the reject and abort scenarios
 end with "no task created"; cancelling approval 1 ends with "intent not confirmed"; rejecting
-approval 2 ends with "MML not acknowledged · nothing was applied".
+approval 2 ends with "MML not approved · nothing was applied".
 
 ## 2. Architecture at a glance (explanation)
 

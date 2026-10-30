@@ -79,30 +79,23 @@ export function approvalCard(state, copy) {
   const detail = approval.generic
     ? copy.approval.waiting
     : format(copy.approval.detail, { cell, window, rate });
-  const options = state.approvalExported
-    ? [
-        { action: "approve", label: copy.approval.acknowledge, primary: true },
-        { action: "reject", label: copy.approval.reject, danger: true },
-      ]
-    : [
-        { action: "export", label: copy.approval.export, primary: true },
-        { action: "reject", label: copy.approval.reject, danger: true },
-      ];
   return {
     type: "approval",
     kicker: copy.approval.kicker,
     title: copy.approval.title,
     text: detail,
     detail: copy.approval.note,
-    mml: state.approvalExported
-      ? {
-          label: copy.approval.sample,
-          text: copy.approval.mml(cell, window, String(rate).replace("%", "")),
-        }
-      : null,
+    // Review is one step: the commands are shown, then the engineer approves or rejects them.
+    mml: {
+      label: copy.approval.sample,
+      text: copy.approval.mml(cell, window, String(rate).replace("%", "")),
+    },
     policy: copy.approval.policy,
     remaining: remainingSeconds(approval.requestedAt, approval.timeoutSeconds),
-    options,
+    options: [
+      { action: "approve", label: copy.approval.approve, primary: true },
+      { action: "reject", label: copy.approval.reject, danger: true },
+    ],
   };
 }
 

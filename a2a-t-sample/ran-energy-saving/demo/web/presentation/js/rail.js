@@ -2,22 +2,41 @@
 
 import { actionLabel, decisionLine, format, proposalLine } from "../copy.js";
 import { el } from "./dom.js";
-import { resolutionOf, roundInfo, stageOf } from "./state.js";
+import { negotiationExpected, resolutionOf, roundInfo, stageOf } from "./state.js";
 
 export function createRail(els, getCopy, getUi) {
+  // The page renders on every frame; rebuilding the same list each time made the panel flash.
+  // Only touch the DOM when the thing the panel shows actually changed.
+  let dotsKey = null;
+  let statusTextKey = null;
+  let emptyTextKey = null;
+  let turnsKey = null;
+
   function render(state) {
     const ui = getUi();
     const copy = getCopy();
-    els.roundDots.replaceChildren();
     const { round, maxRounds } = roundInfo(state);
-    for (let index = 1; index <= maxRounds; index += 1) {
-      const dot = el("span", "round-dot");
-      dot.dataset.filled = String(index <= round);
-      els.roundDots.append(dot);
+    const nextDotsKey = `${round}/${maxRounds}`;
+    if (nextDotsKey !== dotsKey) {
+      els.roundDots.replaceChildren();
+      for (let index = 1; index <= maxRounds; index += 1) {
+        const dot = el("span", "round-dot");
+        dot.dataset.filled = String(index <= round);
+        els.roundDots.append(dot);
+      }
+      dotsKey = nextDotsKey;
     }
 
-    els.status.textContent = statusText(state, copy);
-    els.empty.textContent = emptyText(state, copy);
+    const status = statusText(state, copy);
+    if (status !== statusTextKey) {
+      els.status.textContent = status;
+      statusTextKey = status;
+    }
+    const empty = emptyText(state, copy);
+    if (empty !== emptyTextKey) {
+      els.empty.textContent = empty;
+      emptyTextKey = empty;
+    }
     els.empty.hidden = state.negotiation.length > 0 || ui.tab === "wire";
 
     const business = ui.tab !== "wire";
@@ -25,12 +44,15 @@ export function createRail(els, getCopy, getUi) {
     els.wire.hidden = business;
     if (!business) return;
 
+    const nextTurnsKey = `${state.negotiation.length}|${ui.selectedTurn}|${copy.lang}`;
+    if (nextTurnsKey === turnsKey) return;
     const scrollTop = els.turns.scrollTop;
     els.turns.replaceChildren();
     state.negotiation.forEach((turn, index) => {
       els.turns.append(turnNode(turn, index, ui, copy, state.scenario, select));
     });
     els.turns.scrollTop = scrollTop;
+    turnsKey = nextTurnsKey;
   }
 
   function select(index) {
@@ -183,6 +205,9 @@ function statusText(state, copy) {
   const stage = stageOf(state);
   const resolution = resolutionOf(state);
   const { round, maxRounds } = roundInfo(state);
+  if (state.negotiation.length === 0 && !negotiationExpected(state) && stage !== "idle") {
+    return copy.negotiation.notNeededShort;
+  }
   if (
     state.negotiation.length === 0 &&
     (stage === "executing" || stage === "done")
@@ -208,6 +233,9 @@ function statusText(state, copy) {
 
 function emptyText(state, copy) {
   const stage = stageOf(state);
+  if (state.negotiation.length === 0 && !negotiationExpected(state) && stage !== "idle") {
+    return copy.negotiation.notNeededHint;
+  }
   if (state.negotiation.length === 0 && (stage === "executing" || stage === "done")) {
     return copy.negotiation.notNeeded;
   }

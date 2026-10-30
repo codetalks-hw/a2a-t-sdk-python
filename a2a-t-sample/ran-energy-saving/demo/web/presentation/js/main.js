@@ -13,7 +13,14 @@ import {
   scenarioStory,
   scenarioTag,
 } from "../copy.js";
-import { applyFrame, createState, endingOf, pendingHuman, stageOf } from "./state.js";
+import {
+  applyFrame,
+  createState,
+  endingOf,
+  negotiationExpected,
+  pendingHuman,
+  stageOf,
+} from "./state.js";
 import { STEP_KEYS, sceneFor } from "./scenes.js";
 import { createPlayer } from "./player.js";
 import { createStage, setStageCopy } from "./stage.js";
@@ -34,6 +41,29 @@ import { clear, el } from "./dom.js";
 
 const byId = (id) => document.getElementById(id);
 
+//: Evidence rows are applied one at a time so a batch of server spans does not flash the panels.
+const EVIDENCE_MS = 60;
+
+//: Story beats that should animate once; a repeat is evidence only.
+const REPEATED_SILENT = new Set([
+  "request",
+  "understand",
+  "intent-review",
+  "send",
+  "strategy",
+  "collect-start",
+  "collect-progress",
+  "collect-done",
+  "approval-ready",
+  "approval",
+  "apply",
+  "report",
+  "finish",
+  "end",
+  "abort",
+  "approval-rejected",
+]);
+
 const els = {
   banner: byId("connection-banner"),
   bannerText: byId("connection-text"),
@@ -48,6 +78,9 @@ const els = {
   protocolHint: byId("protocol-hint"),
   chips: byId("scenario-chips"),
   scenarioDesc: byId("scenario-desc"),
+  requestCard: byId("request-card"),
+  requestCardLabel: byId("request-card-label"),
+  requestCardText: byId("request-card-text"),
   editRequest: byId("edit-request"),
   editLabel: byId("edit-label"),
   drawer: byId("drawer"),
@@ -147,11 +180,14 @@ const ui = {
   protocol: "a2a-t",
   compareSaved: null,
   resultRevealed: null,
+  resultCard: null,
+  resultCardRun: null,
   view: createState(),
   shadow: createState(),
   frameLog: [],
   seenFrames: new Set(),
   lastScene: null,
+  lastQueuedScene: null,
   source: null,
   busy: false,
   tab: "business",
@@ -162,6 +198,7 @@ const ui = {
   submitting: false,
   counterOpen: false,
   counterText: "",
+  cardKey: null,
   deadline: null,
   countdownTimer: null,
   rendering: false,
@@ -219,9 +256,12 @@ const player = createPlayer({
   },
   onChange: () => renderControls(),
   onScene: (scene) => {
-    ui.lastScene = scene;
+    // Evidence frames (an unmapped trace span, a plan event) update the panels; they are not
+    // story beats and must not rewind the step bar to the step that was current when they
+    // arrived in the queue.
+    if (scene.key !== "trace" && scene.key !== "event") ui.lastScene = scene;
     renderSteps();
-    stage.scene(scene, ui.view, ui.copy);
+    if (!scene.silent) stage.scene(scene, ui.view, ui.copy);
     renderNarrator();
     handleLoop(scene);
   },
@@ -267,6 +307,7 @@ function bindStaticEvents() {
   els.requestText.addEventListener("input", () => {
     hideError();
     if (!ui.busy && ui.view.status === "idle") renderIntentPanel();
+    renderRequest();
   });
   els.requestText.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -358,6 +399,7 @@ function applyStaticCopy() {
     ui.meta?.modelMode === "offline" ? copy.runPillOffline : copy.runPillLive;
   els.scenariosLabel.textContent = copy.scenarioLabel;
   els.editLabel.textContent = copy.editRequest;
+  els.requestCardLabel.textContent = copy.requestCardLabel;
   els.requestTitle.textContent = copy.requestTitle;
   els.requestHint.textContent = copy.requestHint;
   els.reset.textContent = copy.reset;
@@ -450,6 +492,7 @@ function selectScenario(name, { start = false } = {}) {
   ui.frameLog = [];
   ui.seenFrames = new Set();
   ui.lastScene = null;
+  ui.lastQueuedScene = null;
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
@@ -474,6 +517,7 @@ function resetRequest() {
   els.requestText.value = ui.meta?.scenarioRequests?.[ui.selected] || "";
   hideError();
   renderIntentPanel();
+  renderRequest();
 }
 
 async function startRun() {
@@ -490,6 +534,7 @@ async function startRun() {
   ui.frameLog = [];
   ui.seenFrames = new Set();
   ui.lastScene = null;
+  ui.lastQueuedScene = null;
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
@@ -580,6 +625,22 @@ function enqueueFrame(frame) {
   if ((scene.key === "trace" || scene.key === "event") && ui.lastScene !== null) {
     scene.step = ui.lastScene.step;
   }
+  // A repeated beat (the live planner may evaluate several candidates, and a late span may
+  // repeat a scene) adds evidence without replaying the animation and its narration.
+  if (
+    ui.lastQueuedScene === scene.key &&
+    !scene.hold &&
+    scene.duration > 0 &&
+    REPEATED_SILENT.has(scene.key)
+  ) {
+    scene.duration = 0;
+    scene.silent = true;
+  }
+  if (scene.key !== "trace" && scene.key !== "event") ui.lastQueuedScene = scene.key;
+  if ((scene.key === "trace" || scene.key === "event") && scene.duration <= 0) {
+    scene.duration = EVIDENCE_MS;
+    scene.evidence = true;
+  }
   if (
     frame.type === "trace" &&
     frame.event &&
@@ -647,6 +708,7 @@ function render() {
     els.negoTitle.textContent =
       ui.tab === "wire" ? ui.copy.wire.panelTitle : ui.copy.negotiation.title;
     stage.render(ui.view, ui.copy);
+    renderRequest();
     renderIntentPanel();
     rail.render(ui.view);
     wire.render(ui.view);
@@ -656,6 +718,17 @@ function render() {
   } finally {
     ui.rendering = false;
   }
+}
+
+/** Show the natural-language request from the moment a scenario is selected.
+ *
+ * The audience should see what the engineer asks before anything runs; the drawer stays the
+ * editable copy.
+ */
+function renderRequest() {
+  const text = (ui.view.userRequest || els.requestText.value || "").trim();
+  els.requestCard.hidden = text === "";
+  if (text !== "") els.requestCardText.textContent = text;
 }
 
 function renderIntentPanel() {
@@ -694,7 +767,7 @@ function renderSteps() {
   const current = ui.lastScene ? ui.lastScene.step : -1;
   const pending = pendingHuman(ui.view);
   const stage = stageOf(ui.view);
-  const negotiationSeen = ui.view.negotiation.length > 0;
+  const expectedNegotiation = negotiationExpected(ui.view);
   const approvalSeen = ui.view.approval !== null || ui.view.approvalState !== null;
   const intentEnabled = ui.meta?.intentReview === true;
   const approvalEnabled = ui.meta?.approvalGate !== false;
@@ -725,14 +798,11 @@ function renderSteps() {
     } else if (index === current) {
       state = pending ? "ask" : "now";
     }
-    if (key === "negotiate" && !negotiationSeen && (stage === "executing" || stage === "done")) {
+    if (key === "negotiate" && !expectedNegotiation && ui.view.started) {
       state = "skip";
     }
     if (key === "intent" && !intentEnabled) state = "skip";
     if (key === "approval" && !approvalEnabled) state = "skip";
-    if (key === "approval" && !approvalSeen && stage === "executing" && ui.view.executionArtifacts >= 3) {
-      state = "skip";
-    }
     if (key === "approval" && stage === "done" && !approvalSeen) state = "skip";
     item.className = state;
     const button = item.querySelector("button");
@@ -743,7 +813,9 @@ function renderSteps() {
         state === "skip"
           ? key === "intent"
             ? ui.copy.auto
-            : ui.copy.skip
+            : key === "negotiate"
+              ? ui.copy.negotiation.notNeededShort
+              : ui.copy.skip
           : ui.copy.off;
     } else {
       button.disabled = false;
@@ -784,9 +856,11 @@ function renderNarrator() {
       stopCountdown();
     }
     renderChoices(card);
+    revealCard(card);
     return;
   }
 
+  ui.cardKey = null;
   stopCountdown();
   els.say.classList.remove("ask");
   els.choices.hidden = true;
@@ -807,6 +881,24 @@ function renderNarrator() {
   renderResult();
 
   if (player.status().hold && pendingHuman(ui.view) === null) player.release();
+}
+
+/** Bring a human-gate card fully into view once, without moving the whole page. */
+function revealCard(card) {
+  const key = `${card.type}:${card.title}:${card.options.map((option) => option.action).join(",")}`;
+  if (ui.cardKey === key) return;
+  ui.cardKey = key;
+  requestAnimationFrame(() => {
+    const left = document.querySelector(".left");
+    if (!left) return;
+    const rect = els.say.getBoundingClientRect();
+    const frame = left.getBoundingClientRect();
+    if (rect.bottom > frame.bottom) {
+      left.scrollTop += rect.bottom - frame.bottom + 10;
+    } else if (rect.top < frame.top) {
+      left.scrollTop -= frame.top - rect.top + 10;
+    }
+  });
 }
 
 function pendingCard() {
@@ -856,11 +948,6 @@ function renderChoices(card) {
         return;
       }
       if (card.type === "approval") {
-        if (option.action === "export") {
-          ui.view.approvalExported = true;
-          render();
-          return;
-        }
         submitApproval(option.action === "approve");
         return;
       }
@@ -957,6 +1044,10 @@ async function submitApproval(approved) {
     }
     ui.submitting = false;
     ui.view.approvalState = approved ? "approved" : "rejected";
+    // The scene of the next frame is chosen from the shadow state at enqueue time. The server's
+    // "Approved. Applying the plan." frame arrives before its approval-resolved span, so without
+    // this the show would replay "strategy & start" after the MIE review.
+    ui.shadow.approvalState = ui.view.approvalState;
     player.release();
     render();
   } catch (error) {
@@ -992,6 +1083,22 @@ function renderControls() {
 
 function renderResult() {
   if (!ui.view.finished) return;
+  // The ending (and the comparison card) is built once per run and re-appended on later
+  // renders; building it again would reset the scroll and any click target in the card.
+  if (ui.resultCard === null || ui.resultCardRun !== ui.view.runId) {
+    const built = buildResultCard();
+    if (built === null) return;
+    ui.resultCard = built;
+    ui.resultCardRun = ui.view.runId;
+    ui.compareSaved = null;
+  }
+  els.sayDetail.hidden = false;
+  els.sayDetail.append(ui.resultCard);
+  revealResult();
+}
+
+/** Build the ending card of the current run, or ``null`` while the run has no ending. */
+function buildResultCard() {
   const stage = stageOf(ui.view);
   const card = el("div", "result-card");
   if (stage === "notSent") {
@@ -1034,13 +1141,11 @@ function renderResult() {
       el("p", "result-reason", ui.view.error || ""),
     );
   } else {
-    return;
+    return null;
   }
-  els.sayDetail.hidden = false;
-  els.sayDetail.append(card);
   const comparison = comparisonCard();
-  if (comparison) els.sayDetail.append(comparison);
-  revealResult();
+  if (comparison) card.append(comparison);
+  return card;
 }
 
 /** Bring the ending (and the comparison card) into view once per finished run. */
