@@ -237,6 +237,29 @@ def test_errors_are_mapped_by_their_first_mapped_entry() -> None:
     assert negotiation_kind_for_errors([]) is None
 
 
+def test_a_missing_value_outranks_a_reported_semantic_conflict() -> None:
+    """A live model may report an overlap before the missing target; the kind must not flip.
+
+    The information scenario's Task-T has no throughput target at all. A model that also claims the
+    (absent) target overlaps must still open the information negotiation, not the target one.
+    """
+    conflict = SlotValidationError(
+        slot_name="guaranteedThroughputTarget",
+        code="content.semantic_conflict",
+        message="overlap",
+        facts={"reason": "17:30~23:00 and 20:00~00:00 overlap with different rates"},
+    )
+    missing = SlotValidationError(
+        slot_name="guaranteedThroughputTarget",
+        code="content.param_missing",
+        message="missing",
+        facts={"slot_label": "Task Context"},
+    )
+
+    assert negotiation_kind_for_errors([conflict, missing]) is NegotiationKind.INFORMATION
+    assert negotiation_kind_for_errors([missing, conflict]) is NegotiationKind.INFORMATION
+
+
 def test_revision_caps_the_rate_for_a_cell_with_a_lower_limit() -> None:
     sample = SampleProposal("cell-002", "01:00~05:00", "90")
 

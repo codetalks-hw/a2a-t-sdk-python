@@ -148,6 +148,11 @@ _TIME_SEGMENTED_TARGET_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\d{2}:\d{2}~\d{2}:\d{2}\s*,\s*\d+(?:\.\d+)?\s*Mbps", re.IGNORECASE
 )
 
+#: Heading opening the Task-T context section (the template writes both language labels).
+_CONTEXT_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^##\s+[^\n]*(?:任务上下文|Task Context)[^\n]*$", re.MULTILINE
+)
+
 #: Client-side errors.
 _ERROR_NO_TEMPLATE_URI: Final[str] = "The negotiation propose carries no template URI."
 _ERROR_NO_SESSION: Final[str] = "The negotiation propose carries no valid negotiationContext."
@@ -842,6 +847,45 @@ def _accept_filled_values(
     return filled
 
 
+def _ensure_agreed_target(task_text: str, filled: Mapping[str, object]) -> str:
+    """Keep the agreed throughput target in a refilled Task-T prompt that dropped it.
+
+    The refill is a model call even though the accepted value is already known. A live model can
+    render the template without the negotiated target (typically by leaving the Task Context
+    section empty), and the server then rejects the accept for the very value the client supplied.
+    Every time segment of the agreed target must appear in the prompt; when one is missing, the
+    target is written into the Task Context section per the template layout.
+
+    Args:
+        task_text: prompt rendered from the accepted Task-T parameters.
+        filled: merged Task-T parameters the accept carries.
+
+    Returns:
+        The prompt unchanged when it already carries every segment, otherwise the repaired prompt.
+    """
+    target = filled.get("guaranteedThroughputTarget")
+    if not isinstance(target, str) or not target.strip():
+        return task_text
+    segments = [re.sub(r"\s+", "", segment) for segment in _TIME_SEGMENTED_TARGET_PATTERN.findall(target)]
+    if not segments:
+        return task_text
+    compact_prompt = re.sub(r"\s+", "", task_text)
+    if all(segment in compact_prompt for segment in segments):
+        return task_text
+    _LOGGER.warning(
+        "the refilled Task-T prompt dropped the agreed throughput target; writing it into the task context"
+    )
+    heading = _CONTEXT_HEADING_PATTERN.search(task_text)
+    if heading is None:
+        return f"{task_text.rstrip()}\n\n{target}\n"
+    start = heading.end()
+    following = re.search(r"^##\s", task_text[start:], re.MULTILINE)
+    end = start + following.start() if following is not None else len(task_text)
+    existing = task_text[start:end].strip()
+    body = f"\n\n{existing}\n\n{target}\n\n" if existing else f"\n\n{target}\n\n"
+    return f"{task_text[:start]}{body}{task_text[end:]}"
+
+
 def _build_accept_request(
     *,
     prompt_client: PromptClient,
@@ -861,7 +905,9 @@ def _build_accept_request(
         task_content = prompt_client.generate_task_prompt_from_data_with_schema(
             filled, TASK_PARAM_SCHEMA, task_template_uri
         )
-    task_text = _require_prompt_text(task_content, "the refilled Task-T prompt")
+    task_text = _ensure_agreed_target(
+        _require_prompt_text(task_content, "the refilled Task-T prompt"), filled
+    )
 
     accept_text = _accept_text(kind, filled, decision, language, policy)
     accept_context = session.with_performative(NegotiationPerformative.ACCEPT)

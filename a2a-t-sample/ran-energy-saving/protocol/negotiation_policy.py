@@ -246,21 +246,29 @@ def negotiation_kind_for_error_code(code: str) -> NegotiationKind | None:
 def negotiation_kind_for_errors(
     errors: Sequence[SlotValidationError] | None,
 ) -> NegotiationKind | None:
-    """Map a failed Task-T validation to a negotiation kind using its first mapped error.
+    """Map a failed Task-T validation to the negotiation kind its errors call for.
 
-    ``content.semantic_conflict`` covers both overlapping target windows and feasibility conflicts;
-    its facts decide which negotiation applies. Later errors are considered only when an earlier
-    error has no mapping, so a leading format/unknown entry does not hide a negotiable failure.
+    ``content.semantic_conflict`` is the only model-judged entry: it covers both overlapping target
+    windows and feasibility conflicts, and its facts decide which negotiation applies. The other
+    codes state a concrete fact about the Task-T (a required value is absent, a value is not
+    allowed, a rule is violated), so they outrank a conflict regardless of the order the model
+    lists them in. A live model can report "the target overlaps" before "the target is missing";
+    the missing value must still open the information negotiation. Errors without a mapping are
+    skipped, so a leading format/unknown entry never hides a negotiable failure.
     """
     if not errors:
         return None
+    conflict: SlotValidationError | None = None
     for error in errors:
         code = str(error.code)
         if code == "content.semantic_conflict":
-            return _semantic_conflict_kind(error)
+            conflict = conflict or error
+            continue
         kind = NEGOTIATION_KIND_BY_ERROR_CODE.get(code)
         if kind is not None:
             return kind
+    if conflict is not None:
+        return _semantic_conflict_kind(conflict)
     return None
 
 

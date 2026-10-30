@@ -383,6 +383,49 @@ async def test_information_accept_discards_an_invalid_model_filled_target() -> N
     assert "unit" not in prompt_client.refill_data[0]
 
 
+class _DroppingRefillPromptClient(FakePromptClient):
+    """Prompt client whose refill renders a Task-T without the agreed throughput target."""
+
+    def generate_task_prompt_from_data_with_schema(
+        self,
+        data: Mapping[str, object],
+        schema: Mapping[str, object],
+        template_uri: str,
+    ) -> MetadataContent:
+        del schema
+        self.refill_data.append(dict(data))
+        return MetadataContent(
+            template_uri=template_uri,
+            prompt_text=(
+                "## Task Description\n\nCreate the energy saving task.\n\n"
+                "## Task Context\n\n\n## Expected Output\n\nThe intent report.\n"
+            ),
+            extension_uri=TASK_T_EXTENSION_URI,
+        )
+
+
+async def test_accept_rewrites_a_refill_that_dropped_the_agreed_target() -> None:
+    """A model-refilled Task-T without the agreed target still carries it when accepted."""
+    prompt_client = _DroppingRefillPromptClient()
+    transport = ScriptedTransport([[propose_event("information", 1)], _task_completed_batch()])
+
+    result = await run_client_flow(
+        prompt_client=prompt_client,
+        transport=transport,
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(SCENARIO_INFORMATION_SPEC.scripted_client_decisions),
+        language="en-US",
+        policy=DEMO_CLIENT_POLICY,
+    )
+
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    accept_metadata = MessageToDict(transport.requests[1].message.metadata)
+    task_text = accept_metadata[TASK_T_EXTENSION_URI]
+    assert "{00:00~17:30,10Mbps}" in task_text
+    assert "{17:30~23:00,20Mbps}" in task_text
+    assert "{23:00~23:59,10Mbps}" in task_text
+
+
 async def test_target_scenario_counters_in_round_one_then_accepts_round_two() -> None:
     result, transport, prompt_client = await _run(
         SCENARIO_TARGET_SPEC,
