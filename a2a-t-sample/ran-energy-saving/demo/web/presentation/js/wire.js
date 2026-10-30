@@ -122,15 +122,17 @@ export function buildWireModel(entry, state, format, copy) {
         nodes: [...headerNodes(usePlain ? plainHeaders : headers), ...jsonNodes(usePlain ? plainBody : a2aBody, 0)],
       };
     }
+    const plain = detail.protocol === "plain";
     return {
-      title: copy.wire.messageTitle,
+      title: plain ? copy.wire.plainMessageTitle : copy.wire.messageTitle,
       alternate: false,
-      note: "",
+      note: plain ? copy.wire.plainMessageNote : "",
       nodes: jsonNodes(
         {
           role: "ROLE_USER",
           parts: [{ text: detail.summary || "" }],
-          metadata: detail.templateUri ? { "Negotiation-T": detail.templateUri } : undefined,
+          ...(detail.templateUri ? { metadata: { "Negotiation-T": detail.templateUri } } : {}),
+          ...(detail.messageId ? { messageId: detail.messageId } : {}),
         },
         0,
       ),

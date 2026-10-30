@@ -41,7 +41,7 @@ from protocol.decision_provider import ManualDecisionProvider
 from protocol.sqlite_task_store import SqliteTaskStore
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.run_constants import FINAL_STATE_INTENT_NOT_CONFIRMED
+from shared.run_constants import FINAL_STATE_INTENT_NOT_CONFIRMED, PROTOCOL_A2A_T
 from shared.trace import PHASES
 
 CONTEXT_ID = "ctx-web"
@@ -260,8 +260,10 @@ def factory(runtimes: list[FakeRuntime]) -> Callable[..., Any]:
         mode: str,
         transport: str,
         discovery: str,
+        *,
+        protocol: str = PROTOCOL_A2A_T,
     ) -> FakeRuntime:
-        del config, scenario, transport, discovery
+        del config, scenario, transport, discovery, protocol
         runtime = FakeRuntime(manual=(mode in {"manual", "confirm"}))
         runtimes.append(runtime)
         return runtime
@@ -749,8 +751,10 @@ async def test_intent_review_gate_blocks_the_task_until_the_engineer_confirms(
         mode: str,
         transport: str,
         discovery: str,
+        *,
+        protocol: str = PROTOCOL_A2A_T,
     ) -> FakeRuntime:
-        del config, scenario, mode, transport, discovery
+        del config, scenario, mode, transport, discovery, protocol
         return runtime
 
     app = create_app(
@@ -1473,5 +1477,23 @@ async def test_start_accepts_discovery_and_rejects_unknown_values(client: httpx.
     rejected = await client.post(
         "/api/runs",
         json={"scenario": "information", "mode": "auto", "transport": "sse", "discovery": "nope"},
+    )
+    assert rejected.status_code == 400
+
+
+async def test_start_accepts_the_plain_protocol_and_rejects_unknown_values(
+    client: httpx.AsyncClient,
+) -> None:
+    accepted = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "protocol": "plain"}
+    )
+    assert accepted.status_code == 202
+    assert accepted.json()["protocol"] == "plain"
+    run_id = accepted.json()["runId"]
+    status = await _wait_status(client, run_id, lambda data: data["status"] == "finished")
+    assert status["protocol"] == "plain"
+
+    rejected = await client.post(
+        "/api/runs", json={"scenario": "information", "mode": "auto", "protocol": "nope"}
     )
     assert rejected.status_code == 400

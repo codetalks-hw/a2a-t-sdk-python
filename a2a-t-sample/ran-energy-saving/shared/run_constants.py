@@ -17,6 +17,12 @@ LANGUAGE_EN: Final[str] = "en-US"
 LANGUAGE_ZH: Final[str] = "zh-CN"
 SUPPORTED_LANGUAGES: Final[tuple[str, ...]] = (LANGUAGE_EN, LANGUAGE_ZH)
 
+#: Interaction protocol of one client run. ``a2a-t`` uses Task-T and Negotiation-T; ``plain``
+#: sends one natural-language A2A message and has neither a task template nor a negotiation.
+PROTOCOL_A2A_T: Final[str] = "a2a-t"
+PROTOCOL_PLAIN: Final[str] = "plain"
+SUPPORTED_PROTOCOLS: Final[tuple[str, ...]] = (PROTOCOL_A2A_T, PROTOCOL_PLAIN)
+
 #: Terminal client outcomes.
 FinalState = Literal[
     "task_completed",

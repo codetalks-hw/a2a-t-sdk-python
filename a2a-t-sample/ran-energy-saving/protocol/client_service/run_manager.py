@@ -22,6 +22,7 @@ from shared.metrics import (
     NEGOTIATION_ROUNDS_TOTAL,
 )
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import PROTOCOL_A2A_T
 from shared.trace import (
     PHASE_DISPATCH,
 )
@@ -116,6 +117,7 @@ class RunManager:
         discovery: str = DISCOVERY_REGISTRY,
         user_request: str | None = None,
         *,
+        protocol: str = PROTOCOL_A2A_T,
         conversation_id: str | None = None,
         external_conversation_id: str | None = None,
         user_id: str = "web-user",
@@ -131,6 +133,7 @@ class RunManager:
             transport: event transport.
             discovery: discovery mode.
             user_request: optional natural-language request.
+            protocol: interaction protocol (``a2a-t`` / ``plain``); keyword-only.
             conversation_id: client conversation; generated when omitted.
             external_conversation_id: caller-side conversation id (Gemini Enterprise, console).
             user_id: caller identity.
@@ -164,6 +167,7 @@ class RunManager:
             mode=mode,
             transport=transport,
             discovery=discovery,
+            protocol=protocol,
             user_request=custom_request,
             conversation_id=resolved_conversation,
             external_conversation_id=external_conversation_id,
@@ -419,6 +423,7 @@ class RunManager:
                 run.mode,
                 run.transport,
                 run.discovery,
+                protocol=run.protocol,
             )
             run.emit_trace(
                 kind="runtime_ready",

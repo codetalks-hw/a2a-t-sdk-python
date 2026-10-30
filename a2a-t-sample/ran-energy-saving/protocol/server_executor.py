@@ -25,7 +25,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Protocol
 
 from a2a.helpers.proto_helpers import new_task_from_user_message
 from a2a.server.agent_execution.agent_executor import AgentExecutor
@@ -59,8 +59,16 @@ from protocol.messages import (
     parse_negotiation_context,
     task_prompt_from_metadata,
 )
-from protocol.pre_task_negotiation import PreTaskNegotiationHandler
+from protocol.pre_task_negotiation import NegotiationOutcome
 from protocol.server_agent_spec import ServerAgentFactory
+
+
+class TaskRequestHandler(Protocol):
+    """Entry gate of one inbound request (the A2A-T gate or the plain A2A entry)."""
+
+    async def handle(self, context: RequestContext) -> NegotiationOutcome:
+        """Classify the request and return the executor outcome."""
+        ...
 
 #: Artifact names.
 REPORT_ARTIFACT_NAME: Final[str] = "energy saving intent report"
@@ -684,7 +692,7 @@ class LangGraphTaskExecutor(AgentExecutor):
 class NegotiationAgentExecutor(AgentExecutor):
     """Outer executor: the pre-task negotiation handler in front of the graph executor."""
 
-    def __init__(self, *, handler: PreTaskNegotiationHandler, inner: AgentExecutor) -> None:
+    def __init__(self, *, handler: TaskRequestHandler, inner: AgentExecutor) -> None:
         """Create one executor.
 
         Args:
@@ -699,8 +707,8 @@ class NegotiationAgentExecutor(AgentExecutor):
         self._run_ids_lock = threading.Lock()
 
     @property
-    def handler(self) -> PreTaskNegotiationHandler:
-        """Return the pre-task negotiation handler."""
+    def handler(self) -> TaskRequestHandler:
+        """Return the request entry gate (A2A-T pre-task gate or plain entry)."""
         return self._handler
 
     @property
@@ -755,7 +763,7 @@ class NegotiationAgentExecutor(AgentExecutor):
 
 def build_negotiation_executor(
     *,
-    handler: PreTaskNegotiationHandler,
+    handler: TaskRequestHandler,
     agent_factory: ServerAgentFactory,
     config: SampleConfig | None = None,
     approval_registry: ApprovalRegistry | None = None,

@@ -513,6 +513,23 @@ edit an existing one.
 | the planner exceeds its step budget | the model keeps retrying | raise `A2AT_SAMPLE_PLANNER_MAX_STEPS` or tighten the prompt |
 | the UI task table is empty | `A2AT_SAMPLE_TASK_DB` is unset | set an absolute path and restart the server |
 
+### 4.6 Plain A2A entry (protocol comparison)
+
+One agent card serves both protocols. `ProtocolDispatchHandler` (`protocol/plain_a2a.py`) routes a
+request that declares the Task-T extension (or carries Task-T metadata) to the A2A-T pre-task gate;
+every other request goes to `PlainTaskHandler`:
+
+- the message text is the whole task request; the same guarded LangGraph planner runs it;
+- there is no template validation, no intent approval and no negotiation;
+- the sample refuses to guess: a request without a `{HH:MM~HH:MM,<rate>Mbps}` target is answered
+  with a terminal `REJECTED` Task (`MISSING_TARGET_TEXT`) instead of a plan.
+
+The client side is `run_plain_client_flow` (`protocol/plain_client_flow.py`): one user-role message
+with no extension metadata, then the ordinary A2A task events. `POST /api/runs` takes
+`protocol: "a2a-t" | "plain"`; `run_demo.py` exposes `--protocol plain`. The presentation page
+offers the switch for the night and missing-parameter examples and records both real runs for its
+comparison card.
+
 ## 5. Protocol reference
 
 ### 5.1 Message shape

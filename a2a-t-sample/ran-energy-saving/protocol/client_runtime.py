@@ -40,6 +40,7 @@ from shared.config import (
 )
 from shared.model_factory import build_traced_adk_model
 from shared.models import NegotiationProposeView
+from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PLAIN, SUPPORTED_PROTOCOLS
 from shared.sdk_env import SdkEnvFile, prepare_sdk_env
 from shared.trace import set_global_sink, trace_scope
 from shared.traced_llm import register_traced_providers
@@ -62,6 +63,7 @@ from protocol.decision_provider import (
     ScriptedDecisionProvider,
 )
 from protocol.discovery import DiscoveredAgent, discover_agent
+from protocol.plain_client_flow import run_plain_client_flow
 from protocol.run_spec import RunCatalog, RunSpec
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_runtime")
@@ -176,6 +178,7 @@ class ClientRuntime:
         config: resolved sample configuration.
         run_spec: the named run being executed (catalog entry).
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
+        protocol: interaction protocol (``a2a-t`` / ``plain``).
         transport_name: event transport (``sse`` / ``webhook``).
         prompt_client: A2A-T SDK prompt facade.
         a2a_client: a2a-sdk client used by the transports.
@@ -189,6 +192,7 @@ class ClientRuntime:
     config: SampleConfig
     run_spec: RunSpec
     mode: str
+    protocol: str
     transport_name: str
     prompt_client: A2ATClient
     a2a_client: Any
@@ -265,6 +269,16 @@ class ClientRuntime:
                     if isinstance(user_request, str) and user_request.strip()
                     else self.run_spec.user_request
                 )
+                if self.protocol == PROTOCOL_PLAIN:
+                    # Plain A2A has no Task-T, no intent gate and no negotiation: one message in,
+                    # task events out.
+                    return await run_plain_client_flow(
+                        transport=self.transport,
+                        user_request=request_text,
+                        call_timeout_seconds=self.config.http_timeout_seconds,
+                        event_sink=event_sink,
+                        trace_sink=sink,
+                    )
                 set_context = getattr(self.provider, "set_conversation_context", None)
                 if callable(set_context):
                     set_context(conversation_context)
@@ -309,6 +323,7 @@ async def build_client_runtime(
     mode: str = MODE_AUTO,
     transport: str = TRANSPORT_SSE,
     *,
+    protocol: str = PROTOCOL_A2A_T,
     catalog: RunCatalog,
     env_path: Path | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
@@ -323,6 +338,7 @@ async def build_client_runtime(
         scenario: run name resolved through ``catalog``.
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
         transport: event transport (``sse`` / ``webhook``).
+        protocol: interaction protocol (``a2a-t`` or ``plain``).
         catalog: run catalog supplied by the composition root.
         env_path: source ``.env`` used for discovery and for the per-run SDK ``.env``.
         trace_sink: optional Run Explorer sink attached **before** the SDK and ADK clients are
@@ -344,6 +360,10 @@ async def build_client_runtime(
         raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
     if transport not in SUPPORTED_TRANSPORTS:
         raise ClientRuntimeError(f"Unsupported transport: {transport}; expected one of {SUPPORTED_TRANSPORTS}")
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise ClientRuntimeError(
+            f"Unsupported protocol: {protocol}; expected one of {SUPPORTED_PROTOCOLS}"
+        )
 
     run_spec = catalog.spec(scenario, language=config.language)
     register_traced_providers()
@@ -421,6 +441,7 @@ async def build_client_runtime(
         config=config,
         run_spec=run_spec,
         mode=mode,
+        protocol=protocol,
         transport_name=transport,
         prompt_client=prompt_client,
         a2a_client=a2a_client,
@@ -430,7 +451,8 @@ async def build_client_runtime(
         sdk_env=sdk_env,
         manual_provider=(
             provider
-            if isinstance(provider, (ManualDecisionProvider, ConfirmingDecisionProvider))
+            if protocol == PROTOCOL_A2A_T
+            and isinstance(provider, (ManualDecisionProvider, ConfirmingDecisionProvider))
             else None
         ),
         _httpx_client=httpx_client,

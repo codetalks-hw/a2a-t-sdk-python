@@ -14,6 +14,7 @@ from protocol.client_runtime import build_client_runtime
 from protocol.pre_task_negotiation import TaskTPrecheck
 from protocol.run_spec import RunSpec
 from shared.config import SampleConfig
+from shared.run_constants import PROTOCOL_A2A_T
 
 
 def offline_model_factory(run_spec: RunSpec) -> Any:
@@ -57,6 +58,7 @@ async def build_demo_runtime(
     transport: str,
     discovery: str,
     *,
+    protocol: str = PROTOCOL_A2A_T,
     env_path: Path | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> Any:
@@ -69,6 +71,7 @@ async def build_demo_runtime(
         scenario,
         mode,
         transport,
+        protocol=protocol,
         catalog=DemoRunCatalog(),
         env_path=env_path,
         trace_sink=trace_sink,

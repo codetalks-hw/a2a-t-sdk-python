@@ -140,8 +140,16 @@ collection (days 2 to 8, compressed), approval 2 (MML in MIE) and apply and repo
 keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart), the
 negotiation turns, an **On the wire** inspector, and the merged session trace. On the wire shows the
 real A2A request headers and JSON body with the Task-T metadata; its **Plain A2A** toggle shows the
-same request as one natural-language sentence without the extension header or Task-T fields (format
-comparison only, not a second run). Clicking a trace row selects that message in the inspector.
+same request as one natural-language sentence without the extension header or Task-T fields (a
+format view of the same message). Clicking a trace row selects that message in the inspector.
+
+The page also has a **protocol switch**. The night and missing-parameter examples can run over
+**plain A2A** too: one natural-language message, no Task-T template and no negotiation. The same
+agent card serves both — a request that does not declare the Task-T extension enters the plain path,
+which hands the text to the same guarded planner. In plain mode the intent approval and negotiation
+steps are marked *not applicable*, and a request without a time-segmented guaranteed throughput
+target is rejected instead of guessed. At the end, a comparison card puts the two real runs side by
+side: intent, negotiation rounds, validation and outcome. `--protocol plain` runs it from the CLI.
 
 Approval 1 is real: in `--mode confirm`, the Task-T is held before it leaves the OSS Agent until the
 engineer confirms the structured intent. Approval 2 is the MIE MML review: with `--approval-gate`,

@@ -66,6 +66,7 @@ from shared.http_security import (
     validate_bind_security,
 )
 from shared.models import NegotiationDecision
+from shared.run_constants import PROTOCOL_A2A_T, SUPPORTED_PROTOCOLS
 from shared.trace import (
     PHASES,
     SCHEMA_VERSION,
@@ -77,6 +78,8 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+
+from demo.scenario import PLAIN_PROTOCOL_SCENARIOS
 
 _LOGGER = logging.getLogger("ran_energy_saving.web")
 
@@ -215,6 +218,8 @@ def create_app(
         mode: str,
         transport: str,
         discovery: str,
+        *,
+        protocol: str = PROTOCOL_A2A_T,
     ) -> ClientRuntimeLike:
         """Build the real client runtime with the app's source ``.env``."""
         from demo.composition import build_demo_runtime
@@ -225,6 +230,7 @@ def create_app(
             mode,
             transport,
             discovery,
+            protocol=protocol,
             env_path=env_path,
         )
 
@@ -271,6 +277,9 @@ def create_app(
                     for name in scenario_names
                 },
                 "modes": list(UI_MODES),
+                "protocols": list(SUPPORTED_PROTOCOLS),
+                "plainScenarios": list(PLAIN_PROTOCOL_SCENARIOS),
+                "defaultProtocol": PROTOCOL_A2A_T,
                 "transports": list(SUPPORTED_TRANSPORTS),
                 "discoveries": list(SUPPORTED_DISCOVERY_MODES),
                 "defaultScenario": resolved_default_scenario,
@@ -402,6 +411,7 @@ def create_app(
             )
         scenario = body.get("scenario", resolved_default_scenario)
         mode = body.get("mode", resolved_default_mode)
+        protocol = body.get("protocol", PROTOCOL_A2A_T)
         transport = body.get("transport", resolved_default_transport)
         discovery = body.get("discovery", resolved_default_discovery)
         raw_user_request = body.get("userRequest")
@@ -437,6 +447,13 @@ def create_app(
                 {"error": f"Unsupported mode: {mode}; expected one of {UI_MODES}"},
                 status_code=400,
             )
+        if protocol not in SUPPORTED_PROTOCOLS:
+            return JSONResponse(
+                {
+                    "error": f"Unsupported protocol: {protocol}; expected one of {SUPPORTED_PROTOCOLS}"
+                },
+                status_code=400,
+            )
         if transport not in SUPPORTED_TRANSPORTS:
             return JSONResponse(
                 {"error": f"Unsupported transport: {transport}; expected one of {SUPPORTED_TRANSPORTS}"},
@@ -454,6 +471,7 @@ def create_app(
                 str(transport),
                 str(discovery),
                 user_request,
+                protocol=str(protocol),
                 conversation_id=optional_strings["conversationId"],
                 external_conversation_id=optional_strings["externalConversationId"],
                 user_id=optional_strings["userId"] or "web-user",
@@ -467,6 +485,7 @@ def create_app(
                 "runId": run.run_id,
                 "conversationId": run.conversation_id,
                 "deduplicated": reused,
+                "protocol": run.protocol,
                 "language": config.language,
                 "modelMode": config.model_mode,
                 "modelLabel": config.model_label,

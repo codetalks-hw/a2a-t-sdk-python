@@ -48,6 +48,8 @@ import uuid
 from pathlib import Path
 from typing import TextIO
 
+from shared.run_constants import PROTOCOL_A2A_T
+
 #: The demo lives one level below the sample directory that owns ``runs/`` and the SDK path.
 CASE_DIR = Path(__file__).resolve().parent.parent
 SAMPLE_DIR = CASE_DIR.parent
@@ -517,6 +519,7 @@ async def _run_client_foreground(
     mode: str,
     transport: str,
     language: str,
+    protocol: str = PROTOCOL_A2A_T,
 ) -> int:
     """Run the client flow in-process and write its transcript."""
     from protocol.transcript import NegotiationTranscript
@@ -579,6 +582,7 @@ async def _run_client_foreground(
                 mode,
                 transport,
                 config.discovery,
+                protocol=protocol,
                 env_path=env_path,
             )
             result = await runtime.run(
@@ -748,6 +752,15 @@ def _build_parser(
         type=float,
         default=120.0,
         help="seconds the approval gate waits before treating silence as a rejection (default: 120)",
+    )
+    parser.add_argument(
+        "--protocol",
+        default="a2a-t",
+        choices=("a2a-t", "plain"),
+        help=(
+            "interaction protocol: a2a-t (Task-T + Negotiation-T, default) or plain (one "
+            "natural-language message, no task template and no negotiation)"
+        ),
     )
     parser.add_argument(
         "--transport",
@@ -1106,6 +1119,7 @@ def main() -> int:
                     mode=args.mode,
                     transport=args.transport,
                     language=args.language,
+                    protocol=args.protocol,
                 )
             )
         return return_code

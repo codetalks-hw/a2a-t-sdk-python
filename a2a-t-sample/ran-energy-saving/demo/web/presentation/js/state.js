@@ -26,6 +26,7 @@ export function createState() {
     runId: null,
     scenario: null,
     mode: null,
+    protocol: "a2a-t",
     negotiation: [],
     seen: new Set(),
     taskCreated: false,
@@ -46,6 +47,7 @@ export function createState() {
     approvalState: null,
     approvalExported: false,
     nmsTool: null,
+    lastStatusText: "",
   };
 }
 
@@ -58,6 +60,8 @@ export function applyFrame(state, frame) {
       state.runId = typeof frame.runId === "string" ? frame.runId : state.runId;
       if (typeof frame.scenario === "string") state.scenario = frame.scenario;
       if (typeof frame.mode === "string") state.mode = frame.mode;
+      if (frame.protocol === "plain") state.protocol = "plain";
+      else if (frame.protocol === "a2a-t") state.protocol = "a2a-t";
       if (state.status === STATUS.IDLE) state.status = STATUS.RUNNING;
       return state;
     }
@@ -200,6 +204,7 @@ function applyEvent(state, entry) {
       break;
     case "status": {
       const label = summary || "";
+      if (label) state.lastStatusText = label;
       if (label.includes("Data collection started")) state.dataCollection = "started";
       if (label.includes("Data collection in progress")) state.dataCollection = "progress";
       if (label.includes("Data collection completed")) state.dataCollection = "completed";
@@ -294,6 +299,7 @@ export function stageOf(state) {
   if (state.status === STATUS.FAILED) return "failed";
   if (state.status === STATUS.FINISHED) {
     if (state.finalState === "intent_not_confirmed") return "notSent";
+    if (state.finalState === "task_rejected" && state.protocol === "plain") return "plainRejected";
     if (state.finalState === "task_rejected" || state.approvalState === APPROVAL.REJECTED) {
       return "notApplied";
     }

@@ -20,6 +20,7 @@ import { createStage, setStageCopy } from "./stage.js";
 import { createRail } from "./rail.js";
 import { createTrace, entryOfRow } from "./trace.js";
 import { createWire } from "./wire.js";
+import { buildRecord, compareRows } from "./compare.js";
 import { renderIntent } from "./intent.js";
 import {
   approvalCard,
@@ -41,6 +42,10 @@ const els = {
   badge: byId("badge"),
   runPill: byId("run-pill"),
   scenariosLabel: byId("scenarios-label"),
+  protocolLabel: byId("protocol-label"),
+  protocolA2at: byId("proto-a2at"),
+  protocolPlain: byId("proto-plain"),
+  protocolHint: byId("protocol-hint"),
   chips: byId("scenario-chips"),
   scenarioDesc: byId("scenario-desc"),
   editRequest: byId("edit-request"),
@@ -139,6 +144,9 @@ const ui = {
   meta: null,
   copy: copyFor("zh-CN"),
   selected: null,
+  protocol: "a2a-t",
+  compareSaved: null,
+  resultRevealed: null,
   view: createState(),
   shadow: createState(),
   frameLog: [],
@@ -246,6 +254,8 @@ async function boot() {
 }
 
 function bindStaticEvents() {
+  els.protocolA2at.addEventListener("click", () => setProtocol("a2a-t"));
+  els.protocolPlain.addEventListener("click", () => setProtocol("plain"));
   els.start.addEventListener("click", () => startRun());
   els.reset.addEventListener("click", resetRequest);
   els.editRequest.addEventListener("click", () => {
@@ -341,6 +351,9 @@ function applyStaticCopy() {
   els.brandKicker.textContent = copy.kicker;
   els.title.textContent = copy.title;
   els.badge.textContent = copy.badge;
+  els.protocolLabel.textContent = copy.protocol.label;
+  els.protocolA2at.textContent = copy.protocol.a2at;
+  els.protocolPlain.textContent = copy.protocol.plain;
   els.runPill.textContent =
     ui.meta?.modelMode === "offline" ? copy.runPillOffline : copy.runPillLive;
   els.scenariosLabel.textContent = copy.scenarioLabel;
@@ -431,6 +444,7 @@ function selectScenario(name, { start = false } = {}) {
   closeStream();
   player.reset();
   ui.selected = name;
+  renderProtocol();
   ui.view = createState();
   ui.shadow = createState();
   ui.frameLog = [];
@@ -496,7 +510,11 @@ async function startRun() {
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ scenario: ui.selected, userRequest: request || undefined }),
+      body: JSON.stringify({
+        scenario: ui.selected,
+        userRequest: request || undefined,
+        protocol: ui.protocol,
+      }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
@@ -624,6 +642,7 @@ function render() {
   if (ui.rendering) return;
   ui.rendering = true;
   try {
+    renderProtocol();
     renderSteps();
     els.negoTitle.textContent =
       ui.tab === "wire" ? ui.copy.wire.panelTitle : ui.copy.negotiation.title;
@@ -680,14 +699,24 @@ function renderSteps() {
   const intentEnabled = ui.meta?.intentReview === true;
   const approvalEnabled = ui.meta?.approvalGate !== false;
   const finished = ui.view.finished;
+  const plain = (ui.view.protocol || ui.protocol) === "plain";
+  const plainNa = new Set(plain ? ["understand", "intent", "negotiate"] : []);
 
   ui.steps.forEach((item, index) => {
     const key = STEP_KEYS[index];
+    if (plainNa.has(key)) {
+      item.className = "na";
+      const naButton = item.querySelector("button");
+      naButton.disabled = true;
+      naButton.querySelector("em").textContent = ui.copy.protocol.na;
+      return;
+    }
     let state = "pending";
     if (finished) {
       if (stage === "done") state = "done";
       else if (stage === "notSent") state = index < 2 ? "done" : index === 2 ? "ask" : "off";
       else if (stage === "notApplied") state = index <= 7 ? "done" : "off";
+      else if (stage === "plainRejected") state = index <= 3 ? "done" : "off";
       else if (stage === "failed") state = index <= current ? "done" : "off";
       else state = index <= 4 ? "done" : "off";
       if (stage === "notApplied" && index === 7) state = "ask";
@@ -970,6 +999,11 @@ function renderResult() {
       el("h3", "result-title", ui.copy.result.intentNotConfirmedTitle),
       el("p", "result-reason", ui.copy.result.intentNotConfirmed),
     );
+  } else if (stage === "plainRejected") {
+    card.append(
+      el("h3", "result-title", ui.copy.result.plainRejectedTitle),
+      el("p", "result-reason", ui.copy.result.plainRejected),
+    );
   } else if (stage === "notApplied") {
     card.append(
       el("h3", "result-title", ui.copy.result.notAppliedTitle),
@@ -1004,6 +1038,109 @@ function renderResult() {
   }
   els.sayDetail.hidden = false;
   els.sayDetail.append(card);
+  const comparison = comparisonCard();
+  if (comparison) els.sayDetail.append(comparison);
+  revealResult();
+}
+
+/** Bring the ending (and the comparison card) into view once per finished run. */
+function revealResult() {
+  if (ui.resultRevealed === ui.view.runId) return;
+  ui.resultRevealed = ui.view.runId;
+  requestAnimationFrame(() => {
+    const target = document.querySelector(".left") || document.scrollingElement;
+    if (!target) return;
+    target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+  });
+}
+
+const COMPARE_STORAGE_KEY = "a2at.protocol-compare.v1";
+
+/** Read the stored run records of one scenario (``{}`` when storage is unavailable). */
+function loadCompare(scenario) {
+  try {
+    const raw = window.localStorage.getItem(COMPARE_STORAGE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    const stored = all && typeof all === "object" ? all[scenario] : null;
+    return stored && typeof stored === "object" ? stored : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Persist one scenario's run records. */
+function saveCompare(scenario, value) {
+  try {
+    const raw = window.localStorage.getItem(COMPARE_STORAGE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    all[scenario] = value;
+    window.localStorage.setItem(COMPARE_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    /* storage is optional */
+  }
+}
+
+/** Build the two-protocol card from the two real runs recorded in this browser. */
+function comparisonCard() {
+  const scenario = ui.view.scenario;
+  if (!ui.view.finished || !(ui.meta?.plainScenarios || []).includes(scenario)) return null;
+  const record = buildRecord(ui.view);
+  if (ui.compareSaved !== ui.view.runId) {
+    const stored = loadCompare(scenario);
+    stored[record.protocol] = record;
+    saveCompare(scenario, stored);
+    ui.compareSaved = ui.view.runId;
+  }
+  const stored = loadCompare(scenario);
+  const a2at = stored.a2at || null;
+  const plain = stored.plain || null;
+  const section = el("section", "compare");
+  section.append(el("h4", "compare-title", ui.copy.compare.title));
+  const table = el("table", "compare-table");
+  const head = el("tr");
+  head.append(
+    el("th", "", ""),
+    el("th", "", ui.copy.compare.a2atLabel),
+    el("th", "", ui.copy.compare.plainLabel),
+  );
+  table.append(head);
+  for (const row of compareRows(ui.copy, a2at, plain)) {
+    const line = el("tr");
+    line.append(el("th", "", row.label), el("td", "", row.a2at), el("td", "", row.plain));
+    table.append(line);
+  }
+  section.append(table);
+  const missing = record.protocol === "plain" ? "a2at" : "plain";
+  if (!stored[missing]) {
+    const hint = el("p", "compare-hint");
+    hint.append(
+      el(
+        "span",
+        "",
+        format(ui.copy.compare.runOther, {
+          protocol:
+            missing === "plain"
+              ? ui.copy.compare.plainLabel
+              : ui.copy.compare.a2atLabel,
+        }),
+      ),
+    );
+    const button = el(
+      "button",
+      "btn",
+      missing === "plain" ? ui.copy.compare.plainLabel : ui.copy.compare.a2atLabel,
+    );
+    button.type = "button";
+    const protocol = missing === "plain" ? "plain" : "a2a-t";
+    button.addEventListener("click", () => {
+      setProtocol(protocol);
+      if (ui.protocol !== protocol) return;
+      startRun();
+    });
+    hint.append(button);
+    section.append(hint);
+  }
+  return section;
 }
 
 function reportCard(report, copy) {
@@ -1050,7 +1187,40 @@ function reportPercent(report) {
 }
 
 function narration(scene, stepKey) {
+  const plain = (ui.view.protocol || ui.protocol) === "plain";
+  if (plain && scene.key === "send") {
+    return ui.copy.narration.plainSend || ui.copy.narration.send;
+  }
   return ui.copy.narration[scene.key] || ui.copy.narration[stepKey] || scenarioStory(ui.copy, ui.selected);
+}
+
+/** Whether the selected scenario supports the plain-A2A comparison. */
+function plainAllowed() {
+  return (ui.meta?.plainScenarios || []).includes(ui.selected);
+}
+
+/** Switch the protocol of the next run and refresh the switch state. */
+function setProtocol(protocol) {
+  if (ui.busy) return;
+  if (protocol !== "plain" && protocol !== "a2a-t") return;
+  if (protocol === "plain" && !plainAllowed()) return;
+  ui.protocol = protocol;
+  renderProtocol();
+}
+
+/** Render the protocol switch: plain is offered only where a comparison exists. */
+function renderProtocol() {
+  const available = plainAllowed();
+  if (!available) ui.protocol = "a2a-t";
+  const plain = ui.protocol === "plain";
+  els.protocolA2at.setAttribute("aria-pressed", String(!plain));
+  els.protocolPlain.setAttribute("aria-pressed", String(plain));
+  els.protocolPlain.disabled = !available;
+  els.protocolPlain.title = available
+    ? ui.copy.protocol.plainHint
+    : ui.copy.protocol.unavailable;
+  els.protocolHint.textContent = plain ? ui.copy.protocol.plainHint : "";
+  els.protocolHint.hidden = !plain;
 }
 
 function copyRemaining(card) {

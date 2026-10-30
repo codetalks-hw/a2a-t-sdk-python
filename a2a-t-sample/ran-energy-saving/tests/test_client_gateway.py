@@ -37,6 +37,7 @@ from protocol.sqlite_push_config_store import SqlitePushNotificationConfigStore
 from protocol.sqlite_task_store import SqliteTaskStore, read_task_summaries
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import PROTOCOL_A2A_T
 
 CONTEXT_ID = "ctx-gateway"
 
@@ -145,8 +146,10 @@ def _manager(
         mode: str,
         transport: str,
         discovery: str,
+        *,
+        protocol: str = PROTOCOL_A2A_T,
     ) -> FakeRuntime:
-        del resolved_config, scenario, mode, transport, discovery
+        del resolved_config, scenario, mode, transport, discovery, protocol
         return FakeRuntime(wait=wait)
 
     manager = RunManager(

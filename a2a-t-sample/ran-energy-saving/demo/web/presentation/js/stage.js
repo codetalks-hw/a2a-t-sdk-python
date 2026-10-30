@@ -146,9 +146,10 @@ export function createStage(els) {
       return;
     }
     if (key === "send") {
-      fly("lane-task", "Task-T", "task", 1400);
-      note("oss", copy.roles.oss, copy.states.ossSending);
-      note("nms", copy.roles.nms, copy.states.nmsValidating);
+      const plain = (state.protocol || "a2a-t") === "plain";
+      fly("lane-task", plain ? copy.packet.plain : copy.packet.taskT, "task", 1400);
+      note("oss", copy.roles.oss, plain ? copy.states.ossSendingPlain : copy.states.ossSending);
+      note("nms", copy.roles.nms, plain ? copy.states.nmsPlainReading : copy.states.nmsValidating);
       note("eng", copy.roles.eng, copy.states.engApproved);
       return;
     }

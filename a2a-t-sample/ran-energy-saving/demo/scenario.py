@@ -516,6 +516,10 @@ SCENARIOS: dict[str, Scenario] = {
 #: Supported scenario names, in design order.
 SUPPORTED_SCENARIO_NAMES = tuple(SCENARIOS)
 
+#: Scenarios the plain-A2A comparison supports: one complete request and the missing-parameter
+#: request whose negotiation A2A-T exists for.
+PLAIN_PROTOCOL_SCENARIOS: tuple[str, ...] = (SCENARIO_NIGHT, SCENARIO_INFORMATION)
+
 
 def get_scenario(name: str) -> Scenario:
     """Return the scenario with the given name.

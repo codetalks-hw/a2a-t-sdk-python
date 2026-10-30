@@ -425,6 +425,21 @@ executor = build_negotiation_executor(
 | planner 超过步数上限 | 模型反复试错 | 调大 `A2AT_SAMPLE_PLANNER_MAX_STEPS` 或收紧提示词 |
 | UI 任务表为空 | 未设置 `A2AT_SAMPLE_TASK_DB` | 设置绝对路径后重启服务端 |
 
+### 4.6 普通 A2A 入口（协议对比）
+
+同一张 AgentCard 同时服务两种协议。`ProtocolDispatchHandler`（`protocol/plain_a2a.py`）把声明了
+Task-T 扩展（或携带 Task-T metadata）的请求交给 A2A-T 预检门；其余请求交给 `PlainTaskHandler`：
+
+- 消息文本就是完整任务请求，仍由同一套受约束的 LangGraph 规划器执行；
+- 没有模板校验、没有意图审批、没有协商；
+- 样例拒绝猜测：请求里没有 `{HH:MM~HH:MM,<rate>Mbps}` 目标时，返回终态 `REJECTED` Task
+  （`MISSING_TARGET_TEXT`），而不是编一个方案。
+
+客户端侧是 `run_plain_client_flow`（`protocol/plain_client_flow.py`）：一条不带扩展 metadata 的
+user 消息，然后消费普通的 A2A 任务事件。`POST /api/runs` 接受
+`protocol: "a2a-t" | "plain"`；`run_demo.py` 提供 `--protocol plain`。演示页在“夜间节能”“缺参数”
+两个场景提供协议切换，并把两次真实运行记录到结尾的对比卡。
+
 ## 5. 协议参考
 
 ### 5.1 消息结构

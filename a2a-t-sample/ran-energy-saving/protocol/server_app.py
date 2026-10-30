@@ -80,9 +80,14 @@ from starlette.routing import Route
 
 from protocol.approval_gate import ApprovalRegistry
 from protocol.negotiation_policy import NegotiationState, PolicyDecision
+from protocol.plain_a2a import PlainTaskHandler, ProtocolDispatchHandler
 from protocol.pre_task_negotiation import PreTaskNegotiationHandler, TaskTPrecheck
 from protocol.server_agent_spec import ServerAgentFactory
-from protocol.server_executor import NegotiationAgentExecutor, build_negotiation_executor
+from protocol.server_executor import (
+    NegotiationAgentExecutor,
+    TaskRequestHandler,
+    build_negotiation_executor,
+)
 from protocol.sqlite_task_store import SqliteTaskStore
 
 #: Temporary SDK ``.env`` directory prefix of the server runtime.
@@ -114,7 +119,7 @@ class ServerRuntime:
     config: SampleConfig
     agent_card: AgentCard
     prompt_server: A2ATServer
-    pre_task_handler: PreTaskNegotiationHandler
+    pre_task_handler: TaskRequestHandler
     executor: NegotiationAgentExecutor
     task_store: TaskStore
     app: Starlette
@@ -395,12 +400,15 @@ def build_server_runtime(
         set_global_sink(trace_emitter)
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
-    pre_task_handler = PreTaskNegotiationHandler(
-        prompt_server,
-        max_rounds=MAX_ROUNDS,
-        logger=resolved_logger,
-        policy=policy,
-        precheck=precheck,
+    pre_task_handler = ProtocolDispatchHandler(
+        PreTaskNegotiationHandler(
+            prompt_server,
+            max_rounds=MAX_ROUNDS,
+            logger=resolved_logger,
+            policy=policy,
+            precheck=precheck,
+        ),
+        PlainTaskHandler(logger=resolved_logger),
     )
     approval_enabled = os.environ.get("A2AT_SAMPLE_APPROVAL_GATE", "").strip().lower() in {
         "1",

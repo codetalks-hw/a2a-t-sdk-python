@@ -26,6 +26,7 @@ from protocol.decision_provider import CLIENT_APP_NAME, CLIENT_USER_ID
 from shared.config import SampleConfig
 from shared.metrics import render_prometheus, reset_metrics
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import PROTOCOL_A2A_T
 
 
 class FakeRuntime:
@@ -129,8 +130,10 @@ def _manager(
         mode: str,
         transport: str,
         discovery: str,
+        *,
+        protocol: str = PROTOCOL_A2A_T,
     ) -> FakeRuntime:
-        del resolved_config, scenario, mode, transport, discovery
+        del resolved_config, scenario, mode, transport, discovery, protocol
         runtime = FakeRuntime(wait=wait, error=error)
         runtimes.append(runtime)
         return runtime

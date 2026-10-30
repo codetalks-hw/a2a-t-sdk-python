@@ -29,6 +29,15 @@
 
   <main class="main">
     <section class="left" aria-label="演示舞台">
+      <div class="protocol-row">
+        <span class="micro-label" id="protocol-label">协议</span>
+        <div class="protocols" id="protocol-switch" role="group" aria-labelledby="protocol-label">
+          <button class="pbtn" id="proto-a2at" type="button" aria-pressed="true">A2A-T</button>
+          <button class="pbtn" id="proto-plain" type="button" aria-pressed="false">普通 A2A</button>
+        </div>
+        <span class="protocol-hint" id="protocol-hint"></span>
+      </div>
+
       <div class="toolbar">
         <span class="micro-label" id="scenarios-label">演示场景</span>
         <div class="presets" id="scenario-chips" role="group" aria-labelledby="scenarios-label"></div>

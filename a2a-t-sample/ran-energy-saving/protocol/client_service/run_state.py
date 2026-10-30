@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
 from a2a_t.core.metadata import NegotiationContext
-from shared.config import DISCOVERY_REGISTRY, SampleConfig
+from shared.config import DISCOVERY_REGISTRY
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import PROTOCOL_A2A_T
 from shared.trace import (
     PHASE_DISPATCH,
     PHASE_DONE,
@@ -69,7 +70,9 @@ class ClientRuntimeLike(Protocol):
     async def aclose(self) -> None: ...
 
 
-RuntimeFactory = Callable[[SampleConfig, str, str, str, str], Awaitable[ClientRuntimeLike]]
+#: Builds one client runtime. The protocol is keyword-only so adding it did not shift the
+#: positional scenario/mode/transport/discovery arguments.
+RuntimeFactory = Callable[..., Awaitable[ClientRuntimeLike]]
 
 #: Run statuses owned by the client service.
 RunStatus = Literal["running", "finished", "failed", "interrupted"]
@@ -94,6 +97,7 @@ class RunState:
         run_id: Identifier returned by ``POST /api/runs``.
         scenario: scenario name.
         mode: decision mode (``auto`` / ``manual``).
+        protocol: interaction protocol (``a2a-t`` / ``plain``).
         transport: event transport.
         user_request: optional natural-language request supplied by the UI; ``None`` uses the
             scenario default.
@@ -127,6 +131,7 @@ class RunState:
     scenario: str
     mode: str
     transport: str
+    protocol: str = PROTOCOL_A2A_T
     discovery: str = DISCOVERY_REGISTRY
     user_request: str | None = None
     status: RunStatus = STATUS_RUNNING
@@ -256,6 +261,7 @@ class RunState:
             "userRequest": user_request,
             "language": language,
             "mode": self.mode,
+            "protocol": self.protocol,
             "transport": self.transport,
             "discovery": self.discovery,
             "modelMode": model_mode,
@@ -282,6 +288,7 @@ class RunState:
             "userRequest": user_request,
             "language": language,
             "mode": self.mode,
+            "protocol": self.protocol,
             "transport": self.transport,
             "discovery": self.discovery,
             "modelMode": model_mode,
@@ -651,6 +658,7 @@ class RunState:
             "idempotencyKey": self.idempotency_key,
             "scenario": self.scenario,
             "mode": self.mode,
+            "protocol": self.protocol,
             "transport": self.transport,
             "discovery": self.discovery,
             "status": self.status,
