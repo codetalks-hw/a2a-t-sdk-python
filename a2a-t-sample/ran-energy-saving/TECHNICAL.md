@@ -84,13 +84,24 @@ python run_demo.py --ui --scenario information --model-mode offline
 # open http://127.0.0.1:8080
 ```
 
-The page opens on the presentation view. Pick a scenario, edit the network operations engineer's
-request if needed, and press **Start the energy-saving task**:
+The page opens on the presentation view: a 16:9 stage (engineer, OSS Agent, RAN NMS, approval desk
+and cells, with the A2A-T channel between them) and three evidence panels.
 
-- the right-hand panel is the live OSS ↔ RAN NMS negotiation: every proposal, counter-proposal,
-  accept, reject and abort with its round, and the full content of the selected turn;
-- the left column tracks the flow map, the NMS execution and the result;
-- the request card is the only editable input; transport, model and language come from the CLI.
+Pick a scenario, edit the network operations engineer's request if needed, and start it. The stage
+follows the real run at a human pace: request → structured Task-T → pre-task negotiation → NMS
+evaluation → change approval → apply → report. The right column shows what the OSS Agent understood
+(with the 24-hour throughput chart), every negotiation turn with its full content (business /
+message tabs), and the merged session trace.
+
+Two human decisions can be enabled at startup:
+
+- `--mode confirm`: the OSS Agent produces a recommendation first; the page asks the engineer to
+  confirm, override, accept the NMS proposal or reject before anything is sent;
+- `--approval-gate`: the NMS publishes `INPUT_REQUIRED` before applying a plan; the page asks the
+  engineer to approve or reject. A rejection applies nothing and ends the run without a report.
+
+The playback controls (auto / step, speed, pause, previous / next, loop) pace the presentation only;
+the backend run is real. Transport, model and language come from the CLI.
 
 For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
 use the Run Explorer's left rail, timeline and inspector.
@@ -241,12 +252,13 @@ class NegotiationDecisionProvider(Protocol):
     ) -> NegotiationDecision: ...
 ```
 
-The sample ships three implementations:
+The sample ships four implementations:
 
 | Provider | Used by | Behaviour |
 | --- | --- | --- |
 | `AdkDecisionProvider` | default `--mode auto` | Runs the client ADK agent; returns its structured `NegotiationDecision`. |
 | `ManualDecisionProvider` | `--ui --mode manual` | Waits for the Web UI decision; 300 s timeout becomes `Abort`. |
+| `ConfirmingDecisionProvider` | `--ui --mode confirm` | Wraps the ADK provider: publishes the recommendation, then waits for the engineer's confirmed or overridden decision. |
 | `ScriptedDecisionProvider` | tests (`MODE_SCRIPTED`; not exposed by `run_demo.py`) | Replays the scenario decisions in order. Offline `auto` mode instead keeps the ADK agent in the loop with the fake model. |
 
 Every provider implements `respond(propose, session) -> NegotiationDecision`. Providers decide
@@ -653,12 +665,13 @@ The suite is fully offline and deterministic (485 tests). What it covers:
 | `test_pre_task_negotiation.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, precheck injection, and the real offline server. |
 | `test_task_t_precheck.py` | The demo precheck: missing required fields, overlapping targets, impossible outage guarantees, and a valid Task-T. |
 | `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
-| `test_decision_provider.py` | Contract of the ADK, manual, and scripted providers, including manual timeout, durable session storage, the in-memory fallback and the retention sweep. |
+| `test_decision_provider.py` | Contract of the ADK, manual, scripted and confirming providers, including manual timeout, recommendation publication, durable session storage, the in-memory fallback and the retention sweep. |
+| `test_approval_gate.py` | Approval registry resolve/timeout and the apply tool's write-nothing-on-rejection contract. |
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state, plus a secured server with the real SDK client. |
 | `test_transports.py` | SSE and webhook produce the same performative sequence. |
 | `test_web_ui.py` | `/api/meta`, `/api/tasks`, `/api/client/runs`, `/api/client/conversations`, run lifecycle, SSE events, manual decisions, downloads, error statuses, plus a real offline information run (8 phases, monotonic `seq`, a decision before the task events it causes, client LLM spans, server planner/tool spans, `trace.json`) and a real manual decision flow. |
 | `test_web_static.py` | Static contract: served assets and module graph, no `innerHTML`, inspector tabs and CSS tokens, every element id used by `main.js` exists in the shell; runs `node --check` on every JS module and the in-repo `tests/js` store, i18n and real-frame harnesses (skipped without Node). |
-| `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, pre-task handler delegation, AgentCard extensions, registry payload. |
+| `test_server_executor.py` | LangGraph Task lifecycle, report metadata, planner failure path, the approval gate (approve/reject), pre-task handler delegation, AgentCard extensions, registry payload. |
 | `test_server_planner.py` | Scripted planner sequence, guarded tool order, offline/live model selection, prompt content. |
 | `test_client_store.py` | Conversation/turn sequencing, run idempotency, negotiation audit, Task snapshots, stale-run sweep, atomic claim conflicts, the v1→v2 migration, read-only helpers. |
 | `test_client_service.py` | Run persistence, conversation memory, one active run per conversation across two managers, dead-owner reclaim, failure/interrupt handling, run metrics. |
@@ -712,6 +725,9 @@ Both reach `task_completed`; the client logs
 ```bash
 python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
 curl http://127.0.0.1:8080/api/meta
+# Human-in-the-loop: confirm the OSS decision and approve the change before apply
+python run_demo.py --ui --ui-port 8081 --scenario target --mode confirm --approval-gate \
+  --approval-timeout 120 --model-mode offline
 ```
 
 The UI smoke is confirmed when `/api/meta` returns the language, model mode, scenarios, modes,
@@ -841,7 +857,7 @@ The sample is deliberately a prototype. Before production:
 | [`protocol/pre_task_negotiation.py`](protocol/pre_task_negotiation.py) | The server's only protocol entry: identifies pre-task requests, validates Task-T / Negotiation-T messages, and forwards accepted requests. Declares the `TaskTPrecheck` seam. |
 | [`demo/task_t_precheck.py`](demo/task_t_precheck.py) | Demo `TaskTPrecheck`: missing required fields, overlapping target segments and impossible outage guarantees. |
 | [`protocol/negotiation_policy.py`](protocol/negotiation_policy.py) | Pure deterministic server policy: `propose`, `abort`, `execute`, or `end`. Never calls an LLM. |
-| [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `LangGraphTaskExecutor`: runs the ReAct planner and publishes the A2A Task lifecycle. No ADK. |
+| [`protocol/server_executor.py`](protocol/server_executor.py) | Outer negotiation executor plus `LangGraphTaskExecutor`: runs the ReAct planner and publishes the A2A Task lifecycle, including the optional `INPUT_REQUIRED` approval gate. No ADK. |
 | [`protocol/sqlite_task_store.py`](protocol/sqlite_task_store.py) | SQLite `TaskStore` for persisted A2A Task state and the UI task summaries; schema v2 also owns the gateway push-configuration table. |
 | [`protocol/server_app.py`](protocol/server_app.py) | Server assembly: AgentCard (declares `Task-T/v1` and `Negotiation-T/v1`), request handler, Starlette app, registry registration. |
 | [`protocol/client_flow.py`](protocol/client_flow.py) | Client protocol flow: initial Task-T, multi-round negotiation, accept refill, and terminal handling over SSE or webhook. |
@@ -852,7 +868,8 @@ The sample is deliberately a prototype. Before production:
 | [`protocol/gateway_progress.py`](protocol/gateway_progress.py) | Maps run milestones to outer `WORKING` status updates (deduplicated, capped, no raw payloads). |
 | [`protocol/gateway_push.py`](protocol/gateway_push.py) | Webhook URL validation and the validating push-config store wrapper. |
 | [`protocol/sqlite_push_config_store.py`](protocol/sqlite_push_config_store.py) | SQLite push registrations in the gateway Task database, owner-scoped reads and dispatch across owners. |
-| [`protocol/decision_provider.py`](protocol/decision_provider.py) | Decision-provider protocol and the ADK, manual, and scripted implementations. |
+| [`protocol/decision_provider.py`](protocol/decision_provider.py) | Decision-provider protocol and the ADK, manual, scripted and confirming implementations. |
+| [`protocol/approval_gate.py`](protocol/approval_gate.py) | Process-local human approval registry in front of a network change, with a timeout that becomes a rejection. |
 | [`protocol/discovery.py`](protocol/discovery.py) | AgentCard discovery through the registry center or `/.well-known/agent-card.json`. |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T metadata helpers: extension URIs, `templateUri`, `negotiationContext`, end message, sample-only metadata. |
 | [`protocol/transcript.py`](protocol/transcript.py) | Structured run transcript written to `runs/<timestamp>-<scenario>.json` and `.md`. |
@@ -879,7 +896,7 @@ The sample is deliberately a prototype. Before production:
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | Embedded webhook push receiver with token validation. |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
 | [`demo/registry/`](demo/registry) | Mock registry center (AgentCard register/query, port 5001). |
-| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`), the presentation front end (`presentation/`, `--ui-mode presentation`, default) and the Run Explorer (`static/`, `--ui-mode explorer`). |
+| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`), the presentation front end (`presentation/`, `--ui-mode presentation`, default) and the Run Explorer (`static/`, `--ui-mode explorer`). The presentation page consumes the same SSE stream; the Web UI also proxies the change approval to the NMS. |
 | [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
 
 ### B.2 Replace checklist

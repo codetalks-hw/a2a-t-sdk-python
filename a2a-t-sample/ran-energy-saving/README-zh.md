@@ -105,6 +105,10 @@ sequenceDiagram
 python run_demo.py --scenario information --mode auto --model-mode offline
 # Web UI（演示视图）
 python run_demo.py --ui --scenario information --model-mode offline
+# Web UI：工程师确认 OSS Agent 的决策
+python run_demo.py --ui --mode confirm --scenario information --model-mode offline
+# Web UI：方案下发前由工程师审批
+python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
 # 可选：把 OSS 侧作为 A2A 后端暴露
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 ```
@@ -112,10 +116,18 @@ python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mod
 使用 `--gateway` 时，OSS 侧本身就是一个 A2A Agent：Gemini Enterprise 之类的外部调用方发送一次请求后，
 会在最终节能报告之前收到协商与执行里程碑的进度通知——可以走流式连接，也可以注册 webhook。
 
-Web UI 默认打开演示视图：先选五个演示场景之一，再修改网络操作工程师的请求并发起。右侧协商栏随后实时
-呈现 OSS 与 RAN 网管之间的每一次提议、反提议、接受、拒绝或中止及其轮次，并可展开查看该轮提议的完整
-内容；左侧则展示流程图、网管执行过程与最终的节能报告。传输、模型与语言在进程启动时确定，页面上只保留
-场景切换和请求编辑。
+Web UI 默认打开演示视图：左侧是 16:9 的舞台，依次是网络工程师、OSS Agent、RAN 网管、小区，
+中间是 A2A-T 通道。先选五个演示场景之一（或修改请求）再发起，舞台会按人的节奏跟随真实运行：请求、
+结构化 Task-T、任务前协商、网管评估、变更审批、节能报告。右侧保留证据层：OSS Agent 理解到的任务
+（含 24 小时保障速率图）、每一轮提议与决策的完整内容、以及合并后的会话轨迹；选中的一轮可以在业务
+措辞和它携带的 A2A-T 报文之间切换。
+
+有两个人工决策点。`--mode confirm` 下，OSS Agent 先给出建议，页面请工程师确认或改判后再发出；
+`--approval-gate` 下，网管在真正下发前暂停，页面请工程师批准变更；驳回则不下发、不出报告。
+变更闸门使用真实的 A2A `INPUT_REQUIRED` 任务状态，因此这次暂停在协议上也可见。
+
+播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。
+传输、模型与语言在进程启动时确定，页面上只保留场景切换和请求编辑。
 
 需要协议级视图（阶段、LLM 与工具调用、原始报文、历史记录）时，在同一条命令后加 `--ui-mode explorer`。
 安装、环境变量与完整参数见[技术指南](TECHNICAL-zh.md)。

@@ -1,0 +1,419 @@
+/** Structured intent and the 24-hour guaranteed-throughput chart.
+ *
+ * The intent comes from the rendered Task-T of the run (`task_prompt_rendered` trace detail),
+ * falling back to the engineer's request. Parsing is deliberately small: the sample Task-T has
+ * stable section headings and `{HH:MM~HH:MM,NMbps}` targets.
+ */
+
+import { clear, el, isObject, svg } from "./dom.js";
+import { format } from "../copy.js";
+
+const SLOT_RE =
+  /\{?\s*(\d{1,2}):(\d{2})\s*[~\-–]\s*(\d{1,2}):(\d{2})\s*,\s*([\d.]+)\s*Mbps\s*\}?/gi;
+const OUTAGE_EN_RE = /power outage from\s+(\d{1,2}):(\d{2})\s+to\s+(\d{1,2}):(\d{2})/i;
+const OUTAGE_ZH_RE = /(\d{1,2}):(\d{2})\s*[~\-–]\s*(\d{1,2}):(\d{2})\s*停电/;
+
+/** Parse the Task-T text (or the request) into the facts the page shows. */
+export function parseIntent(text) {
+  if (typeof text !== "string" || text.trim() === "") return null;
+  const sections = sectionMap(text);
+  const operationRaw = sections["operation type"] || "";
+  const objectRaw = sections["task object"] || "";
+  const contextRaw = sections["task context"] || text;
+
+  const slots = parseSlots(contextRaw);
+  const outage = parseOutage(contextRaw);
+  const sites = parseSites(contextRaw);
+  const area = cleanArea(objectRaw) || parseArea(text);
+  const operation = /modify|修改/i.test(operationRaw)
+    ? "modify"
+    : /create|创建/i.test(operationRaw) || slots.length > 0 || area
+      ? "create"
+      : null;
+
+  return {
+    raw: text,
+    operation,
+    area,
+    sites,
+    slots,
+    outage,
+    overlap: findOverlap(slots),
+    gaps: findGaps(slots),
+  };
+}
+
+/** Render the facts grid and the chart into one container. */
+export function renderIntent(container, intentText, copy, { update } = {}) {
+  clear(container);
+  const intent = parseIntent(intentText);
+  if (intent === null) {
+    container.append(el("p", "empty", copy.intent.empty));
+    return null;
+  }
+
+  const facts = el("div", "facts");
+  facts.append(
+    fact(copy.intent.operation, operationLabel(intent, copy)),
+    fact(copy.intent.area, intent.area || copy.intent.none, intent.area ? null : "flag"),
+  );
+  if (intent.sites.length > 0) {
+    facts.append(fact(copy.intent.sites, intent.sites.join(", ")));
+  }
+  if (intent.outage !== null) {
+    facts.append(
+      fact(
+        copy.intent.event,
+        format(copy.intent.outage, {
+          from: hhmm(intent.outage.start),
+          to: hhmm(intent.outage.end),
+        }),
+      ),
+    );
+  }
+  const targetText =
+    intent.slots.length > 0
+      ? intent.slots.map((slot) => `${hhmm(slot.start)}–${hhmm(slot.end)}: ${slot.rate}`).join(" · ") +
+        " Mbps"
+      : copy.intent.noTarget;
+  facts.append(fact(copy.intent.targets, targetText, null, true));
+  if (intent.overlap !== null) {
+    facts.append(
+      fact(
+        copy.intent.check,
+        format(copy.intent.overlap, {
+          from: hhmm(intent.overlap.start),
+          to: hhmm(intent.overlap.end),
+        }),
+        "flag",
+      ),
+    );
+  }
+  container.append(facts, chart(intent, copy, update ?? false));
+  return intent;
+}
+
+function fact(label, value, flag, wide = false) {
+  const node = el("div", wide ? "fact wide" : "fact");
+  node.append(el("span", "", label));
+  const bold = el("b", flag ? "flag" : "", value);
+  node.append(bold);
+  return node;
+}
+
+function operationLabel(intent, copy) {
+  if (intent.operation === "modify") return copy.intent.modify;
+  if (intent.operation === "create") return copy.intent.create;
+  return copy.intent.none;
+}
+
+function chart(intent, copy, update) {
+  const W = 560;
+  const H = 160;
+  const pl = 40;
+  const pr = 12;
+  const pt = 20;
+  const pb = 28;
+  const maxV = Math.max(20, ...intent.slots.map((slot) => slot.rate)) * 1.15;
+  const x = (minutes) => pl + (minutes / 1440) * (W - pl - pr);
+  const y = (value) => pt + (1 - value / maxV) * (H - pt - pb);
+  const y0 = H - pb;
+
+  const root = svg("svg", {
+    class: "chart",
+    viewBox: `0 0 ${W} ${H}`,
+    role: "img",
+    "aria-label": "Guaranteed throughput per time slot over 24 hours",
+  });
+
+  const defs = svg("defs");
+  defs.append(hatch("hatch-g", "#F7F7F7", "#CCCCCC"));
+  defs.append(hatch("hatch-r", "#FFFFFF", "#CD3C14"));
+  root.append(defs);
+
+  for (let hour = 0; hour <= 24; hour += 3) {
+    root.append(
+      svg("line", {
+        class: "ch-grid",
+        x1: x(hour * 60),
+        x2: x(hour * 60),
+        y1: pt,
+        y2: y0,
+      }),
+      svg(
+        "text",
+        { class: "ch-txt", x: x(hour * 60), y: H - 10, "text-anchor": "middle" },
+        `${String(hour).padStart(2, "0")}h`,
+      ),
+    );
+  }
+  for (const value of [0, 10, 20]) {
+    root.append(
+      svg(
+        "text",
+        { class: "ch-txt", x: pl - 6, y: y(value) + 4, "text-anchor": "end" },
+        String(value),
+      ),
+      svg("line", { class: "ch-grid", x1: pl, x2: W - pr, y1: y(value), y2: y(value) }),
+    );
+  }
+  root.append(svg("text", { class: "ch-txt", x: pl - 6, y: pt - 7, "text-anchor": "end" }, "Mbps"));
+
+  for (const gap of intent.gaps) {
+    root.append(
+      svg("rect", {
+        fill: "url(#hatch-g)",
+        x: x(gap.start),
+        y: pt,
+        width: x(gap.end) - x(gap.start),
+        height: y0 - pt,
+      }),
+    );
+    if (x(gap.end) - x(gap.start) > 60) {
+      root.append(
+        svg(
+          "text",
+          {
+            class: "ch-txt",
+            x: (x(gap.start) + x(gap.end)) / 2,
+            y: pt + 13,
+            "text-anchor": "middle",
+          },
+          copy.intent.defaultPolicy,
+        ),
+      );
+    }
+  }
+
+  if (intent.outage !== null) {
+    root.append(
+      svg("rect", {
+        class: "ch-out",
+        x: x(intent.outage.start),
+        y: pt,
+        width: x(intent.outage.end) - x(intent.outage.start),
+        height: y0 - pt,
+      }),
+      svg(
+        "text",
+        {
+          class: "ch-val",
+          x: x(intent.outage.end) + 5,
+          y: pt + 11,
+        },
+        format(copy.intent.outage, {
+          from: hhmm(intent.outage.start),
+          to: hhmm(intent.outage.end),
+        }),
+      ),
+    );
+  }
+
+  for (const slot of intent.slots) {
+    root.append(
+      svg("rect", {
+        class: "ch-slot",
+        x: x(slot.start),
+        y: y(slot.rate),
+        width: x(slot.end) - x(slot.start),
+        height: y0 - y(slot.rate),
+      }),
+      svg("line", {
+        class: "ch-top",
+        x1: x(slot.start),
+        x2: x(slot.end),
+        y1: y(slot.rate),
+        y2: y(slot.rate),
+      }),
+    );
+    if (x(slot.end) - x(slot.start) > 34) {
+      root.append(
+        svg(
+          "text",
+          {
+            class: "ch-val",
+            x: (x(slot.start) + x(slot.end)) / 2,
+            y: y(slot.rate) - 6,
+            "text-anchor": "middle",
+          },
+          String(slot.rate),
+        ),
+      );
+    }
+  }
+
+  if (intent.overlap !== null) {
+    root.append(
+      svg("rect", {
+        fill: "url(#hatch-r)",
+        "fill-opacity": "0.5",
+        x: x(intent.overlap.start),
+        y: pt,
+        width: x(intent.overlap.end) - x(intent.overlap.start),
+        height: y0 - pt,
+      }),
+      svg(
+        "text",
+        {
+          class: "ch-val",
+          x: x(intent.overlap.start) - 3,
+          y: y0 - 6,
+          "text-anchor": "end",
+          fill: "#CD3C14",
+        },
+        copy.intent.overlapLabel,
+      ),
+    );
+  }
+
+  root.append(svg("line", { class: "ch-axis", x1: pl, x2: W - pr, y1: y0, y2: y0 }));
+  root.dataset.update = update ? "true" : "false";
+  return root;
+}
+
+function hatch(id, fill, stroke) {
+  const pattern = svg("pattern", {
+    id,
+    width: 6,
+    height: 6,
+    patternUnits: "userSpaceOnUse",
+    patternTransform: "rotate(45)",
+  });
+  pattern.append(
+    svg("rect", { width: 6, height: 6, fill }),
+    svg("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke, "stroke-width": 2 }),
+  );
+  return pattern;
+}
+
+function sectionMap(text) {
+  const map = {};
+  let current = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const heading = line.match(/^##\s+(.+?)\s*$/);
+    if (heading) {
+      // The rendered Task-T carries bilingual headings such as "任务对象(Task Object)".
+      const english = heading[1].match(/\(([^)]+)\)\s*$/);
+      current = (english ? english[1] : heading[1]).trim().toLowerCase();
+      map[current] = "";
+      continue;
+    }
+    if (current !== null && line !== "") {
+      map[current] = map[current] ? `${map[current]} ${line}` : line;
+    }
+  }
+  return map;
+}
+
+function parseSlots(text) {
+  const slots = [];
+  for (const match of text.matchAll(SLOT_RE)) {
+    const start = timeToMinutes(match[1], match[2]);
+    let end = timeToMinutes(match[3], match[4]);
+    if (end === 0) end = 1440;
+    const rate = Number(match[5]);
+    if (end > start && end <= 1440 && rate > 0) {
+      slots.push({ start, end, rate });
+    }
+  }
+  return slots.sort((a, b) => a.start - b.start);
+}
+
+function parseOutage(text) {
+  const en = text.match(OUTAGE_EN_RE);
+  if (en) {
+    return {
+      start: timeToMinutes(en[1], en[2]),
+      end: normalizeEnd(timeToMinutes(en[3], en[4])),
+    };
+  }
+  const zh = text.match(OUTAGE_ZH_RE);
+  if (zh) {
+    return {
+      start: timeToMinutes(zh[1], zh[2]),
+      end: normalizeEnd(timeToMinutes(zh[3], zh[4])),
+    };
+  }
+  return null;
+}
+
+function parseSites(text) {
+  const match = text.match(/(?:Station list 1|站点列表1为)\s*[:：]?\s*\[([^\]]+)\]/i);
+  if (!match) return [];
+  return match[1]
+    .split(",")
+    .map((item) => item.trim().replace(/^["'“”]+|["'“”]+$/g, ""))
+    .filter(Boolean);
+}
+
+function cleanArea(raw) {
+  if (!raw) return "";
+  let value = raw.trim();
+  value = value.replace(/^The area is the\s+/i, "").replace(/^the area is\s+/i, "");
+  value = value.replace(/^任务对象\s*[:：]\s*/, "");
+  value = value.replace(/^区域为\s*/, "").replace(/^区域\s*[:：]\s*/, "");
+  value = value.replace(/[.。]$/, "");
+  return value.trim();
+}
+
+function parseArea(text) {
+  const en = text.match(/\bin\s+the\s+(.+?)\s+area\b/i);
+  if (en) return en[1].trim();
+  const zh = text.match(/(?:在|区域[:：]\s*)([一-龥A-Za-z0-9]+?)(?:创建|区域|进行)/);
+  return zh ? zh[1].trim() : "";
+}
+
+function findOverlap(slots) {
+  const coverage = new Array(1440).fill(0);
+  for (const slot of slots) {
+    for (let minute = slot.start; minute < slot.end; minute += 1) coverage[minute] += 1;
+  }
+  return firstRun(coverage, (value) => value > 1);
+}
+
+function findGaps(slots) {
+  if (slots.length === 0) return [];
+  const coverage = new Array(1440).fill(0);
+  for (const slot of slots) {
+    for (let minute = slot.start; minute < slot.end; minute += 1) coverage[minute] += 1;
+  }
+  const gaps = [];
+  let start = -1;
+  for (let minute = 0; minute <= 1440; minute += 1) {
+    const empty = minute < 1440 && coverage[minute] === 0;
+    if (empty && start < 0) start = minute;
+    if (!empty && start >= 0) {
+      gaps.push({ start, end: minute });
+      start = -1;
+    }
+  }
+  return gaps;
+}
+
+function firstRun(coverage, predicate) {
+  let start = -1;
+  for (let minute = 0; minute <= 1440; minute += 1) {
+    const hit = minute < 1440 && predicate(coverage[minute]);
+    if (hit && start < 0) start = minute;
+    if (!hit && start >= 0) return { start, end: minute };
+  }
+  return null;
+}
+
+function normalizeEnd(minutes) {
+  return minutes === 0 ? 1440 : minutes;
+}
+
+function timeToMinutes(hours, minutes) {
+  return Number(hours) * 60 + Number(minutes);
+}
+
+/** Format minutes as ``HH:MM`` (24:00 for the end of day). */
+export function hhmm(minutes) {
+  if (minutes >= 1440) return "24:00";
+  const value = Math.max(0, Math.floor(minutes));
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+}
+
+export { isObject };

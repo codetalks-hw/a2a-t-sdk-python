@@ -74,7 +74,11 @@ from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
 from shared.traced_llm import register_traced_providers
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
+from protocol.approval_gate import ApprovalRegistry
 from protocol.negotiation_policy import NegotiationState, PolicyDecision
 from protocol.pre_task_negotiation import PreTaskNegotiationHandler, TaskTPrecheck
 from protocol.server_agent_spec import ServerAgentFactory
@@ -232,6 +236,7 @@ def build_rest_app(
     task_db_path: str | None = None,
     trace_emitter: HttpTraceEmitter | FileTraceEmitter | None = None,
     auth_token: str = "",
+    approval_registry: ApprovalRegistry | None = None,
 ) -> Starlette:
     """Build the Starlette app with the AgentCard routes and the A2A REST routes.
 
@@ -247,6 +252,7 @@ def build_rest_app(
         trace_emitter: optional Run Explorer span emitter.
         auth_token: bearer token every A2A route requires; the AgentCard and health routes stay
             public so discovery and probes work.
+        approval_registry: optional human approval gate resolved by ``POST /approvals``.
     """
     resolved_task_store: TaskStore = task_store if task_store is not None else InMemoryTaskStore()
     push_config_store = InMemoryPushNotificationConfigStore()
@@ -268,9 +274,48 @@ def build_rest_app(
         push_config_store=push_config_store,
         push_sender=push_sender,
     )
+    async def approve(request: Request) -> Response:
+        """Resolve one pending human approval of the change gate."""
+        if approval_registry is None:
+            return JSONResponse(
+                {"error": "The approval gate is disabled.", "code": "approval_gate_disabled"},
+                status_code=404,
+            )
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"error": "The body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"error": "The body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
+        run_id = body.get("runId")
+        approved = body.get("approved")
+        if not isinstance(run_id, str) or not run_id.strip():
+            return JSONResponse(
+                {"error": "The runId field must be a non-empty string.", "code": "run_id_invalid"},
+                status_code=400,
+            )
+        if not isinstance(approved, bool):
+            return JSONResponse(
+                {"error": "The approved field must be a boolean.", "code": "approved_invalid"},
+                status_code=400,
+            )
+        if not approval_registry.resolve(run_id.strip(), approved):
+            return JSONResponse(
+                {"error": "No approval is pending for this run.", "code": "approval_not_pending"},
+                status_code=409,
+            )
+        return JSONResponse({"resolved": True, "approved": approved})
+
     routes = [
         *create_agent_card_routes(agent_card),
         *create_rest_routes(request_handler),
+        Route("/approvals", approve, methods=["POST"]),
     ]
     app = Starlette(
         routes=routes,
@@ -357,10 +402,21 @@ def build_server_runtime(
         policy=policy,
         precheck=precheck,
     )
+    approval_enabled = os.environ.get("A2AT_SAMPLE_APPROVAL_GATE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    approval_timeout = float(
+        os.environ.get("A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS", "120") or "120"
+    )
+    approval_registry = ApprovalRegistry() if approval_enabled else None
     executor = build_negotiation_executor(
         handler=pre_task_handler,
         agent_factory=agent_factory,
         config=resolved_config,
+        approval_registry=approval_registry,
+        approval_timeout_seconds=approval_timeout,
     )
     task_store: TaskStore = (
         SqliteTaskStore(resolved_config.task_db_path)
@@ -380,11 +436,13 @@ def build_server_runtime(
         task_db_path=resolved_config.task_db_path,
         trace_emitter=trace_emitter,
         auth_token=resolved_config.server_auth_token,
+        approval_registry=approval_registry,
     )
     app.state.config = resolved_config
     app.state.prompt_server = prompt_server
     app.state.pre_task_handler = pre_task_handler
     app.state.trace_emitter = trace_emitter
+    app.state.approval_registry = approval_registry
     return ServerRuntime(
         config=resolved_config,
         agent_card=agent_card,

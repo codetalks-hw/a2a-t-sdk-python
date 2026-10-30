@@ -81,12 +81,21 @@ python run_demo.py --ui --scenario information --model-mode offline
 # 打开 http://127.0.0.1:8080
 ```
 
-页面默认打开演示视图。先选场景，必要时修改网络操作工程师的请求，再点 **发起节能任务**：
+页面默认打开演示视图：左侧是 16:9 舞台（网络工程师、OSS Agent、RAN 网管、审批台、小区，中间是
+A2A-T 通道），右侧是三块证据面板。
 
-- 右侧协商栏实时呈现 OSS 与 RAN 网管的每次提议、反提议、接受、拒绝或中止及其轮次，可展开查看该轮
-  提议的完整内容；
-- 左列展示流程图、网管执行过程与结果；
-- 请求卡是唯一可编辑的输入；传输、模型和语言都来自启动参数。
+先选场景，必要时修改网络操作工程师的请求，再发起。舞台按人的节奏跟随真实运行：请求 → 结构化 Task-T →
+任务前协商 → 网管评估 → 变更审批 → 下发 → 报告。右侧展示 OSS Agent 理解到的任务（含 24 小时保障速率
+图）、每一轮提议与决策的完整内容（业务 / 报文切换）以及合并后的会话轨迹。
+
+启动时可开启两个人工决策点：
+
+- `--mode confirm`：OSS Agent 先给出建议，页面请工程师确认、改判、接受网管方案或拒绝后再发出；
+- `--approval-gate`：网管在下发前发布 `INPUT_REQUIRED`，页面请工程师批准或驳回；驳回则不下发、不出
+  报告，以未变更结束。
+
+播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。传输、
+模型和语言都来自启动参数。
 
 需要阶段、LLM 与工具调用、原始报文和历史记录时，加 `--ui-mode explorer`，使用 Run Explorer 的
 左侧栏、时间线与检查器。
@@ -225,12 +234,13 @@ class NegotiationDecisionProvider(Protocol):
     ) -> NegotiationDecision: ...
 ```
 
-样例提供三个实现：
+样例提供四个实现：
 
 | Provider | 使用方 | 行为 |
 | --- | --- | --- |
 | `AdkDecisionProvider` | 默认 `--mode auto` | 运行客户端 ADK 智能体，返回结构化 `NegotiationDecision`。 |
 | `ManualDecisionProvider` | `--ui --mode manual` | 等待 Web UI 决策；300 秒超时后转为 `Abort`。 |
+| `ConfirmingDecisionProvider` | `--ui --mode confirm` | 包装 ADK Provider：先发布建议，再等待工程师确认或改判。 |
 | `ScriptedDecisionProvider` | 测试（`MODE_SCRIPTED`；`run_demo.py` 不暴露） | 按顺序回放场景决策。离线 `auto` 模式则让 ADK 智能体配合 fake model 留在决策回路中。 |
 
 所有 Provider 都实现 `respond(propose, session) -> NegotiationDecision`。Provider 只决定**意图**；流程层负责生成协议内容，且从不改变 round。
@@ -542,12 +552,13 @@ uvx --from ty==0.0.92 ty check .
 | `test_pre_task_negotiation.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理、预检注入，以及真实离线服务端。 |
 | `test_task_t_precheck.py` | 演示预检：必填字段缺失、目标时段重叠、不可行的停电保障，以及合法 Task-T。 |
 | `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
-| `test_decision_provider.py` | ADK、manual、scripted 三种 Provider 的契约，包括 manual 超时、会话落盘、内存降级与保留期清扫。 |
+| `test_decision_provider.py` | ADK、manual、scripted、confirming 四种 Provider 的契约，包括 manual 超时、建议发布、会话落盘、内存降级与保留期清扫。 |
+| `test_approval_gate.py` | 审批注册表的批准/超时，以及 apply 工具“驳回即不写方案”的契约。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态；另含带鉴权服务端与真实 SDK 客户端的组合。 |
 | `test_transports.py` | SSE 与 webhook 产生相同 performative 序列。 |
 | `test_web_ui.py` | `/api/meta`、`/api/tasks`、`/api/client/runs`、`/api/client/conversations`、运行生命周期、SSE 事件、人工决策、下载、错误状态码，以及真实离线信息运行（8 阶段、seq 单调、决策先于任务事件、客户端 LLM span、服务端 planner/tool span、`trace.json`）与真实人工决策流程。 |
 | `test_web_static.py` | 静态契约：资源与模块图、禁止 `innerHTML`、检查器标签页与 CSS token、`main.js` 用到的每个元素 id 都存在于页面；`node --check` 全部 JS，并运行仓库内 `tests/js` 的 store、i18n 与真实帧 harness（无 Node 时跳过）。 |
-| `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、任务前处理器委托、AgentCard 扩展、注册载荷。 |
+| `test_server_executor.py` | LangGraph Task 生命周期、报告元数据、planner 失败路径、审批闸门（批准/驳回）、任务前处理器委托、AgentCard 扩展、注册载荷。 |
 | `test_server_planner.py` | 脚本化 planner 序列、工具顺序约束、离线/在线模型选择、提示词内容。 |
 | `test_client_store.py` | 会话/轮次序列、运行幂等、协商审计、Task 快照、过期运行清理、原子 claim 冲突、v1→v2 迁移、只读助手。 |
 | `test_client_service.py` | 运行持久化、会话记忆、两个 manager 之间的每会话单活跃运行、死进程回收、失败/中断处理、运行指标。 |
@@ -598,6 +609,9 @@ python run_demo.py --scenario target --mode auto --model-mode offline --transpor
 ```bash
 python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offline
 curl http://127.0.0.1:8080/api/meta
+# 人机回路：确认 OSS 决策，并在下发前批准变更
+python run_demo.py --ui --ui-port 8081 --scenario target --mode confirm --approval-gate \
+  --approval-timeout 120 --model-mode offline
 ```
 
 `/api/meta` 返回 §1.1 所示的语言、模型模式、场景、模式、传输与默认值，且 `/api/client/runs` 返回带轮次的运行，即视为 UI smoke 通过。
@@ -681,7 +695,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`protocol/gateway_progress.py`](protocol/gateway_progress.py) | 把运行里程碑映射为外层 `WORKING` 状态（去重、限流、不外发原始载荷）。 |
 | [`protocol/gateway_push.py`](protocol/gateway_push.py) | webhook URL 校验与带校验的 push 配置存储包装。 |
 | [`protocol/sqlite_push_config_store.py`](protocol/sqlite_push_config_store.py) | Gateway Task 数据库中的 SQLite push 注册，owner 隔离读取与跨 owner 分发。 |
-| [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted 三种实现。 |
+| [`protocol/decision_provider.py`](protocol/decision_provider.py) | 决策 Provider 协议及 ADK、manual、scripted、confirming 实现。 |
+| [`protocol/approval_gate.py`](protocol/approval_gate.py) | 变更前的进程内人工审批注册表；超时按驳回处理。 |
 | [`protocol/discovery.py`](protocol/discovery.py) | 通过注册中心或 `/.well-known/agent-card.json` 发现 AgentCard。 |
 | [`protocol/messages.py`](protocol/messages.py) | A2A-T 元数据助手：扩展 URI、`templateUri`、`negotiationContext`、结束消息、样例专用元数据。 |
 | [`protocol/transcript.py`](protocol/transcript.py) | 结构化运行记录，写入 `runs/<timestamp>-<scenario>.json` 与 `.md`。 |
@@ -708,7 +723,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | 内置 webhook 推送接收器，校验 token。 |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | 将 A2A 流事件归一化为统一事件结构。 |
 | [`demo/registry/`](demo/registry) | Mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
-| [`demo/web/`](demo/web) | Starlette Web UI（`app.py`）与单页前端（`static/index.html`）。 |
+| [`demo/web/`](demo/web) | Starlette Web UI（`app.py`）、演示前端（`presentation/`，默认）与 Run Explorer（`static/`）。演示页消费同一 SSE 流；Web UI 同时把变更审批转发给网管。 |
 | [`tests/`](tests) | 单元、集成、传输、Web UI 与五场景离线验收测试；`tests/js/` 为 pytest 驱动的 Node harness。 |
 
 ### B.2 替换清单

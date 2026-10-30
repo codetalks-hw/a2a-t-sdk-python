@@ -56,6 +56,7 @@ from protocol.client_flow import (
 )
 from protocol.decision_provider import (
     AdkDecisionProvider,
+    ConfirmingDecisionProvider,
     ManualDecisionProvider,
     NegotiationDecisionProvider,
     ScriptedDecisionProvider,
@@ -69,7 +70,8 @@ _LOGGER = logging.getLogger("ran_energy_saving.client_runtime")
 MODE_AUTO: Final[str] = "auto"
 MODE_MANUAL: Final[str] = "manual"
 MODE_SCRIPTED: Final[str] = "scripted"
-SUPPORTED_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL, MODE_SCRIPTED)
+MODE_CONFIRM: Final[str] = "confirm"
+SUPPORTED_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL, MODE_SCRIPTED, MODE_CONFIRM)
 
 #: Discovery key of the direct server base URL.
 DIRECT_SERVER_URL_ENV_KEY: Final[str] = "A2AT_SAMPLE_DIRECT_SERVER_URL"
@@ -145,17 +147,20 @@ def _decision_provider(
         return ManualDecisionProvider()
     if mode == MODE_SCRIPTED:
         return ScriptedDecisionProvider(run_spec.scripted_decisions)
-    if mode == MODE_AUTO:
+    if mode in (MODE_AUTO, MODE_CONFIRM):
         # The traced wrapper keeps the ADK decision turns visible in the Run Explorer. The original
         # request is carried into every decision prompt: target/feasibility proposals describe the
         # conflict but not the concrete throughput target, so the model cannot resolve them alone.
-        return AdkDecisionProvider(
+        provider = AdkDecisionProvider(
             model=build_traced_adk_model(config, model=model),
             offline=config.is_offline,
             user_request=run_spec.user_request,
             session_db_path=config.client_db_path,
             agent_factory=client_agent_factory,
         )
+        if mode == MODE_CONFIRM:
+            return ConfirmingDecisionProvider(provider)
+        return provider
     raise ClientRuntimeError(f"Unsupported client mode: {mode}; expected one of {SUPPORTED_MODES}")
 
 
@@ -187,11 +192,24 @@ class ClientRuntime:
     provider: NegotiationDecisionProvider
     discovered: DiscoveredAgent
     sdk_env: SdkEnvFile
-    manual_provider: ManualDecisionProvider | None
+    manual_provider: Any | None
     _httpx_client: httpx.AsyncClient
     _webhook_receiver: WebhookReceiver | None = None
     _closed: bool = False
     trace_sink: Callable[[dict[str, object]], None] | None = None
+
+    def set_recommendation_sink(
+        self,
+        sink: Callable[[Any, Any, Any], None] | None,
+    ) -> None:
+        """Install the confirmation recommendation sink when the provider supports one.
+
+        Args:
+            sink: callback receiving ``(decision, propose, session)`` before the human wait.
+        """
+        setter = getattr(self.provider, "set_recommendation_sink", None)
+        if callable(setter):
+            setter(sink)
 
     async def run(
         self,
@@ -403,7 +421,11 @@ async def build_client_runtime(
         provider=provider,
         discovered=discovered,
         sdk_env=sdk_env,
-        manual_provider=provider if isinstance(provider, ManualDecisionProvider) else None,
+        manual_provider=(
+            provider
+            if isinstance(provider, (ManualDecisionProvider, ConfirmingDecisionProvider))
+            else None
+        ),
         _httpx_client=httpx_client,
         _webhook_receiver=receiver,
         trace_sink=trace_sink,

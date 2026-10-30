@@ -26,6 +26,7 @@ from protocol.decision_provider import (
     CLIENT_USER_ID,
     OFFLINE_FALLBACK_DECISION,
     AdkDecisionProvider,
+    ConfirmingDecisionProvider,
     DecisionProviderError,
     ManualDecisionProvider,
     NegotiationDecisionProvider,
@@ -61,6 +62,7 @@ def test_all_providers_satisfy_the_protocol() -> None:
         AdkDecisionProvider(agent_factory=build_client_agent, model=build_fake_model()),
         ScriptedDecisionProvider([NegotiationDecision(action="accept", rationale="ok")]),
         ManualDecisionProvider(timeout_seconds=0.1),
+        ConfirmingDecisionProvider(ScriptedDecisionProvider([NegotiationDecision(action="accept", rationale="ok")])),
     )
 
     for provider in providers:
@@ -160,6 +162,43 @@ async def test_manual_provider_waits_for_a_late_submission() -> None:
     await task
 
     assert decision is submitted
+
+
+async def test_confirming_provider_publishes_the_recommendation_then_waits() -> None:
+    recommendation = NegotiationDecision(
+        action="counter",
+        rationale="agent recommendation",
+        counter_proposal="keep 17:30~20:00",
+    )
+    submitted = NegotiationDecision(action="accept", rationale="engineer confirmed")
+    provider = ConfirmingDecisionProvider(ScriptedDecisionProvider([recommendation]))
+    seen: list[str] = []
+    provider.set_recommendation_sink(
+        lambda decision, propose, session: seen.append(decision.action)
+    )
+
+    async def submit_later() -> None:
+        await asyncio.sleep(0.01)
+        provider.submit(submitted)
+
+    task = asyncio.create_task(submit_later())
+    decision = await provider.respond(_view("target"), _session())
+    await task
+
+    assert seen == ["counter"]
+    assert decision is submitted
+
+
+async def test_confirming_provider_times_out_into_an_abort() -> None:
+    provider = ConfirmingDecisionProvider(
+        ScriptedDecisionProvider([NegotiationDecision(action="accept", rationale="ok")]),
+        timeout_seconds=0.01,
+    )
+
+    decision = await provider.respond(_view(), _session(round_number=2))
+
+    assert decision.action == "abort"
+    assert "timed out" in decision.rationale
 
 
 async def test_adk_provider_returns_the_fake_model_decision() -> None:

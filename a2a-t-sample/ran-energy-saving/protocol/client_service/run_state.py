@@ -33,7 +33,7 @@ from shared.trace import (
 )
 
 from protocol.client_flow import ClientFlowResult, DecisionMadeCallback
-from protocol.client_runtime import MODE_AUTO, MODE_MANUAL
+from protocol.client_runtime import MODE_AUTO, MODE_CONFIRM, MODE_MANUAL
 from protocol.client_store import (
     NEGOTIATION_DIRECTION_INBOUND,
     NEGOTIATION_DIRECTION_OUTBOUND,
@@ -79,7 +79,7 @@ STATUS_FAILED: Final[RunStatus] = "failed"
 STATUS_INTERRUPTED: Final[RunStatus] = "interrupted"
 
 #: Modes the Web UI may start; the scripted mode is a CLI/test seam only.
-UI_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL)
+UI_MODES: Final[tuple[str, ...]] = (MODE_AUTO, MODE_MANUAL, MODE_CONFIRM)
 
 
 class RunConflictError(RuntimeError):
@@ -493,7 +493,7 @@ class RunState:
             kind=decision.action,
             phase=phase,
             title=f"Decision · {decision.action}",
-            actor="human" if self.mode == MODE_MANUAL else "client",
+            actor="human" if self.mode in (MODE_MANUAL, MODE_CONFIRM) else "client",
             side="client",
             direction="internal",
             status="ok",
@@ -507,6 +507,7 @@ class RunState:
                 "counterParams": dict(decision.counter_params) if decision.counter_params else None,
                 "confirmedIntent": decision.confirmed_intent,
                 "feasibilitySummary": decision.feasibility_summary,
+                "confirmedBy": "engineer" if self.mode == MODE_CONFIRM else None,
             },
         )
         entry["spanId"] = span.span_id
@@ -530,7 +531,7 @@ class RunState:
                     run_id=self.run_id,
                     seq=self.next_negotiation_seq(),
                     direction=NEGOTIATION_DIRECTION_OUTBOUND,
-                    actor="human" if self.mode == MODE_MANUAL else "client",
+                    actor="human" if self.mode in (MODE_MANUAL, MODE_CONFIRM) else "client",
                     negotiation_id=(
                         propose.negotiation_id
                         if propose is not None

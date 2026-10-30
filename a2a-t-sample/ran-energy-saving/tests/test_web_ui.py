@@ -148,11 +148,16 @@ class FakeRuntime:
 
     def __init__(self, *, manual: bool = False, fail: bool = False) -> None:
         self.manual_provider = ManualDecisionProvider(timeout_seconds=5.0) if manual else None
+        self.recommendation_sink = None
         self.fail = fail
         self.closed = False
         self.run_id: str | None = None
         self.user_request: str | None = None
         self.conversation_context: str | None = None
+
+    def set_recommendation_sink(self, sink: Callable[..., None] | None) -> None:
+        """Accept the confirmation recommendation callback."""
+        self.recommendation_sink = sink
 
     async def run(
         self,
@@ -194,6 +199,8 @@ class FakeRuntime:
         if on_decision_requested is not None:
             on_decision_requested(_propose_view(), _session())
         decision = NegotiationDecision(action="accept", rationale="The proposal is acceptable.")
+        if self.recommendation_sink is not None:
+            self.recommendation_sink(decision, _propose_view(), _session())
         if self.manual_provider is not None:
             decision = await self.manual_provider.respond(_propose_view(), _session())
         if on_decision_made is not None:
@@ -243,7 +250,7 @@ def factory(runtimes: list[FakeRuntime]) -> Callable[..., Any]:
         discovery: str,
     ) -> FakeRuntime:
         del config, scenario, transport, discovery
-        runtime = FakeRuntime(manual=(mode == "manual"))
+        runtime = FakeRuntime(manual=(mode in {"manual", "confirm"}))
         runtimes.append(runtime)
         return runtime
 
@@ -321,7 +328,7 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     assert meta["modelMode"] == "offline"
     assert meta["modelLabel"] == "offline (scripted)"
     assert "information" in meta["scenarios"]
-    assert meta["modes"] == ["auto", "manual"]
+    assert meta["modes"] == ["auto", "manual", "confirm"]
     assert meta["discoveries"] == ["registry", "direct"]
     assert meta["defaultScenario"] == "information"
     assert meta["defaultMode"] == "auto"
@@ -683,6 +690,38 @@ async def test_manual_run_publishes_a_manual_decision_request(
     assert requests[0]["timeoutSeconds"] == 5.0
     assert isinstance(requests[0]["requestedAt"], str)
     assert requests[0]["requestedAt"].endswith("Z")
+    await _wait_status(client, run_id, lambda data: data["status"] != "running")
+
+
+async def test_confirm_run_publishes_the_recommendation_with_the_decision(
+    client: httpx.AsyncClient,
+    runtimes: list[FakeRuntime],
+) -> None:
+    start = await client.post(
+        "/api/runs",
+        json={"scenario": "information", "mode": "confirm", "transport": "sse"},
+    )
+    assert start.status_code == 202
+    run_id = start.json()["runId"]
+    events_task = asyncio.create_task(client.get(f"/api/runs/{run_id}/events"))
+
+    pending = await _wait_status(client, run_id, lambda data: data["pendingDecision"] is True)
+    assert pending["mode"] == "confirm"
+
+    response = await client.post(
+        f"/api/runs/{run_id}/decisions",
+        json={"action": "accept", "rationale": "The engineer confirmed the recommendation."},
+    )
+    assert response.status_code == 200
+    events = await asyncio.wait_for(events_task, timeout=5)
+    requests = [
+        payload for payload in _sse_payloads(events.text) if payload["type"] == "decision_requested"
+    ]
+    assert len(requests) == 1
+    assert requests[0]["mode"] == "confirm"
+    assert requests[0]["recommendation"]["action"] == "accept"
+    assert requests[0]["proposal"]["kind"] == "information"
+    assert requests[0]["timeoutSeconds"] == 5.0
     await _wait_status(client, run_id, lambda data: data["status"] != "running")
 
 

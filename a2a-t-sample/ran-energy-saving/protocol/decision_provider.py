@@ -469,6 +469,62 @@ class ScriptedDecisionProvider:
         return decision
 
 
+class ConfirmingDecisionProvider:
+    """Wrap a decision provider with a human confirmation step.
+
+    The inner provider (the ADK decision agent) produces the recommendation. The recommendation is
+    published to the Web UI, which then submits the engineer's confirmed or overridden decision
+    through :meth:`submit`. The decision that finally leaves the client is always the submitted one.
+
+    Attributes:
+        timeout_seconds: Confirmation budget, forwarded to the manual provider.
+        pending: Whether a confirmation is expected or already submitted.
+    """
+
+    def __init__(
+        self,
+        inner: NegotiationDecisionProvider,
+        *,
+        timeout_seconds: float = DEFAULT_MANUAL_TIMEOUT_SECONDS,
+    ) -> None:
+        """Create one confirming provider around the agent provider."""
+        self._inner = inner
+        self._manual = ManualDecisionProvider(timeout_seconds=timeout_seconds)
+        self._sink: Callable[[NegotiationDecision, NegotiationProposeView, Any], None] | None = None
+
+    @property
+    def timeout_seconds(self) -> float:
+        """Confirmation budget in seconds."""
+        return self._manual.timeout_seconds
+
+    @property
+    def pending(self) -> bool:
+        """Whether a confirmation is expected or already submitted."""
+        return self._manual.pending
+
+    def set_recommendation_sink(
+        self,
+        sink: Callable[[NegotiationDecision, NegotiationProposeView, Any], None] | None,
+    ) -> None:
+        """Install the callback invoked with the agent recommendation, before the human wait."""
+        self._sink = sink
+
+    def submit(self, decision: NegotiationDecision) -> None:
+        """Hand the engineer's decision to the waiting flow."""
+        self._manual.submit(decision)
+
+    async def respond(
+        self,
+        propose: NegotiationProposeView,
+        session: NegotiationContext,
+    ) -> NegotiationDecision:
+        """Ask the agent for a recommendation, publish it, then wait for the engineer."""
+        recommendation = await self._inner.respond(propose, session)
+        if self._sink is not None:
+            self._sink(recommendation, propose, session)
+        return await self._manual.respond(propose, session)
+
+
 class ManualDecisionProvider:
     """Decision provider waiting for a decision submitted by a human (Web UI).
 

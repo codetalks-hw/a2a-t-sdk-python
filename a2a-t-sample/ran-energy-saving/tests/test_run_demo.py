@@ -126,6 +126,8 @@ def test_state_round_trip_records_the_run_metadata(monkeypatch: pytest.MonkeyPat
         "trace_url": "http://127.0.0.1:8080",
         "ui_port": 8080,
         "gateway_port": None,
+        "approval_gate": False,
+        "approval_timeout": 120.0,
     }
     assert run_demo._load_pids() == [11, 12]
 

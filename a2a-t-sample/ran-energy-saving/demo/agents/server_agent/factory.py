@@ -30,11 +30,12 @@ def build_server_agent(
     task_prompt: str,
     negotiation_context: Mapping[str, object] | None,
     model: BaseChatModel | None = None,
+    approval_gate: Any | None = None,
 ) -> ServerAgentSpec:
     """Build one planner graph, its tools and the metadata the executor needs."""
     resolved = config or load_config()
     guard = PlanGuard()
-    tools = build_execution_tools(guard)
+    tools = build_execution_tools(guard, approval_gate=approval_gate)
     planner_model = model if model is not None else build_planner_model(resolved)
     system_prompt = build_system_prompt()
     graph = build_execution_graph(
@@ -64,6 +65,7 @@ def server_agent_factory(
         *,
         task_prompt: str,
         negotiation_context: Mapping[str, object] | None,
+        approval_gate: Any | None = None,
     ) -> ServerAgentSpec:
         model = model_factory() if model_factory is not None else None
         return build_server_agent(
@@ -71,6 +73,7 @@ def server_agent_factory(
             task_prompt=task_prompt,
             negotiation_context=negotiation_context,
             model=model,
+            approval_gate=approval_gate,
         )
 
     return factory

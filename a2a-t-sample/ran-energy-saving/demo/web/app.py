@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+import httpx
 from protocol.client_runtime import MODE_AUTO
 from protocol.client_service import (
     STATUS_RUNNING,
@@ -134,6 +135,9 @@ def create_app(
     finished_grace_seconds: float = FINISHED_GRACE_SECONDS,
     bind_host: str = "127.0.0.1",
     ui_mode: str = WEB_UI_PRESENTATION,
+    server_url: str | None = None,
+    approval_gate: bool = False,
+    approval_timeout_seconds: float = 120.0,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -158,6 +162,9 @@ def create_app(
         bind_host: address the caller will bind; a non-loopback bind needs an auth token.
         ui_mode: ``presentation`` (audience-facing page) or ``explorer`` (technical Run
             Explorer); both serve the same API and event stream.
+        server_url: base URL of the A2A server, used by the presentation's approval route.
+        approval_gate: whether the server pauses before applying a plan.
+        approval_timeout_seconds: approval window reported to the page.
 
     Returns:
         The assembled Starlette application.
@@ -258,6 +265,9 @@ def create_app(
                 "defaultTransport": resolved_default_transport,
                 "defaultDiscovery": resolved_default_discovery,
                 "uiMode": ui_mode,
+                "decisionMode": resolved_default_mode,
+                "approvalGate": approval_gate,
+                "approvalTimeoutSeconds": approval_timeout_seconds,
                 # The UI must keep its stream open at least as long as the backend grace window,
                 # otherwise the server's last trace batch is posted to a closed subscriber.
                 "finishedGraceMs": int(round(finished_grace_seconds * 1000)),
@@ -528,6 +538,67 @@ def create_app(
         provider.submit(decision)
         return JSONResponse({"accepted": True, "runId": run.run_id})
 
+    async def submit_approval(request: Request) -> Response:
+        """Forward the engineer's change approval to the NMS approval gate."""
+        run = manager.get(request.path_params["run_id"])
+        if run is None:
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"error": "The body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
+        if not isinstance(body, dict) or not isinstance(body.get("approved"), bool):
+            return JSONResponse(
+                {
+                    "error": "The approved field must be a boolean.",
+                    "code": "approved_invalid",
+                },
+                status_code=400,
+            )
+        if not approval_gate or not server_url:
+            return JSONResponse(
+                {"error": "The approval gate is disabled.", "code": "approval_gate_disabled"},
+                status_code=404,
+            )
+        if run.status != STATUS_RUNNING:
+            return JSONResponse(
+                {"error": "The run is not running.", "code": "run_not_running"},
+                status_code=409,
+            )
+        headers = {}
+        if config.server_auth_token:
+            headers["authorization"] = f"Bearer {config.server_auth_token}"
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=10.0) as client:
+                forwarded = await client.post(
+                    f"{server_url.rstrip('/')}/approvals",
+                    json={"runId": run.run_id, "approved": body["approved"]},
+                    headers=headers,
+                )
+        except httpx.HTTPError as exc:
+            _LOGGER.warning("approval forward failed: %s", exc)
+            return JSONResponse(
+                {"error": "The NMS approval gate is unreachable.", "code": "approval_unreachable"},
+                status_code=502,
+            )
+        payload = await _json_or_empty(forwarded)
+        if forwarded.status_code >= 400:
+            return JSONResponse(payload, status_code=forwarded.status_code)
+        return JSONResponse(
+            {"accepted": True, "runId": run.run_id, "approved": body["approved"]}
+        )
+
+    async def _json_or_empty(response: httpx.Response) -> dict[str, object]:
+        """Return one forwarded JSON object, or an empty mapping."""
+        try:
+            value = response.json()
+        except ValueError:
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
     async def _stored_transcript(request: Request, field_name: str) -> str | None:
         """Read one transcript path persisted with a finished run."""
         path = config.client_db_path
@@ -659,6 +730,7 @@ def create_app(
             Route("/api/runs/{run_id}", run_status),
             Route("/api/runs/{run_id}/events", run_events),
             Route("/api/runs/{run_id}/decisions", submit_decision, methods=["POST"]),
+            Route("/api/runs/{run_id}/approvals", submit_approval, methods=["POST"]),
             Route("/api/runs/{run_id}/transcript.json", transcript_json),
             Route("/api/runs/{run_id}/transcript.md", transcript_markdown),
             Route("/api/runs/{run_id}/trace", ingest_trace, methods=["POST"]),

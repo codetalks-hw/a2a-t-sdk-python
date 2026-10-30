@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -35,6 +36,7 @@ from demo.composition import build_demo_negotiation_policy
 from dotenv import dotenv_values
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
+from protocol.approval_gate import ApprovalRegistry
 from protocol.messages import SAMPLE_PROPOSAL_METADATA_KEY, TASK_TEMPLATE_URI
 from protocol.pre_task_negotiation import (
     NegotiationContentServer,
@@ -366,3 +368,98 @@ def test_live_server_constructs_from_the_example_env_with_an_empty_key(
 
     assert runtime.prompt_server is not None
     assert runtime.config.is_offline is False
+
+
+async def _wait_for_approval(
+    executor: LangGraphTaskExecutor,
+    context: RequestContext,
+    queue: RecordingEventQueue,
+    registry: ApprovalRegistry,
+    *,
+    approved: bool,
+) -> list[object]:
+    """Start one execution, wait until the gate is pending, resolve it, return the events."""
+    task = asyncio.create_task(executor.execute(context, queue))
+    task_id = ""
+    for _ in range(300):
+        tasks = [event for event in queue.events if isinstance(event, Task)]
+        if tasks and registry.pending(tasks[0].id):
+            task_id = tasks[0].id
+            break
+        await asyncio.sleep(0.01)
+    assert task_id, "the approval gate never became pending"
+    assert registry.resolve(task_id, approved) is True
+    await asyncio.wait_for(task, 15)
+    return list(queue.events)
+
+
+async def test_langgraph_executor_applies_only_after_approval(
+    offline_config: SampleConfig,
+) -> None:
+    ran_data.reset()
+    reset_metrics()
+    context = _make_context(
+        negotiation={"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
+    )
+    registry = ApprovalRegistry()
+    executor = LangGraphTaskExecutor(
+        agent_factory=build_server_agent,
+        config=offline_config,
+        approval_registry=registry,
+        approval_timeout_seconds=5.0,
+    )
+    queue = RecordingEventQueue()
+
+    try:
+        events = await _wait_for_approval(
+            executor, context, queue, registry, approved=True
+        )
+        assert len(ran_data.list_plans()) == 1
+    finally:
+        ran_data.reset()
+
+    states = [
+        event.status.state
+        for event in events
+        if isinstance(event, TaskStatusUpdateEvent)
+    ]
+    assert TaskState.TASK_STATE_INPUT_REQUIRED in states
+    assert states[-1] == TaskState.TASK_STATE_COMPLETED
+    artifacts = [event for event in events if isinstance(event, TaskArtifactUpdateEvent)]
+    assert any(event.artifact.name == REPORT_ARTIFACT_NAME for event in artifacts)
+
+
+async def test_langgraph_executor_writes_nothing_when_approval_is_rejected(
+    offline_config: SampleConfig,
+) -> None:
+    ran_data.reset()
+    reset_metrics()
+    context = _make_context(
+        negotiation={"id": CONTEXT_ID, "round": 2, "maxRounds": 3, "performative": "ACCEPT"}
+    )
+    registry = ApprovalRegistry()
+    executor = LangGraphTaskExecutor(
+        agent_factory=build_server_agent,
+        config=offline_config,
+        approval_registry=registry,
+        approval_timeout_seconds=5.0,
+    )
+    queue = RecordingEventQueue()
+
+    try:
+        events = await _wait_for_approval(
+            executor, context, queue, registry, approved=False
+        )
+        assert ran_data.list_plans() == ()
+    finally:
+        ran_data.reset()
+
+    states = [
+        event.status.state
+        for event in events
+        if isinstance(event, TaskStatusUpdateEvent)
+    ]
+    assert TaskState.TASK_STATE_INPUT_REQUIRED in states
+    assert states[-1] == TaskState.TASK_STATE_REJECTED
+    artifacts = [event for event in events if isinstance(event, TaskArtifactUpdateEvent)]
+    assert not any(event.artifact.name == REPORT_ARTIFACT_NAME for event in artifacts)

@@ -26,7 +26,7 @@ from shared.trace import (
     PHASE_DISPATCH,
 )
 
-from protocol.client_runtime import MODE_MANUAL
+from protocol.client_runtime import MODE_CONFIRM, MODE_MANUAL
 from protocol.client_service.run_state import (
     SESSION_SWEEP_INTERVAL_SECONDS,
     STATUS_FAILED,
@@ -314,6 +314,9 @@ class RunManager:
             run.record_proposal(propose, session)
             run.proposals.append(propose)
             NEGOTIATION_ROUNDS_TOTAL.inc({"role": "server", "round": session.round})
+            # Confirm mode waits for the agent recommendation; its callback publishes the
+            # decision frame with the recommendation attached, so the page never shows a
+            # decision before the OSS Agent has one.
             if run.mode != MODE_MANUAL:
                 return
             run.pending_decision = True
@@ -346,6 +349,33 @@ class RunManager:
             run.record_decision(decision, propose, session=session)
             NEGOTIATION_ROUNDS_TOTAL.inc({"role": "client", "round": session.round})
 
+        def on_decision_recommended(
+            decision: NegotiationDecision,
+            propose: NegotiationProposeView,
+            session: NegotiationContext,
+        ) -> None:
+            """Publish the recommendation and let the engineer confirm it."""
+            run.pending_decision = True
+            timeout_seconds = getattr(run.manual_provider, "timeout_seconds", None)
+            run.broadcast(
+                {
+                    "type": "decision_requested",
+                    "mode": run.mode,
+                    "proposal": propose.model_dump(),
+                    "recommendation": decision.model_dump(),
+                    "round": session.round,
+                    "maxRounds": session.max_rounds,
+                    "performative": session.performative.value,
+                    "phase": "negotiation",
+                    "timeoutSeconds": (
+                        float(timeout_seconds)
+                        if isinstance(timeout_seconds, (int, float))
+                        else None
+                    ),
+                    "requestedAt": now_iso(),
+                }
+            )
+
         def trace_sink(span: dict[str, object]) -> None:
             run.record_trace(span)
 
@@ -372,6 +402,12 @@ class RunManager:
             )
             discovered = getattr(run.runtime, "discovered", None)
             card = getattr(discovered, "agent_card", None)
+            if run.mode == MODE_CONFIRM:
+                set_recommendation_sink = getattr(
+                    run.runtime, "set_recommendation_sink", None
+                )
+                if callable(set_recommendation_sink):
+                    set_recommendation_sink(on_decision_recommended)
             run.emit_trace(
                 kind="discovery",
                 phase=PHASE_DISPATCH,

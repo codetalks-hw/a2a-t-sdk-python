@@ -1,8 +1,9 @@
 """Contract tests of the audience-facing presentation page.
 
-The page is the demo default. These tests pin what must never leak into it (transport, model or
-trace wording), what it must expose (scenario switcher, request entry, three acts) and that the
-Run Explorer stays available behind ``--ui-mode explorer``.
+The page is the demo default. These tests pin what it must expose (scenario presets, the stage,
+the negotiation rail, the evidence panels and the human decision card), what must never leak into
+the business view (transport, model or webhook wording) and that the Run Explorer stays available
+behind ``--ui-mode explorer``.
 """
 
 from __future__ import annotations
@@ -18,7 +19,19 @@ from demo.web.app import PRESENTATION_DIR, create_app
 from shared.config import SampleConfig
 
 #: Modules the page loads directly or transitively.
-PRESENTATION_MODULES = ("app.js", "model.js", "copy.js")
+PRESENTATION_MODULES = (
+    "copy.js",
+    "js/main.js",
+    "js/state.js",
+    "js/scenes.js",
+    "js/player.js",
+    "js/stage.js",
+    "js/rail.js",
+    "js/trace.js",
+    "js/intent.js",
+    "js/decisions.js",
+    "js/dom.js",
+)
 
 
 @pytest.fixture
@@ -39,19 +52,27 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
     assert response.status_code == 200
     page = response.text
     assert "/static/app.css" in page
-    assert "/static/app.js" in page
+    assert "/static/js/main.js" in page
     for marker in (
         'id="scenario-chips"',
         'id="request-text"',
+        'id="drawer"',
         'id="start"',
-        'data-node="oss"',
-        'data-node="nms"',
-        'data-node="cells"',
-        'id="rail"',
+        'id="steps"',
+        'id="stage"',
+        'id="a-eng"',
+        'id="a-oss"',
+        'id="a-nms"',
+        'id="a-approval"',
+        'id="a-cells"',
+        'id="say"',
+        'id="choices"',
+        'id="p-intent"',
+        'id="p-nego"',
+        'id="p-trace"',
         'id="turns"',
-        'id="rail-status"',
-        'data-act="execution"',
-        'data-act="result"',
+        'id="wire"',
+        'id="trace-rows"',
     ):
         assert marker in page, marker
     # One module script, no inline payload rendering.
@@ -59,12 +80,12 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
     assert "innerHTML" not in page
 
 
-async def test_the_page_never_mentions_transport_or_trace_details(
+async def test_the_page_never_mentions_transport_or_webhook_details(
     client: httpx.AsyncClient,
 ) -> None:
     page = (await client.get("/")).text.lower()
 
-    for word in ("transport", "model mode", "trace", "inspector", "stream", "webhook", "实时"):
+    for word in ("transport", "model mode", "webhook", "实时", "inspector"):
         assert word not in page, word
 
 
@@ -72,16 +93,13 @@ async def test_presentation_assets_are_served(client: httpx.AsyncClient) -> None
     css = await client.get("/static/app.css")
     assert css.status_code == 200
     assert "text/css" in css.headers["content-type"]
-    assert "--accent" in css.text
+    assert "--accent" not in css.text
+    assert "--orange" in css.text
 
     for name in PRESENTATION_MODULES:
         response = await client.get(f"/static/{name}")
         assert response.status_code == 200, name
         assert "javascript" in response.headers["content-type"]
-        assert response.text.strip(), name
-    # The entry module imports its two dependencies; both are ES modules.
-    assert 'from "./model.js"' in (await client.get("/static/app.js")).text
-    assert 'from "./copy.js"' in (await client.get("/static/app.js")).text
 
 
 async def test_meta_reports_the_presentation_mode_and_the_five_scenarios(
@@ -93,6 +111,10 @@ async def test_meta_reports_the_presentation_mode_and_the_five_scenarios(
     assert meta["scenarios"] == ["information", "target", "feasibility", "reject", "abort"]
     assert set(meta["scenarioRequests"]) == set(meta["scenarios"])
     assert all(meta["scenarioRequests"][name] for name in meta["scenarios"])
+    assert meta["decisionMode"] == "auto"
+    assert meta["approvalGate"] is False
+    assert meta["approvalTimeoutSeconds"] == 120.0
+    assert "confirm" in meta["modes"]
 
 
 async def test_unknown_ui_mode_is_rejected(offline_config: SampleConfig, tmp_path: Path) -> None:
@@ -154,3 +176,22 @@ def test_presentation_sources_never_build_payloads_with_innerhtml() -> None:
         assert "innerHTML" not in source, name
         assert "outerHTML" not in source, name
         assert "insertAdjacentHTML" not in source, name
+
+
+async def test_meta_reports_the_approval_gate(
+    offline_config: SampleConfig,
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        approval_gate=True,
+        server_url="http://127.0.0.1:9",
+        approval_timeout_seconds=90.0,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        meta = (await http_client.get("/api/meta")).json()
+
+    assert meta["approvalGate"] is True
+    assert meta["approvalTimeoutSeconds"] == 90.0

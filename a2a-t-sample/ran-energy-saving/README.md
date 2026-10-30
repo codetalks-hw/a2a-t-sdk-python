@@ -108,6 +108,10 @@ The other two outcomes are simple conclusions:
 python run_demo.py --scenario information --mode auto --model-mode offline
 # Web UI (presentation view)
 python run_demo.py --ui --scenario information --model-mode offline
+# Web UI with the engineer confirming the OSS Agent's decision
+python run_demo.py --ui --mode confirm --scenario information --model-mode offline
+# Web UI with a human approval before the plan reaches the network
+python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
 # Optional: expose the OSS side as an A2A backend
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 ```
@@ -116,12 +120,23 @@ With `--gateway`, the OSS side is itself an A2A agent: an external caller such a
 sends one request and receives progress notifications (negotiation and execution milestones) before
 the final energy-saving report, either on a stream or through a registered webhook.
 
-The Web UI opens on the presentation view. Choose one of the five demo scenarios, edit the network
-operations engineer's request, and start it. The right-hand panel then follows the live negotiation
-between the OSS and the RAN NMS — every proposal, counter-proposal, accept, reject and abort with
-its round, and the full content of the selected turn — while the left column tracks the flow map,
-the NMS execution and the energy-saving report. Transport, model and language are fixed when the
-process starts, so the page itself only offers the scenario switcher and the request text.
+The Web UI opens on the presentation view: a 16:9 stage with the engineer, the OSS Agent, the RAN
+NMS and the cells, plus the A2A-T channel between them. Choose one of the five demo scenarios (or
+edit the request) and start it; the stage follows the live run at a human pace — request, structured
+Task-T, pre-task negotiation, NMS evaluation, change approval and the energy-saving report. The
+right column keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart),
+every proposal and decision turn with its full message, and the merged session trace. The selected
+turn switches between the business wording and the A2A-T message it carried.
+
+Two human decisions are available. With `--mode confirm`, the OSS Agent produces a recommendation
+first; the page asks the engineer to confirm or override it before it is sent. With
+`--approval-gate`, the NMS pauses before applying a plan and the page asks the engineer to approve
+the change; a rejection applies nothing and ends the run without a report. The change gate uses the
+real A2A `INPUT_REQUIRED` task state, so the pause is visible on the protocol as well.
+
+The playback controls (auto / step by step, speed, pause, previous / next, loop) only pace the
+presentation; the backend run is real. Transport, model and language are fixed when the process
+starts, so the page itself offers only the scenario switcher and the request text.
 
 For the protocol-level view (phases, LLM and tool calls, raw payloads, run history), start the same
 command with `--ui-mode explorer`. Installation, environment variables and the full command

@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>RAN energy saving · pre-task negotiation</title>
+  <meta name="color-scheme" content="light">
+  <title>RAN 节能 · 任务前协商</title>
   <link rel="stylesheet" href="/static/app.css">
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="/static/js/main.js"></script>
 </head>
 <body>
   <div class="connection-banner" id="connection-banner" role="status" hidden>
@@ -14,107 +14,242 @@
   </div>
 
   <header class="top">
-    <h1 id="title">RAN 节能 · 任务前协商</h1>
-    <p class="story" id="story"></p>
+    <div class="brand">
+      <span class="brand-mark" id="brand-mark" aria-hidden="true">A2A-T</span>
+      <div class="brand-text">
+        <small id="brand-kicker">RAN 节能 · 任务前协商</small>
+        <h1 id="title">OSS 与 RAN 网管在任务创建前达成一致</h1>
+      </div>
+    </div>
+    <div class="top-meta">
+      <span class="badge" id="badge">任务前协商</span>
+    </div>
   </header>
 
-  <main class="shell">
-    <div class="column">
-      <section class="scenarios" aria-labelledby="scenarios-label">
-        <span class="scenarios-label" id="scenarios-label">演示场景</span>
-        <div class="chips" id="scenario-chips" role="group" aria-labelledby="scenarios-label"></div>
-      </section>
+  <main class="main">
+    <section class="left" aria-label="演示舞台">
+      <div class="toolbar">
+        <span class="micro-label" id="scenarios-label">演示场景</span>
+        <div class="presets" id="scenario-chips" role="group" aria-labelledby="scenarios-label"></div>
+        <button class="tbtn" id="edit-request" type="button" aria-expanded="false" aria-controls="drawer">
+          ✎ <span id="edit-label">编辑请求</span>
+        </button>
+      </div>
 
-      <section class="request" aria-labelledby="request-title">
-        <div class="request-head">
-          <h2 id="request-title">网络操作工程师的请求</h2>
-          <span class="request-hint" id="request-hint"></span>
-        </div>
+      <div class="drawer" id="drawer" hidden>
+        <label class="micro-label" for="request-text" id="request-title">网络操作工程师的请求</label>
         <textarea id="request-text" rows="4" spellcheck="false" aria-labelledby="request-title"></textarea>
-        <div class="request-actions">
-          <button type="button" class="ghost" id="reset-request">恢复默认请求</button>
-          <button type="button" class="primary" id="start">发起节能任务</button>
+        <div class="drawer-row">
+          <button class="btn primary" id="start" type="button">发送给 OSS Agent</button>
+          <button class="btn" id="reset-request" type="button">恢复默认</button>
+          <span class="hint" id="request-hint"></span>
         </div>
         <p class="error" id="request-error" role="alert" hidden></p>
-      </section>
-
-      <div class="map-scroll">
-        <section class="map" aria-label="协作流程">
-          <div class="node" data-node="oss" data-state="idle">
-            <span class="node-role" id="oss-role">OSS / BSS</span>
-            <span class="node-side" id="oss-side">客户侧</span>
-            <span class="node-state" id="oss-state">待发起</span>
-          </div>
-          <div class="link" data-link="negotiation" data-state="idle">
-            <span class="link-line" aria-hidden="true"></span>
-            <span class="link-label" id="negotiation-link">任务前协商</span>
-            <span class="link-return">◀ <span id="report-link">状态 + 报告</span></span>
-          </div>
-          <div class="node" data-node="nms" data-state="idle">
-            <span class="node-role" id="nms-role">RAN 网管</span>
-            <span class="node-side" id="nms-side">执行侧</span>
-            <span class="node-state" id="nms-state">待发起</span>
-          </div>
-          <div class="link" data-link="apply" data-state="idle">
-            <span class="link-line" aria-hidden="true"></span>
-            <span class="link-label" id="apply-link">方案下发</span>
-          </div>
-          <div class="node" data-node="cells" data-state="idle">
-            <span class="node-role" id="cells-role">小区 / 基站</span>
-            <span class="node-side" id="cells-side">执行结果</span>
-            <span class="node-state" id="cells-state">待发起</span>
-          </div>
-        </section>
       </div>
 
-      <p class="left-hint" id="left-hint">达成一致后，网管的执行过程与节能报告会显示在这里。</p>
+      <ol class="steps" id="steps" aria-label="演示步骤"></ol>
 
-      <section class="acts" id="acts">
-        <article class="act" data-act="execution" id="act-execution" hidden>
-          <button class="act-head" type="button" aria-expanded="false" aria-controls="act-execution-body">
-            <span class="act-index" aria-hidden="true">②</span>
-            <span class="act-name" id="act-execution-name">网管执行</span>
-            <span class="act-meta" id="execution-meta"></span>
-            <span class="act-chevron" aria-hidden="true">▾</span>
-          </button>
-          <div class="act-body" id="act-execution-body" hidden>
-            <p class="task-line" id="task-line" hidden></p>
-            <ol class="steps" id="steps">
-              <li data-step="evaluate"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
-              <li data-step="apply"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
-              <li data-step="report"><span class="step-dot" aria-hidden="true"></span><span class="step-name"></span></li>
-            </ol>
+      <div class="stagewrap">
+        <div class="stage" id="stage">
+          <svg class="lanes" viewBox="0 0 1200 520" aria-hidden="true">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0 0L10 5L0 10z" fill="#8F8F8F"/>
+              </marker>
+            </defs>
+            <rect class="zone-it" x="0" y="0" width="600" height="520"/>
+            <rect class="zone-net" x="600" y="0" width="600" height="520"/>
+            <line class="divider" x1="600" y1="0" x2="600" y2="520"/>
+            <text class="zone-lbl" x="300" y="505" text-anchor="middle" id="zone-label-it">IT environment · OSS side</text>
+            <text class="zone-lbl" x="900" y="505" text-anchor="middle" id="zone-label-net">Network environment · RAN side</text>
+            <rect class="chan" x="470" y="220" width="260" height="120"/>
+            <text class="chan-lbl" x="600" y="210" text-anchor="middle" id="chan-label">A2A-T</text>
+            <text class="chan-sub" x="600" y="368" text-anchor="middle" id="chan-sub1">A2A message + Task-T extension</text>
+            <text class="chan-sub" x="600" y="384" text-anchor="middle" id="chan-sub2">Negotiation-T · status updates</text>
+            <text class="lane-lbl" x="600" y="250" text-anchor="middle" id="lane-task-label">tasks →</text>
+            <text class="lane-lbl" x="600" y="342" text-anchor="middle" id="lane-status-label">← status, questions</text>
+            <path id="lane-request" class="lane" d="M184 272 L224 272" marker-end="url(#arrow)"/>
+            <path id="lane-return" class="lane" d="M224 312 L184 312" marker-end="url(#arrow)"/>
+            <path id="lane-task" class="lane" d="M436 266 L680 266" marker-end="url(#arrow)"/>
+            <path id="lane-status" class="lane" d="M680 318 L438 318" marker-end="url(#arrow)"/>
+            <path id="lane-apply" class="lane" d="M892 278 L946 278" marker-end="url(#arrow)"/>
+            <path id="lane-data" class="lane" d="M946 316 L894 316" marker-end="url(#arrow)"/>
+            <path id="lane-approval" class="lane dash" d="M110 404 L110 436 L684 436" marker-end="url(#arrow)"/>
+            <line class="lane dash" x1="788" y1="404" x2="788" y2="414"/>
+            <text class="lane-lbl" x="400" y="454" text-anchor="middle" id="lane-approval-label">engineer approval before any change</text>
+          </svg>
+
+          <div class="bubble" id="b-eng"></div>
+          <div class="bubble" id="b-oss"></div>
+          <div class="bubble" id="b-nms"></div>
+          <div class="bubble" id="b-cells"></div>
+
+          <div class="actor" id="a-eng">
+            <div class="actor-head">
+              <svg class="actor-icon" viewBox="0 0 40 40" aria-hidden="true">
+                <rect width="40" height="40" fill="#000"/>
+                <circle cx="20" cy="14" r="6" fill="#fff"/>
+                <path d="M9 33c1-7 6-10 11-10s10 3 11 10z" fill="#fff"/>
+              </svg>
+              <div><h3 id="eng-name">Network engineer</h3><div class="org" id="eng-org">Operations</div></div>
+            </div>
+            <div class="actor-state" id="s-eng">Not started</div>
           </div>
-        </article>
 
-        <article class="act" data-act="result" id="act-result" hidden>
-          <button class="act-head" type="button" aria-expanded="false" aria-controls="act-result-body">
-            <span class="act-index" aria-hidden="true">③</span>
-            <span class="act-name" id="act-result-name">结果</span>
-            <span class="act-meta" id="result-meta"></span>
-            <span class="act-chevron" aria-hidden="true">▾</span>
-          </button>
-          <div class="act-body" id="act-result-body" hidden>
-            <div id="result-body"></div>
+          <div class="actor" id="a-oss">
+            <div class="actor-head">
+              <svg class="actor-icon" viewBox="0 0 40 40" aria-hidden="true">
+                <rect width="40" height="40" fill="#FF7900"/>
+                <rect x="9" y="12" width="22" height="17" fill="none" stroke="#000" stroke-width="2.5"/>
+                <circle cx="16" cy="20" r="2.3" fill="#000"/>
+                <circle cx="24" cy="20" r="2.3" fill="#000"/>
+                <path d="M20 7v5" stroke="#000" stroke-width="2.5"/>
+              </svg>
+              <div><h3 id="oss-name">OSS Agent</h3><div class="org" id="oss-org">A2A-T client · decision agent</div></div>
+            </div>
+            <div class="skills" id="oss-skills"></div>
+            <div class="actor-state" id="s-oss">Waiting for a request</div>
           </div>
-        </article>
-      </section>
-    </div>
 
-    <aside class="rail" id="rail" aria-labelledby="rail-title">
-      <div class="rail-head">
-        <h2 id="rail-title"><span class="rail-index" aria-hidden="true">①</span> <span id="rail-title-text">协商</span></h2>
-        <span class="act-rounds" id="round-dots" aria-hidden="true"></span>
+          <div class="actor" id="a-nms">
+            <div class="actor-head">
+              <svg class="actor-icon" viewBox="0 0 40 40" aria-hidden="true">
+                <rect width="40" height="40" fill="#4BB4E6"/>
+                <path d="M20 15L13 33M20 15l7 18M15.5 27h9" stroke="#000" stroke-width="2.3" fill="none"/>
+                <circle cx="20" cy="13" r="2.5" fill="#000"/>
+                <path d="M13 9a9 9 0 0 0 0 9M27 9a9 9 0 0 1 0 9" stroke="#000" stroke-width="2" fill="none"/>
+              </svg>
+              <div><h3 id="nms-name">RAN NMS</h3><div class="org" id="nms-org">A2A-T server · execution agent</div></div>
+            </div>
+            <div class="bar" aria-hidden="true"><i id="nms-bar"></i></div>
+            <div class="actor-state" id="s-nms">Waiting for a task</div>
+            <div class="actor-note" id="nms-note">Black box: we only see what it reports over A2A-T.</div>
+          </div>
+
+          <div class="approval" id="a-approval">
+            <div class="approval-text">
+              <b id="approval-name">Approval desk</b>
+              <span id="approval-org">change control</span>
+            </div>
+            <i id="approval-state">idle</i>
+          </div>
+
+          <div class="actor" id="a-cells">
+            <div class="cells-head">
+              <b id="cells-name">Cells / base stations</b>
+              <span id="cells-org">network side</span>
+            </div>
+            <svg class="cells-figure" id="cells-figure" viewBox="0 0 220 104" aria-label="Two radio cells"></svg>
+            <div class="actor-state" id="s-cells">Normal operation</div>
+          </div>
+
+          <div class="paused-tag" id="paused-tag" hidden>PAUSED</div>
+        </div>
       </div>
-      <p class="rail-status" id="rail-status">待发起</p>
-      <ol class="turns" id="turns"></ol>
-      <p class="rail-empty" id="rail-empty">等待发起。</p>
+
+      <div class="say" id="say">
+        <div class="say-text">
+          <small id="say-kicker">Ready</small>
+          <p id="say-text-content">Pick an example to start.</p>
+          <div class="say-detail" id="say-detail" hidden></div>
+        </div>
+        <div class="choices" id="choices" hidden></div>
+        <div class="controls">
+          <fieldset class="playback">
+            <legend>Playback</legend>
+            <label><input type="radio" name="playback" id="pb-auto" value="auto" checked><span>Auto</span></label>
+            <label><input type="radio" name="playback" id="pb-step" value="step"><span>Step by step</span></label>
+          </fieldset>
+          <div class="opts">
+            <label for="speed">Speed
+              <select id="speed">
+                <option value="0.6">Slow</option>
+                <option value="1" selected>Normal</option>
+                <option value="1.6">Fast</option>
+              </select>
+            </label>
+            <label><input type="checkbox" id="loop"> Loop</label>
+          </div>
+          <div class="playback-buttons">
+            <button id="prev" type="button" title="Previous step">◀ Previous</button>
+            <button id="pause" type="button" title="Pause or resume">❚❚ Pause</button>
+            <button id="next" class="next" type="button" title="Next step">Start ▶</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="legend" id="legend" aria-label="Legend">
+        <span><i style="background:#000"></i><span id="legend-chat">Inside the OSS</span></span>
+        <span><i style="background:#FF7900"></i><span id="legend-task">Task-T over A2A-T</span></span>
+        <span><i style="background:#4BB4E6"></i><span id="legend-status">Status from the RAN NMS</span></span>
+        <span><i style="background:#FFD200"></i><span id="legend-neg">Question or decision</span></span>
+        <span><i style="background:#50BE87"></i><span id="legend-cfg">Plan sent to the network</span></span>
+        <span><i style="background:#fff;border:3px solid #4BB4E6"></i><span id="legend-data">Measurements back</span></span>
+      </div>
+    </section>
+
+    <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" aria-label="Resize the two columns" tabindex="0" title="Drag to resize · double-click to reset"></div>
+
+    <aside class="right" aria-label="Details">
+      <section class="panel" id="p-intent">
+        <header>
+          <h2 id="intent-title">What the OSS Agent understood</h2>
+          <span class="sub" id="intent-sub"></span>
+        </header>
+        <div class="body" id="intent-body"></div>
+      </section>
+
+      <section class="panel panel-nego" id="p-nego">
+        <header>
+          <h2 id="nego-title">Negotiation</h2>
+          <span class="sub" id="nego-status">Not started</span>
+        </header>
+        <div class="nego-tools">
+          <span class="round-dots" id="round-dots" aria-hidden="true"></span>
+          <div class="seg" role="group" aria-label="Negotiation view">
+            <button id="tab-business" type="button" aria-pressed="true">Business</button>
+            <button id="tab-wire" type="button" aria-pressed="false">Message</button>
+          </div>
+        </div>
+        <div class="body nego-body" id="nego-body">
+          <ol class="turns" id="turns"></ol>
+          <div class="wire" id="wire" hidden>
+            <p class="wire-title" id="wire-title"></p>
+            <pre class="wire-code" id="wire-code"></pre>
+            <p class="wire-note" id="wire-note" hidden></p>
+          </div>
+          <p class="empty" id="nego-empty">Waiting for the request.</p>
+        </div>
+      </section>
+
+      <section class="panel panel-trace" id="p-trace">
+        <header>
+          <button class="panel-toggle" id="trace-toggle" type="button" aria-expanded="true" aria-controls="trace-body">
+            <h2 id="trace-title">Session trace</h2>
+          </button>
+          <span class="sub" id="trace-sub">one session, both sides</span>
+        </header>
+        <div class="body trace-body" id="trace-body">
+          <ol class="trace-rows" id="trace-rows"></ol>
+          <p class="empty" id="trace-empty">Nothing yet.</p>
+        </div>
+      </section>
     </aside>
   </main>
 
   <details class="tech" id="tech">
-    <summary id="tech-summary">技术详情</summary>
+    <summary id="tech-summary">Technical details</summary>
     <pre id="tech-log"></pre>
   </details>
+
+  <section class="below" aria-label="Reference">
+    <h2 id="below-title">What happens in this demo</h2>
+    <div class="below-grid" id="below-flow"></div>
+    <div class="notes">
+      <div><h3 id="shows-title">What the demo shows</h3><ul id="shows-list"></ul></div>
+      <div><h3 id="not-shown-title">Not shown</h3><ul id="not-shown-list"></ul></div>
+    </div>
+    <p class="below-note" id="below-note"></p>
+  </section>
 </body>
 </html>

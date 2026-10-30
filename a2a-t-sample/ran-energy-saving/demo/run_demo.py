@@ -161,19 +161,27 @@ def _server_trace_env(
     ui: bool,
     ui_port: int,
     trace_token: str | None = None,
+    approval_gate: bool = False,
+    approval_timeout: float = 120.0,
 ) -> dict[str, str]:
-    """Return the Run Explorer environment of the server process.
+    """Return the Run Explorer and approval-gate environment of the server process.
 
     ``--ui`` points the server at the Web UI trace endpoint with a per-run local token (a reused
     keep-alive server passes its recorded token back so both processes agree); the CLI points it at
-    ``runs/<runId>/server-trace.jsonl`` under the sample root.
+    ``runs/<runId>/server-trace.jsonl`` under the sample root. ``--approval-gate`` makes the NMS
+    wait for the engineer before applying a plan.
     """
     if ui:
-        return {
+        env = {
             "A2AT_SAMPLE_TRACE_URL": _trace_url(ui_port),
             "A2AT_SAMPLE_TRACE_TOKEN": trace_token or secrets.token_hex(16),
         }
-    return {"A2AT_SAMPLE_TRACE_DIR": str(CASE_DIR / "runs")}
+    else:
+        env = {"A2AT_SAMPLE_TRACE_DIR": str(CASE_DIR / "runs")}
+    if approval_gate:
+        env["A2AT_SAMPLE_APPROVAL_GATE"] = "1"
+        env["A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS"] = str(approval_timeout)
+    return env
 
 
 def _trace_url(ui_port: int) -> str:
@@ -323,6 +331,8 @@ def _save_state(
     trace_url: str = "",
     ui_port: int | None = None,
     gateway_port: int | None = None,
+    approval_gate: bool = False,
+    approval_timeout: float = 120.0,
 ) -> None:
     """Persist the managed PIDs and their run metadata atomically.
 
@@ -338,6 +348,8 @@ def _save_state(
         "trace_url": trace_url,
         "ui_port": ui_port,
         "gateway_port": gateway_port,
+        "approval_gate": approval_gate,
+        "approval_timeout": approval_timeout,
     }
     tmp_path = PID_FILE.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(state), encoding="utf-8")
@@ -357,6 +369,8 @@ def _server_reuse_decision(
     ui: bool,
     trace_url: str = "",
     ui_port: int | None = None,
+    approval_gate: bool = False,
+    approval_timeout: float = 120.0,
 ) -> str:
     """Decide whether a listening A2A server may be reused for the requested run.
 
@@ -386,6 +400,10 @@ def _server_reuse_decision(
     if not _state_pids(state):
         return REUSE_REFUSE
     if state.get("model_mode") != model_mode or state.get("language") != language:
+        return REUSE_RESTART
+    if bool(state.get("approval_gate")) != approval_gate:
+        return REUSE_RESTART
+    if approval_gate and float(state.get("approval_timeout") or 120.0) != approval_timeout:
         return REUSE_RESTART
     recorded_token = str(state.get("trace_token") or "")
     if ui and not recorded_token:
@@ -604,6 +622,9 @@ def _run_ui(
     transport: str,
     ui_mode: str = "presentation",
     host: str = "127.0.0.1",
+    server_url: str = "",
+    approval_gate: bool = False,
+    approval_timeout: float = 120.0,
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
     import uvicorn
@@ -632,6 +653,9 @@ def _run_ui(
         default_transport=transport,
         bind_host=host,
         ui_mode=ui_mode,
+        server_url=server_url or None,
+        approval_gate=approval_gate,
+        approval_timeout_seconds=approval_timeout,
     )
     trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(
@@ -639,6 +663,7 @@ def _run_ui(
         f"(language={config.language}, model_mode={config.model_mode} [{config.model_label}], "
         f"provider={config.adk_model_provider}, "
         f"defaults: scenario={scenario}, mode={mode}, transport={transport}, "
+        f"approval_gate={approval_gate}, "
         f"server trace ingestion: {'enabled' if trace_enabled else 'disabled (no local token)'})"
     )
     try:
@@ -683,9 +708,23 @@ def _build_parser(
         default="auto",
         choices=cli_modes,
         help=(
-            "client decision mode: ADK agent (auto) or Web UI decisions "
-            "(manual; requires --ui --ui-mode explorer)"
+            "client decision mode: auto (ADK agent), confirm (agent recommends, engineer "
+            "confirms in the Web UI) or manual (the engineer decides; requires --ui)"
         ),
+    )
+    parser.add_argument(
+        "--approval-gate",
+        action="store_true",
+        help=(
+            "pause the NMS before applying a plan and wait for the engineer's approval in the "
+            "Web UI (requires --ui)"
+        ),
+    )
+    parser.add_argument(
+        "--approval-timeout",
+        type=float,
+        default=120.0,
+        help="seconds the approval gate waits before treating silence as a rejection (default: 120)",
     )
     parser.add_argument(
         "--transport",
@@ -790,11 +829,9 @@ def main() -> int:
         print(f"[run_demo] stopped {stopped}/{len(pids)} recorded background processes")
         return 0
 
-    if args.mode == "manual" and not args.ui:
-        parser.error("--mode manual requires --ui (the decision form lives in the Web UI)")
-    if args.mode == "manual" and args.ui_mode != "explorer":
+    if args.mode in ("manual", "confirm") and not args.ui:
         parser.error(
-            "--mode manual requires --ui-mode explorer (the presentation view has no decision form)"
+            f"--mode {args.mode} requires --ui (the decision lives in the Web UI)"
         )
 
     python = sys.executable
@@ -861,6 +898,8 @@ def main() -> int:
         ui=args.ui,
         trace_url=_trace_url(args.ui_port) if args.ui else "",
         ui_port=args.ui_port if args.ui else None,
+        approval_gate=args.approval_gate,
+        approval_timeout=args.approval_timeout,
     )
     if reuse == REUSE_REFUSE:
         print(
@@ -981,6 +1020,8 @@ def main() -> int:
             ui=args.ui,
             ui_port=args.ui_port,
             trace_token=recorded_token or None,
+            approval_gate=args.approval_gate,
+            approval_timeout=args.approval_timeout,
         )
         if args.ui:
             # The UI process checks the same token the server sends; the URL is only read by the
@@ -998,6 +1039,8 @@ def main() -> int:
             trace_url=_trace_url(args.ui_port) if args.ui else "",
             ui_port=args.ui_port if args.ui else None,
             gateway_port=args.gateway_port if args.gateway else None,
+            approval_gate=args.approval_gate,
+            approval_timeout=args.approval_timeout,
         )
         persisted = True
 
@@ -1014,6 +1057,9 @@ def main() -> int:
                 mode=args.mode,
                 transport=args.transport,
                 ui_mode=args.ui_mode,
+                server_url=f"http://127.0.0.1:{server_port}",
+                approval_gate=args.approval_gate,
+                approval_timeout=args.approval_timeout,
             )
         else:
             print(

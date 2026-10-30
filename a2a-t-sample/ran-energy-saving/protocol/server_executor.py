@@ -23,6 +23,7 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -46,6 +47,10 @@ from shared.logging_setup import log_context
 from shared.metrics import SERVER_TASKS_TOTAL
 from shared.trace import PHASE_EXECUTION, Span, current_trace, emit_span, trace_scope
 
+from protocol.approval_gate import (
+    DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+    ApprovalRegistry,
+)
 from protocol.messages import (
     SAMPLE_RUN_ID_METADATA_KEY,
     TASK_TEMPLATE_URI,
@@ -70,6 +75,13 @@ PLANNER_STAGE: Final[str] = "server_planner"
 
 #: Default recursion limit when no config is supplied (tests).
 DEFAULT_PLANNER_MAX_STEPS: Final[int] = 12
+
+#: Tool whose execution is gated by the engineer's approval.
+APPLY_TOOL_NAME: Final[str] = "apply_energy_saving_plan"
+
+#: Trace stage of the approval gate.
+APPROVAL_STAGE: Final[str] = "approval_gate"
+
 
 _LOGGER = logging.getLogger("ran_energy_saving.server_executor")
 
@@ -291,6 +303,8 @@ class LangGraphTaskExecutor(AgentExecutor):
         *,
         agent_factory: ServerAgentFactory,
         config: SampleConfig | None = None,
+        approval_registry: ApprovalRegistry | None = None,
+        approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
     ) -> None:
         """Create one executor.
 
@@ -298,9 +312,14 @@ class LangGraphTaskExecutor(AgentExecutor):
             agent_factory: builder of the planner graph and its metadata for one task; supplied by
                 the NMS integration (the demo factory lives in :mod:`demo.agents.server_agent`).
             config: resolved sample configuration; defaults to :func:`load_config`.
+            approval_registry: optional human gate registry; ``None`` applies plans without a pause.
+            approval_timeout_seconds: seconds the gate waits before treating the approval as a
+                rejection.
         """
         self._config = config
         self._agent_factory = agent_factory
+        self._approval_registry = approval_registry
+        self._approval_timeout_seconds = approval_timeout_seconds
 
     @property
     def recursion_limit(self) -> int:
@@ -392,11 +411,113 @@ class LangGraphTaskExecutor(AgentExecutor):
         negotiation_context: dict[str, object] | None,
     ) -> None:
         """Run the graph, publishing one artifact per tool result and the final report."""
-        agent = self._agent_factory(
-            self._config,
-            task_prompt=_task_prompt(context),
-            negotiation_context=negotiation_context,
-        )
+        approval_gate = None
+        if self._approval_registry is not None:
+
+            async def approval_gate(
+                cell_id: str,
+                window: str,
+                target_rate: str,
+                evaluation: Mapping[str, object] | None,
+            ) -> bool:
+                """Publish INPUT_REQUIRED, wait for the engineer, then resume or reject."""
+                key = _run_id(context) or task_id
+                rate_text = f"{target_rate}%"
+                await updater.update_status(
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
+                    message=updater.new_agent_message(
+                        [
+                            Part(
+                                text=(
+                                    "Waiting for the engineer's approval before applying the "
+                                    f"plan: {cell_id}, {window}, {rate_text}."
+                                )
+                            )
+                        ]
+                    ),
+                )
+                emit_span(
+                    Span(
+                        run_id=_run_id(context),
+                        span_id=f"approval_server_{uuid.uuid4().hex}",
+                        parent_span_id=execution_span_id,
+                        context_id=context.context_id,
+                        task_id=task_id,
+                        phase=PHASE_EXECUTION,
+                        actor="human",
+                        side="server",
+                        kind="approval",
+                        stage=APPROVAL_STAGE,
+                        title="Approval requested",
+                        purpose="Human approval before a network change.",
+                        status="pending",
+                        detail={
+                            "cellId": cell_id,
+                            "window": window,
+                            "rate": rate_text,
+                            "taskId": task_id,
+                            "runId": key,
+                            "approvalState": "requested",
+                            "timeoutSeconds": self._approval_timeout_seconds,
+                            "savedPercent": (
+                                evaluation.get("estimated_saving_percent")
+                                if isinstance(evaluation, Mapping)
+                                else None
+                            ),
+                        },
+                    )
+                )
+                approved = await self._approval_registry.wait(
+                    key, self._approval_timeout_seconds
+                )
+                emit_span(
+                    Span(
+                        run_id=_run_id(context),
+                        span_id=f"approval_server_{uuid.uuid4().hex}",
+                        parent_span_id=execution_span_id,
+                        context_id=context.context_id,
+                        task_id=task_id,
+                        phase=PHASE_EXECUTION,
+                        actor="human",
+                        side="server",
+                        kind="approval",
+                        stage=APPROVAL_STAGE,
+                        title="Approval resolved",
+                        purpose="Human approval before a network change.",
+                        status="ok" if approved else "error",
+                        detail={
+                            "cellId": cell_id,
+                            "window": window,
+                            "rate": rate_text,
+                            "taskId": task_id,
+                            "runId": key,
+                            "approved": approved,
+                            "approvalState": "approved" if approved else "rejected",
+                        },
+                    )
+                )
+                if approved:
+                    await updater.update_status(
+                        TaskState.TASK_STATE_WORKING,
+                        message=updater.new_agent_message(
+                            [Part(text="Approved. Applying the plan.")]
+                        ),
+                    )
+                return approved
+
+        if approval_gate is None:
+            agent = self._agent_factory(
+                self._config,
+                task_prompt=_task_prompt(context),
+                negotiation_context=negotiation_context,
+            )
+        else:
+            agent = self._agent_factory(
+                self._config,
+                task_prompt=_task_prompt(context),
+                negotiation_context=negotiation_context,
+                approval_gate=approval_gate,
+            )
         report_tool_name = agent.report_tool_name
         history: list[BaseMessage] = list(agent.initial_messages)
         steps: list[ToolStep] = []
@@ -460,6 +581,21 @@ class LangGraphTaskExecutor(AgentExecutor):
                                 metadata={"toolName": step.name},
                                 last_chunk=True,
                             )
+
+        denied = [
+            step
+            for step in steps
+            if step.name == APPLY_TOOL_NAME and step.result.get("error_code") == "approval_denied"
+        ]
+        if denied:
+            reason = "The engineer rejected the change; nothing was applied."
+            _LOGGER.info("task rejected at the approval gate: %s", task_id)
+            SERVER_TASKS_TOTAL.inc({"state": "rejected"})
+            await updater.update_status(
+                TaskState.TASK_STATE_REJECTED,
+                message=updater.new_agent_message([Part(text=reason)]),
+            )
+            return
 
         report_steps = [
             step
@@ -594,6 +730,8 @@ def build_negotiation_executor(
     handler: PreTaskNegotiationHandler,
     agent_factory: ServerAgentFactory,
     config: SampleConfig | None = None,
+    approval_registry: ApprovalRegistry | None = None,
+    approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
 ) -> NegotiationAgentExecutor:
     """Build the outer executor with the LangGraph executor inside.
 
@@ -601,11 +739,15 @@ def build_negotiation_executor(
         handler: pre-task negotiation handler.
         agent_factory: builder of the planner graph of one accepted task.
         config: resolved sample configuration.
+        approval_registry: optional human gate registry.
+        approval_timeout_seconds: seconds the gate waits before rejecting.
     """
     return NegotiationAgentExecutor(
         handler=handler,
         inner=LangGraphTaskExecutor(
             agent_factory=agent_factory,
             config=config,
+            approval_registry=approval_registry,
+            approval_timeout_seconds=approval_timeout_seconds,
         ),
     )

@@ -96,11 +96,16 @@ class ScriptedChatModel(BaseChatModel):
             )
         elif turn == 3:
             plan_id = self._find_plan_id(messages)
-            message = self._tool_call(
-                "generate_energy_saving_report",
-                {"plan_id": plan_id},
-                turn,
-            )
+            if plan_id is None:
+                # The plan was not applied (for example the engineer rejected the change at the
+                # approval gate), so the run ends without a report.
+                message = AIMessage(content="The plan was not applied; no report is generated.")
+            else:
+                message = self._tool_call(
+                    "generate_energy_saving_report",
+                    {"plan_id": plan_id},
+                    turn,
+                )
         else:
             message = AIMessage(
                 content=(
@@ -123,8 +128,8 @@ class ScriptedChatModel(BaseChatModel):
             ],
         )
 
-    def _find_plan_id(self, messages: list[BaseMessage]) -> str:
-        """Read the applied plan id from the preceding tool result."""
+    def _find_plan_id(self, messages: list[BaseMessage]) -> str | None:
+        """Read the applied plan id from the preceding tool result, or ``None`` when it failed."""
         for message in reversed(messages):
             if not isinstance(message, ToolMessage):
                 continue
@@ -132,12 +137,11 @@ class ScriptedChatModel(BaseChatModel):
                 continue
             try:
                 payload = json.loads(str(message.content))
-            except (TypeError, ValueError) as exc:
-                raise PlannerError("The apply tool result is not valid JSON.") from exc
+            except (TypeError, ValueError):
+                return None
             plan_id = payload.get("plan_id")
-            if isinstance(plan_id, str) and plan_id:
-                return plan_id
-            raise PlannerError("The apply tool result carries no plan_id.")
+            return plan_id if isinstance(plan_id, str) and plan_id else None
+        return None
         raise PlannerError("The scripted planner reached the report step without an apply result.")
 
 
