@@ -22,6 +22,7 @@
       </div>
     </div>
     <div class="top-meta">
+      <span class="pill" id="run-pill">离线样例 · 参考数据</span>
       <span class="badge" id="badge">任务前协商</span>
     </div>
   </header>
@@ -140,7 +141,7 @@
               <b id="cells-name">Cells / base stations</b>
               <span id="cells-org">Songshanhu · test cluster</span>
             </div>
-            <svg class="cells-figure" id="cells-figure" viewBox="0 0 220 104" aria-label="Two radio cells"></svg>
+            <svg class="cells-figure" id="cells-figure" viewBox="0 0 360 128" aria-label="Six radio sites"></svg>
             <div class="actor-state" id="s-cells">Normal operation</div>
           </div>
 
@@ -209,12 +210,16 @@
           <span class="round-dots" id="round-dots" aria-hidden="true"></span>
           <div class="seg" role="group" aria-label="Negotiation view">
             <button id="tab-business" type="button" aria-pressed="true">Business</button>
-            <button id="tab-wire" type="button" aria-pressed="false">Message</button>
+            <button id="tab-wire" type="button" aria-pressed="false">On the wire</button>
           </div>
         </div>
         <div class="body nego-body" id="nego-body">
           <ol class="turns" id="turns"></ol>
           <div class="wire" id="wire" hidden>
+            <div class="wire-format" id="wire-format" role="group" aria-label="Message format">
+              <button id="wire-t" type="button" aria-pressed="true">A2A-T (Task-T)</button>
+              <button id="wire-a" type="button" aria-pressed="false">Plain A2A</button>
+            </div>
             <p class="wire-title" id="wire-title"></p>
             <pre class="wire-code" id="wire-code"></pre>
             <p class="wire-note" id="wire-note" hidden></p>
@@ -248,9 +253,11 @@
     <div class="below-grid" id="below-flow"></div>
     <div class="notes">
       <div><h3 id="shows-title">What the demo shows</h3><ul id="shows-list"></ul></div>
+      <div><h3 id="booth-title">At the booth</h3><ul id="booth-list"></ul></div>
       <div><h3 id="not-shown-title">Not shown</h3><ul id="not-shown-list"></ul></div>
     </div>
     <p class="below-note" id="below-note"></p>
   </section>
+  <footer class="footer" id="footer"></footer>
 </body>
 </html>

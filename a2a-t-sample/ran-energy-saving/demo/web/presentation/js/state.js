@@ -201,6 +201,7 @@ function applyEvent(state, entry) {
     case "status": {
       const label = summary || "";
       if (label.includes("Data collection started")) state.dataCollection = "started";
+      if (label.includes("Data collection in progress")) state.dataCollection = "progress";
       if (label.includes("Data collection completed")) state.dataCollection = "completed";
       if (label.includes("SUBMITTED") || label.includes("WORKING") || label.includes("INPUT_REQUIRED")) {
         state.taskCreated = true;

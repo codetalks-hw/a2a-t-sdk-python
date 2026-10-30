@@ -43,6 +43,43 @@ export function parseIntent(text) {
   };
 }
 
+/** Return the plain-A2A sentence of one parsed intent (no Task-T fields). */
+export function plainSentence(intent, language = "en-US") {
+  if (!intent) return "";
+  const area = intent.area || (language === "zh-CN" ? "目标区域" : "the target area");
+  if (language === "zh-CN") {
+    const verb = intent.operation === "modify" ? "修改运行中的" : "创建";
+    let text = `在${area}${verb}无线网络节能任务`;
+    if (intent.sites.length > 0) text += `，站点列表为 ${intent.sites.join("、")}`;
+    if (intent.slots.length > 0) {
+      text += `，保障速率为 ${intent.slots
+        .map((slot) => `${hhmm(slot.start)}–${hhmm(slot.end)} ${slot.rate}Mbps`)
+        .join("、")}`;
+    }
+    if (intent.outage !== null) {
+      text += `，背景事件为 ${hhmm(intent.outage.start)}–${hhmm(intent.outage.end)} 停电`;
+    }
+    return `${text}；在满足这些目标的前提下最大化节能，并报告节能收益和实际速率。`;
+  }
+  const verb =
+    intent.operation === "modify"
+      ? "Modify the running energy-saving task"
+      : "Perform RAN energy saving";
+  let text = `${verb} in ${area}`;
+  if (intent.sites.length > 0) text += ` for ${intent.sites.join(", ")}`;
+  if (intent.slots.length > 0) {
+    text += `. Guarantee ${intent.slots
+      .map((slot) => `${slot.rate} Mbps from ${hhmm(slot.start)} to ${hhmm(slot.end)}`)
+      .join(", ")}`;
+  }
+  if (intent.outage !== null) {
+    text += `, because of a power outage from ${hhmm(intent.outage.start)} to ${hhmm(
+      intent.outage.end,
+    )}`;
+  }
+  return `${text}. Maximize energy saving while meeting these targets, and report the energy saving gain and the throughput reached.`;
+}
+
 /** Render the facts grid and the chart into one container. */
 export function renderIntent(container, intentText, copy, { update } = {}) {
   clear(container);

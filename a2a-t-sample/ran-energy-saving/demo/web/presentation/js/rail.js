@@ -18,15 +18,12 @@ export function createRail(els, getCopy, getUi) {
 
     els.status.textContent = statusText(state, copy);
     els.empty.textContent = emptyText(state, copy);
-    els.empty.hidden = state.negotiation.length > 0;
+    els.empty.hidden = state.negotiation.length > 0 || ui.tab === "wire";
 
     const business = ui.tab !== "wire";
     els.turns.hidden = !business;
     els.wire.hidden = business;
-    if (!business) {
-      renderWire(state, ui, copy);
-      return;
-    }
+    if (!business) return;
 
     const scrollTop = els.turns.scrollTop;
     els.turns.replaceChildren();

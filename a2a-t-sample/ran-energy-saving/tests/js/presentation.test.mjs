@@ -16,7 +16,7 @@ import {
 } from "../../demo/web/presentation/js/state.js";
 import { sceneFor } from "../../demo/web/presentation/js/scenes.js";
 import { createPlayer } from "../../demo/web/presentation/js/player.js";
-import { parseIntent } from "../../demo/web/presentation/js/intent.js";
+import { parseIntent, plainSentence } from "../../demo/web/presentation/js/intent.js";
 import {
   approvalCard,
   decisionCard,
@@ -367,6 +367,9 @@ assert.equal(english.operation, "create");
 assert.equal(english.area, "Songshanhu Administration Committee");
 assert.equal(english.slots.length, 4);
 assert.equal(english.overlap, null);
+const englishSentence = plainSentence(english, "en-US");
+assert.ok(englishSentence.includes("Perform RAN energy saving in Songshanhu Administration Committee"));
+assert.ok(englishSentence.includes("Guarantee 2 Mbps from 00:00 to 07:00"));
 
 const overlapTaskT = englishTaskT.replace(
   "{23:00~24:00,2Mbps}",

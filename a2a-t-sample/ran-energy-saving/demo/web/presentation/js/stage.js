@@ -13,6 +13,37 @@ export function createStage(els) {
   buildCells(els.cellsFigure);
   let bubbles = {};
   const packetTimers = new Set();
+  let dayProgress = 0;
+  let dayTimer = null;
+
+  function stopDays() {
+    if (dayTimer !== null) {
+      window.cancelAnimationFrame(dayTimer);
+      dayTimer = null;
+    }
+  }
+
+  function animateDays(copy) {
+    stopDays();
+    const start = performance.now();
+    const frame = (now) => {
+      const t = Math.min(1, (now - start) / 2600);
+      dayProgress = t;
+      const day = Math.max(1, Math.min(8, Math.round(1 + t * 7)));
+      els.nmsBar.style.width = `${Math.round(t * 100)}%`;
+      setActor(
+        "nms",
+        { cls: "active", text: format(copy.states.nmsCollecting, { day }) },
+        copy,
+      );
+      if (t < 1) {
+        dayTimer = window.requestAnimationFrame(frame);
+      } else {
+        dayTimer = null;
+      }
+    };
+    dayTimer = window.requestAnimationFrame(frame);
+  }
 
   function clearPackets() {
     for (const timer of packetTimers) window.clearTimeout(timer);
@@ -23,6 +54,8 @@ export function createStage(els) {
 
   function reset() {
     clearPackets();
+    stopDays();
+    dayProgress = 0;
     bubbles = {};
     for (const node of Object.values(els.bubbles)) {
       node.className = "bubble";
@@ -31,7 +64,7 @@ export function createStage(els) {
     els.nmsBar.style.width = "0";
     els.approval.className = "approval";
     els.approvalState.textContent = "";
-    for (let index = 0; index < 2; index += 1) setCell(index, 3, false, false);
+    for (let index = 0; index < 6; index += 1) setCell(index, 3, false, false);
   }
 
   function note(actor, who, text, neg = false) {
@@ -116,6 +149,7 @@ export function createStage(els) {
       fly("lane-task", "Task-T", "task", 1400);
       note("oss", copy.roles.oss, copy.states.ossSending);
       note("nms", copy.roles.nms, copy.states.nmsValidating);
+      note("eng", copy.roles.eng, copy.states.engApproved);
       return;
     }
     if (key === "strategy") {
@@ -125,11 +159,22 @@ export function createStage(els) {
     }
     if (key === "collect-start") {
       note("nms", copy.roles.nms, copy.dataCollection.start);
-      note("cells", copy.roles.cells, copy.states.cellsMeasuring);
+      note("cells", copy.roles.cells, copy.dataCollection.noMml);
+      note("eng", copy.roles.eng, copy.states.engApproved);
+      return;
+    }
+    if (key === "collect-progress") {
+      note("nms", copy.roles.nms, copy.dataCollection.progress);
+      note("cells", copy.roles.cells, copy.dataCollection.noMml);
+      animateDays(copy);
       return;
     }
     if (key === "collect-done") {
+      stopDays();
+      dayProgress = 1;
+      els.nmsBar.style.width = "100%";
       note("nms", copy.roles.nms, copy.dataCollection.done);
+      note("cells", copy.roles.cells, copy.states.cellsBaseline);
       return;
     }
     if (key === "approval-ready") {
@@ -149,14 +194,20 @@ export function createStage(els) {
       return;
     }
     if (key === "approval") {
-      note("nms", copy.roles.nms, copy.approval.waiting, true);
-      note("eng", copy.roles.eng, copy.states.engReviewing, true);
+      fly("lane-status", copy.approval.confirmInMie, "neg", 1300);
+      fly("lane-return", copy.approval.reviewNeeded, "neg", 1100);
+      note("nms", copy.roles.nms, copy.approval.suggestions, true);
+      note("oss", copy.roles.oss, copy.approval.waiting, true);
+      note("eng", copy.roles.eng, copy.approval.exporting, true);
+      fly("lane-approval", copy.approval.reviewInMie, "neg", 2000);
+      note("cells", copy.roles.cells, copy.approval.policy, true);
       return;
     }
     if (key === "apply") {
-      fly("lane-apply", "MML", "cfg", 1100);
-      note("nms", copy.roles.nms, copy.states.nmsApplying);
+      fly("lane-apply", copy.approval.mmlCommands, "cfg", 1200);
+      note("nms", copy.roles.nms, copy.approval.sendingMml);
       note("cells", copy.roles.cells, copy.states.cellsApplying);
+      note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
       return;
     }
     if (key === "report") {
@@ -208,10 +259,14 @@ export function createStage(els) {
         eng = { cls: "wait", text: copy.states.engReviewing };
       } else if (state.approvalState === "approved") {
         nms = { cls: "active", text: copy.states.nmsApplying };
-      } else if (state.dataCollection === "started") {
-        nms = { cls: "active", text: copy.states.nmsCollecting };
+      } else if (state.dataCollection === "started" || state.dataCollection === "progress") {
+        const day = Math.max(1, Math.min(8, Math.round(1 + dayProgress * 7)));
+        nms = {
+          cls: "active",
+          text: format(copy.states.nmsCollecting, { day }),
+        };
       } else if (state.dataCollection === "completed") {
-        nms = { cls: "active", text: copy.states.nmsEvaluating };
+        nms = { cls: "active", text: copy.states.nmsCollectingDone };
       } else if (applyDone) {
         nms = { cls: "active", text: copy.states.nmsReporting };
       } else {
@@ -219,7 +274,11 @@ export function createStage(els) {
       }
       cells = {
         cls: applyDone ? "ok" : "active",
-        text: applyDone ? copy.states.cellsApplied : copy.states.cellsMeasuring,
+        text: applyDone
+          ? copy.states.cellsApplied
+          : state.dataCollection === "completed"
+            ? copy.states.cellsBaseline
+            : copy.states.cellsMeasuring,
       };
     } else if (stage === "done") {
       eng = { cls: "ok", text: copy.states.engApproved };
@@ -268,17 +327,11 @@ export function createStage(els) {
       stage === "done"
         ? 100
         : stage === "executing"
-          ? applyDone
-            ? 90
-            : state.approvalState === "approved"
-              ? 76
-              : steps[0].done
-                ? 60
-                : state.dataCollection === "completed"
-                  ? 46
-                  : state.dataCollection === "started"
-                    ? 30
-                    : 20
+          ? applyDone || state.dataCollection === "completed" || state.approvalState !== null
+            ? 100
+            : state.dataCollection === "started" || state.dataCollection === "progress"
+              ? Math.round(dayProgress * 100)
+              : 20
           : stage === "negotiating"
             ? 12
             : 0;
@@ -300,7 +353,7 @@ export function createStage(els) {
 
     const carriers = stage === "done" ? 2 : stage === "executing" && applyDone ? 2 : 3;
     const battery = stage === "done" || (stage === "executing" && applyDone);
-    for (let index = 0; index < 2; index += 1) setCell(index, carriers, battery, false);
+    for (let index = 0; index < 6; index += 1) setCell(index, carriers, battery, false);
   }
 
   function setActor(name, value, copy) {
@@ -313,13 +366,15 @@ export function createStage(els) {
 
   function buildCells(figure) {
     figure.replaceChildren();
-    for (let index = 0; index < 2; index += 1) {
-      const cx = 38 + index * 104;
-      const ay = 34;
+    for (let index = 0; index < 6; index += 1) {
+      const column = index % 3;
+      const row = Math.floor(index / 3);
+      const cx = 58 + column * 122;
+      const ay = 30 + row * 62;
       const group = svg("g", { id: `cell-${index}` });
-      for (let ring = 1; ring <= 3; ring += 1) {
-        const r = 5 + ring * 5;
-        const angle = (40 * Math.PI) / 180;
+      for (let ring = 1; ring <= 2; ring += 1) {
+        const r = 4 + ring * 5;
+        const angle = (42 * Math.PI) / 180;
         const x1 = cx + r * Math.cos(-angle);
         const y1 = ay + r * Math.sin(-angle);
         const x2 = cx + r * Math.cos(angle);
@@ -340,24 +395,24 @@ export function createStage(els) {
       group.append(
         svg("path", {
           class: "cell-mast",
-          d: `M${cx} ${ay}L${cx - 8} ${ay + 38}M${cx} ${ay}L${cx + 8} ${ay + 38}M${cx - 5} ${ay + 29}h10`,
+          d: `M${cx} ${ay}L${cx - 6} ${ay + 26}M${cx} ${ay}L${cx + 6} ${ay + 26}M${cx - 4} ${ay + 20}h8`,
         }),
-        svg("circle", { cx, cy: ay, r: 2.6, fill: "#000" }),
+        svg("circle", { cx, cy: ay, r: 2.2, fill: "#000" }),
         svg("g", { class: "cell-bat", id: `cell-bat-${index}` }),
       );
       const batteryGroup = group.querySelector(`#cell-bat-${index}`);
       batteryGroup.append(
         svg("rect", {
-          x: cx + 10,
-          y: ay + 25,
-          width: 14,
-          height: 8,
+          x: cx + 9,
+          y: ay + 15,
+          width: 12,
+          height: 7,
           fill: "#fff",
           stroke: "#000",
-          "stroke-width": 1.2,
+          "stroke-width": 1.1,
         }),
-        svg("rect", { x: cx + 24, y: ay + 27.5, width: 2, height: 3, fill: "#000" }),
-        svg("rect", { x: cx + 11.5, y: ay + 26.5, width: 5, height: 5, fill: "#FFD200" }),
+        svg("rect", { x: cx + 21, y: ay + 17.2, width: 2, height: 2.6, fill: "#000" }),
+        svg("rect", { x: cx + 10.2, y: ay + 16.2, width: 4, height: 4.6, fill: "#FFD200" }),
       );
       group.append(
         svg(
@@ -366,10 +421,10 @@ export function createStage(els) {
             class: "cell-lbl",
             id: `cell-lbl-${index}`,
             x: cx,
-            y: ay + 52,
+            y: ay + 38,
             "text-anchor": "middle",
           },
-          `小区 ${index + 1}`,
+          index < 2 ? `cell-00${index + 1}` : `site-${index + 1}`,
         ),
       );
       figure.append(group);

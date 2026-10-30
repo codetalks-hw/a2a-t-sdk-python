@@ -19,6 +19,7 @@ import { createPlayer } from "./player.js";
 import { createStage, setStageCopy } from "./stage.js";
 import { createRail } from "./rail.js";
 import { createTrace } from "./trace.js";
+import { createWire } from "./wire.js";
 import { renderIntent } from "./intent.js";
 import {
   approvalCard,
@@ -38,6 +39,7 @@ const els = {
   brandKicker: byId("brand-kicker"),
   title: byId("title"),
   badge: byId("badge"),
+  runPill: byId("run-pill"),
   scenariosLabel: byId("scenarios-label"),
   chips: byId("scenario-chips"),
   scenarioDesc: byId("scenario-desc"),
@@ -98,6 +100,9 @@ const els = {
   tabWire: byId("tab-wire"),
   turns: byId("turns"),
   wire: byId("wire"),
+  wireFormat: byId("wire-format"),
+  wireT: byId("wire-t"),
+  wireA: byId("wire-a"),
   wireTitle: byId("wire-title"),
   wireCode: byId("wire-code"),
   wireNote: byId("wire-note"),
@@ -116,8 +121,11 @@ const els = {
   belowNote: byId("below-note"),
   showsTitle: byId("shows-title"),
   showsList: byId("shows-list"),
+  boothTitle: byId("booth-title"),
+  boothList: byId("booth-list"),
   notShownTitle: byId("not-shown-title"),
   notShownList: byId("not-shown-list"),
+  footer: byId("footer"),
   legendChat: byId("legend-chat"),
   legendTask: byId("legend-task"),
   legendStatus: byId("legend-status"),
@@ -141,6 +149,8 @@ const ui = {
   tab: "business",
   selectedTurn: -1,
   wireEntry: null,
+  wireFormat: "t",
+  wirePinned: false,
   submitting: false,
   counterOpen: false,
   counterText: "",
@@ -166,10 +176,25 @@ const rail = createRail(
   () => ui.copy,
   () => ui,
 );
+const wire = createWire(
+  {
+    formatT: els.wireT,
+    formatA: els.wireA,
+    title: els.wireTitle,
+    code: els.wireCode,
+    note: els.wireNote,
+  },
+  () => ui.copy,
+  () => ui,
+);
 const trace = createTrace(
   { body: els.traceBody, rows: els.traceRows, empty: els.traceEmpty },
   () => ui.copy,
-  (entry) => rail.showEntry(entry),
+  (entry) => {
+    ui.wirePinned = true;
+    wire.showEntry(entry);
+    setTab("wire");
+  },
 );
 
 const player = createPlayer({
@@ -183,6 +208,7 @@ const player = createPlayer({
   onChange: () => renderControls(),
   onScene: (scene) => {
     ui.lastScene = scene;
+    renderSteps();
     stage.scene(scene, ui.view, ui.copy);
     renderNarrator();
     handleLoop(scene);
@@ -249,6 +275,21 @@ function bindStaticEvents() {
   });
   els.tabBusiness.addEventListener("click", () => setTab("business"));
   els.tabWire.addEventListener("click", () => setTab("wire"));
+  els.requestText.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      startRun();
+    }
+  });
+  els.wireT.addEventListener("click", () => {
+    ui.wireFormat = "t";
+    wire.render(ui.view);
+  });
+  els.wireA.addEventListener("click", () => {
+    if (els.wireA.disabled) return;
+    ui.wireFormat = "a";
+    wire.render(ui.view);
+  });
   els.traceToggle.addEventListener("click", () => {
     const open = els.traceToggle.getAttribute("aria-expanded") === "true";
     els.traceToggle.setAttribute("aria-expanded", String(!open));
@@ -286,7 +327,7 @@ function setTab(tab) {
   ui.tab = tab;
   els.tabBusiness.setAttribute("aria-pressed", String(tab === "business"));
   els.tabWire.setAttribute("aria-pressed", String(tab === "wire"));
-  rail.render(ui.view);
+  render();
 }
 
 function applyStaticCopy() {
@@ -296,6 +337,8 @@ function applyStaticCopy() {
   els.brandKicker.textContent = copy.kicker;
   els.title.textContent = copy.title;
   els.badge.textContent = copy.badge;
+  els.runPill.textContent =
+    ui.meta?.modelMode === "offline" ? copy.runPillOffline : copy.runPillLive;
   els.scenariosLabel.textContent = copy.scenarioLabel;
   els.editLabel.textContent = copy.editRequest;
   els.requestTitle.textContent = copy.requestTitle;
@@ -306,6 +349,8 @@ function applyStaticCopy() {
   els.intentTitle.textContent = copy.intent.title;
   els.intentSub.textContent = copy.intent.sub;
   els.negoTitle.textContent = copy.negotiation.title;
+  els.tabBusiness.textContent = copy.negotiation.business;
+  els.tabWire.textContent = copy.negotiation.wire;
   els.traceTitle.textContent = copy.trace.title;
   els.traceSub.textContent = copy.trace.sub;
   els.techSummary.textContent = copy.tech;
@@ -340,12 +385,16 @@ function renderBottomCopy() {
     els.belowFlow.append(node);
   }
   els.showsTitle.textContent = copy.below.showsTitle;
+  els.boothTitle.textContent = copy.below.boothTitle;
   els.notShownTitle.textContent = copy.below.notShownTitle;
   clear(els.showsList);
+  clear(els.boothList);
   clear(els.notShownList);
   for (const item of copy.below.shows) els.showsList.append(el("li", "", item));
+  for (const item of copy.below.booth) els.boothList.append(el("li", "", item));
   for (const item of copy.below.notShown) els.notShownList.append(el("li", "", item));
   els.belowNote.textContent = copy.below.note;
+  if (els.footer) els.footer.textContent = copy.footer;
 }
 
 function renderPresets() {
@@ -386,6 +435,8 @@ function selectScenario(name, { start = false } = {}) {
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
+  ui.wireFormat = "t";
+  ui.wirePinned = false;
   ui.counterOpen = false;
   ui.looping = false;
   els.requestText.value = ui.meta?.scenarioRequests?.[name] || "";
@@ -423,6 +474,8 @@ async function startRun() {
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
+  ui.wireFormat = "t";
+  ui.wirePinned = false;
   ui.counterOpen = false;
   ui.counterText = "";
   ui.submitting = false;
@@ -503,6 +556,14 @@ function enqueueFrame(frame) {
   if ((scene.key === "trace" || scene.key === "event") && ui.lastScene !== null) {
     scene.step = ui.lastScene.step;
   }
+  if (
+    frame.type === "trace" &&
+    frame.event &&
+    frame.event.kind === "message_sent" &&
+    !ui.wirePinned
+  ) {
+    ui.wireEntry = frame.event;
+  }
   applyFrame(ui.shadow, frame);
   ui.frameLog.push(frame);
   player.enqueue(scene);
@@ -558,9 +619,12 @@ function render() {
   ui.rendering = true;
   try {
     renderSteps();
+    els.negoTitle.textContent =
+      ui.tab === "wire" ? ui.copy.wire.panelTitle : ui.copy.negotiation.title;
     stage.render(ui.view, ui.copy);
     renderIntentPanel();
     rail.render(ui.view);
+    wire.render(ui.view);
     trace.render(ui.view);
     renderNarrator();
     renderControls();

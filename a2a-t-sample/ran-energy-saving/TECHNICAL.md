@@ -94,8 +94,11 @@ Pick a scenario, edit the network operations engineer's request if needed, and s
 follows the real run through nine steps: request → structured Task-T → approval 1 (intent) → Task-T
 sent → negotiation when needed → strategy and task start → data collection (days 2–8, compressed) →
 approval 2 (MML in MIE) → apply and report. The right column shows what the OSS Agent understood
-(with the 24-hour throughput chart), every negotiation turn with its full content (business /
-message tabs), and the merged session trace.
+(with the 24-hour throughput chart), the negotiation turns, an **On the wire** inspector, and the
+merged session trace. The inspector shows the real A2A request headers and JSON body with the
+Task-T metadata; its **Plain A2A** toggle replaces the Task-T fields with one natural-language
+sentence and drops the extension header. It is a format comparison only, not a second run. Clicking
+a trace row selects that message in the inspector.
 
 Two human approvals can be enabled at startup:
 
@@ -106,6 +109,13 @@ Two human approvals can be enabled at startup:
 - `--approval-gate`: approval 2 is the MIE MML review. The RAN Agent publishes `INPUT_REQUIRED`
   before applying a plan; the page asks the engineer to export, check and acknowledge the MML
   suggestion in MIE. A rejection applies nothing and ends the run without a report.
+
+The data-collection step is driven by three real `WORKING` status updates (started, in progress,
+completed); the page animates days 1–8, shows the network-side bubble "No MML applied yet", and
+keeps the RAN Agent at "Data collection completed" until the MIE review starts. The green
+`MML commands` packet only appears in the apply step, after the engineer acknowledges the suggestion
+in MIE. The stage shows six radio sites: the two dataset cells (`cell-001`, `cell-002`) plus four
+illustrative sites of the same test cluster.
 
 The playback controls (auto / step, speed, pause, previous / next, loop) pace the presentation only;
 the backend run is real. Transport, model and language come from the CLI.

@@ -508,6 +508,11 @@ async def run_client_flow(
         metadata = metadata_to_dict(request.message.metadata)
         template_uri = metadata.get(TEMPLATE_URI_METADATA_KEY)
         label_text = request.message.parts[0].text if request.message.parts else ""
+        metadata_keys = sorted(str(key) for key in metadata)
+        extension_uri = next(
+            (key for key in metadata_keys if "Task-T" in key),
+            None,
+        )
         emit_trace(
             "message_sent",
             phase=phase,
@@ -518,8 +523,11 @@ async def run_client_flow(
             detail={
                 "performative": performative,
                 "summary": label_text,
-                "metadataKeys": sorted(str(key) for key in metadata),
+                "metadataKeys": metadata_keys,
                 "templateUri": template_uri if isinstance(template_uri, str) else None,
+                "extensionUri": extension_uri,
+                "messageId": getattr(request.message, "message_id", None),
+                "taskId": getattr(request.message, "task_id", None),
             },
         )
 

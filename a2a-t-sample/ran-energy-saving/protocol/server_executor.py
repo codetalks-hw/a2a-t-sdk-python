@@ -71,6 +71,10 @@ DATA_COLLECTION_STARTED_TEXT: Final[str] = (
     "Data collection started: measuring the cluster baseline (3 to 7 days in the PoC; compressed "
     "here). No optimization is applied yet."
 )
+DATA_COLLECTION_PROGRESS_TEXT: Final[str] = (
+    "Data collection in progress: the cluster is sending measurements; expected to complete on "
+    "day 8. No optimization is applied yet."
+)
 DATA_COLLECTION_COMPLETED_TEXT: Final[str] = (
     "Data collection completed: baseline ready. Preparing optimization suggestions."
 )
@@ -367,6 +371,10 @@ class LangGraphTaskExecutor(AgentExecutor):
         await updater.update_status(
             TaskState.TASK_STATE_WORKING,
             message=updater.new_agent_message([Part(text=DATA_COLLECTION_STARTED_TEXT)]),
+        )
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING,
+            message=updater.new_agent_message([Part(text=DATA_COLLECTION_PROGRESS_TEXT)]),
         )
         _LOGGER.info("task accepted; running the planner")
         execution_span_id = _emit_execution_span(context, task.id)

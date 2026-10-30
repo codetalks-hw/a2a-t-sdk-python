@@ -74,6 +74,9 @@ function eventScene(entry, state, frame) {
       if (label.includes("Data collection started")) {
         return scene("collect-start", 1600, frame);
       }
+      if (label.includes("Data collection in progress")) {
+        return scene("collect-progress", 2600, frame);
+      }
       if (label.includes("Data collection completed")) {
         return scene("collect-done", 1200, frame);
       }
@@ -177,6 +180,7 @@ function stepOf(key) {
     case "strategy":
       return "strategy";
     case "collect-start":
+    case "collect-progress":
     case "collect-done":
       return "collect";
     case "approval":

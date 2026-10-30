@@ -86,6 +86,14 @@ button { cursor: pointer; }
 }
 .brand-text h1 { font-size: 19px; line-height: 1.2; }
 .top-meta { display: flex; align-items: center; gap: 8px; flex: none; }
+.pill {
+  border: 1px solid var(--g700);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--g900);
+  background: var(--white);
+}
 .badge {
   border: 1px solid var(--g700);
   padding: 5px 10px;
@@ -544,8 +552,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 #p-nego > header { border-bottom-color: var(--orange); }
 .panel .body { padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; min-width: 0; min-height: 0; overflow: auto; }
 #p-intent { flex: 0 0 auto; }
-#p-nego { flex: 1.5 1 0; min-height: 240px; }
-#p-trace { flex: 0.75 1 0; min-height: 150px; }
+#p-nego { flex: 1.8 1 0; min-height: 280px; }
+#p-trace { flex: 0.6 1 0; min-height: 150px; }
 #p-trace .body { padding: 0; }
 .panel-toggle { all: unset; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .panel-toggle::before { content: "▾"; font-size: 11px; color: var(--g700); }
@@ -602,8 +610,21 @@ h5.content-heading { font-size: 12px; color: var(--g700); }
 .turn-params dd { margin: 0; font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
 .badge-confirmed { font-size: 10px; font-weight: 700; color: #fff; background: var(--green); padding: 0 4px; }
 .empty { margin: 0; color: var(--g700); font-size: 12.5px; padding: 10px 0; text-align: center; border: 1px dashed var(--g300); }
-.wire { display: flex; flex-direction: column; gap: 5px; min-height: 0; }
+.wire { display: flex; flex-direction: column; gap: 5px; min-height: 0; flex: 1 1 auto; }
+.wire-format { display: inline-flex; align-self: flex-start; border: 2px solid var(--black); }
+.wire-format button { border: 0; background: var(--white); padding: 2px 8px; font-size: 11px; font-weight: 700; }
+.wire-format button[aria-pressed="true"] { background: var(--black); color: var(--white); }
+.wire-format button:disabled { color: var(--g300); }
 .wire-title { margin: 0; font-size: 12.5px; font-weight: 700; }
+.wire-request { color: var(--black); font-weight: 700; }
+.wire-head-key { color: var(--g900); font-weight: 700; }
+.wire-ext-key { color: var(--orange-text); font-weight: 700; }
+.wire-head-value { color: var(--g700); }
+.wire-json-key { color: var(--orange-text); font-weight: 700; }
+.wire-json-string { color: #1f6f3f; }
+.wire-json-number, .wire-json-bool { color: #1c4f9c; }
+.wire-json-null { color: var(--g500); }
+.wire-empty { color: var(--g700); }
 .wire-code {
   margin: 0;
   background: var(--g50);
@@ -615,7 +636,9 @@ h5.content-heading { font-size: 12px; color: var(--g700); }
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 46vh;
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
 }
 .wire-note { margin: 0; font-size: 11.5px; color: var(--g900); background: var(--g50); border-left: 4px solid var(--orange); padding: 5px 8px; }
 .mml-block {
@@ -690,11 +713,19 @@ h5.content-heading { font-size: 12px; color: var(--g700); }
 .below-card .hitl { align-self: flex-start; margin-top: 2px; padding: 1px 6px; background: var(--green); font-size: 11px; font-weight: 700; }
 .below-card h3 { font-size: 14px; }
 .below-card p { margin: 0; font-size: 12.3px; }
-.notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; padding-top: 18px; }
+.notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; padding-top: 18px; }
 .notes h3 { font-size: 15px; margin-bottom: 6px; display: flex; align-items: center; gap: 7px; }
 .notes h3::before { content: ""; width: 10px; height: 10px; background: var(--orange); }
 .notes ul { margin: 0; padding-left: 17px; display: flex; flex-direction: column; gap: 4px; font-size: 12.8px; }
 .below-note { margin: 16px 0 0; font-size: 11.5px; color: var(--g700); }
+.footer {
+  background: var(--black);
+  color: var(--g300);
+  font-size: 11.5px;
+  line-height: 1.45;
+  padding: 14px max(16px, env(safe-area-inset-left, 0px));
+  margin-top: 20px;
+}
 
 .connection-banner {
   position: sticky;

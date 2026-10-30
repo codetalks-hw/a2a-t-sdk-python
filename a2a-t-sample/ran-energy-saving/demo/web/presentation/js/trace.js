@@ -33,7 +33,7 @@ function rowNode(row, copy, onSelect) {
     node.classList.add("click");
     node.tabIndex = 0;
     node.setAttribute("role", "button");
-    const open = () => onSelect(wireEntry(entry));
+    const open = () => onSelect(entry);
     node.addEventListener("click", open);
     node.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {

@@ -137,16 +137,20 @@ case 1 (night-time energy saving, with and without negotiation) and use case 2 (
 outage). The stage follows the live run at a human pace through nine steps: request, structured
 Task-T, approval 1 (intent), Task-T sent, negotiation when needed, strategy and task start, data
 collection (days 2 to 8, compressed), approval 2 (MML in MIE) and apply and report. The right column
-keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart), every
-proposal and decision turn with its full message, and the merged session trace.
+keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart), the
+negotiation turns, an **On the wire** inspector, and the merged session trace. On the wire shows the
+real A2A request headers and JSON body with the Task-T metadata; its **Plain A2A** toggle shows the
+same request as one natural-language sentence without the extension header or Task-T fields (format
+comparison only, not a second run). Clicking a trace row selects that message in the inspector.
 
 Approval 1 is real: in `--mode confirm`, the Task-T is held before it leaves the OSS Agent until the
 engineer confirms the structured intent. Approval 2 is the MIE MML review: with `--approval-gate`,
 the RAN Agent publishes the real A2A `INPUT_REQUIRED` state before applying a plan; the page asks the
 engineer to export, check and acknowledge the MML suggestion in MIE. A rejection applies nothing and
-ends the run without a report. The data-collection phase is driven by two real `WORKING` status
-updates from the RAN Agent; the page compresses the days into a few seconds and never invents
-measurements.
+ends the run without a report. The data-collection phase is driven by three real `WORKING` status
+updates (started, in progress, completed); the page animates days 1–8 and never invents measurements.
+No MML command reaches the network before the MIE acknowledgment; the green `MML commands` packet
+appears only in the apply step.
 
 The playback controls (auto / step by step, speed, pause, previous / next, loop) only pace the
 presentation; the backend run is real. Transport, model and language are fixed when the process

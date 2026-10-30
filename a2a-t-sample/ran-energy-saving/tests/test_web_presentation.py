@@ -30,6 +30,7 @@ PRESENTATION_MODULES = (
     "js/trace.js",
     "js/intent.js",
     "js/decisions.js",
+    "js/wire.js",
     "js/dom.js",
 )
 
@@ -72,6 +73,10 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
         'id="p-trace"',
         'id="turns"',
         'id="wire"',
+        'id="wire-t"',
+        'id="wire-a"',
+        'id="booth-title"',
+        'id="footer"',
         'id="trace-rows"',
     ):
         assert marker in page, marker

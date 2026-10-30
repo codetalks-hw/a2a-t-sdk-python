@@ -273,6 +273,26 @@ async def _run(
     return result, transport, prompt_client
 
 
+async def test_message_sent_span_carries_the_wire_fields() -> None:
+    spans: list[dict[str, object]] = []
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=ScriptedTransport([_task_completed_batch()]),
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        trace_sink=spans.append,
+    )
+
+    sent = next(span for span in spans if span["kind"] == "message_sent")
+    detail = sent["detail"]
+    assert isinstance(detail, dict)
+    assert isinstance(detail["messageId"], str) and detail["messageId"]
+    assert str(detail["extensionUri"]).endswith("/Task-T/v1")
+    assert detail["performative"] == "TASK_T"
+
+
 async def test_intent_gate_can_stop_the_run_before_any_task_t_is_sent() -> None:
     prompt_client = FakePromptClient()
     transport = ScriptedTransport([])
