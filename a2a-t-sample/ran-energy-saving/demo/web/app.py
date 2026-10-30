@@ -140,6 +140,7 @@ def create_app(
     approval_gate: bool = False,
     approval_timeout_seconds: float = 120.0,
     allow_insecure_bind: bool = False,
+    intent_review: bool | None = None,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -169,6 +170,8 @@ def create_app(
         approval_timeout_seconds: approval window reported to the page.
         allow_insecure_bind: explicit opt-in for a trusted-LAN bind without ``A2AT_SAMPLE_AUTH_TOKEN``;
             only the Web UI exposes this, never the A2A server.
+        intent_review: whether confirm mode waits for approval 1; defaults to true only for the
+            presentation view, because the explorer has no intent card.
 
     Returns:
         The assembled Starlette application.
@@ -202,6 +205,9 @@ def create_app(
     resolved_default_discovery = _resolve_default(
         default_discovery, SUPPORTED_DISCOVERY_MODES, config_discovery, "discovery"
     )
+    resolved_intent_review = (
+        ui_mode == WEB_UI_PRESENTATION if intent_review is None else intent_review
+    )
 
     async def default_factory(
         resolved_config: SampleConfig,
@@ -229,6 +235,7 @@ def create_app(
         runs_dir=runs_dir,
         store=client_store,
         memory_turns=memory_turns,
+        intent_review=resolved_intent_review,
     )
 
     @asynccontextmanager
@@ -272,6 +279,7 @@ def create_app(
                 "defaultDiscovery": resolved_default_discovery,
                 "uiMode": ui_mode,
                 "decisionMode": resolved_default_mode,
+                "intentReview": resolved_intent_review and resolved_default_mode == "confirm",
                 "approvalGate": approval_gate,
                 "approvalTimeoutSeconds": approval_timeout_seconds,
                 # The UI must keep its stream open at least as long as the backend grace window,
@@ -544,6 +552,33 @@ def create_app(
         provider.submit(decision)
         return JSONResponse({"accepted": True, "runId": run.run_id})
 
+    async def submit_intent(request: Request) -> Response:
+        """Resolve approval 1: the engineer confirms or rejects the structured intent."""
+        run = manager.get(request.path_params["run_id"])
+        if run is None:
+            return JSONResponse({"error": "Unknown run.", "code": "unknown_run"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"error": "The body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
+        if not isinstance(body, dict) or not isinstance(body.get("approved"), bool):
+            return JSONResponse(
+                {
+                    "error": "The approved field must be a boolean.",
+                    "code": "approved_invalid",
+                },
+                status_code=400,
+            )
+        if run.status != STATUS_RUNNING or not run.resolve_intent(body["approved"]):
+            return JSONResponse(
+                {"error": "No intent review is pending for this run."},
+                status_code=409,
+            )
+        return JSONResponse({"accepted": True, "runId": run.run_id})
+
     async def submit_approval(request: Request) -> Response:
         """Forward the engineer's change approval to the NMS approval gate."""
         run = manager.get(request.path_params["run_id"])
@@ -736,6 +771,7 @@ def create_app(
             Route("/api/runs/{run_id}", run_status),
             Route("/api/runs/{run_id}/events", run_events),
             Route("/api/runs/{run_id}/decisions", submit_decision, methods=["POST"]),
+            Route("/api/runs/{run_id}/intent", submit_intent, methods=["POST"]),
             Route("/api/runs/{run_id}/approvals", submit_approval, methods=["POST"]),
             Route("/api/runs/{run_id}/transcript.json", transcript_json),
             Route("/api/runs/{run_id}/transcript.md", transcript_markdown),

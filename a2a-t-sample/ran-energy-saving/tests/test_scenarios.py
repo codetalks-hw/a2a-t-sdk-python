@@ -1,4 +1,4 @@
-"""End-to-end acceptance tests of the five RAN energy-saving scenarios.
+"""End-to-end acceptance tests of the seven RAN energy-saving scenarios.
 
 Each test starts a real uvicorn server in a background thread and runs the real client runtime
 (``A2ATClient`` + A2A SDK + ADK ``Runner`` with the deterministic fake model) against it over
@@ -116,6 +116,22 @@ async def test_scenario_matches_the_design_sequence(
     assert result.task_id is None
     assert result.report is None
     assert _completed_status_seen(result) is False
+
+
+async def test_planned_outage_uses_the_micro_cell_without_negotiation(
+    english_language: None,
+) -> None:
+    """Use case 2 is a complete request: no proposal, and the outage plan targets cell-002."""
+    config = offline_direct_config(free_tcp_port())
+
+    with running_server(config):
+        result, exchange = await run_scenario_flow(config, "outage", "sse")
+
+    assert exchange.steps == []
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    assert result.report is not None
+    assert result.report.get("cell_id") == "cell-002"
+    assert result.report.get("window") == "01:00~05:00"
 
 
 @pytest.mark.parametrize("scenario_name", ("information", "target", "feasibility"))

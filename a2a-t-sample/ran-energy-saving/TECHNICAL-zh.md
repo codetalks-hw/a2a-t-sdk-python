@@ -81,18 +81,20 @@ python run_demo.py --ui --scenario information --model-mode offline
 # 打开 http://127.0.0.1:8080
 ```
 
-页面默认打开演示视图：左侧是 16:9 舞台（网络工程师、OSS Agent、RAN 网管、审批台、小区，中间是
-A2A-T 通道），右侧是三块证据面板。
+页面默认打开演示视图：左侧是 16:9 舞台（网络工程师、OSS Agent、RAN Agent、MIE 与无线站点，中间是
+A2A-T 通道），右侧是三块证据面板。七个示例覆盖用例 1（夜间节能，含协商与无协商）和用例 2（计划停电）。
 
-先选场景，必要时修改网络操作工程师的请求，再发起。舞台按人的节奏跟随真实运行：请求 → 结构化 Task-T →
-任务前协商 → 网管评估 → 变更审批 → 下发 → 报告。右侧展示 OSS Agent 理解到的任务（含 24 小时保障速率
-图）、每一轮提议与决策的完整内容（业务 / 报文切换）以及合并后的会话轨迹。
+先选场景，必要时修改网络操作工程师的请求，再发起。舞台按人的节奏跟随真实运行的九步：请求 → 结构化
+Task-T → 审批 1（意图）→ 下发 Task-T → 需要时协商 → 策略与任务启动 → 数据采集（第 2–8 天，时间压缩）
+→ 审批 2（MIE 中的 MML）→ 下发与报告。右侧展示 OSS Agent 理解到的任务（含 24 小时保障速率图）、每一轮
+提议与决策的完整内容（业务 / 报文切换）以及合并后的会话轨迹。
 
-启动时可开启两个人工决策点：
+启动时可开启两次人工审批：
 
-- `--mode confirm`：OSS Agent 先给出建议，页面请工程师确认、改判、接受网管方案或拒绝后再发出；
-- `--approval-gate`：网管在下发前发布 `INPUT_REQUIRED`，页面请工程师批准或驳回；驳回则不下发、不出
-  报告，以未变更结束。
+- `--mode confirm`：审批 1 在 Task-T 离开 OSS Agent 之前停住，工程师确认结构化意图（或修改请求）；
+  同一模式下，OSS Agent 也会先给出协商决策建议，再由工程师确认、改判、接受 RAN Agent 方案或拒绝；
+- `--approval-gate`：审批 2 是 MIE 的 MML 审核。RAN Agent 在下发前发布 `INPUT_REQUIRED`，页面请工程师
+  在 MIE 中导出、检查并确认 MML 建议；驳回则不下发、不出报告，以未变更结束。
 
 播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。传输、
 模型和语言都来自启动参数。
@@ -100,7 +102,7 @@ A2A-T 通道），右侧是三块证据面板。
 需要阶段、LLM 与工具调用、原始报文和历史记录时，加 `--ui-mode explorer`，使用 Run Explorer 的
 左侧栏、时间线与检查器。
 
-**如何验证：** 演示视图最终出现节能报告；拒绝与中止场景显示“未创建任务”。
+**如何验证：** 演示视图最终出现节能报告；拒绝与中止场景显示“未创建任务”；审批 1 取消显示“意图未确认”；审批 2 驳回显示“MML 未确认 · 未下发任何变更”。
 
 ## 2. 架构速览（解释）
 
@@ -245,6 +247,8 @@ class NegotiationDecisionProvider(Protocol):
 
 所有 Provider 都实现 `respond(propose, session) -> NegotiationDecision`。Provider 只决定**意图**；流程层负责生成协议内容，且从不改变 round。
 
+**审批 1 不是决策 Provider。** confirm 模式下，`run_client_flow` 在 `task_prompt_rendered` 之后、首条 Task-T 发出之前调用异步 `on_intent_ready(prompt_text)` 钩子。Web UI 的 `POST /api/runs/{id}/intent` 负责解除等待；返回 `False` 时以 `intent_not_confirmed` 终态结束，不发送任何消息，也不创建 Task。
+
 `AdkDecisionProvider` 需要决策 agent：可以直接传 `agent=`，或传 `agent_factory=`（演示组合根传 `demo.agents.client_agent.agent.build_client_agent`）。Provider 本身不再导入样例 agent，部署方可以接自己的 ADK 图。
 
 **ADK 会话存在哪。** `AdkDecisionProvider` 为每次协商保留一个 ADK 会话，让智能体看到前面几轮的提议。设置 `A2AT_SAMPLE_CLIENT_DB` 时，这些会话落在同一个 SQLite 文件里，进程重启后仍在；未设置（单元测试、临时运行）则留在内存。落盘的会话就是这次协商的审计记录——模型收到的提示词、给出的回答与看到的工具结果——按 `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS`（默认 7 天）保留。清扫在客户端启动时执行，之后在每次运行前最多每小时执行一次，长驻进程不会无限增长。数据库打不开时记一条警告并降级为内存：决策不依赖审计存储。
@@ -255,7 +259,7 @@ class NegotiationDecisionProvider(Protocol):
 2. 反提议必须带 `counter_params`（`cellId`、`window`、`targetRate`）；
 3. accept 时把提议要求的值放进 `filled_params`。
 
-**如何验证：** 客户端日志出现 `decision-made action=... round=...`；离线五场景的 `final_state` 与[§5.3](#53-五个场景的协议序列)一致。
+**如何验证：** 客户端日志出现 `decision-made action=... round=...`；离线七场景的 `final_state` 与[§5.3](#53-七个场景的协议序列)一致。
 
 ### 3.4 可选：作为 A2A 后端暴露
 
@@ -443,17 +447,19 @@ executor = build_negotiation_executor(
 
 协商内容**只使用 `fromText`**。（Negotiation-T 的 `fromData` 不在本样例范围内；Task-T 的 accept 重填使用独立的 `fromDataWithSchema` API。）
 
-### 5.3 五个场景的协议序列
+### 5.3 七个场景的协议序列
 
 所有序列都由服务端发起。`S` = 服务端，`C` = 客户端；括号内为 round。期望序列由 `tests/test_scenarios.py` 与 `tests/test_client_flow.py` 断言。
 
 | 场景 | 业务说法 | 触发 | 协商序列 | 最终状态 |
 | --- | --- | --- | --- | --- |
+| `night` | 完整用例 1：直接创建夜间节能任务 | 请求包含所有必需槽位（`operationType`、区域、描述、分时段保障速率）。 | 无 | Task `COMPLETED` + 报告（`task_completed`） |
 | `information` | 目标缺参数：网管问、OSS 补 | Task-T 请求缺少分时段保障速率目标（`content.param_missing`）。 | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
 | `target` | 时段冲突：先纠偏再执行 | 保障吞吐目标的时间段重叠（`content.value_not_allowed`）。 | `S:Propose(1)` → `C:Propose(1)`（反提议） → `S:Propose(2)`（修订） → `C:Accept(2)` | Task `COMPLETED` + 报告（`task_completed`） |
 | `feasibility` | 条件不可行：网管给替代方案 | 保障速率与 18 小时停电冲突（`content.rule_violation`）。 | `S:Propose(1)`（替代方案） → `C:Accept(1)` | Task `COMPLETED` + 报告（`task_completed`） |
 | `reject` | OSS 无法提供：协商结束 | 客户端无法提供缺失的保障速率目标。 | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | 无 Task（`no_task_negotiation_ended`） |
 | `abort` | 反复不收敛：达到轮次上限后主动中止 | 客户端反复反提议策略始终无法接受的方案。 | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | 无 Task（`no_task_negotiation_aborted`） |
+| `outage` | 完整用例 2：计划停电，停电期间下调保障 | 请求包含站点列表、03:00–05:00 停电和 2 Mbps 保障。 | 无 | Task `COMPLETED` + 报告（`task_completed`，`cell-002` 01:00–05:00） |
 
 说明：
 
@@ -551,7 +557,7 @@ uvx --from ty==0.0.92 ty check .
 | `test_policy.py` | 所有策略决策与轮次规则，包括 `maxRounds` 时的 abort 与错误码映射。 |
 | `test_pre_task_negotiation.py` | 消息识别、Task-T/Negotiation-T 校验调用、轮次推进、终态处理、预检注入，以及真实离线服务端。 |
 | `test_task_t_precheck.py` | 演示预检：必填字段缺失、目标时段重叠、不可行的停电保障，以及合法 Task-T。 |
-| `test_client_flow.py` | 五场景流程、accept/counter/reject/abort 消息构造、`sampleProposal` 约定、两种传输。 |
+| `test_client_flow.py` | 七场景流程、accept/counter/reject/abort 消息构造、意图审批闸门、`sampleProposal` 约定、两种传输。 |
 | `test_decision_provider.py` | ADK、manual、scripted、confirming 四种 Provider 的契约，包括 manual 超时、建议发布、会话落盘、内存降级与保留期清扫。 |
 | `test_approval_gate.py` | 审批注册表的批准/超时，以及 apply 工具“驳回即不写方案”的契约。 |
 | `test_scenarios.py` | 端到端验收：真实服务端 + 真实客户端 + 客户端 ADK fake model，断言精确 performative/round 序列与终态；另含带鉴权服务端与真实 SDK 客户端的组合。 |
@@ -579,7 +585,7 @@ uvx --from ty==0.0.92 ty check .
 
 JS harness 位于 [`tests/js`](tests/js)：`store.test.mjs` 重放合成帧，`frames.test.mjs` 重放离线集成运行的真实 SSE 帧。两者都由 `pytest` 驱动，未安装 `node` 时干净跳过。
 
-### 五场景离线 smoke
+### 七场景离线 smoke
 
 ```bash
 for s in information target feasibility reject abort; do
@@ -705,7 +711,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`shared/logging_setup.py`](shared/logging_setup.py) | 根日志、运行关联上下文、text/JSON 格式与凭据脱敏。 |
 | [`protocol/run_spec.py`](protocol/run_spec.py) | `RunSpec`、`RunCatalog` 与 `ClientPolicy`：一次运行是什么、accept 填哪些值。 |
 | [`protocol/server_agent_spec.py`](protocol/server_agent_spec.py) | `ServerAgentSpec` / `ServerAgentFactory`：部署方接入执行器的 planner 图。 |
-| [`demo/catalog.py`](demo/catalog.py) | 基于五个场景的演示 `RunCatalog` 与 `ClientPolicy`。 |
+| [`demo/catalog.py`](demo/catalog.py) | 基于七个场景的演示 `RunCatalog` 与 `ClientPolicy`。 |
 | [`demo/composition.py`](demo/composition.py) | 组合根：离线模型/provider、演示运行时与协商策略。 |
 | [`demo/plan_evaluator.py`](demo/plan_evaluator.py) | `RanDataPlanEvaluator`：反提议方案的可行性与修订。 |
 | [`shared/agent_card.py`](shared/agent_card.py) | 客户端（服务发现）与服务端（构建 AgentCard）共享的身份常量。 |
@@ -714,7 +720,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`shared/http_security.py`](shared/http_security.py) | 回环绑定策略、Bearer 中间件、`/health`、`/ready` 与 `/metrics` 助手。 |
 | [`shared/metrics.py`](shared/metrics.py) | 无依赖的 Counter/Gauge/Summary 注册表与 Prometheus 文本渲染。 |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision`（客户端 `output_schema`）与 Provider 视角的提议视图。 |
-| [`demo/scenario.py`](demo/scenario.py) | 五个场景定义：请求、期望 performative/round 序列、终态、离线决策。 |
+| [`demo/scenario.py`](demo/scenario.py) | 七个场景定义：请求、期望 performative/round 序列、终态、离线决策；`night` 与 `outage` 是完整请求，不触发协商。 |
 | [`shared/task_schema.py`](shared/task_schema.py) | 服务端校验与客户端 accept 重填共用的调用方参数 schema。 |
 | [`demo/ran_data.py`](demo/ran_data.py) + [`resources/ran_data/cells.json`](resources/ran_data/cells.json) | 进程内 RAN 数据集、方案评估与进程内方案存储。 |
 | [`demo/scripted_llm.py`](demo/scripted_llm.py) + [`resources/mock_llm/`](resources/mock_llm) | 通过官方工厂注册的脚本化 SDK `LLMClient`；按 schema 路由的预置响应。 |
@@ -723,8 +729,8 @@ python run_demo.py --scenario target --mode auto --model-mode live
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | 内置 webhook 推送接收器，校验 token。 |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | 将 A2A 流事件归一化为统一事件结构。 |
 | [`demo/registry/`](demo/registry) | Mock 注册中心（AgentCard 注册/查询，端口 5001）。 |
-| [`demo/web/`](demo/web) | Starlette Web UI（`app.py`）、演示前端（`presentation/`，默认）与 Run Explorer（`static/`）。演示页消费同一 SSE 流；Web UI 同时把变更审批转发给网管。 |
-| [`tests/`](tests) | 单元、集成、传输、Web UI 与五场景离线验收测试；`tests/js/` 为 pytest 驱动的 Node harness。 |
+| [`demo/web/`](demo/web) | Starlette Web UI（`app.py`）、演示前端（`presentation/`，默认）与 Run Explorer（`static/`）。演示页消费同一 SSE 流；Web UI 负责审批 1（`POST /api/runs/{id}/intent`）并把审批 2 转发给 RAN Agent。 |
+| [`tests/`](tests) | 单元、集成、传输、Web UI 与七场景离线验收测试；`tests/js/` 为 pytest 驱动的 Node harness。 |
 
 ### B.2 替换清单
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -217,6 +217,7 @@ class ClientRuntime:
         event_sink: Callable[[dict[str, object]], None] | None = None,
         on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
         on_decision_made: DecisionMadeCallback | None = None,
+        on_intent_ready: Callable[[str], Awaitable[bool]] | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
         user_request: str | None = None,
@@ -233,6 +234,7 @@ class ClientRuntime:
             on_decision_requested: Optional observer invoked before asking the provider.
             on_decision_made: Optional observer invoked immediately after the provider returns,
                 before the response is sent.
+            on_intent_ready: Optional async approval gate invoked before the Task-T is sent.
             trace_sink: Optional observer of synthetic Run Explorer spans (LLM/tool producers
                 included); defaults to the sink the runtime was built with.
             run_id: Optional Run Explorer run id (the Web UI and the CLI pass theirs).
@@ -272,6 +274,7 @@ class ClientRuntime:
                     event_sink=event_sink,
                     on_decision_requested=on_decision_requested,
                     on_decision_made=on_decision_made,
+                    on_intent_ready=on_intent_ready,
                     trace_sink=sink,
                     call_timeout_seconds=self.config.http_timeout_seconds,
                     conversation_context=conversation_context,

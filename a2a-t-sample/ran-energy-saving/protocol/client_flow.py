@@ -24,7 +24,7 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
@@ -59,6 +59,7 @@ from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIM
 from shared.logging_setup import log_context
 from shared.models import NegotiationDecision, NegotiationProposeView
 from shared.run_constants import (
+    FINAL_STATE_INTENT_NOT_CONFIRMED,
     FINAL_STATE_NEGOTIATION_ABORTED,
     FINAL_STATE_NEGOTIATION_ENDED,
     FINAL_STATE_TASK_COMPLETED,
@@ -408,6 +409,7 @@ async def run_client_flow(
     event_sink: Callable[[dict[str, object]], None] | None = None,
     on_decision_requested: Callable[[NegotiationProposeView, NegotiationContext], None] | None = None,
     on_decision_made: DecisionMadeCallback | None = None,
+    on_intent_ready: Callable[[str], Awaitable[bool]] | None = None,
     trace_sink: Callable[[dict[str, object]], None] | None = None,
     conversation_context: str | None = None,
 ) -> ClientFlowResult:
@@ -435,6 +437,8 @@ async def run_client_flow(
         on_decision_made: Optional observer invoked immediately after the provider returns, before
             the response is built or sent. It lets the Web UI and the transcript record a decision
             causally, i.e. before the task events it causes.
+        on_intent_ready: Optional async approval gate invoked with the rendered Task-T before the
+            initial message is sent. Returning ``False`` ends the run before any task is created.
         trace_sink: Optional observer of synthetic Run Explorer spans (``task_prompt_rendered``,
             ``message_sent``, ``decision_requested``, ``decision_made``). Protocol events keep using
             ``event_sink``; the two streams share the Web UI sequence numbering.
@@ -535,6 +539,14 @@ async def run_client_flow(
             "length": len(prompt_text),
         },
     )
+    if on_intent_ready is not None and not await on_intent_ready(prompt_text):
+        # The engineer did not confirm the structured intent, so the Task-T never leaves the OSS
+        # side. No message is sent and no task is created.
+        blocked = ClientFlowResult()
+        blocked.final_state = FINAL_STATE_INTENT_NOT_CONFIRMED
+        _fill_result(blocked, None)
+        return blocked
+
     initial_metadata: dict[str, object] = {
         prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
         TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
@@ -1113,6 +1125,10 @@ def _fill_result(result: ClientFlowResult, context_id: str | None) -> None:
             fallback_event = fallback_event or event
             if report_event is None and "report" in (_string_field(event, "name") or "").lower():
                 report_event = event
+    # A rejected change still carries tool artifacts (the profile and the evaluation), but it has
+    # no report. Never expose the first tool result as if it were the energy-saving report.
+    if result.final_state != FINAL_STATE_TASK_COMPLETED:
+        return
     selected = report_event or fallback_event
     if selected is not None and result.report is None:
         data = selected.get("data")

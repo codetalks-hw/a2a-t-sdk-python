@@ -33,6 +33,8 @@ from demo.scenario import (
     NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH,
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH,
+    NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_ZH,
     NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN,
     NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH,
     NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
@@ -52,12 +54,14 @@ STAGE_SLOT_EXTRACTION_TARGET = "slot_extraction_target"
 STAGE_SLOT_EXTRACTION_FEASIBILITY = "slot_extraction_feasibility"
 STAGE_SLOT_EXTRACTION_TARGET_REFILL = "slot_extraction_target_refill"
 STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL = "slot_extraction_feasibility_refill"
+STAGE_SLOT_EXTRACTION_OUTAGE = "slot_extraction_outage"
 STAGE_CONTENT_VALIDATION = "content_validation"
 STAGE_CONTENT_VALIDATION_MISSING = "content_validation_missing"
 STAGE_CONTENT_VALIDATION_TARGET = "content_validation_target"
 STAGE_CONTENT_VALIDATION_FEASIBILITY = "content_validation_feasibility"
 STAGE_CONTENT_VALIDATION_TARGET_REFILL = "content_validation_target_refill"
 STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL = "content_validation_feasibility_refill"
+STAGE_CONTENT_VALIDATION_OUTAGE = "content_validation_outage"
 STAGE_NEGOTIATION_PROPOSE_EXTRACTION = "negotiation_propose_extraction"
 STAGE_NEGOTIATION_ACCEPT_EXTRACTION = "negotiation_accept_extraction"
 STAGE_NEGOTIATION_REJECT_EXTRACTION = "negotiation_reject_extraction"
@@ -81,12 +85,14 @@ _STAGE_FILES: dict[str, str] = {
     STAGE_SLOT_EXTRACTION_FEASIBILITY: "slot_extraction_feasibility.json",
     STAGE_SLOT_EXTRACTION_TARGET_REFILL: "slot_extraction_target_refill.json",
     STAGE_SLOT_EXTRACTION_FEASIBILITY_REFILL: "slot_extraction_feasibility_refill.json",
+    STAGE_SLOT_EXTRACTION_OUTAGE: "slot_extraction_outage.json",
     STAGE_CONTENT_VALIDATION: "content_validation.json",
     STAGE_CONTENT_VALIDATION_MISSING: "content_validation_missing.json",
     STAGE_CONTENT_VALIDATION_TARGET: "content_validation_target.json",
     STAGE_CONTENT_VALIDATION_FEASIBILITY: "content_validation_feasibility.json",
     STAGE_CONTENT_VALIDATION_TARGET_REFILL: "content_validation_target_refill.json",
     STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL: "content_validation_feasibility_refill.json",
+    STAGE_CONTENT_VALIDATION_OUTAGE: "content_validation_outage.json",
     STAGE_NEGOTIATION_PROPOSE_EXTRACTION: "negotiation_propose_extraction.json",
     STAGE_NEGOTIATION_ACCEPT_EXTRACTION: "negotiation_accept_extraction.json",
     STAGE_NEGOTIATION_REJECT_EXTRACTION: "negotiation_reject_extraction.json",
@@ -102,6 +108,13 @@ _STAGE_FILES: dict[str, str] = {
 #: Complete scenario inputs; checked before every other variant so a complete request never falls
 #: through to a negotiation variant.
 _COMPLETE_SCENARIO_INPUTS = (NATURAL_LANGUAGE_PROMPT_INPUT_EN, NATURAL_LANGUAGE_PROMPT_INPUT_ZH)
+
+#: Planned-outage inputs of use case 2. They are complete requests too, but carry the site list and
+#: the background event, so they need their own canned slot extraction and validation.
+_OUTAGE_SCENARIO_INPUTS = (
+    NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_EN,
+    NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_ZH,
+)
 
 #: Target / feasibility negotiation inputs: complete inputs served by their own slot-extraction
 #: variants, whose canned slots preserve the distinguishing values the rendered prompt needs. They
@@ -124,6 +137,15 @@ _MISSING_SCENARIO_INPUTS = (
 #: inputs. Each marker is a value the failing input carries and the negotiated refill does not.
 _TARGET_VALIDATION_MARKER = "20:00~00:00,10Mbps"
 _FEASIBILITY_VALIDATION_MARKERS = ("06:00~18:00,10Mbps",)
+#: The planned-outage request and its rendered Task-T both carry the 03:00~05:00 outage and the
+#: lower 2 Mbps guarantee. Either marker is enough to route to the outage canned validation.
+_OUTAGE_VALIDATION_MARKERS = (
+    "03:00~05:00,2Mbps",
+    "lower the guaranteed throughput to 2Mbps",
+    "将分时段保障速率下调到 2Mbps",
+    "power outage from 03:00 to 05:00",
+    "03:00~05:00停电",
+)
 
 #: Throughput segment of the complete (information-accept) target. A rendered Task-T prompt that
 #: carries the region but none of this marker omits the time-segmented guaranteed throughput
@@ -464,6 +486,8 @@ def route_structured_call(
     if "semantic_verdict" in property_names and "negotiation_type" in property_names:
         return STAGE_NEGOTIATION_SEMANTIC_VALIDATION
     if "slots" in property_names and "slot_errors" in property_names:
+        if any(scenario_input in user_content for scenario_input in _OUTAGE_SCENARIO_INPUTS):
+            return STAGE_SLOT_EXTRACTION_OUTAGE
         if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION
         if any(scenario_input in user_content for scenario_input in _TARGET_SCENARIO_INPUTS):
@@ -479,16 +503,18 @@ def route_structured_call(
         return STAGE_SLOT_EXTRACTION
     if "semantic_verdict" in property_names:
         head = _head_before_markers(user_content, _TEMPLATE_CONTENT_LABELS)
+        if any(marker in head for marker in _OUTAGE_VALIDATION_MARKERS):
+            return STAGE_CONTENT_VALIDATION_OUTAGE
         if _is_target_validation_head(head):
             return STAGE_CONTENT_VALIDATION_TARGET
         if _is_feasibility_validation_head(head):
             return STAGE_CONTENT_VALIDATION_FEASIBILITY
+        if any(scenario_input in head for scenario_input in _COMPLETE_SCENARIO_INPUTS):
+            return STAGE_CONTENT_VALIDATION
         if any(marker in head for marker in _FEASIBILITY_REFILL_MARKERS):
             return STAGE_CONTENT_VALIDATION_FEASIBILITY_REFILL
         if any(marker in head for marker in _TARGET_REFILL_MARKERS):
             return STAGE_CONTENT_VALIDATION_TARGET_REFILL
-        if any(scenario_input in head for scenario_input in _COMPLETE_SCENARIO_INPUTS):
-            return STAGE_CONTENT_VALIDATION
         if any(scenario_input in head for scenario_input in _MISSING_SCENARIO_INPUTS):
             return STAGE_CONTENT_VALIDATION_MISSING
         region_string = REGION_STRINGS.get(language or "", "")

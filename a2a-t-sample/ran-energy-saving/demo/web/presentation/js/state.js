@@ -38,10 +38,13 @@ export function createState() {
     finished: false,
     negotiationEnded: false,
     intentText: null,
+    intentReview: null,
+    dataCollection: null,
     trace: [],
     decision: null,
     approval: null,
     approvalState: null,
+    approvalExported: false,
     nmsTool: null,
   };
 }
@@ -62,6 +65,18 @@ export function applyFrame(state, frame) {
       return applyEvent(state, frame.event);
     case "trace":
       return applyTrace(state, frame.event);
+    case "intent_review_requested": {
+      state.intentReview = {
+        promptText: typeof frame.promptText === "string" ? frame.promptText : "",
+        timeoutSeconds: numberOrNull(frame.timeoutSeconds),
+        requestedAt: typeof frame.requestedAt === "string" ? frame.requestedAt : null,
+        resolved: false,
+      };
+      if (!state.intentText && state.intentReview.promptText) {
+        state.intentText = state.intentReview.promptText;
+      }
+      return state;
+    }
     case "decision_requested": {
       state.decision = {
         proposal: isObject(frame.proposal) ? frame.proposal : {},
@@ -102,6 +117,7 @@ export function applyFrame(state, frame) {
       state.error =
         typeof frame.error === "string" && frame.error ? frame.error : state.error;
       if (state.decision !== null) state.decision.resolved = true;
+      if (state.intentReview !== null) state.intentReview.resolved = true;
       return state;
     }
     default:
@@ -184,6 +200,8 @@ function applyEvent(state, entry) {
       break;
     case "status": {
       const label = summary || "";
+      if (label.includes("Data collection started")) state.dataCollection = "started";
+      if (label.includes("Data collection completed")) state.dataCollection = "completed";
       if (label.includes("SUBMITTED") || label.includes("WORKING") || label.includes("INPUT_REQUIRED")) {
         state.taskCreated = true;
       }
@@ -227,7 +245,9 @@ function applyTrace(state, span) {
         ? "decisionRequested"
         : kind === "approval"
           ? "approval"
-          : null,
+          : kind === "intent_review_requested"
+            ? "intentReview"
+            : null,
     sub: typeof span.purpose === "string" ? span.purpose : "",
     chip: kind === "tool" ? "tool" : kind === "llm" ? "LLM" : "",
     chipKind: kind === "tool" ? "status" : "",
@@ -258,6 +278,7 @@ function applyTrace(state, span) {
         generic: false,
       };
       state.approvalState = APPROVAL.WAITING;
+      state.approvalExported = false;
     } else if (approved) {
       state.approvalState = APPROVAL.APPROVED;
     } else if (detail && detail.approvalState === "rejected") {
@@ -271,6 +292,7 @@ function applyTrace(state, span) {
 export function stageOf(state) {
   if (state.status === STATUS.FAILED) return "failed";
   if (state.status === STATUS.FINISHED) {
+    if (state.finalState === "intent_not_confirmed") return "notSent";
     if (state.finalState === "task_rejected" || state.approvalState === APPROVAL.REJECTED) {
       return "notApplied";
     }
@@ -322,13 +344,15 @@ export function executionSteps(state) {
 /** Whether the run currently waits for the engineer. */
 export function pendingHuman(state) {
   if (state.status !== STATUS.RUNNING) return null;
+  if (state.intentReview !== null && !state.intentReview.resolved) return "intent";
   if (state.approvalState === APPROVAL.WAITING) return "approval";
   if (state.decision !== null && !state.decision.resolved) return "decision";
   return null;
 }
 
 function traceSpanTag(span, kind) {
-  if (kind === "tool" || kind === "execution" || kind === "approval") return "nms";
+  if (kind === "approval") return "mie";
+  if (kind === "tool" || kind === "execution") return "nms";
   if (kind === "task_prompt_rendered" || kind === "decision_requested") return "oss";
   if (kind === "message_sent") return "a2at";
   if (kind === "llm") {

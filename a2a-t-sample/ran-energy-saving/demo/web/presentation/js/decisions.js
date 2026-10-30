@@ -1,6 +1,25 @@
-/** The two human moments of the demo: a negotiation decision and a change approval. */
+/** The three human moments of the demo: intent review, negotiation decision and MML review. */
 
 import { actionLabel, format, proposalLine } from "../copy.js";
+
+/** Build approval 1: the engineer confirms the structured intent before the Task-T is sent. */
+export function intentCard(state, copy) {
+  const review = state.intentReview;
+  if (review === null || review.resolved) return null;
+  return {
+    type: "intent",
+    kicker: copy.intentReview.kicker,
+    title: copy.intentReview.title,
+    text: copy.intentReview.text,
+    detail: copy.intentReview.detail,
+    remaining: remainingSeconds(review.requestedAt, review.timeoutSeconds),
+    options: [
+      { action: "approve", label: copy.intentReview.confirm, primary: true },
+      { action: "edit", label: copy.intentReview.edit },
+      { action: "cancel", label: copy.intentReview.cancel, danger: true },
+    ],
+  };
+}
 
 /** Build the negotiation decision card, or ``null`` when no decision is pending. */
 export function decisionCard(state, copy) {
@@ -50,28 +69,40 @@ export function decisionCard(state, copy) {
   };
 }
 
-/** Build the change-approval card, or ``null`` when no approval is pending. */
+/** Build approval 2 (the MIE MML review), or ``null`` when no review is pending. */
 export function approvalCard(state, copy) {
   if (state.approvalState !== "waiting") return null;
   const approval = state.approval || {};
+  const cell = approval.cellId || "—";
+  const window = approval.window || "—";
+  const rate = approval.rate || "—";
   const detail = approval.generic
     ? copy.approval.waiting
-    : format(copy.approval.detail, {
-        cell: approval.cellId || "—",
-        window: approval.window || "—",
-        rate: approval.rate || "—",
-      });
+    : format(copy.approval.detail, { cell, window, rate });
+  const options = state.approvalExported
+    ? [
+        { action: "approve", label: copy.approval.acknowledge, primary: true },
+        { action: "reject", label: copy.approval.reject, danger: true },
+      ]
+    : [
+        { action: "export", label: copy.approval.export, primary: true },
+        { action: "reject", label: copy.approval.reject, danger: true },
+      ];
   return {
     type: "approval",
     kicker: copy.approval.kicker,
     title: copy.approval.title,
     text: detail,
     detail: copy.approval.note,
+    mml: state.approvalExported
+      ? {
+          label: copy.approval.sample,
+          text: copy.approval.mml(cell, window, String(rate).replace("%", "")),
+        }
+      : null,
+    policy: copy.approval.policy,
     remaining: remainingSeconds(approval.requestedAt, approval.timeoutSeconds),
-    options: [
-      { action: "approve", label: copy.approval.approve, primary: true },
-      { action: "reject", label: copy.approval.reject, danger: true },
-    ],
+    options,
   };
 }
 

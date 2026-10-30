@@ -23,7 +23,7 @@ export function parseIntent(text) {
 
   const slots = parseSlots(contextRaw);
   const outage = parseOutage(contextRaw);
-  const sites = parseSites(contextRaw);
+  const sites = parseSites(`${objectRaw} ${contextRaw}`);
   const area = cleanArea(objectRaw) || parseArea(text);
   const operation = /modify|修改/i.test(operationRaw)
     ? "modify"
@@ -339,7 +339,7 @@ function parseOutage(text) {
 }
 
 function parseSites(text) {
-  const match = text.match(/(?:Station list 1|站点列表1为)\s*[:：]?\s*\[([^\]]+)\]/i);
+  const match = text.match(/(?:Station list|Site list|站点列表)\s*1\s*(?:为|[:：])?\s*\[([^\]]+)\]/i);
   if (!match) return [];
   return match[1]
     .split(",")
@@ -353,6 +353,8 @@ function cleanArea(raw) {
   value = value.replace(/^The area is the\s+/i, "").replace(/^the area is\s+/i, "");
   value = value.replace(/^任务对象\s*[:：]\s*/, "");
   value = value.replace(/^区域为\s*/, "").replace(/^区域\s*[:：]\s*/, "");
+  // The site-level Task-T puts the site list in the same section; keep only the area name.
+  value = value.split(/(?:[;；]\s*|\.\s+)(?:Station list|Site list|站点列表)/i)[0];
   value = value.replace(/[.。]$/, "");
   return value.trim();
 }

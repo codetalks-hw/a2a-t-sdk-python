@@ -57,6 +57,8 @@ Every `python` below means this interpreter. Without activation, use
 ```bash
 cd ran-energy-saving
 python run_demo.py --scenario information --mode auto --model-mode offline
+# complete use case 2, no negotiation
+python run_demo.py --scenario outage --mode auto --model-mode offline
 ```
 
 Offline mode needs no `.env` and no API key: `run_demo.py` falls back to `env.example`.
@@ -84,21 +86,26 @@ python run_demo.py --ui --scenario information --model-mode offline
 # open http://127.0.0.1:8080
 ```
 
-The page opens on the presentation view: a 16:9 stage (engineer, OSS Agent, RAN NMS, approval desk
-and cells, with the A2A-T channel between them) and three evidence panels.
+The page opens on the presentation view: a 16:9 stage (engineer, OSS Agent, RAN Agent, MIE and radio
+sites, with the A2A-T channel between them) and three evidence panels. Seven examples cover use case
+1 (night-time energy saving, complete and negotiated) and use case 2 (planned power outage).
 
 Pick a scenario, edit the network operations engineer's request if needed, and start it. The stage
-follows the real run at a human pace: request → structured Task-T → pre-task negotiation → NMS
-evaluation → change approval → apply → report. The right column shows what the OSS Agent understood
+follows the real run through nine steps: request → structured Task-T → approval 1 (intent) → Task-T
+sent → negotiation when needed → strategy and task start → data collection (days 2–8, compressed) →
+approval 2 (MML in MIE) → apply and report. The right column shows what the OSS Agent understood
 (with the 24-hour throughput chart), every negotiation turn with its full content (business /
 message tabs), and the merged session trace.
 
-Two human decisions can be enabled at startup:
+Two human approvals can be enabled at startup:
 
-- `--mode confirm`: the OSS Agent produces a recommendation first; the page asks the engineer to
-  confirm, override, accept the NMS proposal or reject before anything is sent;
-- `--approval-gate`: the NMS publishes `INPUT_REQUIRED` before applying a plan; the page asks the
-  engineer to approve or reject. A rejection applies nothing and ends the run without a report.
+- `--mode confirm`: approval 1 holds the Task-T before it leaves the OSS Agent; the engineer confirms
+  the structured intent (or edits the request). The same mode also makes the OSS Agent recommend a
+  negotiation decision before the engineer confirms, overrides, accepts the RAN Agent proposal or
+  rejects it;
+- `--approval-gate`: approval 2 is the MIE MML review. The RAN Agent publishes `INPUT_REQUIRED`
+  before applying a plan; the page asks the engineer to export, check and acknowledge the MML
+  suggestion in MIE. A rejection applies nothing and ends the run without a report.
 
 The playback controls (auto / step, speed, pause, previous / next, loop) pace the presentation only;
 the backend run is real. Transport, model and language come from the CLI.
@@ -106,8 +113,9 @@ the backend run is real. Transport, model and language come from the CLI.
 For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
 use the Run Explorer's left rail, timeline and inspector.
 
-**Verify:** the presentation view ends with the energy-saving report, or with "no task created" for
-the reject and abort scenarios.
+**Verify:** the presentation view ends with the energy-saving report; the reject and abort scenarios
+end with "no task created"; cancelling approval 1 ends with "intent not confirmed"; rejecting
+approval 2 ends with "MML not acknowledged · nothing was applied".
 
 ## 2. Architecture at a glance (explanation)
 
@@ -264,6 +272,11 @@ The sample ships four implementations:
 Every provider implements `respond(propose, session) -> NegotiationDecision`. Providers decide
 **intent only**; the flow turns it into protocol content and never changes the round.
 
+**Approval 1 is not a decision provider.** In confirm mode, `run_client_flow` calls its async
+`on_intent_ready(prompt_text)` hook after `task_prompt_rendered` and before the initial Task-T is
+sent. The Web UI's `POST /api/runs/{id}/intent` resolves the hook; `False` returns the terminal
+`intent_not_confirmed` state without sending any message or creating a Task.
+
 `AdkDecisionProvider` needs the decision agent: pass `agent=` directly, or `agent_factory=` (the
 demo composition passes `demo.agents.client_agent.agent.build_client_agent`). The provider no longer
 imports the sample agent itself, so a deployment can plug its own ADK graph.
@@ -285,8 +298,8 @@ corrective turn; only then does it raise. Your implementation should at least:
 2. include `counter_params` (`cellId`, `window`, `targetRate`) on a counter;
 3. put the values the proposal asked for into `filled_params` on accept.
 
-**Verify:** the client logs `decision-made action=... round=...`; the offline five-scenario
-`final_state` matches [§5.3](#53-protocol-sequences-of-the-five-scenarios).
+**Verify:** the client logs `decision-made action=... round=...`; the offline seven-scenario
+`final_state` matches [§5.3](#53-protocol-sequences-of-the-seven-scenarios).
 
 ### 3.4 Optional: expose the OSS as an A2A backend
 
@@ -513,18 +526,20 @@ Round rules:
 Negotiation content uses **`fromText` only**. (`fromData` for Negotiation-T is out of scope for
 this sample; the Task-T accept refill uses the separate `fromDataWithSchema` API.)
 
-### 5.3 Protocol sequences of the five scenarios
+### 5.3 Protocol sequences of the seven scenarios
 
 All sequences are initiated by the server. `S` = server, `C` = client; parentheses show the round.
 The expected sequences are asserted by `tests/test_scenarios.py` and `tests/test_client_flow.py`.
 
 | Scenario | Business reading | Trigger | Negotiation sequence | Final state |
 | --- | --- | --- | --- | --- |
+| `night` | Complete use case 1: create the night-time task directly | The request carries every required slot (`operationType`, `region`, description, guaranteed-throughput target). | none | Task `COMPLETED` + report (`task_completed`) |
 | `information` | Missing value: the NMS asks, the OSS fills it | The Task-T request omits the time-segmented guaranteed throughput target (`content.param_missing`). | `S:Propose(1)` → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
 | `target` | Conflicting segments: correct the overlap before executing | The guaranteed-throughput target has overlapping time segments (`content.value_not_allowed`). | `S:Propose(1)` → `C:Propose(1)` (counter) → `S:Propose(2)` (revision) → `C:Accept(2)` | Task `COMPLETED` + report (`task_completed`) |
 | `feasibility` | Infeasible conditions: the NMS proposes an alternative | A guaranteed rate conflicts with an 18-hour power outage (`content.rule_violation`). | `S:Propose(1)` (alternative plan) → `C:Accept(1)` | Task `COMPLETED` + report (`task_completed`) |
 | `reject` | The OSS cannot provide the value: the negotiation ends | The client cannot provide the missing throughput target. | `S:Propose(1)` → `C:Reject(1)` → `S:Message("协商已结束")` | No Task (`no_task_negotiation_ended`) |
 | `abort` | No convergence: the NMS aborts after the round budget | The client keeps counter-proposing a plan the policy cannot accept. | `S:Propose(1)` → `C:Propose(1)` → `S:Propose(2)` → `C:Propose(2)` → `S:Propose(3)` → `C:Propose(3)` → `S:Abort(3)` | No Task (`no_task_negotiation_aborted`) |
+| `outage` | Complete use case 2: planned outage, lower the guarantee during the outage | The request carries the site list, the 03:00–05:00 outage and the 2 Mbps guarantee. | none | Task `COMPLETED` + report (`task_completed`, `cell-002` 01:00–05:00) |
 
 Notes:
 
@@ -668,7 +683,7 @@ The suite is fully offline and deterministic (485 tests). What it covers:
 | `test_policy.py` | Every policy decision and round rule, including the abort at `maxRounds` and the error-code mapping. |
 | `test_pre_task_negotiation.py` | Message classification, Task-T/Negotiation-T validation calls, round advance, terminal handling, precheck injection, and the real offline server. |
 | `test_task_t_precheck.py` | The demo precheck: missing required fields, overlapping targets, impossible outage guarantees, and a valid Task-T. |
-| `test_client_flow.py` | Five scenario flows, accept/counter/reject/abort message construction, the `sampleProposal` convention, and both transports. |
+| `test_client_flow.py` | Seven scenario flows, accept/counter/reject/abort message construction, the intent approval gate, the `sampleProposal` convention, and both transports. |
 | `test_decision_provider.py` | Contract of the ADK, manual, scripted and confirming providers, including manual timeout, recommendation publication, durable session storage, the in-memory fallback and the retention sweep. |
 | `test_approval_gate.py` | Approval registry resolve/timeout and the apply tool's write-nothing-on-rejection contract. |
 | `test_scenarios.py` | End-to-end acceptance: a real server + real client + client ADK fake model, asserting the exact performative/round sequence and final state, plus a secured server with the real SDK client. |
@@ -698,7 +713,7 @@ The JS harnesses live in [`tests/js`](tests/js): `store.test.mjs` replays synthe
 `frames.test.mjs` replays the real SSE frames of the offline integration run. Both run from
 `pytest` and skip cleanly when `node` is not installed.
 
-### Five-scenario offline smoke
+### Seven-scenario offline smoke
 
 ```bash
 for s in information target feasibility reject abort; do
@@ -731,6 +746,9 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 curl http://127.0.0.1:8080/api/meta
 # Human-in-the-loop: confirm the OSS decision and approve the change before apply
 python run_demo.py --ui --ui-port 8081 --scenario target --mode confirm --approval-gate \
+  --approval-timeout 120 --model-mode offline
+# approval 1 + approval 2 with the complete night scenario
+python run_demo.py --ui --ui-port 8082 --scenario night --mode confirm --approval-gate \
   --approval-timeout 120 --model-mode offline
 ```
 
@@ -883,13 +901,13 @@ The sample is deliberately a prototype. Before production:
 | [`shared/logging_setup.py`](shared/logging_setup.py) | Root logging, run-correlation context, text/JSON formats and credential redaction. |
 | [`protocol/run_spec.py`](protocol/run_spec.py) | `RunSpec`, `RunCatalog` and `ClientPolicy`: what a run is and which values an accept fills. |
 | [`protocol/server_agent_spec.py`](protocol/server_agent_spec.py) | `ServerAgentSpec` / `ServerAgentFactory`: the planner graph a deployment plugs into the executor. |
-| [`demo/catalog.py`](demo/catalog.py) | Demo `RunCatalog` and `ClientPolicy` over the five scenarios. |
+| [`demo/catalog.py`](demo/catalog.py) | Demo `RunCatalog` and `ClientPolicy` over the seven scenarios. |
 | [`demo/composition.py`](demo/composition.py) | Composition root: offline model/provider, demo runtime and negotiation policy. |
 | [`demo/plan_evaluator.py`](demo/plan_evaluator.py) | `RanDataPlanEvaluator`: feasibility and revision of a counter-proposed plan. |
 | [`shared/agent_card.py`](shared/agent_card.py) | AgentCard identity constants shared by the client (discovery) and the server (card build). |
 | [`shared/sdk_env.py`](shared/sdk_env.py) | Per-run SDK `.env` builder shared by both runtimes (no client↔server import). |
 | [`shared/models.py`](shared/models.py) | `NegotiationDecision` (client `output_schema`) and the provider-facing proposal view. |
-| [`demo/scenario.py`](demo/scenario.py) | Five scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions. |
+| [`demo/scenario.py`](demo/scenario.py) | Seven scenario definitions: requests, expected performative/round sequence, terminal state, offline decisions; `night` and `outage` are complete requests with no negotiation. |
 | [`shared/task_schema.py`](shared/task_schema.py) | Caller parameter schema used by server validation and client accept refill. |
 | [`shared/sqlite.py`](shared/sqlite.py) | Shared connection settings, read-only access, `user_version` and the ordered migration runner. |
 | [`shared/http_security.py`](shared/http_security.py) | Loopback bind policy, bearer middleware, `/health`, `/ready` and `/metrics` helpers. |
@@ -901,8 +919,8 @@ The sample is deliberately a prototype. Before production:
 | [`shared/webhook_receiver.py`](shared/webhook_receiver.py) | Embedded webhook push receiver with token validation. |
 | [`shared/sse_event_consumer.py`](shared/sse_event_consumer.py) | Normalizes A2A stream events into one event shape. |
 | [`demo/registry/`](demo/registry) | Mock registry center (AgentCard register/query, port 5001). |
-| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`), the presentation front end (`presentation/`, `--ui-mode presentation`, default) and the Run Explorer (`static/`, `--ui-mode explorer`). The presentation page consumes the same SSE stream; the Web UI also proxies the change approval to the NMS. |
-| [`tests/`](tests) | Unit, integration, transport, Web UI, and five-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
+| [`demo/web/`](demo/web) | Starlette Web UI (`app.py`), the presentation front end (`presentation/`, `--ui-mode presentation`, default) and the Run Explorer (`static/`, `--ui-mode explorer`). The presentation page consumes the same SSE stream; the Web UI resolves approval 1 (`POST /api/runs/{id}/intent`) and proxies approval 2 to the RAN Agent. |
+| [`tests/`](tests) | Unit, integration, transport, Web UI, and seven-scenario offline acceptance tests; `tests/js/` holds the Node harnesses run by pytest. |
 
 ### B.2 Replace checklist
 

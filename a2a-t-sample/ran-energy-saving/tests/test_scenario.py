@@ -25,7 +25,15 @@ def test_max_rounds_is_three() -> None:
 
 
 def test_scenario_names_and_request_languages() -> None:
-    assert SUPPORTED_SCENARIO_NAMES == ("information", "target", "feasibility", "reject", "abort")
+    assert SUPPORTED_SCENARIO_NAMES == (
+        "night",
+        "information",
+        "target",
+        "feasibility",
+        "reject",
+        "abort",
+        "outage",
+    )
     for scenario in SCENARIOS.values():
         for language in SUPPORTED_LANGUAGES:
             assert resolve_user_request(scenario, language)

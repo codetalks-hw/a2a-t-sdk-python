@@ -107,10 +107,33 @@ export function createStage(els) {
       note("oss", copy.roles.oss, copy.states.ossUnderstanding);
       return;
     }
+    if (key === "intent-review") {
+      note("oss", copy.roles.oss, copy.intentReview.text, true);
+      note("eng", copy.roles.eng, copy.states.engIntent, true);
+      return;
+    }
     if (key === "send") {
       fly("lane-task", "Task-T", "task", 1400);
       note("oss", copy.roles.oss, copy.states.ossSending);
       note("nms", copy.roles.nms, copy.states.nmsValidating);
+      return;
+    }
+    if (key === "strategy") {
+      note("nms", copy.roles.nms, copy.states.nmsStrategy);
+      note("oss", copy.roles.oss, copy.states.ossFollowing);
+      return;
+    }
+    if (key === "collect-start") {
+      note("nms", copy.roles.nms, copy.dataCollection.start);
+      note("cells", copy.roles.cells, copy.states.cellsMeasuring);
+      return;
+    }
+    if (key === "collect-done") {
+      note("nms", copy.roles.nms, copy.dataCollection.done);
+      return;
+    }
+    if (key === "approval-ready") {
+      note("nms", copy.roles.nms, copy.states.nmsEvaluating);
       return;
     }
     if (key === "propose") {
@@ -127,11 +150,11 @@ export function createStage(els) {
     }
     if (key === "approval") {
       note("nms", copy.roles.nms, copy.approval.waiting, true);
-      note("eng", copy.roles.eng, copy.approval.kicker, true);
+      note("eng", copy.roles.eng, copy.states.engReviewing, true);
       return;
     }
     if (key === "apply") {
-      fly("lane-apply", "APPLY", "cfg", 1100);
+      fly("lane-apply", "MML", "cfg", 1100);
       note("nms", copy.roles.nms, copy.states.nmsApplying);
       note("cells", copy.roles.cells, copy.states.cellsApplying);
       return;
@@ -182,14 +205,17 @@ export function createStage(els) {
       oss = { cls: "ok", text: copy.states.ossFollowing };
       if (state.approvalState === "waiting") {
         nms = { cls: "wait", text: copy.states.nmsApproval };
+        eng = { cls: "wait", text: copy.states.engReviewing };
       } else if (state.approvalState === "approved") {
         nms = { cls: "active", text: copy.states.nmsApplying };
-      } else if (steps[0].done && !applyDone) {
+      } else if (state.dataCollection === "started") {
+        nms = { cls: "active", text: copy.states.nmsCollecting };
+      } else if (state.dataCollection === "completed") {
         nms = { cls: "active", text: copy.states.nmsEvaluating };
       } else if (applyDone) {
         nms = { cls: "active", text: copy.states.nmsReporting };
       } else {
-        nms = { cls: "active", text: copy.states.nmsEvaluating };
+        nms = { cls: "active", text: copy.states.nmsStrategy };
       }
       cells = {
         cls: applyDone ? "ok" : "active",
@@ -205,6 +231,11 @@ export function createStage(els) {
       oss = { cls: "ok", text: copy.states.ossDone };
       nms = { cls: "fail", text: copy.approval.rejected };
       cells = { cls: "", text: copy.states.cellsUnchanged };
+    } else if (stage === "notSent") {
+      eng = { cls: "wait", text: copy.states.engIntent };
+      oss = { cls: "", text: copy.states.ossWaiting };
+      nms = { cls: "", text: copy.states.nmsWaiting };
+      cells = { cls: "", text: copy.states.cellsNormal };
     } else if (stage === "ended" || stage === "failed") {
       eng = { cls: "", text: copy.states.engSent };
       oss = { cls: "", text: copy.states.ossDone };
@@ -212,13 +243,17 @@ export function createStage(els) {
       cells = { cls: "", text: copy.states.cellsNormal };
     }
 
+    if (pending === "intent") {
+      oss = { cls: "wait", text: copy.states.ossWaitingHuman };
+      eng = { cls: "wait", text: copy.states.engIntent };
+    }
     if (pending === "decision") {
       oss = { cls: "wait", text: copy.states.ossWaitingHuman };
       eng = { cls: "wait", text: copy.states.engWaiting };
     }
     if (pending === "approval") {
       nms = { cls: "wait", text: copy.states.nmsApproval };
-      eng = { cls: "wait", text: copy.states.engWaiting };
+      eng = { cls: "wait", text: copy.states.engReviewing };
     }
     if (resolution === "rejected" || resolution === "aborted") {
       nms = { cls: stage === "failed" ? "fail" : "", text: copy.negotiation.statusEnded };
@@ -235,11 +270,17 @@ export function createStage(els) {
         : stage === "executing"
           ? applyDone
             ? 90
-            : steps[0].done
-              ? 66
-              : 40
+            : state.approvalState === "approved"
+              ? 76
+              : steps[0].done
+                ? 60
+                : state.dataCollection === "completed"
+                  ? 46
+                  : state.dataCollection === "started"
+                    ? 30
+                    : 20
           : stage === "negotiating"
-            ? 16
+            ? 12
             : 0;
     els.nmsBar.style.width = `${progress}%`;
 

@@ -53,6 +53,9 @@ from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_service")
 
+#: Human budget of approval 1 (the OSS intent review) before the Task-T is sent.
+INTENT_REVIEW_TIMEOUT_SECONDS = 300.0
+
 
 class RunManager:
     """Owns client runs and conversations of one process.
@@ -72,12 +75,14 @@ class RunManager:
         runs_dir: Path | None = None,
         store: ClientStore | None = None,
         memory_turns: int = 6,
+        intent_review: bool = True,
     ) -> None:
         self._config = config
         self._runtime_factory = runtime_factory
         self._catalog = catalog
         self._runs_dir = runs_dir
         self._store = store
+        self._intent_review = intent_review
         self._memory_turns = max(0, memory_turns)
         self._runs: dict[str, RunState] = {}
         self._active_by_conversation: dict[str, RunState] = {}
@@ -376,6 +381,34 @@ class RunManager:
                 }
             )
 
+        async def on_intent_ready(prompt_text: str) -> bool:
+            """Ask the engineer to confirm the structured intent before the Task-T is sent."""
+            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            run.pending_intent = True
+            run.intent_future = future
+            run.emit_trace(
+                kind="intent_review_requested",
+                phase=PHASE_DISPATCH,
+                title="Intent review requested",
+                detail={"promptText": prompt_text, "timeoutSeconds": INTENT_REVIEW_TIMEOUT_SECONDS},
+            )
+            run.broadcast(
+                {
+                    "type": "intent_review_requested",
+                    "promptText": prompt_text,
+                    "timeoutSeconds": INTENT_REVIEW_TIMEOUT_SECONDS,
+                    "requestedAt": now_iso(),
+                }
+            )
+            try:
+                return await asyncio.wait_for(future, timeout=INTENT_REVIEW_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                _LOGGER.info("intent review timed out for run %s", run.run_id)
+                return False
+            finally:
+                run.pending_intent = False
+                run.intent_future = None
+
         def trace_sink(span: dict[str, object]) -> None:
             run.record_trace(span)
 
@@ -422,6 +455,11 @@ class RunManager:
                 event_sink=event_sink,
                 on_decision_requested=on_decision_requested,
                 on_decision_made=on_decision_made,
+                on_intent_ready=(
+                    on_intent_ready
+                    if run.mode == MODE_CONFIRM and self._intent_review
+                    else None
+                ),
                 trace_sink=trace_sink,
                 run_id=run.run_id,
                 user_request=run.user_request,
@@ -449,6 +487,8 @@ class RunManager:
             transcript.record_error(run.error)
         finally:
             run.pending_decision = False
+            run.pending_intent = False
+            run.intent_future = None
             if run.runtime is not None:
                 with suppress(asyncio.CancelledError, Exception):
                     await run.runtime.aclose()

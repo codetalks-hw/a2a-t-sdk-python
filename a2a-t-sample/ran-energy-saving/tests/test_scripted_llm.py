@@ -23,8 +23,10 @@ from a2a_t.server.a2at_server import A2ATServer
 from demo.scenario import LANGUAGE_ZH, SCENARIOS, Scenario
 from demo.scripted_llm import (
     SCRIPTED_PROVIDER_NAME,
+    STAGE_CONTENT_VALIDATION,
     STAGE_CONTENT_VALIDATION_FEASIBILITY,
     STAGE_CONTENT_VALIDATION_MISSING,
+    STAGE_CONTENT_VALIDATION_OUTAGE,
     STAGE_CONTENT_VALIDATION_TARGET,
     STAGE_NEGOTIATION_ABORT_EXTRACTION,
     STAGE_NEGOTIATION_ACCEPT_EXTRACTION,
@@ -40,6 +42,7 @@ from demo.scripted_llm import (
     STAGE_SLOT_EXTRACTION,
     STAGE_SLOT_EXTRACTION_FEASIBILITY,
     STAGE_SLOT_EXTRACTION_MISSING,
+    STAGE_SLOT_EXTRACTION_OUTAGE,
     STAGE_SLOT_EXTRACTION_TARGET,
     ScriptedLLMClient,
     register_scripted_provider,
@@ -76,11 +79,13 @@ _LLM_CONFIG = LLMClientConfig(
 
 #: Expected slot-extraction and content-validation stage per scenario.
 _EXPECTED_STAGES: dict[str, tuple[str, str]] = {
+    "night": (STAGE_SLOT_EXTRACTION, STAGE_CONTENT_VALIDATION),
     "information": (STAGE_SLOT_EXTRACTION_MISSING, STAGE_CONTENT_VALIDATION_MISSING),
     "target": (STAGE_SLOT_EXTRACTION_TARGET, STAGE_CONTENT_VALIDATION_TARGET),
     "feasibility": (STAGE_SLOT_EXTRACTION_FEASIBILITY, STAGE_CONTENT_VALIDATION_FEASIBILITY),
     "reject": (STAGE_SLOT_EXTRACTION_MISSING, STAGE_CONTENT_VALIDATION_MISSING),
     "abort": (STAGE_SLOT_EXTRACTION_TARGET, STAGE_CONTENT_VALIDATION_TARGET),
+    "outage": (STAGE_SLOT_EXTRACTION_OUTAGE, STAGE_CONTENT_VALIDATION_OUTAGE),
 }
 
 
@@ -94,7 +99,15 @@ def client() -> ScriptedLLMClient:
 
 
 def test_all_five_scenarios_are_defined() -> None:
-    assert tuple(SCENARIOS) == ("information", "target", "feasibility", "reject", "abort")
+    assert tuple(SCENARIOS) == (
+        "night",
+        "information",
+        "target",
+        "feasibility",
+        "reject",
+        "abort",
+        "outage",
+    )
 
 
 @pytest.mark.parametrize("scenario_name", tuple(SCENARIOS))

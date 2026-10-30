@@ -101,14 +101,12 @@ sequenceDiagram
 ## 4. 演示
 
 ```bash
-# 命令行（离线、确定性，无需 key）
-python run_demo.py --scenario information --mode auto --model-mode offline
-# Web UI（演示视图）
-python run_demo.py --ui --scenario information --model-mode offline
-# Web UI：工程师确认 OSS Agent 的决策
-python run_demo.py --ui --mode confirm --scenario information --model-mode offline
-# Web UI：方案下发前由工程师审批
-python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
+# 命令行（离线、确定性，无需 key）：计划停电，无协商
+python run_demo.py --scenario outage --mode auto --model-mode offline
+# Web UI（演示视图；默认打开完整的用例 1）
+python run_demo.py --ui --model-mode offline
+# Web UI：审批 1（意图）+ 审批 2（MIE 中的 MML）
+python run_demo.py --ui --mode confirm --approval-gate --scenario target --model-mode offline
 # 可选：把 OSS 侧作为 A2A 后端暴露
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 # 在局域网共享 Web UI：显式选择免 token（仅限可信网络）
@@ -127,15 +125,17 @@ A2AT_SAMPLE_AUTH_TOKEN=<token> python run_demo.py --ui --ui-host 0.0.0.0 --model
 使用 `--gateway` 时，OSS 侧本身就是一个 A2A Agent：Gemini Enterprise 之类的外部调用方发送一次请求后，
 会在最终节能报告之前收到协商与执行里程碑的进度通知——可以走流式连接，也可以注册 webhook。
 
-Web UI 默认打开演示视图：左侧是 16:9 的舞台，依次是网络工程师、OSS Agent、RAN 网管、小区，
-中间是 A2A-T 通道。先选五个演示场景之一（或修改请求）再发起，舞台会按人的节奏跟随真实运行：请求、
-结构化 Task-T、任务前协商、网管评估、变更审批、节能报告。右侧保留证据层：OSS Agent 理解到的任务
-（含 24 小时保障速率图）、每一轮提议与决策的完整内容、以及合并后的会话轨迹；选中的一轮可以在业务
-措辞和它携带的 A2A-T 报文之间切换。
+Web UI 默认打开演示视图：左侧是 16:9 的舞台，依次是网络工程师、OSS Agent、RAN Agent、MIE 与
+无线站点，中间是 A2A-T 通道。七个示例覆盖用例 1（夜间节能，含协商与无协商）和用例 2（计划停电）。
+舞台按人的节奏跟随真实运行，共九步：请求、结构化 Task-T、审批 1（意图）、下发 Task-T、需要时协商、
+策略与任务启动、数据采集（第 2–8 天，时间压缩）、审批 2（MIE 中的 MML）、下发与报告。右侧保留证据
+层：OSS Agent 理解到的任务（含 24 小时保障速率图）、每一轮提议与决策的完整内容、以及合并后的会话
+轨迹；选中的一轮可以在业务措辞和它携带的 A2A-T 报文之间切换。
 
-有两个人工决策点。`--mode confirm` 下，OSS Agent 先给出建议，页面请工程师确认或改判后再发出；
-`--approval-gate` 下，网管在真正下发前暂停，页面请工程师批准变更；驳回则不下发、不出报告。
-变更闸门使用真实的 A2A `INPUT_REQUIRED` 任务状态，因此这次暂停在协议上也可见。
+审批 1 是真实的：`--mode confirm` 下，Task-T 在离开 OSS Agent 之前停住，工程师确认结构化意图后才
+发送。审批 2 是 MIE 的 MML 审核：`--approval-gate` 下，RAN Agent 在下发前发布真实的 A2A
+`INPUT_REQUIRED` 状态；页面请工程师在 MIE 中导出、检查并确认 MML 建议。驳回则不下发、不出报告。
+数据采集阶段由 RAN Agent 的两条真实 `WORKING` 状态驱动；页面把多天压缩成几秒，不伪造测量值。
 
 播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。
 传输、模型与语言在进程启动时确定，页面上只保留场景切换和请求编辑。

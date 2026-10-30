@@ -76,22 +76,23 @@ class ScriptedChatModel(BaseChatModel):
             turn = self._turn
             self._turn += 1
 
+        cell_id, window, target_rate = self._plan_args(messages)
         if turn == 0:
             message = self._tool_call(
                 "get_cell_energy_profile",
-                {"cell_id": "cell-001", "date": self.dataset_date},
+                {"cell_id": cell_id, "date": self.dataset_date},
                 turn,
             )
         elif turn == 1:
             message = self._tool_call(
                 "evaluate_energy_saving_plan",
-                {"cell_id": "cell-001", "window": "00:00~06:00", "target_rate": "30"},
+                {"cell_id": cell_id, "window": window, "target_rate": target_rate},
                 turn,
             )
         elif turn == 2:
             message = self._tool_call(
                 "apply_energy_saving_plan",
-                {"cell_id": "cell-001", "window": "00:00~06:00", "target_rate": "30"},
+                {"cell_id": cell_id, "window": window, "target_rate": target_rate},
                 turn,
             )
         elif turn == 3:
@@ -113,6 +114,18 @@ class ScriptedChatModel(BaseChatModel):
                 )
             )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _plan_args(self, messages: list[BaseMessage]) -> tuple[str, str, str]:
+        """Choose the sample plan carried by the accepted Task-T.
+
+        The night-time complete request uses the macro cell's night window. A planned-outage task
+        (use case 2) uses the micro cell whose available window covers the outage window, at its
+        lower saving rate. The live planner chooses from the same dataset with the same intent.
+        """
+        text = "\n".join(str(message.content) for message in messages)
+        if "power outage" in text.lower() or "停电" in text:
+            return "cell-002", "01:00~05:00", "20"
+        return "cell-001", "00:00~06:00", "30"
 
     def _tool_call(self, name: str, args: dict[str, object], turn: int) -> AIMessage:
         """Build one tool-calling assistant message."""
@@ -207,8 +220,11 @@ def build_system_prompt(*, dataset_catalog: str | None = None) -> str:
         "6. The sample default plan is cell-001, window 00:00~06:00, target rate 30%. You may "
         "choose another dataset cell/window/rate when the accepted task or tool results justify "
         "it; the tools reject an invalid order or an infeasible plan.\n"
-        "7. Do not invent cells, windows, rates, or plan ids.\n"
-        "8. When the report is generated, return a short confirmation and stop calling tools."
+        "7. For a planned-outage task (a site list plus a background event), prefer the cell whose "
+        "available window covers the outage and keep its target rate within the cell's maximum "
+        "saving rate.\n"
+        "8. Do not invent cells, windows, rates, or plan ids.\n"
+        "9. When the report is generated, return a short confirmation and stop calling tools."
     )
 
 

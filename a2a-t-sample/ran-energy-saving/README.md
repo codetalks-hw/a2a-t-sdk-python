@@ -104,14 +104,12 @@ The other two outcomes are simple conclusions:
 ## 4. Demo
 
 ```bash
-# CLI (offline, deterministic, no key)
-python run_demo.py --scenario information --mode auto --model-mode offline
-# Web UI (presentation view)
-python run_demo.py --ui --scenario information --model-mode offline
-# Web UI with the engineer confirming the OSS Agent's decision
-python run_demo.py --ui --mode confirm --scenario information --model-mode offline
-# Web UI with a human approval before the plan reaches the network
-python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
+# CLI (offline, deterministic, no key): planned outage, no negotiation
+python run_demo.py --scenario outage --mode auto --model-mode offline
+# Web UI (presentation view; opens on the complete use case 1)
+python run_demo.py --ui --model-mode offline
+# Web UI with approval 1 (intent) and approval 2 (MML in MIE)
+python run_demo.py --ui --mode confirm --approval-gate --scenario target --model-mode offline
 # Optional: expose the OSS side as an A2A backend
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
 # Share the Web UI on the LAN: explicit tokenless opt-in (trusted network only)
@@ -134,18 +132,21 @@ sends one request and receives progress notifications (negotiation and execution
 the final energy-saving report, either on a stream or through a registered webhook.
 
 The Web UI opens on the presentation view: a 16:9 stage with the engineer, the OSS Agent, the RAN
-NMS and the cells, plus the A2A-T channel between them. Choose one of the five demo scenarios (or
-edit the request) and start it; the stage follows the live run at a human pace — request, structured
-Task-T, pre-task negotiation, NMS evaluation, change approval and the energy-saving report. The
-right column keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart),
-every proposal and decision turn with its full message, and the merged session trace. The selected
-turn switches between the business wording and the A2A-T message it carried.
+Agent, the MIE and the radio sites, plus the A2A-T channel between them. Seven examples cover use
+case 1 (night-time energy saving, with and without negotiation) and use case 2 (planned power
+outage). The stage follows the live run at a human pace through nine steps: request, structured
+Task-T, approval 1 (intent), Task-T sent, negotiation when needed, strategy and task start, data
+collection (days 2 to 8, compressed), approval 2 (MML in MIE) and apply and report. The right column
+keeps the evidence: what the OSS Agent understood (with the 24-hour throughput chart), every
+proposal and decision turn with its full message, and the merged session trace.
 
-Two human decisions are available. With `--mode confirm`, the OSS Agent produces a recommendation
-first; the page asks the engineer to confirm or override it before it is sent. With
-`--approval-gate`, the NMS pauses before applying a plan and the page asks the engineer to approve
-the change; a rejection applies nothing and ends the run without a report. The change gate uses the
-real A2A `INPUT_REQUIRED` task state, so the pause is visible on the protocol as well.
+Approval 1 is real: in `--mode confirm`, the Task-T is held before it leaves the OSS Agent until the
+engineer confirms the structured intent. Approval 2 is the MIE MML review: with `--approval-gate`,
+the RAN Agent publishes the real A2A `INPUT_REQUIRED` state before applying a plan; the page asks the
+engineer to export, check and acknowledge the MML suggestion in MIE. A rejection applies nothing and
+ends the run without a report. The data-collection phase is driven by two real `WORKING` status
+updates from the RAN Agent; the page compresses the days into a few seconds and never invents
+measurements.
 
 The playback controls (auto / step by step, speed, pause, previous / next, loop) only pace the
 presentation; the backend run is real. Transport, model and language are fixed when the process

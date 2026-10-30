@@ -66,6 +66,15 @@ from protocol.server_agent_spec import ServerAgentFactory
 REPORT_ARTIFACT_NAME: Final[str] = "energy saving intent report"
 TOOL_ARTIFACT_NAME: Final[str] = "tool result"
 
+#: Business status updates of the compressed baseline-collection phase (days 2-8 in the PoC).
+DATA_COLLECTION_STARTED_TEXT: Final[str] = (
+    "Data collection started: measuring the cluster baseline (3 to 7 days in the PoC; compressed "
+    "here). No optimization is applied yet."
+)
+DATA_COLLECTION_COMPLETED_TEXT: Final[str] = (
+    "Data collection completed: baseline ready. Preparing optimization suggestions."
+)
+
 #: Final text of a completed Task.
 FINAL_TASK_TEXT: Final[str] = "RAN energy-saving task completed."
 
@@ -355,6 +364,10 @@ class LangGraphTaskExecutor(AgentExecutor):
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING,
+            message=updater.new_agent_message([Part(text=DATA_COLLECTION_STARTED_TEXT)]),
+        )
         _LOGGER.info("task accepted; running the planner")
         execution_span_id = _emit_execution_span(context, task.id)
 
@@ -574,6 +587,13 @@ class LangGraphTaskExecutor(AgentExecutor):
                         )
                         steps.append(step)
                         _emit_tool_span(context, task_id, execution_span_id, step)
+                        if name == "get_cell_energy_profile":
+                            await updater.update_status(
+                                TaskState.TASK_STATE_WORKING,
+                                message=updater.new_agent_message(
+                                    [Part(text=DATA_COLLECTION_COMPLETED_TEXT)]
+                                ),
+                            )
                         if name != report_tool_name:
                             await updater.add_artifact(
                                 [Part(text=json.dumps(step.result, ensure_ascii=False))],

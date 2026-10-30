@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,12 +56,13 @@ class FakeRuntime:
             [NegotiationDecision, NegotiationProposeView, NegotiationContext], None
         ]
         | None = None,
+        on_intent_ready: Callable[[str], Awaitable[bool]] | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
         user_request: str | None = None,
         conversation_context: str | None = None,
     ) -> ClientFlowResult:
-        del trace_sink, run_id
+        del on_intent_ready, trace_sink, run_id
         self.conversation_context = conversation_context
         self.user_request = user_request
         self.entered.set()

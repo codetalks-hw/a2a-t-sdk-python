@@ -425,6 +425,15 @@ async def test_langgraph_executor_applies_only_after_approval(
     ]
     assert TaskState.TASK_STATE_INPUT_REQUIRED in states
     assert states[-1] == TaskState.TASK_STATE_COMPLETED
+    status_texts = [
+        event.status.message.parts[0].text
+        for event in events
+        if isinstance(event, TaskStatusUpdateEvent)
+        and event.status.HasField("message")
+        and event.status.message.parts
+    ]
+    assert any("Data collection started" in text for text in status_texts)
+    assert any("Data collection completed" in text for text in status_texts)
     artifacts = [event for event in events if isinstance(event, TaskArtifactUpdateEvent)]
     assert any(event.artifact.name == REPORT_ARTIFACT_NAME for event in artifacts)
 

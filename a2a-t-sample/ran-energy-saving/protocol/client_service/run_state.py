@@ -107,6 +107,8 @@ class RunState:
         error: failure message of a failed run.
         transcript_error: failure message when the transcript could not be written.
         pending_decision: whether the manual provider currently waits for a decision.
+        pending_intent: whether the run waits for approval 1 (the OSS intent review).
+        intent_future: resolver of the pending intent review.
         proposals: inbound proposals in order.
         discovery: discovery mode of the run.
         traces: every trace span produced/ingested for the run.
@@ -142,6 +144,8 @@ class RunState:
     error: str | None = None
     transcript_error: str | None = None
     pending_decision: bool = False
+    pending_intent: bool = False
+    intent_future: asyncio.Future[bool] | None = None
     proposals: list[NegotiationProposeView] = field(default_factory=list)
     traces: list[dict[str, object]] = field(default_factory=list)
     spans: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -201,6 +205,14 @@ class RunState:
     def manual_provider(self) -> Any | None:
         """The manual provider of the runtime, when the run uses one."""
         return self.runtime.manual_provider if self.runtime is not None else None
+
+    def resolve_intent(self, approved: bool) -> bool:
+        """Resolve the pending intent review, returning whether one was waiting."""
+        future = self.intent_future
+        if not self.pending_intent or future is None or future.done():
+            return False
+        future.set_result(approved)
+        return True
 
     def next_seq(self) -> int:
         """Allocate the next global ``seq`` without consuming a phase step."""
@@ -643,6 +655,7 @@ class RunState:
             "discovery": self.discovery,
             "status": self.status,
             "pendingDecision": self.pending_decision,
+            "pendingIntent": self.pending_intent,
             "finalState": self.result.final_state if self.result is not None else None,
             "contextId": self.result.context_id if self.result is not None else None,
             "taskId": self.result.task_id if self.result is not None else None,

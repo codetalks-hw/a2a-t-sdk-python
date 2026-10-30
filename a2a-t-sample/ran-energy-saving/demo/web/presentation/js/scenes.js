@@ -2,18 +2,19 @@
  *
  * The backend runs at its own speed; the presentation player consumes these scenes at a human
  * pace. A scene carries the step it belongs to, how long it should stay on screen, and whether it
- * must wait for the engineer (a negotiation decision or a change approval).
+ * must wait for the engineer (approval 1, a negotiation decision or the MML review).
  */
 
 export const STEP_KEYS = [
   "request",
   "understand",
+  "intent",
   "send",
   "negotiate",
-  "evaluate",
+  "strategy",
+  "collect",
   "approval",
   "apply",
-  "report",
 ];
 
 /** Return the zero-based index of a step key, or -1. */
@@ -37,6 +38,8 @@ export function sceneFor(frame, state) {
       return eventScene(frame.event, state, frame);
     case "trace":
       return traceScene(frame.event, state, frame);
+    case "intent_review_requested":
+      return scene("intent-review", 0, frame, true);
     case "decision_requested":
       // Confirm mode delivers the proposal and the agent recommendation in one frame; manual
       // mode delivers the proposal alone. Both stop the show for the engineer.
@@ -68,17 +71,23 @@ function eventScene(entry, state, frame) {
       return entry.phase === "negotiation" ? scene("end", 700, frame) : scene("event", 0, frame);
     case "status": {
       const label = typeof entry.summary === "string" ? entry.summary : "";
+      if (label.includes("Data collection started")) {
+        return scene("collect-start", 1600, frame);
+      }
+      if (label.includes("Data collection completed")) {
+        return scene("collect-done", 1200, frame);
+      }
       if (label.includes("INPUT_REQUIRED")) {
         // The status only names the state; the plan details arrive in the approval trace span.
         // Hold here unless that span already populated the card.
         return scene("approval", 0, frame, state.approval === null);
       }
-      if (label.includes("SUBMITTED")) return scene("submitted", 800, frame);
+      if (label.includes("SUBMITTED")) return scene("strategy", 900, frame);
       if (label.includes("WORKING")) {
         if (state.approvalState === "approved" || state.executionArtifacts >= 2) {
           return scene("apply", 900, frame);
         }
-        return scene("evaluate", 900, frame);
+        return scene("strategy", 900, frame);
       }
       if (label.includes("REJECTED")) return scene("approval-rejected", 900, frame);
       if (label.includes("COMPLETED") || label.includes("FAILED")) {
@@ -89,7 +98,13 @@ function eventScene(entry, state, frame) {
     case "artifact": {
       if (entry.phase === "report") return scene("report", 1000, frame);
       const next = state.executionArtifacts + 1;
-      return scene(next >= 3 ? "apply" : "evaluate", 700, frame);
+      if (next === 1) {
+        return state.dataCollection === "completed"
+          ? scene("trace", 0, frame)
+          : scene("collect-done", 900, frame);
+      }
+      if (next === 2) return scene("approval-ready", 900, frame);
+      return scene("apply", 700, frame);
     }
     default:
       return scene("event", 0, frame);
@@ -98,6 +113,10 @@ function eventScene(entry, state, frame) {
 
 function traceScene(span, state, frame) {
   if (!isObject(span)) return scene("trace", 0, frame);
+  if (span.kind === "intent_review_requested") {
+    // The dedicated intent frame drives the hold and the card; its trace span only adds a row.
+    return null;
+  }
   if (span.kind === "task_prompt_rendered") {
     return state.intentText === null ? scene("understand", 1200, frame) : scene("trace", 0, frame);
   }
@@ -106,6 +125,18 @@ function traceScene(span, state, frame) {
     const performative = typeof detail.performative === "string" ? detail.performative : "";
     if (performative === "TASK_T") return scene("send", 1200, frame);
     return scene("negotiate-send", 500, frame);
+  }
+  if (span.kind === "tool") {
+    const detail = isObject(span.detail) ? span.detail : {};
+    const name = typeof detail.toolName === "string" ? detail.toolName : "";
+    if (name === "get_cell_energy_profile") {
+      if (state.dataCollection === "completed") return scene("trace", 0, frame);
+      return state.dataCollection === "started"
+        ? scene("collect-done", 900, frame)
+        : scene("collect-start", 1200, frame);
+    }
+    if (name === "evaluate_energy_saving_plan") return scene("approval-ready", 900, frame);
+    if (name === "apply_energy_saving_plan") return scene("apply", 900, frame);
   }
   if (span.kind === "approval") {
     const detail = isObject(span.detail) ? span.detail : {};
@@ -133,6 +164,8 @@ function stepOf(key) {
       return "request";
     case "understand":
       return "understand";
+    case "intent-review":
+      return "intent";
     case "send":
       return "send";
     case "propose":
@@ -141,17 +174,19 @@ function stepOf(key) {
     case "end":
     case "abort":
       return "negotiate";
-    case "submitted":
-    case "evaluate":
-      return "evaluate";
+    case "strategy":
+      return "strategy";
+    case "collect-start":
+    case "collect-done":
+      return "collect";
     case "approval":
+    case "approval-ready":
     case "approval-rejected":
       return "approval";
     case "apply":
-      return "apply";
     case "report":
     case "finish":
-      return "report";
+      return "apply";
     default:
       return "request";
   }

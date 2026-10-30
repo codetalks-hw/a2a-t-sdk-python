@@ -186,6 +186,12 @@ function statusText(state, copy) {
   const stage = stageOf(state);
   const resolution = resolutionOf(state);
   const { round, maxRounds } = roundInfo(state);
+  if (
+    state.negotiation.length === 0 &&
+    (stage === "executing" || stage === "done")
+  ) {
+    return copy.negotiation.statusNotNeeded;
+  }
   if (resolution === "rejected" || resolution === "aborted" || stage === "ended") {
     return copy.negotiation.statusEnded;
   }
@@ -204,7 +210,11 @@ function statusText(state, copy) {
 }
 
 function emptyText(state, copy) {
-  return stageOf(state) === "idle" ? copy.negotiation.empty : copy.negotiation.waiting;
+  const stage = stageOf(state);
+  if (state.negotiation.length === 0 && (stage === "executing" || stage === "done")) {
+    return copy.negotiation.notNeeded;
+  }
+  return stage === "idle" ? copy.negotiation.empty : copy.negotiation.waiting;
 }
 
 function wireText(entry, copy) {

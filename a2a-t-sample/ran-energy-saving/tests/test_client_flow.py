@@ -53,6 +53,7 @@ from protocol.decision_provider import ScriptedDecisionProvider
 from protocol.messages import END_MESSAGE_TEXT, SAMPLE_PROPOSAL_METADATA_KEY
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import FINAL_STATE_INTENT_NOT_CONFIRMED
 from shared.trace import (
     PHASE_NEGOTIATION,
     PHASE_RESOLUTION,
@@ -270,6 +271,31 @@ async def _run(
         policy=DEMO_CLIENT_POLICY,
     )
     return result, transport, prompt_client
+
+
+async def test_intent_gate_can_stop_the_run_before_any_task_t_is_sent() -> None:
+    prompt_client = FakePromptClient()
+    transport = ScriptedTransport([])
+    seen: list[str] = []
+
+    async def reject_intent(prompt_text: str) -> bool:
+        seen.append(prompt_text)
+        return False
+
+    result = await run_client_flow(
+        prompt_client=prompt_client,
+        transport=transport,
+        user_request=SCENARIO_INFORMATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        on_intent_ready=reject_intent,
+    )
+
+    assert seen and seen[0]
+    assert result.final_state == FINAL_STATE_INTENT_NOT_CONFIRMED
+    assert result.task_id is None
+    assert result.report is None
+    assert transport.requests == []
 
 
 async def test_conversation_context_is_prepended_to_task_t_generation() -> None:
@@ -838,6 +864,8 @@ async def test_decision_span_is_emitted_only_without_a_consumer_callback() -> No
 
 def _scenario_batches(scenario_name: str) -> list[list[dict[str, object]]]:
     """Return the transport batches that replay one scenario's server behavior."""
+    if scenario_name in {"night", "outage"}:
+        return [_task_completed_batch()]
     if scenario_name == "information":
         return [[propose_event("information", 1)], _task_completed_batch()]
     if scenario_name == "target":
@@ -892,8 +920,10 @@ async def test_trace_phases_and_steps_for_every_scenario(scenario_name: str) -> 
     assert len(span_ids) == len(set(span_ids))
     assert all(str(span_id).startswith("flow_") for span_id in span_ids)
 
-    expected_phases = {PHASE_TASK_PROMPT, PHASE_TASK_VALIDATION, PHASE_NEGOTIATION}
-    if scenario_name != "abort":
+    expected_phases = {PHASE_TASK_PROMPT, PHASE_TASK_VALIDATION}
+    if scenario.expected_sequence:
+        expected_phases.add(PHASE_NEGOTIATION)
+    if scenario_name != "abort" and scenario.expected_sequence:
         expected_phases.add(PHASE_RESOLUTION)
     assert {str(span["phase"]) for span in spans} == expected_phases
 

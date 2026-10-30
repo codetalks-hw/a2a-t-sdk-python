@@ -21,6 +21,7 @@ import {
   approvalCard,
   decisionCard,
   decisionPayload,
+  intentCard,
   remainingSeconds,
 } from "../../demo/web/presentation/js/decisions.js";
 import { copyFor } from "../../demo/web/presentation/copy.js";
@@ -212,6 +213,25 @@ assert.equal(decisionCard(thinking, copy), null);
 applyFrame(confirming, decision(2, "counter", 1));
 assert.equal(pendingHuman(confirming), null);
 
+// --- Approval 1: intent review ------------------------------------------
+
+const intentReview = createState();
+applyFrame(intentReview, { type: "run_started", runId: "r9", scenario: "night", mode: "confirm" });
+applyFrame(intentReview, {
+  type: "intent_review_requested",
+  promptText: "## Operation Type\nCreate",
+  timeoutSeconds: 300,
+  requestedAt: new Date().toISOString(),
+});
+assert.equal(pendingHuman(intentReview), "intent");
+const intentReviewCard = intentCard(intentReview, copy);
+assert.ok(intentReviewCard);
+assert.ok(intentReviewCard.options.some((option) => option.action === "approve"));
+intentReview.intentReview.resolved = true;
+assert.equal(pendingHuman(intentReview), null);
+applyFrame(intentReview, finished("intent_not_confirmed"));
+assert.equal(stageOf(intentReview), "notSent");
+
 // --- Approval gate ------------------------------------------------------
 
 const approval = createState();
@@ -223,7 +243,11 @@ assert.equal(approval.approvalState, "waiting");
 assert.equal(pendingHuman(approval), "approval");
 const approvalModel = approvalCard(approval, copy);
 assert.ok(approvalModel);
-assert.ok(approvalModel.options.some((option) => option.action === "approve"));
+assert.ok(approvalModel.options.some((option) => option.action === "export"));
+approval.approvalExported = true;
+const exported = approvalCard(approval, copy);
+assert.ok(exported.options.some((option) => option.action === "approve"));
+assert.ok(exported.mml.text.includes("SET ENERGYSAVING"));
 
 applyFrame(approval, {
   type: "trace",
@@ -283,7 +307,14 @@ assert.equal(
 );
 assert.equal(
   sceneFor({ type: "event", event: { kind: "artifact", phase: "report" } }, sceneState).step,
-  7,
+  8,
+);
+assert.equal(
+  sceneFor(
+    { type: "event", event: { kind: "status", summary: "Data collection started: ..." } },
+    sceneState,
+  ).step,
+  6,
 );
 assert.equal(sceneFor({ type: "finished", finalState: "task_completed" }, sceneState).key, "finish");
 
@@ -370,6 +401,23 @@ const feasibility = parseIntent(
 );
 assert.deepEqual(feasibility.outage, { start: 0, end: 1080 });
 assert.deepEqual(feasibility.sites, ["站点名称1", "站点名称2"]);
+
+const outageTaskT = `## Operation Type
+
+Create
+
+## Task Object
+
+The area is the Songshanhu Administration Committee. Site list 1: ["Site 1", "Site 2"].
+
+## Task Context
+
+Time-segment-based guaranteed throughput target: {00:00~03:00,10Mbps}, {03:00~05:00,2Mbps}, {05:00~24:00,10Mbps}. Background event: power outage from 03:00 to 05:00.`;
+const outage = parseIntent(outageTaskT);
+assert.equal(outage.area, "Songshanhu Administration Committee");
+assert.deepEqual(outage.sites, ["Site 1", "Site 2"]);
+assert.deepEqual(outage.outage, { start: 180, end: 300 });
+assert.equal(outage.slots.length, 3);
 
 // --- Remaining time -----------------------------------------------------
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>RAN 节能 · 任务前协商</title>
+  <title>A2A-T · RAN 节能</title>
   <link rel="stylesheet" href="/static/app.css">
   <script type="module" src="/static/js/main.js"></script>
 </head>
@@ -17,8 +17,8 @@
     <div class="brand">
       <span class="brand-mark" id="brand-mark" aria-hidden="true">A2A-T</span>
       <div class="brand-text">
-        <small id="brand-kicker">RAN 节能 · 任务前协商</small>
-        <h1 id="title">OSS 与 RAN 网管在任务创建前达成一致</h1>
+        <small id="brand-kicker">A2A-T · RAN 节能</small>
+        <h1 id="title">OSS Agent 与 RAN Agent 通过 A2A-T 就网络任务达成一致</h1>
       </div>
     </div>
     <div class="top-meta">
@@ -35,6 +35,7 @@
           ✎ <span id="edit-label">编辑请求</span>
         </button>
       </div>
+      <p class="scenario-desc" id="scenario-desc"></p>
 
       <div class="drawer" id="drawer" hidden>
         <label class="micro-label" for="request-text" id="request-title">网络操作工程师的请求</label>
@@ -61,7 +62,7 @@
             <rect class="zone-net" x="600" y="0" width="600" height="520"/>
             <line class="divider" x1="600" y1="0" x2="600" y2="520"/>
             <text class="zone-lbl" x="300" y="505" text-anchor="middle" id="zone-label-it">IT environment · OSS side</text>
-            <text class="zone-lbl" x="900" y="505" text-anchor="middle" id="zone-label-net">Network environment · RAN side</text>
+            <text class="zone-lbl" x="900" y="505" text-anchor="middle" id="zone-label-net">Network environment · Songshanhu</text>
             <rect class="chan" x="470" y="220" width="260" height="120"/>
             <text class="chan-lbl" x="600" y="210" text-anchor="middle" id="chan-label">A2A-T</text>
             <text class="chan-sub" x="600" y="368" text-anchor="middle" id="chan-sub1">A2A message + Task-T extension</text>
@@ -91,7 +92,7 @@
                 <circle cx="20" cy="14" r="6" fill="#fff"/>
                 <path d="M9 33c1-7 6-10 11-10s10 3 11 10z" fill="#fff"/>
               </svg>
-              <div><h3 id="eng-name">Network engineer</h3><div class="org" id="eng-org">Operations</div></div>
+              <div><h3 id="eng-name">Network engineer</h3><div class="org" id="eng-org">Songshanhu operations</div></div>
             </div>
             <div class="actor-state" id="s-eng">Not started</div>
           </div>
@@ -105,7 +106,7 @@
                 <circle cx="24" cy="20" r="2.3" fill="#000"/>
                 <path d="M20 7v5" stroke="#000" stroke-width="2.5"/>
               </svg>
-              <div><h3 id="oss-name">OSS Agent</h3><div class="org" id="oss-org">A2A-T client · decision agent</div></div>
+              <div><h3 id="oss-name">OSS Agent</h3><div class="org" id="oss-org">ADK on GCP</div></div>
             </div>
             <div class="skills" id="oss-skills"></div>
             <div class="actor-state" id="s-oss">Waiting for a request</div>
@@ -119,7 +120,7 @@
                 <circle cx="20" cy="13" r="2.5" fill="#000"/>
                 <path d="M13 9a9 9 0 0 0 0 9M27 9a9 9 0 0 1 0 9" stroke="#000" stroke-width="2" fill="none"/>
               </svg>
-              <div><h3 id="nms-name">RAN NMS</h3><div class="org" id="nms-org">A2A-T server · execution agent</div></div>
+              <div><h3 id="nms-name">RAN Agent</h3><div class="org" id="nms-org">Huawei · energy saving</div></div>
             </div>
             <div class="bar" aria-hidden="true"><i id="nms-bar"></i></div>
             <div class="actor-state" id="s-nms">Waiting for a task</div>
@@ -128,8 +129,8 @@
 
           <div class="approval" id="a-approval">
             <div class="approval-text">
-              <b id="approval-name">Approval desk</b>
-              <span id="approval-org">change control</span>
+              <b id="approval-name">MIE</b>
+              <span id="approval-org">Huawei · MML review</span>
             </div>
             <i id="approval-state">idle</i>
           </div>
@@ -137,7 +138,7 @@
           <div class="actor" id="a-cells">
             <div class="cells-head">
               <b id="cells-name">Cells / base stations</b>
-              <span id="cells-org">network side</span>
+              <span id="cells-org">Songshanhu · test cluster</span>
             </div>
             <svg class="cells-figure" id="cells-figure" viewBox="0 0 220 104" aria-label="Two radio cells"></svg>
             <div class="actor-state" id="s-cells">Normal operation</div>
@@ -181,7 +182,7 @@
       <div class="legend" id="legend" aria-label="Legend">
         <span><i style="background:#000"></i><span id="legend-chat">Inside the OSS</span></span>
         <span><i style="background:#FF7900"></i><span id="legend-task">Task-T over A2A-T</span></span>
-        <span><i style="background:#4BB4E6"></i><span id="legend-status">Status from the RAN NMS</span></span>
+        <span><i style="background:#4BB4E6"></i><span id="legend-status">Status from the RAN Agent</span></span>
         <span><i style="background:#FFD200"></i><span id="legend-neg">Question or decision</span></span>
         <span><i style="background:#50BE87"></i><span id="legend-cfg">Plan sent to the network</span></span>
         <span><i style="background:#fff;border:3px solid #4BB4E6"></i><span id="legend-data">Measurements back</span></span>

@@ -102,16 +102,25 @@ async def test_presentation_assets_are_served(client: httpx.AsyncClient) -> None
         assert "javascript" in response.headers["content-type"]
 
 
-async def test_meta_reports_the_presentation_mode_and_the_five_scenarios(
+async def test_meta_reports_the_presentation_mode_and_the_seven_scenarios(
     client: httpx.AsyncClient,
 ) -> None:
     meta = (await client.get("/api/meta")).json()
 
     assert meta["uiMode"] == "presentation"
-    assert meta["scenarios"] == ["information", "target", "feasibility", "reject", "abort"]
+    assert meta["scenarios"] == [
+        "night",
+        "information",
+        "target",
+        "feasibility",
+        "reject",
+        "abort",
+        "outage",
+    ]
     assert set(meta["scenarioRequests"]) == set(meta["scenarios"])
     assert all(meta["scenarioRequests"][name] for name in meta["scenarios"])
     assert meta["decisionMode"] == "auto"
+    assert meta["intentReview"] is False
     assert meta["approvalGate"] is False
     assert meta["approvalTimeoutSeconds"] == 120.0
     assert "confirm" in meta["modes"]

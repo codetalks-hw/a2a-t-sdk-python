@@ -722,9 +722,9 @@ def _build_parser(
     parser = argparse.ArgumentParser(description="Non-blocking launcher of the RAN energy-saving ADK sample.")
     parser.add_argument(
         "--scenario",
-        default="information",
+        default="night",
         choices=list(SUPPORTED_SCENARIO_NAMES),
-        help="demonstration scenario (default: information)",
+        help="demonstration scenario (default: night)",
     )
     parser.add_argument(
         "--mode",

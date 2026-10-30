@@ -5,7 +5,14 @@
  * for a human: a negotiation decision and a change approval.
  */
 
-import { copyFor, format, scenarioLabel, scenarioStory, scenarioTag } from "../copy.js";
+import {
+  copyFor,
+  format,
+  scenarioKind,
+  scenarioLabel,
+  scenarioStory,
+  scenarioTag,
+} from "../copy.js";
 import { applyFrame, createState, pendingHuman, resolutionOf, stageOf } from "./state.js";
 import { STEP_KEYS, sceneFor } from "./scenes.js";
 import { createPlayer } from "./player.js";
@@ -13,7 +20,14 @@ import { createStage, setStageCopy } from "./stage.js";
 import { createRail } from "./rail.js";
 import { createTrace } from "./trace.js";
 import { renderIntent } from "./intent.js";
-import { approvalCard, clock, decisionCard, decisionPayload, remainingSeconds } from "./decisions.js";
+import {
+  approvalCard,
+  clock,
+  decisionCard,
+  decisionPayload,
+  intentCard,
+  remainingSeconds,
+} from "./decisions.js";
 import { clear, el } from "./dom.js";
 
 const byId = (id) => document.getElementById(id);
@@ -26,6 +40,7 @@ const els = {
   badge: byId("badge"),
   scenariosLabel: byId("scenarios-label"),
   chips: byId("scenario-chips"),
+  scenarioDesc: byId("scenario-desc"),
   editRequest: byId("edit-request"),
   editLabel: byId("edit-label"),
   drawer: byId("drawer"),
@@ -321,6 +336,7 @@ function renderBottomCopy() {
       el("h3", "", card.title),
       el("p", "", card.body),
     );
+    if (card.hitl) node.append(el("span", "hitl", card.hitl));
     els.belowFlow.append(node);
   }
   els.showsTitle.textContent = copy.below.showsTitle;
@@ -341,7 +357,7 @@ function renderPresets() {
     button.setAttribute("aria-pressed", String(name === ui.selected));
     button.title = scenarioStory(ui.copy, name);
     const nameRow = el("span", "nm");
-    const mark = el("i", scenarioTag(ui.copy, name) === "ending" ? "end" : "neg");
+    const mark = el("i", scenarioKind(ui.copy, name));
     nameRow.append(mark, el("span", "", scenarioLabel(ui.copy, name)));
     button.append(nameRow, el("small", "", scenarioTag(ui.copy, name)));
     button.addEventListener("click", () => {
@@ -350,6 +366,12 @@ function renderPresets() {
     });
     els.chips.append(button);
   }
+  renderScenarioDescription();
+}
+
+function renderScenarioDescription() {
+  if (!els.scenarioDesc) return;
+  els.scenarioDesc.textContent = scenarioStory(ui.copy, ui.selected);
 }
 
 function selectScenario(name, { start = false } = {}) {
@@ -372,6 +394,7 @@ function selectScenario(name, { start = false } = {}) {
   for (const chip of els.chips.children) {
     chip.setAttribute("aria-pressed", String(chip.dataset.scenario === name));
   }
+  renderScenarioDescription();
   render();
   if (start) startRun();
 }
@@ -475,6 +498,11 @@ function enqueueFrame(frame) {
     hold: false,
     frame,
   };
+  // Unmapped trace/event frames are evidence rows, not stage steps: keep the current step
+  // instead of falling back to the Request step.
+  if ((scene.key === "trace" || scene.key === "event") && ui.lastScene !== null) {
+    scene.step = ui.lastScene.step;
+  }
   applyFrame(ui.shadow, frame);
   ui.frameLog.push(frame);
   player.enqueue(scene);
@@ -487,6 +515,9 @@ function frameKey(frame) {
     if (Number.isInteger(entry.seq)) return `${frame.type}:${entry.seq}`;
     if (typeof entry.spanId === "string") return `${frame.type}:${entry.spanId}`;
     return null;
+  }
+  if (frame.type === "intent_review_requested") {
+    return `intent:${frame.requestedAt ?? ""}`;
   }
   if (frame.type === "decision_requested" || frame.type === "decision_recommended") {
     return `${frame.type}:${frame.round ?? "?"}:${frame.requestedAt ?? ""}`;
@@ -576,6 +607,8 @@ function renderSteps() {
   const stage = stageOf(ui.view);
   const negotiationSeen = ui.view.negotiation.length > 0;
   const approvalSeen = ui.view.approval !== null || ui.view.approvalState !== null;
+  const intentEnabled = ui.meta?.intentReview === true;
+  const approvalEnabled = ui.meta?.approvalGate !== false;
   const finished = ui.view.finished;
 
   ui.steps.forEach((item, index) => {
@@ -583,10 +616,11 @@ function renderSteps() {
     let state = "pending";
     if (finished) {
       if (stage === "done") state = "done";
-      else if (stage === "notApplied") state = index <= 3 ? "done" : index === 4 ? "done" : "off";
+      else if (stage === "notSent") state = index < 2 ? "done" : index === 2 ? "ask" : "off";
+      else if (stage === "notApplied") state = index <= 7 ? "done" : "off";
       else if (stage === "failed") state = index <= current ? "done" : "off";
-      else state = index <= 3 ? "done" : "off";
-      if (stage === "notApplied" && index === 5) state = "ask";
+      else state = index <= 4 ? "done" : "off";
+      if (stage === "notApplied" && index === 7) state = "ask";
     } else if (index < current) {
       state = "done";
     } else if (index === current) {
@@ -595,18 +629,26 @@ function renderSteps() {
     if (key === "negotiate" && !negotiationSeen && (stage === "executing" || stage === "done")) {
       state = "skip";
     }
-    if (key === "approval" && ui.meta && ui.meta.approvalGate === false) state = "skip";
+    if (key === "intent" && !intentEnabled) state = "skip";
+    if (key === "approval" && !approvalEnabled) state = "skip";
     if (key === "approval" && !approvalSeen && stage === "executing" && ui.view.executionArtifacts >= 3) {
       state = "skip";
     }
     if (key === "approval" && stage === "done" && !approvalSeen) state = "skip";
     item.className = state;
     const button = item.querySelector("button");
+    const when = button.querySelector("em");
     if (state === "skip" || state === "off") {
       button.disabled = true;
-      button.querySelector("em").textContent = state === "skip" ? ui.copy.skip : ui.copy.off;
+      when.textContent =
+        state === "skip"
+          ? key === "intent"
+            ? ui.copy.auto
+            : ui.copy.skip
+          : ui.copy.off;
     } else {
       button.disabled = false;
+      when.textContent = ui.copy.stepWhen[key] || "";
     }
   });
 }
@@ -621,6 +663,15 @@ function renderNarrator() {
     els.sayDetail.replaceChildren();
     els.sayDetail.append(el("span", "", card.text));
     if (card.detail) els.sayDetail.append(el("span", "reason", card.detail));
+    if (card.mml) {
+      const block = el("div", "mml-block");
+      block.append(
+        el("span", "mml-label", card.mml.label),
+        el("pre", "mml-code", card.mml.text),
+      );
+      els.sayDetail.append(block);
+    }
+    if (card.policy) els.sayDetail.append(el("span", "policy", card.policy));
     if (card.remaining !== null) {
       const line = el("span", "reason");
       line.append(el("span", "", `${copyRemaining(card)} `));
@@ -660,7 +711,11 @@ function renderNarrator() {
 }
 
 function pendingCard() {
-  return decisionCard(ui.view, ui.copy) || approvalCard(ui.view, ui.copy);
+  return (
+    intentCard(ui.view, ui.copy) ||
+    decisionCard(ui.view, ui.copy) ||
+    approvalCard(ui.view, ui.copy)
+  );
 }
 
 function renderChoices(card) {
@@ -697,7 +752,16 @@ function renderChoices(card) {
     button.type = "button";
     button.disabled = ui.submitting;
     button.addEventListener("click", () => {
+      if (card.type === "intent") {
+        submitIntent(option.action);
+        return;
+      }
       if (card.type === "approval") {
+        if (option.action === "export") {
+          ui.view.approvalExported = true;
+          render();
+          return;
+        }
         submitApproval(option.action === "approve");
         return;
       }
@@ -739,6 +803,40 @@ async function submitDecision(action, counterText = "") {
     ui.submitting = false;
     const message = error instanceof Error ? error.message : String(error);
     els.sayDetail.append(el("span", "error", `${ui.copy.decision.submitFailed} ${message}`));
+    renderChoices(card);
+  }
+}
+
+async function submitIntent(action) {
+  if (ui.submitting) return;
+  const card = intentCard(ui.view, ui.copy);
+  if (card === null) return;
+  const approved = action === "approve";
+  ui.submitting = true;
+  renderChoices(card);
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(ui.view.runId)}/intent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || `HTTP ${response.status}`);
+    }
+    ui.submitting = false;
+    if (ui.view.intentReview !== null) ui.view.intentReview.resolved = true;
+    if (!approved && action === "edit") {
+      els.drawer.hidden = false;
+      els.editRequest.setAttribute("aria-expanded", "true");
+      els.requestText.focus();
+    }
+    player.release();
+    render();
+  } catch (error) {
+    ui.submitting = false;
+    const message = error instanceof Error ? error.message : String(error);
+    els.sayDetail.append(el("span", "error", `${ui.copy.intentReview.submitFailed} ${message}`));
     renderChoices(card);
   }
 }
@@ -797,13 +895,18 @@ function renderResult() {
   if (!ui.view.finished) return;
   const stage = stageOf(ui.view);
   const card = el("div", "result-card");
-  if (ui.view.report) {
-    card.append(reportCard(ui.view.report, ui.copy));
+  if (stage === "notSent") {
+    card.append(
+      el("h3", "result-title", ui.copy.result.intentNotConfirmedTitle),
+      el("p", "result-reason", ui.copy.result.intentNotConfirmed),
+    );
   } else if (stage === "notApplied") {
     card.append(
       el("h3", "result-title", ui.copy.result.notAppliedTitle),
       el("p", "result-reason", ui.copy.result.notApplied),
     );
+  } else if (ui.view.report) {
+    card.append(reportCard(ui.view.report, ui.copy));
   } else if (stage === "ended") {
     const resolution = resolutionOf(ui.view);
     const reason =
@@ -872,6 +975,7 @@ function narration(scene, stepKey) {
 }
 
 function copyRemaining(card) {
+  if (card.type === "intent") return ui.copy.intentReview.remaining;
   return card.type === "approval" ? ui.copy.approval.remaining : ui.copy.decision.remaining;
 }
 

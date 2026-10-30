@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from protocol.decision_provider import ManualDecisionProvider
 from protocol.sqlite_task_store import SqliteTaskStore
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
+from shared.run_constants import FINAL_STATE_INTENT_NOT_CONFIRMED
 from shared.trace import PHASES
 
 CONTEXT_ID = "ctx-web"
@@ -146,10 +147,17 @@ def _trace_span(
 class FakeRuntime:
     """Deterministic runtime double: one proposal, an optional manual wait, then completion."""
 
-    def __init__(self, *, manual: bool = False, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        manual: bool = False,
+        fail: bool = False,
+        intent_gate: bool = False,
+    ) -> None:
         self.manual_provider = ManualDecisionProvider(timeout_seconds=5.0) if manual else None
         self.recommendation_sink = None
         self.fail = fail
+        self.intent_gate = intent_gate
         self.closed = False
         self.run_id: str | None = None
         self.user_request: str | None = None
@@ -168,6 +176,7 @@ class FakeRuntime:
             [NegotiationDecision, NegotiationProposeView, NegotiationContext], None
         ]
         | None = None,
+        on_intent_ready: Callable[[str], Awaitable[bool]] | None = None,
         trace_sink: Callable[[dict[str, object]], None] | None = None,
         run_id: str | None = None,
         user_request: str | None = None,
@@ -176,6 +185,9 @@ class FakeRuntime:
         self.run_id = run_id
         self.user_request = user_request
         self.conversation_context = conversation_context
+        if on_intent_ready is not None and self.intent_gate:
+            if not await on_intent_ready("## Operation Type\nCreate"):
+                return ClientFlowResult(final_state=FINAL_STATE_INTENT_NOT_CONFIRMED)
         if trace_sink is not None:
             trace_sink(
                 _trace_span(
@@ -330,7 +342,7 @@ async def test_meta_exposes_the_read_only_process_language(client: httpx.AsyncCl
     assert "information" in meta["scenarios"]
     assert meta["modes"] == ["auto", "manual", "confirm"]
     assert meta["discoveries"] == ["registry", "direct"]
-    assert meta["defaultScenario"] == "information"
+    assert meta["defaultScenario"] == "night"
     assert meta["defaultMode"] == "auto"
     assert meta["defaultTransport"] == "sse"
     assert meta["defaultDiscovery"] == "registry"
@@ -723,6 +735,54 @@ async def test_confirm_run_publishes_the_recommendation_with_the_decision(
     assert requests[0]["proposal"]["kind"] == "information"
     assert requests[0]["timeoutSeconds"] == 5.0
     await _wait_status(client, run_id, lambda data: data["status"] != "running")
+
+
+async def test_intent_review_gate_blocks_the_task_until_the_engineer_confirms(
+    offline_config: SampleConfig,
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(intent_gate=True)
+
+    async def factory(
+        config: SampleConfig,
+        scenario: str,
+        mode: str,
+        transport: str,
+        discovery: str,
+    ) -> FakeRuntime:
+        del config, scenario, mode, transport, discovery
+        return runtime
+
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        runtime_factory=factory,
+        finished_grace_seconds=0.0,
+        ui_mode="presentation",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        start = await client.post(
+            "/api/runs",
+            json={"scenario": "information", "mode": "confirm", "transport": "sse"},
+        )
+        assert start.status_code == 202
+        run_id = start.json()["runId"]
+        events_task = asyncio.create_task(client.get(f"/api/runs/{run_id}/events"))
+
+        pending = await _wait_status(client, run_id, lambda data: data["pendingIntent"] is True)
+        assert pending["pendingIntent"] is True
+        response = await client.post(
+            f"/api/runs/{run_id}/intent",
+            json={"approved": True},
+        )
+        assert response.status_code == 200
+        final = await _wait_status(client, run_id, lambda data: data["status"] != "running")
+        assert final["finalState"] == "task_completed"
+        events = await asyncio.wait_for(events_task, timeout=5)
+        frames = [payload for payload in _sse_payloads(events.text) if payload["type"] == "intent_review_requested"]
+        assert len(frames) == 1
+        assert frames[0]["promptText"].startswith("## Operation Type")
 
 
 async def test_second_start_is_rejected_while_a_run_is_active(

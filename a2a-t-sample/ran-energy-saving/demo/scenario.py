@@ -1,9 +1,13 @@
-"""Business scripts of the five RAN energy-saving demonstration scenarios.
+"""Business scripts of the seven RAN energy-saving demonstration scenarios.
 
 Every scenario carries the client-side natural-language request (both languages), the expected
 negotiation kind, the exact performative/round sequence from the design, the expected final state,
 and the decisions a scripted (offline) client returns. Tests assert the sequence and the rounds
 instead of log text.
+
+``night`` and ``outage`` are complete requests: the RAN Agent creates the task without a pre-task
+negotiation. ``night`` uses the area-level complete request, while ``outage`` carries the Site 1 /
+Site 2 planned-outage context of use case 2.
 
 The ``reject`` scenario reuses the missing-throughput request: the server opens an ``information``
 negotiation and the client rejects because it cannot provide the missing content. The ``abort``
@@ -34,29 +38,56 @@ from shared.run_constants import (
 )
 
 #: Supported scenario names.
+SCENARIO_NIGHT = "night"
 SCENARIO_INFORMATION = "information"
 SCENARIO_TARGET = "target"
 SCENARIO_FEASIBILITY = "feasibility"
 SCENARIO_REJECT = "reject"
 SCENARIO_ABORT = "abort"
+SCENARIO_OUTAGE = "outage"
 
-#: Supported negotiation kinds (server-side trigger families).
+#: Supported negotiation kinds (server-side trigger families). ``KIND_NONE`` marks a complete
+#: request that the RAN Agent accepts without opening a pre-task negotiation.
+KIND_NONE = "none"
 KIND_INFORMATION = "information"
 KIND_TARGET = "target"
 KIND_FEASIBILITY = "feasibility"
 
 #: Chinese natural-language task request used for prompt generation (UC1, complete input).
 NATURAL_LANGUAGE_PROMPT_INPUT_ZH = (
-    "在松山湖管委会创建无线网络节能任务：在满足任务上下文的前提下最大化节能；"
-    "分时段保障速率目标为 {00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、"
-    "{23:00~23:59,10Mbps}。"
+    "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
+    "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
+    "在满足任务上下文的前提下最大化节能；分时段保障速率目标为 {00:00~17:30,10Mbps}、"
+    "{17:30~23:00,20Mbps}、{23:00~23:59,10Mbps}。"
 )
 
 #: English natural-language task request used for prompt generation (UC1, complete input).
 NATURAL_LANGUAGE_PROMPT_INPUT_EN = (
     "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
-    "energy saving. The time-segment-based guaranteed throughput target is {00:00~17:30,10Mbps}, "
-    "{17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}."
+    "energy saving. Based on the task object and task context, output a wireless network energy "
+    "saving plan that achieves the energy saving goal defined in the task target and returns the "
+    "energy saving result in the format defined in the expected output. The time-segment-based "
+    "guaranteed throughput target is {00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
+    "{23:00~23:59,10Mbps}."
+)
+
+#: Chinese natural-language task request of use case 2 (planned power outage, complete input).
+NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_ZH = (
+    "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
+    "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
+    "站点列表1为[站点1, 站点2]；明天计划停电，停电期间 03:00~05:00 将分时段保障速率下调到 "
+    "2Mbps 以节省电池，停电之外保持 {00:00~03:00,10Mbps}、{05:00~24:00,10Mbps}。"
+)
+
+#: English natural-language task request of use case 2 (planned power outage, complete input).
+NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_EN = (
+    "Create a RAN energy saving task in the Songshanhu Administration Committee area to maximize "
+    "energy saving. Based on the task object and task context, output a wireless network energy "
+    "saving plan that achieves the energy saving goal defined in the task target and returns the "
+    "energy saving result in the format defined in the expected output. Station list 1 is "
+    "[\"Site 1\", \"Site 2\"]. Planned power outage tomorrow; during the outage, 03:00~05:00, "
+    "lower the guaranteed throughput to 2Mbps to save battery; outside the outage, keep "
+    "{00:00~03:00,10Mbps} and {05:00~24:00,10Mbps}."
 )
 
 #: Chinese natural-language task request of the information negotiation: the region is present but
@@ -298,6 +329,22 @@ class Scenario:
     description: str
 
 
+SCENARIO_NIGHT_SPEC = Scenario(
+    name=SCENARIO_NIGHT,
+    expected_kind=KIND_NONE,
+    user_request={
+        LANGUAGE_EN: NATURAL_LANGUAGE_PROMPT_INPUT_EN,
+        LANGUAGE_ZH: NATURAL_LANGUAGE_PROMPT_INPUT_ZH,
+    },
+    expected_sequence=(),
+    expected_final_state=FINAL_STATE_TASK_COMPLETED,
+    scripted_client_decisions=(),
+    description=(
+        "A complete night-time energy-saving request; the RAN Agent creates the task without a "
+        "pre-task negotiation."
+    ),
+)
+
 SCENARIO_INFORMATION_SPEC = Scenario(
     name=SCENARIO_INFORMATION,
     expected_kind=KIND_INFORMATION,
@@ -439,13 +486,31 @@ SCENARIO_ABORT_SPEC = Scenario(
     description="The client keeps counter-proposing an infeasible plan until the server aborts at maxRounds.",
 )
 
+SCENARIO_OUTAGE_SPEC = Scenario(
+    name=SCENARIO_OUTAGE,
+    expected_kind=KIND_NONE,
+    user_request={
+        LANGUAGE_EN: NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_EN,
+        LANGUAGE_ZH: NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_ZH,
+    },
+    expected_sequence=(),
+    expected_final_state=FINAL_STATE_TASK_COMPLETED,
+    scripted_client_decisions=(),
+    description=(
+        "A planned power outage tomorrow on two sites; the RAN Agent accepts the lower guaranteed "
+        "rate during the outage without a pre-task negotiation."
+    ),
+)
+
 #: All scenarios keyed by name, in design order.
 SCENARIOS: dict[str, Scenario] = {
+    SCENARIO_NIGHT_SPEC.name: SCENARIO_NIGHT_SPEC,
     SCENARIO_INFORMATION_SPEC.name: SCENARIO_INFORMATION_SPEC,
     SCENARIO_TARGET_SPEC.name: SCENARIO_TARGET_SPEC,
     SCENARIO_FEASIBILITY_SPEC.name: SCENARIO_FEASIBILITY_SPEC,
     SCENARIO_REJECT_SPEC.name: SCENARIO_REJECT_SPEC,
     SCENARIO_ABORT_SPEC.name: SCENARIO_ABORT_SPEC,
+    SCENARIO_OUTAGE_SPEC.name: SCENARIO_OUTAGE_SPEC,
 }
 
 #: Supported scenario names, in design order.
