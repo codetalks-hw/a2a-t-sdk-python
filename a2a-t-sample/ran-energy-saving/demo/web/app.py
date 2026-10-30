@@ -58,6 +58,7 @@ from shared.config import (
     SampleConfig,
 )
 from shared.http_security import (
+    UI_TOKEN_COOKIE,
     BearerAuthMiddleware,
     install_health_routes,
     install_metrics_route,
@@ -138,6 +139,7 @@ def create_app(
     server_url: str | None = None,
     approval_gate: bool = False,
     approval_timeout_seconds: float = 120.0,
+    allow_insecure_bind: bool = False,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -165,6 +167,8 @@ def create_app(
         server_url: base URL of the A2A server, used by the presentation's approval route.
         approval_gate: whether the server pauses before applying a plan.
         approval_timeout_seconds: approval window reported to the page.
+        allow_insecure_bind: explicit opt-in for a trusted-LAN bind without ``A2AT_SAMPLE_AUTH_TOKEN``;
+            only the Web UI exposes this, never the A2A server.
 
     Returns:
         The assembled Starlette application.
@@ -175,7 +179,9 @@ def create_app(
     if ui_mode not in WEB_UI_MODES:
         raise ValueError(f"Unsupported ui mode: {ui_mode}; expected one of {WEB_UI_MODES}")
     static_dir = PRESENTATION_DIR if ui_mode == WEB_UI_PRESENTATION else STATIC_DIR
-    validate_bind_security(bind_host, config.auth_token)
+    validate_bind_security(
+        bind_host, config.auth_token, allow_insecure=allow_insecure_bind
+    )
     if catalog is None:
         from demo.catalog import DemoRunCatalog
 
@@ -748,6 +754,9 @@ def create_app(
                     # The trace ingest route carries the run-scoped local trace token instead of
                     # the user bearer; the handler still rejects a wrong or absent trace token.
                     public_path_patterns=(TRACE_INGEST_PATH_PATTERN,),
+                    # The page copies ``?token=…`` into this cookie, so fetch and EventSource
+                    # (which cannot set an Authorization header) carry the same token.
+                    cookie_name=UI_TOKEN_COOKIE,
                 )
             ]
             if config.auth_token

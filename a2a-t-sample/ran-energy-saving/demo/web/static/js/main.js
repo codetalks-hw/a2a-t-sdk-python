@@ -35,6 +35,25 @@ import { TimelineView } from "./timeline.js";
 
 const $ = (id) => document.getElementById(id);
 
+/** Copy ``?token=…`` into the UI cookie, then strip it from the address bar.
+ *
+ * The bearer middleware protects ``/api/*``; a same-origin cookie is carried by both fetch and
+ * EventSource. The cookie name mirrors ``UI_TOKEN_COOKIE`` in shared/http_security.
+ */
+function installUiToken() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  if (!token) return;
+  document.cookie = `a2at_ui_token=${encodeURIComponent(token)}; Path=/; SameSite=Strict`;
+  params.delete("token");
+  const query = params.toString();
+  history.replaceState(
+    null,
+    "",
+    `${location.pathname}${query ? `?${query}` : ""}${location.hash}`,
+  );
+}
+
 /** Minimum delay before closing a finished run's stream: the server posts its last spans late. */
 const DEFAULT_FINISHED_GRACE_MS = 1500;
 
@@ -1858,4 +1877,5 @@ async function boot() {
   else scheduleRender();
 }
 
+installUiToken();
 boot();

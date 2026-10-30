@@ -586,7 +586,7 @@ SDK. `run_demo.py` reads `A2AT_SAMPLE_UI_PORT` only as the default of `--ui-port
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | default `7` (>= 1) | Days a decision-agent session is kept as audit data before the startup/periodic sweep removes it. |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | default `127.0.0.1` / `8001` | Optional inbound A2A gateway bind and advertised AgentCard interface. |
 | `A2AT_SAMPLE_GATEWAY_TASK_DB` | unset = in-memory; `run_demo.py` writes `<sample>/runs/gateway-task-status.sqlite3` | Absolute SQLite path of the inbound gateway Task store. |
-| `A2AT_SAMPLE_AUTH_TOKEN` | unset = open (loopback only) | Bearer token for the Web UI `/api/*` routes and the inbound gateway A2A routes. A non-loopback bind without it fails at startup. The trace ingest route is exempt because it carries the run-scoped `A2AT_SAMPLE_TRACE_TOKEN` instead. |
+| `A2AT_SAMPLE_AUTH_TOKEN` | unset = open (loopback only) | Bearer token for the Web UI `/api/*` routes and the inbound gateway A2A routes. A non-loopback bind without it fails at startup unless the Web UI is started with `--allow-insecure-bind` (trusted-LAN demo). The presentation page copies a `?token=…` value into the same-origin `a2at_ui_token` cookie, so fetch and SSE carry it without an `Authorization` header. The trace ingest route is exempt because it carries the run-scoped `A2AT_SAMPLE_TRACE_TOKEN` instead. |
 | `A2AT_SAMPLE_SERVER_AUTH_TOKEN` | unset = open (loopback only) | Service bearer token of the A2A server. The client sends it on every A2A call; the server requires it on every route except the AgentCard and health endpoints, and declares the scheme on the card. A non-loopback server bind without it fails at startup. |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0` (default), `1` | Register the gateway AgentCard with the registry center. |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | default `information` | Scenario used for an inbound gateway request. |
@@ -642,7 +642,11 @@ it hands to the child processes. The UI binds loopback by default; `--ui-host 0.
 `A2AT_SAMPLE_UI_HOST=0.0.0.0`) exposes it on all interfaces. The server-to-UI trace POST still
 targets `127.0.0.1`, which is correct when the UI and server run on the same host. The UI, the
 gateway and the server stay open only on loopback: binding a non-loopback address requires the
-matching token (`A2AT_SAMPLE_AUTH_TOKEN` or `A2AT_SAMPLE_SERVER_AUTH_TOKEN`).
+matching token (`A2AT_SAMPLE_AUTH_TOKEN` or `A2AT_SAMPLE_SERVER_AUTH_TOKEN`). The Web UI has one
+explicit exception, `--allow-insecure-bind`, for a trusted-LAN demo without a token; it never
+applies to the A2A server. A token-protected UI can be shared as `http://<lan-ip>:<port>/?token=…`;
+the page stores the token in an `a2at_ui_token` cookie (same-origin, `SameSite=Strict`) and strips
+it from the address bar, so `fetch` and `EventSource` both authenticate.
 
 ## 7. Testing and acceptance
 
@@ -790,7 +794,8 @@ The sample is deliberately a prototype. Before production:
 - **Authentication and TLS.** Two independent boundaries: `A2AT_SAMPLE_AUTH_TOKEN` guards the
   inbound Web UI `/api/*` and gateway routes, and `A2AT_SAMPLE_SERVER_AUTH_TOKEN` guards the A2A
   server (the client presents it, the card declares the scheme). Both fail a non-loopback bind when
-  unset. The trace ingest route keeps its run-scoped token instead of the user bearer. The mock
+  unset, except the Web UI's explicit `--allow-insecure-bind` demo opt-in (never the A2A server).
+  The trace ingest route keeps its run-scoped token instead of the user bearer. The mock
   registry remains open. Terminate TLS at the deployment gateway; `A2A-Version: 1.0` and the
   AgentCard are not security controls.
 - **Health and readiness.** The Web UI, the gateway and the server expose `/health` (liveness) and

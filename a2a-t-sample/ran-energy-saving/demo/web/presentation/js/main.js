@@ -177,9 +177,14 @@ const player = createPlayer({
 boot();
 
 async function boot() {
+  installTokenFromUrl();
   bindStaticEvents();
   try {
     const response = await fetch("/api/meta");
+    if (response.status === 401) {
+      showError(ui.copy.authRequired);
+      return;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     ui.meta = await response.json();
   } catch {
@@ -1021,6 +1026,26 @@ function bindSplitter() {
       setWidth(current - 30, true);
     }
   });
+}
+
+/** Copy ``?token=…`` into the UI cookie, then strip it from the address bar.
+ *
+ * The bearer middleware protects ``/api/*``. A browser cannot set an Authorization header on an
+ * EventSource, and asking every view to add one is brittle; a same-origin cookie is carried by
+ * both fetch and EventSource. The cookie name mirrors ``UI_TOKEN_COOKIE`` in shared/http_security.
+ */
+function installTokenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  if (!token) return;
+  document.cookie = `a2at_ui_token=${encodeURIComponent(token)}; Path=/; SameSite=Strict`;
+  params.delete("token");
+  const query = params.toString();
+  history.replaceState(
+    null,
+    "",
+    `${location.pathname}${query ? `?${query}` : ""}${location.hash}`,
+  );
 }
 
 // Debug handle for the demo operator console and the headless smoke test.

@@ -111,7 +111,18 @@ python run_demo.py --ui --mode confirm --scenario information --model-mode offli
 python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
 # 可选：把 OSS 侧作为 A2A 后端暴露
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
+# 在局域网共享 Web UI：显式选择免 token（仅限可信网络）
+python run_demo.py --ui --ui-host 0.0.0.0 --allow-insecure-bind --model-mode offline
+# 或者保留 token，分享带 token 的链接；页面会把它存进同源 cookie
+A2AT_SAMPLE_AUTH_TOKEN=<token> python run_demo.py --ui --ui-host 0.0.0.0 --model-mode offline
+# 同事打开 http://<你的局域网 IP>:8080/?token=<token>
 ```
+
+`--ui-host 0.0.0.0` 只暴露 Web UI；注册中心与网管服务仍在回环地址。未配置
+`A2AT_SAMPLE_AUTH_TOKEN` 时，启动器默认拒绝非回环绑定；只有显式加 `--allow-insecure-bind`
+才允许。该模式下能访问端口的人都能发起运行，请只在可信网络使用。配置了 token 时，分享
+`/?token=…` 链接即可：页面会把 token 写入同源 `a2at_ui_token` cookie，并从地址栏移除，因此
+`fetch` 与 SSE 流都能通过认证（浏览器无法给 `EventSource` 设置 `Authorization` 头）。
 
 使用 `--gateway` 时，OSS 侧本身就是一个 A2A Agent：Gemini Enterprise 之类的外部调用方发送一次请求后，
 会在最终节能报告之前收到协商与执行里程碑的进度通知——可以走流式连接，也可以注册 webhook。

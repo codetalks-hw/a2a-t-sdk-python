@@ -14,6 +14,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from typing import Any, Final
+from urllib.parse import unquote
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -30,6 +31,9 @@ LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
 #: Routes that stay public even when a token is configured.
 PUBLIC_PATHS: Final[frozenset[str]] = frozenset({"/health", "/ready", "/"})
 
+#: Cookie the presentation page sets from ``?token=…`` so same-origin fetches and SSE carry it.
+UI_TOKEN_COOKIE: Final[str] = "a2at_ui_token"
+
 
 def is_loopback(host: str) -> bool:
     """Return whether ``host`` is a loopback bind address."""
@@ -41,17 +45,28 @@ def validate_bind_security(
     token: str,
     *,
     token_env_key: str = "A2AT_SAMPLE_AUTH_TOKEN",
+    allow_insecure: bool = False,
 ) -> None:
     """Reject a non-loopback bind without a bearer token.
 
+    Args:
+        host: bind address.
+        token: configured bearer token (empty when unset).
+        token_env_key: environment key named in the error.
+        allow_insecure: explicit opt-in for a trusted-LAN demo without a token. The Web UI passes
+            this only when the launcher's ``--allow-insecure-bind`` flag is set.
+
     Raises:
-        ValueError: when ``host`` is not loopback and ``token`` is empty.
+        ValueError: when ``host`` is not loopback, ``token`` is empty and ``allow_insecure`` is
+            false.
     """
-    if not is_loopback(host) and not token.strip():
-        raise ValueError(
-            f"Refusing to bind {host!r} without {token_env_key}. "
-            "Bind a loopback address for a local demo, or configure a bearer token."
-        )
+    if allow_insecure or is_loopback(host) or token.strip():
+        return
+    raise ValueError(
+        f"Refusing to bind {host!r} without {token_env_key}. "
+        "Bind a loopback address for a local demo, pass --allow-insecure-bind for a trusted "
+        "LAN demo, or configure a bearer token."
+    )
 
 
 class BearerAuthMiddleware:
@@ -69,12 +84,14 @@ class BearerAuthMiddleware:
         protected_prefixes: tuple[str, ...] = ("/api/",),
         public_paths: frozenset[str] | None = None,
         public_path_patterns: tuple[re.Pattern[str], ...] = (),
+        cookie_name: str | None = None,
     ) -> None:
         self._app = app
         self._token = token.strip()
         self._protected_prefixes = protected_prefixes
         self._public_paths = PUBLIC_PATHS if public_paths is None else public_paths
         self._public_path_patterns = public_path_patterns
+        self._cookie_name = cookie_name
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         """Authenticate one HTTP request before delegating to the wrapped app."""
@@ -85,7 +102,10 @@ class BearerAuthMiddleware:
         if self._is_public(path) or not self._is_protected(path):
             await self._app(scope, receive, send)
             return
-        supplied = _bearer_token(scope.get("headers", ()))
+        headers = scope.get("headers", ())
+        supplied = _bearer_token(headers)
+        if not supplied and self._cookie_name:
+            supplied = _cookie_token(headers, self._cookie_name)
         if supplied and hmac.compare_digest(supplied, self._token):
             await self._app(scope, receive, send)
             return
@@ -116,6 +136,18 @@ def _bearer_token(headers: tuple[tuple[bytes, bytes], ...]) -> str:
         scheme, _, token = decoded.partition(" ")
         if scheme.lower() == "bearer":
             return token.strip()
+    return ""
+
+
+def _cookie_token(headers: tuple[tuple[bytes, bytes], ...], name: str) -> str:
+    """Extract one URL-decoded cookie value, or an empty string."""
+    for key, value in headers:
+        if key.lower() != b"cookie":
+            continue
+        for part in value.decode("latin-1").split(";"):
+            cookie_name, _, cookie_value = part.strip().partition("=")
+            if cookie_name == name and cookie_value:
+                return unquote(cookie_value)
     return ""
 
 

@@ -195,3 +195,19 @@ async def test_meta_reports_the_approval_gate(
 
     assert meta["approvalGate"] is True
     assert meta["approvalTimeoutSeconds"] == 90.0
+
+
+def test_non_loopback_bind_needs_the_insecure_opt_in(
+    offline_config: SampleConfig,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="Refusing to bind"):
+        create_app(offline_config, runs_dir=tmp_path, bind_host="0.0.0.0")
+
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        bind_host="0.0.0.0",
+        allow_insecure_bind=True,
+    )
+    assert app is not None

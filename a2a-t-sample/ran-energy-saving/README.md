@@ -114,7 +114,20 @@ python run_demo.py --ui --mode confirm --scenario information --model-mode offli
 python run_demo.py --ui --mode confirm --approval-gate --scenario information --model-mode offline
 # Optional: expose the OSS side as an A2A backend
 python run_demo.py --ui --gateway --ui-port 8080 --gateway-port 8001 --model-mode offline
+# Share the Web UI on the LAN: explicit tokenless opt-in (trusted network only)
+python run_demo.py --ui --ui-host 0.0.0.0 --allow-insecure-bind --model-mode offline
+# Or keep a token and share a link; the page stores it in a same-origin cookie
+A2AT_SAMPLE_AUTH_TOKEN=<token> python run_demo.py --ui --ui-host 0.0.0.0 --model-mode offline
+# colleagues open http://<your-lan-ip>:8080/?token=<token>
 ```
+
+`--ui-host 0.0.0.0` exposes only the Web UI; the registry and the NMS server stay on loopback.
+Without `A2AT_SAMPLE_AUTH_TOKEN` the launcher refuses a non-loopback bind unless
+`--allow-insecure-bind` is passed explicitly; in that mode anyone who can reach the port can start
+runs, so use it only on a trusted network. With a token, share the `/?token=…` link: the page copies
+the token into a same-origin `a2at_ui_token` cookie and removes it from the address bar, so both
+`fetch` and the SSE stream authenticate (a browser cannot set an `Authorization` header on an
+`EventSource`).
 
 With `--gateway`, the OSS side is itself an A2A agent: an external caller such as Gemini Enterprise
 sends one request and receives progress notifications (negotiation and execution milestones) before

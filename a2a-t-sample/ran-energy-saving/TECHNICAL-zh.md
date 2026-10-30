@@ -501,7 +501,7 @@ executor = build_negotiation_executor(
 | `A2AT_SAMPLE_ADK_SESSION_RETENTION_DAYS` | 默认 `7`（>= 1） | 决策智能体会话作为审计数据保留的天数，到期由启动/定期清扫删除。 |
 | `A2AT_SAMPLE_GATEWAY_HOST` / `A2AT_SAMPLE_GATEWAY_PORT` | 默认 `127.0.0.1` / `8001` | 可选入站 A2A Gateway 的绑定与 AgentCard 对外接口。 |
 | `A2AT_SAMPLE_GATEWAY_TASK_DB` | 未设置 = 内存；`run_demo.py` 写入 `<sample>/runs/gateway-task-status.sqlite3` | 入站 Gateway 的 Task 存储绝对 SQLite 路径。 |
-| `A2AT_SAMPLE_AUTH_TOKEN` | 未设置 = 开放（仅回环） | Web UI `/api/*` 与入站 Gateway A2A 路由的 Bearer token。绑定非回环地址却未配置时启动失败。trace ingest 路由例外，它使用每次运行独立的 `A2AT_SAMPLE_TRACE_TOKEN`。 |
+| `A2AT_SAMPLE_AUTH_TOKEN` | 未设置 = 开放（仅回环） | Web UI `/api/*` 与入站 Gateway A2A 路由的 Bearer token。绑定非回环地址却未配置时启动失败，除非 Web UI 显式使用 `--allow-insecure-bind`（可信局域网演示）。演示页会把 `?token=…` 写入同源 `a2at_ui_token` cookie，因此 fetch 与 SSE 无需 `Authorization` 头也能认证。trace ingest 路由例外，它使用每次运行独立的 `A2AT_SAMPLE_TRACE_TOKEN`。 |
 | `A2AT_SAMPLE_SERVER_AUTH_TOKEN` | 未设置 = 开放（仅回环） | A2A 服务端的服务 token。客户端在每次 A2A 调用中携带；服务端除 AgentCard 与健康检查外都要求它，并在卡片上声明 bearer scheme。服务端绑定非回环地址却未配置时启动失败。 |
 | `A2AT_SAMPLE_GATEWAY_REGISTER` | `0`（默认）、`1` | 是否把 Gateway AgentCard 注册到注册中心。 |
 | `A2AT_SAMPLE_GATEWAY_SCENARIO` | 默认 `information` | 入站 Gateway 请求使用的场景。 |
@@ -530,7 +530,7 @@ executor = build_negotiation_executor(
 
 已有的 `.env` 若设置了 `A2AT_SAMPLE_WEBHOOK_IDLE_TIMEOUT=30` 或 `A2AT_LLM_TIMEOUT_SECONDS=60`，应更新或删除：新的样例键为 `A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS=300`、`A2AT_SAMPLE_LLM_TIMEOUT_SECONDS=120`、`A2AT_SAMPLE_LLM_MAX_ATTEMPTS=1`。
 
-**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`、可选 A2A Gateway `8001`（均绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给子进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。UI、Gateway 与服务端只在回环地址上开放；绑定非回环地址必须配置对应 token（`A2AT_SAMPLE_AUTH_TOKEN` 或 `A2AT_SAMPLE_SERVER_AUTH_TOKEN`）。
+**端口。** 默认服务端 `8000`、注册中心 `5001`、webhook `9000`、Web UI `8080`、可选 A2A Gateway `8001`（均绑定 `127.0.0.1`）。`run_demo.py` 会把这些值写入交给子进程的每次运行 `.env`。Web UI 默认只监听回环地址；`--ui-host 0.0.0.0`（或 `A2AT_SAMPLE_UI_HOST=0.0.0.0`）可监听所有网卡。服务端向 UI 发送 trace 时仍使用 `127.0.0.1`，在 UI 与服务端同机运行时这是正确的。UI、Gateway 与服务端只在回环地址上开放；绑定非回环地址必须配置对应 token（`A2AT_SAMPLE_AUTH_TOKEN` 或 `A2AT_SAMPLE_SERVER_AUTH_TOKEN`）。Web UI 有一个显式例外 `--allow-insecure-bind`，仅用于可信局域网免 token 演示，绝不适用于 A2A 服务端。带 token 的 UI 可以分享 `http://<lan-ip>:<port>/?token=…`；页面把 token 写入同源 `a2at_ui_token` cookie（`SameSite=Strict`），并从地址栏移除，fetch 与 `EventSource` 都能认证。
 
 ## 7. 测试与验收
 
@@ -647,7 +647,7 @@ python run_demo.py --scenario target --mode auto --model-mode live
 - **日志。** 客户端、网管与 Gateway 共用一条 stdlib 日志流；接入采集器时设 `A2AT_SAMPLE_LOG_FORMAT=json`。每条记录带 `runId` / `conversationId` / `taskId` / `contextId` / `negotiationId` / `round`，可跨进程追踪一次协商。凭据会被脱敏，提示词与工具结果只做摘要，不在 `info` 级别整段输出。
 - **注册中心。** `registry/` 是 mock。使用部署环境的真实注册中心，或配置 `direct` 发现并固定 AgentCard 端点。
 - **Webhook 安全。** `A2AT_SAMPLE_WEBHOOK_TOKEN` 是静态演示 token。生产应使用按客户端的密钥、轮换、重放防护与 TLS；把接收器视为对外暴露的 HTTP 端点。
-- **鉴权与 TLS。** 两个独立边界：`A2AT_SAMPLE_AUTH_TOKEN` 保护入站 Web UI `/api/*` 与 Gateway 路由；`A2AT_SAMPLE_SERVER_AUTH_TOKEN` 保护 A2A 服务端（客户端携带，卡片声明 scheme）。两者在绑定非回环地址却未配置时都会启动失败。trace ingest 路由使用每次运行的 trace token，而不是用户 Bearer。mock 注册中心仍为开放。应在部署网关终止 TLS；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
+- **鉴权与 TLS。** 两个独立边界：`A2AT_SAMPLE_AUTH_TOKEN` 保护入站 Web UI `/api/*` 与 Gateway 路由；`A2AT_SAMPLE_SERVER_AUTH_TOKEN` 保护 A2A 服务端（客户端携带，卡片声明 scheme）。两者在绑定非回环地址却未配置时都会启动失败，唯一例外是 Web UI 的 `--allow-insecure-bind` 演示开关（不适用于 A2A 服务端）。trace ingest 路由使用每次运行的 trace token，而不是用户 Bearer。mock 注册中心仍为开放。应在部署网关终止 TLS；`A2A-Version: 1.0` 与 AgentCard 不是安全控制。
 - **健康检查。** Web UI、Gateway 与服务端都提供 `/health`（存活）与 `/ready`（SQLite 可访问）。平台探针应使用它们，而不是业务路由。
 - **推送投递。** Gateway 会校验调用方提供的 webhook（绝对 http(s) URL、无内嵌凭据；非回环只允许 HTTPS），并发送 A2A 通知 token。SDK sender 每个事件只 POST 一次并记录失败；生产需要重试/排队、死信路径与出站白名单以防止 SSRF。push 注册存放在 Gateway Task 数据库，应按敏感文件保护。样例的 Bearer 中间件只认证调用方，不填充 `ServerCallContext.user`，因此所有注册共享空 owner 分区；多租户部署必须在调用上下文中提供已认证用户。
 - **指标。** 三个进程都通过 `/metrics` 输出 Prometheus 文本：客户端运行状态/终态、在途运行、运行耗时、按侧与轮次的协商消息、服务端任务终态。指标注册表是进程内的，应逐个进程抓取（或由采集器聚合）。配置 token 时该路由受 Bearer 保护。

@@ -625,11 +625,13 @@ def _run_ui(
     server_url: str = "",
     approval_gate: bool = False,
     approval_timeout: float = 120.0,
+    allow_insecure_bind: bool = False,
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
     import uvicorn
     from protocol.client_store import SqliteClientStore
     from shared.config import load_config
+    from shared.http_security import is_loopback
     from shared.logging_setup import configure_logging
 
     from demo.catalog import DemoRunCatalog
@@ -642,21 +644,26 @@ def _run_ui(
         if config.client_db_path is not None
         else None
     )
-    app = create_app(
-        config,
-        env_path=env_path,
-        catalog=DemoRunCatalog(),
-        client_store=client_store,
-        memory_turns=config.client_memory_turns,
-        default_scenario=scenario,
-        default_mode=mode,
-        default_transport=transport,
-        bind_host=host,
-        ui_mode=ui_mode,
-        server_url=server_url or None,
-        approval_gate=approval_gate,
-        approval_timeout_seconds=approval_timeout,
-    )
+    try:
+        app = create_app(
+            config,
+            env_path=env_path,
+            catalog=DemoRunCatalog(),
+            client_store=client_store,
+            memory_turns=config.client_memory_turns,
+            default_scenario=scenario,
+            default_mode=mode,
+            default_transport=transport,
+            bind_host=host,
+            ui_mode=ui_mode,
+            server_url=server_url or None,
+            approval_gate=approval_gate,
+            approval_timeout_seconds=approval_timeout,
+            allow_insecure_bind=allow_insecure_bind,
+        )
+    except ValueError as exc:
+        print(f"[run_demo] {exc}")
+        return 2
     trace_enabled = bool(os.environ.get("A2AT_SAMPLE_TRACE_TOKEN", "").strip())
     print(
         f"[run_demo] Web UI on http://{host}:{ui_port} (ui_mode={ui_mode}) "
@@ -666,6 +673,22 @@ def _run_ui(
         f"approval_gate={approval_gate}, "
         f"server trace ingestion: {'enabled' if trace_enabled else 'disabled (no local token)'})"
     )
+    if not is_loopback(host):
+        try:
+            lan_ip = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            lan_ip = "<your-lan-ip>"
+        if config.auth_token:
+            print(
+                f"[run_demo] share on the LAN: http://{lan_ip}:{ui_port}/?token="
+                "<A2AT_SAMPLE_AUTH_TOKEN>"
+            )
+        else:
+            print(
+                "[run_demo] WARNING: the Web UI is reachable on the LAN without a bearer "
+                "token; anyone who can reach the port can start runs. Use only on a trusted "
+                f"network. Share: http://{lan_ip}:{ui_port}/"
+            )
     try:
         uvicorn.run(app, host=host, port=ui_port, log_level="info")
     except KeyboardInterrupt:
@@ -772,6 +795,14 @@ def _build_parser(
         help=(
             f"bind host of the Web UI (default: {default_ui_host}; A2AT_SAMPLE_UI_HOST). "
             "Use 0.0.0.0 to expose it on all interfaces."
+        ),
+    )
+    parser.add_argument(
+        "--allow-insecure-bind",
+        action="store_true",
+        help=(
+            "allow --ui-host on a non-loopback address without A2AT_SAMPLE_AUTH_TOKEN "
+            "(trusted-LAN demo only; anyone who can reach the port can start runs)"
         ),
     )
     parser.add_argument(
@@ -1060,6 +1091,7 @@ def main() -> int:
                 server_url=f"http://127.0.0.1:{server_port}",
                 approval_gate=args.approval_gate,
                 approval_timeout=args.approval_timeout,
+                allow_insecure_bind=args.allow_insecure_bind,
             )
         else:
             print(

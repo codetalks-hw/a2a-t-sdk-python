@@ -18,6 +18,8 @@ const EN = {
   start: "Send to the OSS Agent",
   running: "A demo run is in progress…",
   startFailed: "The demo could not be started.",
+  authRequired:
+    "This demo needs an access token. Open the link that includes ?token=…, or ask the host for it.",
   connectionLost: "Connection interrupted, reconnecting…",
   chooseScenario: "Pick an example to start.",
   ready: "Ready",
@@ -359,6 +361,7 @@ const ZH = {
   start: "发送给 OSS Agent",
   running: "演示进行中…",
   startFailed: "演示未能启动。",
+  authRequired: "该演示需要访问 token。请使用带 ?token=… 的链接打开，或向主持人索取。",
   connectionLost: "连接中断，正在重连…",
   chooseScenario: "选择一个演示场景开始。",
   ready: "准备就绪",

@@ -9,6 +9,7 @@ import httpx
 import pytest
 from shared.config import SampleConfig
 from shared.http_security import (
+    UI_TOKEN_COOKIE,
     BearerAuthMiddleware,
     install_health_routes,
     is_loopback,
@@ -21,7 +22,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 
-def _app(*, token: str = "", ready: bool = True) -> Starlette:
+def _app(
+    *,
+    token: str = "",
+    ready: bool = True,
+    cookie_name: str | None = None,
+) -> Starlette:
     async def api(request: object) -> JSONResponse:
         del request
         return JSONResponse({"ok": True})
@@ -29,7 +35,14 @@ def _app(*, token: str = "", ready: bool = True) -> Starlette:
     app = Starlette(
         routes=[Route("/api/value", api)],
         middleware=(
-            [Middleware(BearerAuthMiddleware, token=token, protected_prefixes=("/api/",))]
+            [
+                Middleware(
+                    BearerAuthMiddleware,
+                    token=token,
+                    protected_prefixes=("/api/",),
+                    cookie_name=cookie_name,
+                )
+            ]
             if token
             else []
         ),
@@ -40,6 +53,28 @@ def _app(*, token: str = "", ready: bool = True) -> Starlette:
         checks={"dependency": lambda: ready},
     )
     return app
+
+
+def test_insecure_bind_needs_an_explicit_opt_in() -> None:
+    with pytest.raises(ValueError, match="Refusing to bind"):
+        validate_bind_security("0.0.0.0", "")
+
+    validate_bind_security("0.0.0.0", "", allow_insecure=True)
+
+
+async def test_a_same_origin_cookie_carries_the_bearer_token() -> None:
+    app = _app(token="secret", cookie_name=UI_TOKEN_COOKIE)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        accepted = await client.get(
+            "/api/value", headers={"cookie": f"{UI_TOKEN_COOKIE}=secret"}
+        )
+        rejected = await client.get(
+            "/api/value", headers={"cookie": f"{UI_TOKEN_COOKIE}=wrong"}
+        )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 401
 
 
 def test_loopback_detection_and_bind_policy() -> None:
