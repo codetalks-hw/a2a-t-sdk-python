@@ -259,7 +259,12 @@ const player = createPlayer({
     rebuild(index);
   },
   onChange: () => renderControls(),
-  onScene: (scene) => {
+  // A gate scene is queued with ``hold`` when the approval frame arrives. If the engineer answers
+  // while that scene is still waiting behind earlier beats, the decision is already known when it
+  // is finally applied; do not hold or repaint the stale "waiting" card.
+  holds: (scene) => scene.key !== "approval-pure" || ui.view.mieResolved === null,
+  onScene: (scene, { hold } = {}) => {
+    if (scene.key === "approval-pure" && hold === false) return;
     // Evidence frames (an unmapped trace span, a plan event) update the panels; they are not
     // story beats and must not rewind the step bar to the step that was current when they
     // arrived in the queue.
@@ -1350,9 +1355,14 @@ function narration(scene, stepKey) {
   if (protocol === "pure") {
     const pureKey = {
       send: "pureSend",
+      understand: "pureUnderstand",
+      strategy: "pureStrategy",
       propose: "purePropose",
       decision: "purePropose",
+      "approval-ready": "pureApprovalReady",
       "approval-pure": "pureApproval",
+      execute: "pureExecute",
+      apply: "pureExecute",
       report: "pureReport",
       finish: "pureFinish",
     }[scene.key];

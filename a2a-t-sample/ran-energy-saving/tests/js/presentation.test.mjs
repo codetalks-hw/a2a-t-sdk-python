@@ -751,6 +751,52 @@ assert.equal(pendingHuman(pureView), null);
 assert.equal(approvalCard(pureView, pureCopy), null);
 assert.equal(sceneFor(pureApproval, pureView).key, "trace");
 
+// Pure statuses use their own phase vocabulary: the outer OSS lifecycle and RAN progress after
+// the decision are evidence, not a rewind to the strategy step.
+const submitted = event({
+  seq: 41,
+  entryType: "event",
+  kind: "status",
+  state: "TASK_STATE_SUBMITTED",
+  summary: "TASK_STATE_SUBMITTED",
+});
+assert.equal(sceneFor(submitted, pureView).key, "trace");
+const working = event({
+  seq: 42,
+  entryType: "event",
+  kind: "status",
+  state: "TASK_STATE_WORKING",
+  summary: "MIE approved. Applying the plan.",
+  detail: { hop: "ran", pure: { hop: "ran" } },
+});
+assert.equal(sceneFor(working, pureView).key, "trace");
+const planning = event({
+  seq: 43,
+  entryType: "event",
+  kind: "status",
+  state: "TASK_STATE_WORKING",
+  summary: "RAN Agent is working.",
+  detail: { hop: "ran", pure: { hop: "ran" } },
+});
+assert.equal(sceneFor(planning, pureView).key, "strategy");
+const taskDone = event({
+  seq: 44,
+  entryType: "event",
+  kind: "status",
+  state: "TASK_STATE_WORKING",
+  summary: "RAN energy-saving task completed.",
+  detail: { hop: "ran", pure: { hop: "ran" } },
+});
+assert.equal(sceneFor(taskDone, pureView).key, "trace");
+const appliedArtifact = event({
+  seq: 45,
+  entryType: "event",
+  kind: "artifact",
+  summary: "",
+  detail: { hop: "ran", pure: { hop: "ran" }, toolName: "apply_energy_saving_plan" },
+});
+assert.equal(sceneFor(appliedArtifact, pureView).key, "execute");
+
 const completed = event({
   seq: 5,
   entryType: "event",
@@ -779,5 +825,43 @@ applyFrame(pureNight, {
   protocol: "pure",
 });
 assert.equal(negotiationExpected(pureNight), false);
+
+// A gate scene queued before the decision must not hold the player once that decision exists.
+let gateMeta = null;
+const resolvedGatePlayer = createPlayer({
+  onApply: () => {},
+  onRewind: () => {},
+  onChange: () => {},
+  onScene: (scene, meta) => {
+    if (scene.key === "approval-pure") gateMeta = meta;
+  },
+  holds: () => false,
+});
+resolvedGatePlayer.enqueue({
+  key: "approval-pure",
+  step: 8,
+  duration: 0,
+  hold: true,
+  frame: pureApproval,
+});
+assert.equal(gateMeta.hold, false);
+assert.equal(resolvedGatePlayer.status().hold, false);
+assert.equal(resolvedGatePlayer.status().playhead, 1);
+
+const openGatePlayer = createPlayer({
+  onApply: () => {},
+  onRewind: () => {},
+  onChange: () => {},
+  onScene: () => {},
+  holds: () => true,
+});
+openGatePlayer.enqueue({
+  key: "approval-pure",
+  step: 8,
+  duration: 0,
+  hold: true,
+  frame: pureApproval,
+});
+assert.equal(openGatePlayer.status().hold, true);
 
 console.log("presentation model harness: ok");

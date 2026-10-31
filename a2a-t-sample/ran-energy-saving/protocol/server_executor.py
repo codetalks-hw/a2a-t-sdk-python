@@ -54,6 +54,7 @@ from protocol.approval_gate import (
 from protocol.messages import (
     SAMPLE_RUN_ID_METADATA_KEY,
     TASK_TEMPLATE_URI,
+    format_rate_percent,
     metadata_to_dict,
     negotiation_context_metadata,
     parse_negotiation_context,
@@ -517,7 +518,7 @@ class LangGraphTaskExecutor(AgentExecutor):
         ) -> bool:
             """Publish INPUT_REQUIRED, wait for the engineer, then resume or reject."""
             key = _run_id(context) or task_id
-            rate_text = f"{target_rate}%"
+            rate_text = format_rate_percent(target_rate)
             await updater.update_status(
                 TaskState.TASK_STATE_INPUT_REQUIRED,
                 message=updater.new_agent_message(
@@ -622,7 +623,7 @@ class LangGraphTaskExecutor(AgentExecutor):
         ) -> bool:
             """Publish INPUT_REQUIRED, ask MIE, then resume or reject."""
             key = _run_id(context) or task_id
-            rate_text = f"{target_rate}%"
+            rate_text = format_rate_percent(target_rate)
             plan = {
                 "cellId": cell_id,
                 "window": window,

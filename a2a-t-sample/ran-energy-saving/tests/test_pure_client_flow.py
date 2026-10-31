@@ -80,6 +80,24 @@ async def test_the_flow_continues_the_same_task_after_input_required() -> None:
     assert all(span["detail"]["protocol"] == "pure" for span in spans)
 
 
+async def test_the_run_id_travels_as_sample_metadata_on_both_messages() -> None:
+    transport = _FakeTransport([[_input_required()], [_completed()]])
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        answer=lambda event: "Use {00:00~06:00,10Mbps}.",
+        run_id="run-42",
+    )
+
+    first_request, _ = transport.requests[0]
+    follow_up, _ = transport.requests[1]
+    assert first_request.message.metadata["sampleRunId"] == "run-42"
+    assert follow_up.message.metadata["sampleRunId"] == "run-42"
+    # The sample key is the only metadata; no A2A-T extension metadata is attached.
+    assert set(first_request.message.metadata) == {"sampleRunId"}
+
+
 async def test_the_default_answer_uses_the_server_proposal() -> None:
     proposal = "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
     event = _input_required()

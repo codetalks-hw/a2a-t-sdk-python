@@ -48,6 +48,7 @@ from starlette.applications import Starlette
 
 from protocol.client_flow import ClientFlowResult, SseClientTransport
 from protocol.discovery import DISCOVERY_DIRECT, discover_agent
+from protocol.messages import SAMPLE_RUN_ID_METADATA_KEY, metadata_to_dict
 from protocol.pure_client_flow import run_pure_client_flow
 
 #: Agent identity and skill.
@@ -121,7 +122,10 @@ class OSSPureExecutor(AgentExecutor):
         )
         try:
             result = await self._run_ran(
-                _message_text(message), events.put_nowait, updater
+                _message_text(message),
+                _run_id_of(message),
+                events.put_nowait,
+                updater,
             )
         except Exception as exc:  # noqa: BLE001 - the outer Task must reach a terminal state
             _LOGGER.exception("OSS->RAN hop failed")
@@ -180,6 +184,7 @@ class OSSPureExecutor(AgentExecutor):
     async def _run_ran(
         self,
         user_request: str,
+        run_id: str | None,
         event_sink: Callable[[dict[str, object]], None],
         updater: TaskUpdater,
     ) -> ClientFlowResult:
@@ -215,6 +220,7 @@ class OSSPureExecutor(AgentExecutor):
                     max_rounds=self._max_rounds,
                     call_timeout_seconds=self._timeout_seconds,
                     event_sink=event_sink,
+                    run_id=run_id,
                 )
             finally:
                 close = getattr(client, "close", None)
@@ -416,6 +422,13 @@ def main() -> None:
     )
     _LOGGER.info("starting OSS Agent on %s:%s", host, port)
     uvicorn.run(app, host=host, port=port)
+
+
+def _run_id_of(message: object) -> str | None:
+    """Return the sample-local Run Explorer id carried by one A2A message."""
+    metadata = getattr(message, "metadata", None)
+    value = metadata_to_dict(metadata).get(SAMPLE_RUN_ID_METADATA_KEY)
+    return value if isinstance(value, str) and value else None
 
 
 def _message_text(message: object) -> str:

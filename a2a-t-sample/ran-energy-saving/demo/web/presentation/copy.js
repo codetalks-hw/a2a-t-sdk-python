@@ -84,6 +84,7 @@ const EN = {
       "The RAN Agent asked the MIE Agent over standard A2A. Nothing is applied before the approval.",
     mieRequest: "RAN Agent asks MIE to approve the plan over A2A.",
     mieApproved: "MIE approved. RAN Agent resumes.",
+    engAcknowledged: "Plan acknowledged in MIE",
     metrics: "This pure A2A run",
     hops: "hops",
     rounds: "negotiation rounds",
@@ -138,10 +139,18 @@ const EN = {
       "The request leaves as one plain A2A message. The RAN Agent has only the text to interpret: no template, no typed slots and no negotiation.",
     pureSend:
       "The OSS Agent forwards the request to the RAN Agent over standard A2A. No Task-T and no Negotiation-T extension is involved.",
+    pureUnderstand:
+      "The OSS Agent receives the request from the engineer and forwards it to the RAN Agent over standard A2A.",
+    pureStrategy:
+      "The RAN Agent accepts the task and prepares its energy-saving plan before asking MIE for approval.",
     purePropose:
       "The RAN Agent needs a value and returns a standard A2A INPUT_REQUIRED task. The OSS Agent answers with a follow-up message on the same task.",
+    pureApprovalReady:
+      "The plan is ready. The RAN Agent asks the MIE Agent to approve it over standard A2A.",
     pureApproval:
       "The RAN Agent asks the MIE Agent to approve the plan over standard A2A. The engineer decides in MIE, and MIE answers the RAN Agent.",
+    pureExecute:
+      "The RAN Agent applies the approved plan; the radio sites report the execution results back over A2A.",
     pureReport:
       "The RAN Agent returns the report to the OSS Agent, which reports it to the engineer.",
     pureFinish: "The three-agent pure A2A session is over.",
@@ -711,6 +720,7 @@ const ZH = {
     mieNote: "RAN Agent 通过标准 A2A 请求 MIE Agent 审批；批准前不会执行任何变更。",
     mieRequest: "RAN Agent 通过 A2A 请求 MIE 审批方案。",
     mieApproved: "MIE 已批准，RAN Agent 继续执行。",
+    engAcknowledged: "方案已在 MIE 中确认",
     metrics: "本次纯 A2A 运行",
     hops: "跳",
     rounds: "协商轮次",
@@ -763,10 +773,14 @@ const ZH = {
       "请求作为一条普通 A2A 消息发出。RAN Agent 只能从文本里自行理解：没有模板、没有类型化槽位，也没有协商。",
     pureSend:
       "OSS Agent 通过标准 A2A 把请求转发给 RAN Agent。全程不涉及 Task-T 和 Negotiation-T 扩展。",
+    pureUnderstand: "OSS Agent 收到工程师的请求，通过标准 A2A 转发给 RAN Agent。",
+    pureStrategy: "RAN Agent 接受任务，先准备节能方案，再请求 MIE 审批。",
     purePropose:
       "RAN Agent 需要补一个值，于是返回标准 A2A 的 INPUT_REQUIRED 任务；OSS Agent 在同一任务上发后续消息回答。",
+    pureApprovalReady: "方案已准备好，RAN Agent 通过标准 A2A 请求 MIE Agent 审批。",
     pureApproval:
       "RAN Agent 通过标准 A2A 请求 MIE Agent 审批方案；工程师在 MIE 中决定，MIE 再把结果回给 RAN Agent。",
+    pureExecute: "RAN Agent 执行已批准的方案，无线站点通过 A2A 上报执行结果。",
     pureReport: "RAN Agent 把报告回给 OSS Agent，由 OSS Agent 汇总给工程师。",
     pureFinish: "三 Agent 的纯 A2A 会话结束。",
     propose: "RAN Agent 发现了问题，先问清楚，而不是猜测或直接拒绝。",

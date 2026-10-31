@@ -289,6 +289,7 @@ class ClientRuntime:
                         call_timeout_seconds=self.config.http_timeout_seconds,
                         event_sink=event_sink,
                         trace_sink=sink,
+                        run_id=run_id,
                     )
                 if self.protocol == PROTOCOL_PLAIN:
                     # Plain A2A has no Task-T, no intent gate and no negotiation: one message in,

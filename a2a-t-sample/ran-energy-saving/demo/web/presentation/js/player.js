@@ -11,7 +11,7 @@ const BEAT_MS = 260;
 //: Pause after the engineer answers, so the next scene does not snap in under the click.
 const RELEASE_MS = 420;
 
-export function createPlayer({ onApply, onRewind, onChange, onScene }) {
+export function createPlayer({ onApply, onRewind, onChange, onScene, holds = null }) {
   let scenes = [];
   let playhead = 0;
   let mode = "auto";
@@ -37,12 +37,16 @@ export function createPlayer({ onApply, onRewind, onChange, onScene }) {
     const scene = scenes[playhead];
     playhead += 1;
     onApply(scene.frame);
+    // A scene queued before a decision can still be applied after it (the approval frame arrived
+    // while an earlier beat was pacing). Re-check whether the gate is still open at apply time;
+    // otherwise the page would hold on a card that no longer exists and never release it.
+    const shouldHold = scene.hold && (holds === null || holds(scene));
     // Mark the hold before the scene callback so a terminal frame already queued behind the gate
     // can be applied and release it (the server may have closed the gate while the player was
     // still pacing earlier scenes).
-    if (scene.hold) hold = true;
-    if (onScene) onScene(scene);
-    if (scene.hold) {
+    if (shouldHold) hold = true;
+    if (onScene) onScene(scene, { hold: shouldHold });
+    if (shouldHold) {
       onChange();
       return;
     }

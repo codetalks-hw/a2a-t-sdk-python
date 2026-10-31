@@ -21,6 +21,7 @@ from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS
 from shared.sse_event_consumer import normalize_event
 
 from protocol.discovery import DISCOVERY_DIRECT, discover_agent
+from protocol.messages import format_rate_percent
 from protocol.mie_agent import (
     MIE_AGENT_NAME,
     MIE_AGENT_ORGANIZATION,
@@ -76,7 +77,7 @@ class MIEApprovalClient:
         plan: dict[str, object] = {
             "cellId": cell_id,
             "window": window,
-            "rate": f"{target_rate}%",
+            "rate": format_rate_percent(target_rate),
             "savedPercent": (
                 evaluation.get("estimated_saving_percent")
                 if isinstance(evaluation, Mapping)

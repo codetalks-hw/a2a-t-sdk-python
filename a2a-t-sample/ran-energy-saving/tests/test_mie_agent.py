@@ -13,6 +13,7 @@ import httpx
 import uvicorn
 from demo.composition import build_demo_runtime
 from demo.pure_policy import build_demo_pure_policy
+from protocol.messages import format_rate_percent
 from protocol.mie_agent import MIEApprovalRegistry, build_mie_app
 from shared.config import DISCOVERY_DIRECT, TRANSPORT_SSE
 from shared.run_constants import FINAL_STATE_TASK_COMPLETED, LANGUAGE_EN, PROTOCOL_PURE
@@ -146,3 +147,10 @@ async def test_a_pure_run_waits_for_and_accepts_the_mie_decision() -> None:
         and event["metadata"]["pure"].get("kind") == "approval"
     ]
     assert approval_states
+
+
+def test_the_rate_format_does_not_double_the_percent_sign() -> None:
+    # The live planner may return 35 or 35%; both must render as 35% on the MIE card.
+    assert format_rate_percent("35") == "35%"
+    assert format_rate_percent("35%") == "35%"
+    assert format_rate_percent(30) == "30%"

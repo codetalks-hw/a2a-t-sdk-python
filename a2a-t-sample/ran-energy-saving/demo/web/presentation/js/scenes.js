@@ -60,21 +60,44 @@ function eventScene(entry, state, frame) {
   if (entry.entryType === "decision") return scene("decision", 1600, frame);
   const pure = isObject(entry.detail?.pure) ? entry.detail.pure : null;
   const hop = typeof entry.detail?.hop === "string" ? entry.detail.hop : null;
-  if (pure !== null || hop !== null) {
-    if (entry.kind === "status") {
-      if (pure?.kind === "approval") {
-        // The OSS Agent relays RAN's approval wait as WORKING; the MIE card itself arrives on the
-        // separate MIE SSE. Hold at this scene until the human decision is known. A replay after
-        // the decision is evidence only.
-        if (state.mieResolved !== null) return scene("trace", 0, frame);
-        return scene("approval-pure", 0, frame, true);
-      }
-      if (pure?.kind === "negotiation") return scene("propose", 1800, frame);
-      if (hop === "oss" && pure?.phase === "receive") return scene("understand", 2600, frame);
-      if (hop === "oss" && pure?.phase === "answer") return scene("decision", 1600, frame);
-      if (hop === "oss" && pure?.phase === "report") return scene("report", 2600, frame);
+  if (state.protocol === "pure" && entry.kind === "status") {
+    // Pure A2A has its own phase vocabulary. The generic A2A-T status mapping assumes the server
+    // Task is the one advancing the story, but in pure mode the outer OSS Task emits SUBMITTED /
+    // WORKING lifecycle updates and the RAN reports ordinary progress after the MIE decision.
+    // Letting those fall through to the generic WORKING branch would jump to the strategy step at
+    // the start ("SUBMITTED") and rewind to it after approval ("MIE approved. Applying the plan.",
+    // "task completed"), desynchronising the stage from the actual hop.
+    const summary = typeof entry.summary === "string" ? entry.summary : "";
+    const taskState = typeof entry.state === "string" ? entry.state : "";
+    if (pure?.kind === "approval") {
+      // The OSS Agent relays RAN's approval wait as WORKING; the MIE card itself arrives on the
+      // separate MIE SSE. Hold at this scene until the human decision is known. A replay after
+      // the decision is evidence only.
+      if (state.mieResolved !== null) return scene("trace", 0, frame);
+      return scene("approval-pure", 0, frame, true);
     }
-    if (entry.kind === "artifact" && artifactTool(entry) === "apply_energy_saving_plan") {
+    if (pure?.kind === "negotiation") return scene("propose", 1800, frame);
+    if (hop === "oss" && pure?.phase === "receive") return scene("understand", 2600, frame);
+    if (hop === "oss" && pure?.phase === "answer") return scene("decision", 1600, frame);
+    if (hop === "oss" && pure?.phase === "report") return scene("report", 2600, frame);
+    if (summary.includes("Data collection started")) return scene("collect-start", 2200, frame);
+    if (summary.includes("Data collection in progress")) {
+      return scene("collect-progress", 3000, frame);
+    }
+    if (summary.includes("Data collection completed")) return scene("collect-done", 1800, frame);
+    // The RAN starts planning only after the negotiation is settled; this is the strategy beat.
+    if (summary.includes("RAN Agent is working")) return scene("strategy", 4200, frame);
+    if (taskState === "TASK_STATE_REJECTED" || summary.includes("REJECTED")) {
+      return scene("approval-rejected", 1200, frame);
+    }
+    if (["TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED"].includes(taskState)) {
+      return scene("finish", 1200, frame);
+    }
+    // Lifecycle and post-approval progress are evidence; the apply artifact drives execution.
+    return scene("trace", 0, frame);
+  }
+  if (state.protocol === "pure" && entry.kind === "artifact") {
+    if (artifactTool(entry) === "apply_energy_saving_plan") {
       // Pure A2A has no MML dispatch; the apply artifact is RAN's execution confirmation.
       return scene("execute", 1800, frame);
     }

@@ -270,6 +270,7 @@ export function createStage(els) {
         if (token === sceneToken) fn();
       }, ms);
     const key = scene.key;
+    const pureMode = state.protocol === "pure";
     const scenario = state.scenario;
     const { round } = roundInfo(state);
     const roles = copy.roles;
@@ -533,7 +534,12 @@ export function createStage(els) {
     if (key === "execute") {
       setActors({
         ...base,
-        eng: { cls: "ok", text: copy.states.engAcknowledged },
+        eng: {
+          cls: "ok",
+          text: pureMode
+            ? copy.pure?.engAcknowledged || copy.states.engAcknowledged
+            : copy.states.engAcknowledged,
+        },
         oss: { cls: "", text: copy.states.ossWaitingResults },
         nms: { cls: "active", text: copy.states.nmsExecuted },
         cells: { cls: "ok", text: copy.states.cellsApplied },
