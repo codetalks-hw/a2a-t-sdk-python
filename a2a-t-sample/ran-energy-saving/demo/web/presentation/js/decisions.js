@@ -71,6 +71,36 @@ export function decisionCard(state, copy) {
 
 /** Build approval 2 (the MIE MML review), or ``null`` when no review is pending. */
 export function approvalCard(state, copy) {
+  if (
+    state.protocol === "pure" &&
+    state.mieWaiting &&
+    state.mieApproval !== null &&
+    state.mieResolved === null &&
+    !state.finished &&
+    state.status === "running"
+  ) {
+    const approval = isObject(state.mieApproval) ? state.mieApproval : {};
+    const plan = isObject(approval.plan) ? approval.plan : {};
+    const cell = plan.cellId || "—";
+    const window = plan.window || "—";
+    const rate = plan.rate || "—";
+    return {
+      type: "approval",
+      pure: true,
+      taskId: approval.taskId || null,
+      kicker: copy.pure?.mieKicker || copy.approval.kicker,
+      title: copy.pure?.mieTitle || copy.approval.title,
+      text: format(copy.approval.detail, { cell, window, rate }),
+      detail: copy.pure?.mieWait || copy.approval.waiting,
+      mml: null,
+      policy: copy.pure?.mieNote || copy.approval.note,
+      remaining: remainingSeconds(approval.requestedAt, approval.timeoutSeconds),
+      options: [
+        { action: "approve", label: copy.approval.approve, primary: true },
+        { action: "reject", label: copy.approval.reject, danger: true },
+      ],
+    };
+  }
   // A gate that is still marked waiting when the run has already ended must not keep the page
   // stuck on the card: the ending card has to take over.
   if (state.approvalState !== "waiting" || state.finished || state.status !== "running") return null;
@@ -162,4 +192,8 @@ function clean(payload) {
     if (value !== null && value !== undefined && value !== "") result[key] = value;
   }
   return result;
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

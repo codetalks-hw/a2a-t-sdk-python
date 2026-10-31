@@ -130,15 +130,37 @@ Web UI 默认打开演示视图：左侧是 16:9 的舞台，依次是网络工�
 舞台按人的节奏跟随真实运行，共九步：请求、结构化 Task-T、审批 1（意图）、下发 Task-T、需要时协商、
 策略与任务启动、数据采集（第 2–8 天，时间压缩）、审批 2（MIE 中的 MML）、下发与报告。右侧保留证据
 层：OSS Agent 理解到的任务（含 24 小时保障速率图）、协商轮次、**On the wire** 报文检查器，以及合并
-后的会话轨迹。On the wire 展示真实的 A2A 请求头、JSON body 和 Task-T metadata；切换到 **普通 A2A**
-时，同一请求被写成一句自然语言，去掉扩展头和 Task-T 字段（这是同一条消息的格式视图）。点击
+后的会话轨迹。On the wire 展示真实的 A2A 请求头、JSON body 和 Task-T metadata；在 A2A-T 模式下切换到
+**普通 A2A** 时，同一请求被写成一句自然语言，去掉扩展头和 Task-T 字段（这是同一条消息的格式视图）。点击
 会话轨迹的一行会在检查器中选中该消息。
 
-页面还提供**协议切换**。“夜间节能”和“缺参数”两个示例可以改用**普通 A2A**运行：只发一条自然语言
-消息，没有 Task-T 模板，也没有协商。同一张 AgentCard 同时服务两种协议——没有声明 Task-T 扩展的请求
-进入普通 A2A 入口，文本直接交给同一套受约束的规划器。普通 A2A 模式下，意图审批和协商步骤标为“不适用”；
-请求缺少分时段保障速率目标时直接拒绝，而不是猜测。运行结束后，对比卡把两次真实运行并排展示：意图、
-协商轮次、校验与结局。CLI 可用 `--protocol plain` 运行。
+### 纯 A2A 模式（三跳，只用标准 A2A）
+
+页面是单模式的：协议在进程启动时确定，页面不再提供协议切换或对比卡。要对比两种模式，分别启动
+A2A-T 演示和纯 A2A 演示即可。
+
+`--protocol pure` 启动真实的三跳 A2A 链路：
+
+```
+工程师/UI ──A2A──► OSS Agent (:8001) ──A2A──► RAN Agent (:8000) ──A2A──► MIE Agent (:8002)
+```
+
+- OSS Agent 把工程师请求原样转发给 RAN Agent。缺参数或目标冲突时，RAN Agent 返回标准 A2A Task 的
+  `INPUT_REQUIRED`；OSS Agent 带 `taskId`/`contextId` 在同一任务上发后续消息作答，最多 3 轮。
+  全程不生成、不返回 `Task-T/v1` 或 `Negotiation-T/v1` metadata。
+- RAN Agent 在下发方案前通过 A2A 请求 MIE Agent 审批。MIE Agent 通过自己的 SSE 把审批卡推给页面，
+  工程师的批准/拒绝通过 `POST /api/mie/approvals/{taskId}` 回到 MIE。
+- 演示会展示 OSS、RAN、MIE 三跳、协商轮次、MIE 审批卡，以及每次运行的指标（跳数、协商轮次、
+  A2A 消息数）。示例包括 `night`（无协商）、`information`（缺参 1 轮）和 `target`（先反提议再接受）。
+- 旧的单轮 `plain` 路径仍保留在代码和测试中作为内部基线，但 CLI 和页面都不再暴露。
+
+```bash
+# 纯 A2A：三跳 + MIE 人工审批
+uv run python -m demo.run_demo --protocol pure --ui --approval-gate --scenario information
+
+# 现有 A2A-T 模式（Task-T + Negotiation-T），行为不变
+uv run python -m demo.run_demo --protocol a2a-t --ui --mode confirm --approval-gate --scenario information
+```
 
 审批 1 是真实的：`--mode confirm` 下，Task-T 在离开 OSS Agent 之前停住，工程师确认结构化意图后才
 发送。审批 2 是 MIE 的 MML 审核：`--approval-gate` 下，RAN Agent 在下发前发布真实的 A2A

@@ -27,7 +27,6 @@ import { createStage, setStageCopy } from "./stage.js";
 import { createRail } from "./rail.js";
 import { createTrace, entryOfRow } from "./trace.js";
 import { createWire } from "./wire.js";
-import { buildRecord, compareRows } from "./compare.js";
 import { renderIntent } from "./intent.js";
 import {
   approvalCard,
@@ -56,6 +55,7 @@ const REPEATED_SILENT = new Set([
   "collect-done",
   "approval-ready",
   "approval",
+  "approval-pure",
   "apply",
   "report",
   "end",
@@ -72,9 +72,9 @@ const els = {
   runPill: byId("run-pill"),
   scenariosLabel: byId("scenarios-label"),
   protocolLabel: byId("protocol-label"),
-  protocolA2at: byId("proto-a2at"),
-  protocolPlain: byId("proto-plain"),
+  protocolBadge: byId("protocol-badge"),
   protocolHint: byId("protocol-hint"),
+  wireFormat: byId("wire-format"),
   chips: byId("scenario-chips"),
   scenarioDesc: byId("scenario-desc"),
   requestCard: byId("request-card"),
@@ -190,6 +190,8 @@ const ui = {
   lastQueuedScene: null,
   terminalApplied: null,
   source: null,
+  mieSource: null,
+  mieEnabled: false,
   busy: false,
   tab: "business",
   selectedTurn: -1,
@@ -288,16 +290,18 @@ async function boot() {
   }
   ui.copy = copyFor(ui.meta.language);
   ui.selected = ui.meta.defaultScenario || ui.meta.scenarios?.[0] || null;
+  ui.protocol = ui.meta.protocol || ui.meta.defaultProtocol || "a2a-t";
+  ui.mieEnabled = Boolean(ui.meta.mieEnabled);
   els.requestText.value = ui.meta.scenarioRequests?.[ui.selected] || "";
   applyStaticCopy();
+  renderProtocol();
   renderPresets();
   renderBottomCopy();
+  subscribeMie();
   render();
 }
 
 function bindStaticEvents() {
-  els.protocolA2at.addEventListener("click", () => setProtocol("a2a-t"));
-  els.protocolPlain.addEventListener("click", () => setProtocol("plain"));
   els.start.addEventListener("click", () => startRun());
   els.reset.addEventListener("click", resetRequest);
   els.editRequest.addEventListener("click", () => {
@@ -395,8 +399,6 @@ function applyStaticCopy() {
   els.title.textContent = copy.title;
   els.badge.textContent = copy.badge;
   els.protocolLabel.textContent = copy.protocol.label;
-  els.protocolA2at.textContent = copy.protocol.a2at;
-  els.protocolPlain.textContent = copy.protocol.plain;
   els.runPill.textContent =
     ui.meta?.modelMode === "offline" ? copy.runPillOffline : copy.runPillLive;
   els.scenariosLabel.textContent = copy.scenarioLabel;
@@ -622,6 +624,51 @@ function subscribe(runId) {
   };
 }
 
+/** Subscribe to the MIE Agent approval stream of the pure A2A three-hop mode. */
+function subscribeMie() {
+  if (!ui.mieEnabled) return;
+  if (ui.mieSource) ui.mieSource.close();
+  const source = new EventSource("/api/mie/events");
+  ui.mieSource = source;
+  source.onmessage = (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (payload !== null && typeof payload === "object") handleMieEvent(payload);
+  };
+}
+
+/** Apply one MIE approval event: fill or clear the card; release the held scene on a decision. */
+function handleMieEvent(payload) {
+  if (payload.type === "approval_requested") {
+    // Store the card now, but let the run SSE's approval scene decide when to show it. The MIE
+    // event usually arrives before the OSS relays the wait, and showing it at step 1 would let
+    // the audience approve before the story reaches the approval step.
+    ui.view.mieApproval = { ...payload, requestedAt: new Date().toISOString() };
+    ui.shadow.mieApproval = ui.view.mieApproval;
+    render();
+    return;
+  }
+  if (payload.type === "approval_resolved") {
+    const resolved = {
+      approved: payload.approved === true,
+      reason: payload.reason ?? null,
+    };
+    ui.view.mieResolved = resolved;
+    ui.shadow.mieResolved = resolved;
+    ui.view.mieApproval = null;
+    ui.shadow.mieApproval = null;
+    ui.view.mieWaiting = false;
+    ui.shadow.mieWaiting = false;
+    if (resolved.approved) stage.approvalResolved(ui.copy, ui.view);
+    player.release();
+    render();
+  }
+}
+
 function enqueueFrame(frame) {
   const key = frameKey(frame);
   if (key !== null) {
@@ -774,6 +821,7 @@ function renderIntentPanel() {
 function renderSteps() {
   if (ui.steps === undefined) {
     els.steps.replaceChildren();
+    const pureSteps = ui.protocol === "pure" ? ui.copy.pure?.steps || {} : {};
     for (const key of STEP_KEYS) {
       const item = el("li");
       const button = el("button");
@@ -781,7 +829,7 @@ function renderSteps() {
       button.dataset.step = key;
       button.append(
         el("b", "", String(STEP_KEYS.indexOf(key) + 1)),
-        el("span", "", ui.copy.steps[key] || key),
+        el("span", "", pureSteps[key] || ui.copy.steps[key] || key),
         el("em", "", ui.copy.stepWhen[key] || ""),
       );
       button.addEventListener("click", () => {
@@ -1077,7 +1125,11 @@ async function submitApproval(approved) {
   const card = approvalCard(ui.view, ui.copy);
   if (card) renderChoices(card);
   try {
-    const response = await fetch(`/api/runs/${encodeURIComponent(ui.view.runId)}/approvals`, {
+    const endpoint =
+      card?.pure && card.taskId
+        ? `/api/mie/approvals/${encodeURIComponent(card.taskId)}`
+        : `/api/runs/${encodeURIComponent(ui.view.runId)}/approvals`;
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ approved }),
@@ -1088,12 +1140,22 @@ async function submitApproval(approved) {
     }
     ui.submitting = false;
     ui.cardError = "";
-    ui.view.approvalState = approved ? "approved" : "rejected";
-    // The scene of the next frame is chosen from the shadow state at enqueue time. The server's
-    // "Approved. Applying the plan." frame arrives before its approval-resolved span, so without
-    // this the show would replay "strategy & start" after the MIE review.
-    ui.shadow.approvalState = ui.view.approvalState;
-    if (approved) stage.approvalResolved(ui.copy);
+    if (card?.pure) {
+      ui.view.mieResolved = { approved, reason: null };
+      ui.shadow.mieResolved = ui.view.mieResolved;
+      ui.view.mieApproval = null;
+      ui.shadow.mieApproval = null;
+      ui.view.mieWaiting = false;
+      ui.shadow.mieWaiting = false;
+      if (approved) stage.approvalResolved(ui.copy, ui.view);
+    } else {
+      ui.view.approvalState = approved ? "approved" : "rejected";
+      // The scene of the next frame is chosen from the shadow state at enqueue time. The server's
+      // "Approved. Applying the plan." frame arrives before its approval-resolved span, so without
+      // this the show would replay "strategy & start" after the MIE review.
+      ui.shadow.approvalState = ui.view.approvalState;
+      if (approved) stage.approvalResolved(ui.copy, ui.view);
+    }
     player.release();
     render();
   } catch (error) {
@@ -1190,9 +1252,43 @@ function buildResultCard() {
   } else {
     return null;
   }
-  const comparison = comparisonCard();
-  if (comparison) card.append(comparison);
+  if (ui.view.protocol === "pure") {
+    const metrics = ui.view.pureMetrics || pureMetricsFromLog();
+    if (metrics) card.append(pureMetricsBlock(metrics, ui.copy));
+  }
   return card;
+}
+
+/** Read the pure run metrics from the frame log when a terminal bypass skipped the last event. */
+function pureMetricsFromLog() {
+  for (let index = ui.frameLog.length - 1; index >= 0; index -= 1) {
+    const frame = ui.frameLog[index];
+    if (frame?.type !== "event") continue;
+    const detail = frame.event?.detail;
+    const pure = detail?.pure;
+    if (pure && Number.isInteger(pure.hops)) {
+      return { ...pure, hop: detail.hop ?? pure.hop ?? null };
+    }
+  }
+  return null;
+}
+
+/** Compact metrics block of one pure A2A run. */
+function pureMetricsBlock(metrics, copy) {
+  const block = el("section", "pure-metrics");
+  block.append(el("h4", "pure-metrics-title", copy.pure?.metrics || "This pure A2A run"));
+  const rows = [
+    [copy.pure?.hops || "hops", metrics.hops],
+    [copy.pure?.rounds || "rounds", metrics.rounds],
+    [copy.pure?.messages || "messages", metrics.messages],
+  ];
+  for (const [label, value] of rows) {
+    if (value === null || value === undefined || value === "") continue;
+    const row = el("div", "pure-metric");
+    row.append(el("span", "", String(label)), el("b", "", String(value)));
+    block.append(row);
+  }
+  return block;
 }
 
 /** Bring the ending (and the comparison card) into view once per finished run. */
@@ -1204,95 +1300,6 @@ function revealResult() {
     if (!target) return;
     target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
   });
-}
-
-const COMPARE_STORAGE_KEY = "a2at.protocol-compare.v1";
-
-/** Read the stored run records of one scenario (``{}`` when storage is unavailable). */
-function loadCompare(scenario) {
-  try {
-    const raw = window.localStorage.getItem(COMPARE_STORAGE_KEY);
-    const all = raw ? JSON.parse(raw) : {};
-    const stored = all && typeof all === "object" ? all[scenario] : null;
-    return stored && typeof stored === "object" ? stored : {};
-  } catch {
-    return {};
-  }
-}
-
-/** Persist one scenario's run records. */
-function saveCompare(scenario, value) {
-  try {
-    const raw = window.localStorage.getItem(COMPARE_STORAGE_KEY);
-    const all = raw ? JSON.parse(raw) : {};
-    all[scenario] = value;
-    window.localStorage.setItem(COMPARE_STORAGE_KEY, JSON.stringify(all));
-  } catch {
-    /* storage is optional */
-  }
-}
-
-/** Build the two-protocol card from the two real runs recorded in this browser. */
-function comparisonCard() {
-  const scenario = ui.view.scenario;
-  if (!ui.view.finished || !(ui.meta?.plainScenarios || []).includes(scenario)) return null;
-  const record = buildRecord(ui.view);
-  if (ui.compareSaved !== ui.view.runId) {
-    const stored = loadCompare(scenario);
-    stored[record.protocol] = record;
-    saveCompare(scenario, stored);
-    ui.compareSaved = ui.view.runId;
-  }
-  const stored = loadCompare(scenario);
-  const a2at = stored.a2at || null;
-  const plain = stored.plain || null;
-  const section = el("section", "compare");
-  section.append(el("h4", "compare-title", ui.copy.compare.title));
-  const table = el("table", "compare-table");
-  const head = el("tr");
-  head.append(
-    el("th", "", ""),
-    el("th", "", ui.copy.compare.a2atLabel),
-    el("th", "", ui.copy.compare.plainLabel),
-  );
-  table.append(head);
-  for (const row of compareRows(ui.copy, a2at, plain)) {
-    const line = el("tr");
-    line.append(el("th", "", row.label), el("td", "", row.a2at), el("td", "", row.plain));
-    table.append(line);
-  }
-  section.append(table);
-  const missing = record.protocol === "plain" ? "a2at" : "plain";
-  if (!stored[missing]) {
-    const hint = el("p", "compare-hint");
-    hint.append(
-      el(
-        "span",
-        "",
-        format(ui.copy.compare.runOther, {
-          protocol:
-            missing === "plain"
-              ? ui.copy.compare.plainLabel
-              : ui.copy.compare.a2atLabel,
-        }),
-      ),
-    );
-    const button = el(
-      "button",
-      "btn",
-      missing === "plain" ? ui.copy.compare.plainLabel : ui.copy.compare.a2atLabel,
-    );
-    button.type = "button";
-    const protocol = missing === "plain" ? "plain" : "a2a-t";
-    button.addEventListener("click", () => {
-      setProtocol(protocol);
-      if (ui.protocol !== protocol) return;
-      startRun();
-    });
-    hint.append(button);
-    section.append(hint);
-  }
-  return section;
 }
 
 function reportCard(report, copy) {
@@ -1339,40 +1346,68 @@ function reportPercent(report) {
 }
 
 function narration(scene, stepKey) {
-  const plain = (ui.view.protocol || ui.protocol) === "plain";
-  if (plain && scene.key === "send") {
+  const protocol = ui.view.protocol || ui.protocol;
+  if (protocol === "pure") {
+    const pureKey = {
+      send: "pureSend",
+      propose: "purePropose",
+      decision: "purePropose",
+      "approval-pure": "pureApproval",
+      report: "pureReport",
+      finish: "pureFinish",
+    }[scene.key];
+    if (pureKey && ui.copy.narration[pureKey]) return ui.copy.narration[pureKey];
+  }
+  if (protocol === "plain" && scene.key === "send") {
     return ui.copy.narration.plainSend || ui.copy.narration.send;
   }
   return ui.copy.narration[scene.key] || ui.copy.narration[stepKey] || scenarioStory(ui.copy, ui.selected);
 }
 
-/** Whether the selected scenario supports the plain-A2A comparison. */
-function plainAllowed() {
-  return (ui.meta?.plainScenarios || []).includes(ui.selected);
-}
-
-/** Switch the protocol of the next run and refresh the switch state. */
-function setProtocol(protocol) {
-  if (ui.busy) return;
-  if (protocol !== "plain" && protocol !== "a2a-t") return;
-  if (protocol === "plain" && !plainAllowed()) return;
-  ui.protocol = protocol;
-  renderProtocol();
-}
-
-/** Render the protocol switch: plain is offered only where a comparison exists. */
+/** Render the active protocol of this process. The page never switches protocol at runtime. */
 function renderProtocol() {
-  const available = plainAllowed();
-  if (!available) ui.protocol = "a2a-t";
-  const plain = ui.protocol === "plain";
-  els.protocolA2at.setAttribute("aria-pressed", String(!plain));
-  els.protocolPlain.setAttribute("aria-pressed", String(plain));
-  els.protocolPlain.disabled = !available;
-  els.protocolPlain.title = available
-    ? ui.copy.protocol.plainHint
-    : ui.copy.protocol.unavailable;
-  els.protocolHint.textContent = plain ? ui.copy.protocol.plainHint : "";
-  els.protocolHint.hidden = !plain;
+  const pure = ui.protocol === "pure";
+  if (els.protocolLabel) els.protocolLabel.textContent = ui.copy.protocol.label;
+  if (els.protocolBadge) {
+    els.protocolBadge.textContent = pure ? ui.copy.protocol.pure : ui.copy.protocol.a2at;
+  }
+  els.protocolHint.textContent = pure ? ui.copy.protocol.pureHint : "";
+  els.protocolHint.hidden = !pure;
+  if (els.badge) els.badge.textContent = pure ? ui.copy.pure.badge : ui.copy.badge;
+  if (els.wireFormat) els.wireFormat.hidden = pure;
+  if (els.tabWire) els.tabWire.hidden = pure;
+
+  // The stage carries protocol-specific labels outside the copy registry (the SVG channel and
+  // the MIE role). Keep them consistent with the active process protocol.
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  };
+  if (pure) {
+    els.brandKicker.textContent = ui.copy.pure.kicker;
+    els.title.textContent = ui.copy.pure.title;
+    document.title = ui.copy.pure.title;
+    setText("brand-mark", "A2A");
+    setText("chan-label", ui.copy.pure.channel);
+    setText("chan-sub1", ui.copy.pure.channelSub1);
+    setText("chan-sub2", ui.copy.pure.channelSub2);
+    setText("lane-task-label", ui.copy.pure.laneTask);
+    setText("lane-status-label", ui.copy.pure.laneStatus);
+    setText("approval-org", ui.copy.pure.mieOrg);
+    setText("nms-note", ui.copy.pure.nmsNote);
+  } else {
+    els.brandKicker.textContent = ui.copy.kicker;
+    els.title.textContent = ui.copy.title;
+    document.title = ui.copy.title;
+    setText("brand-mark", "A2A-T");
+    setText("chan-label", ui.copy.map.channel);
+    setText("chan-sub1", ui.copy.map.channelSub1);
+    setText("chan-sub2", ui.copy.map.channelSub2);
+    setText("lane-task-label", ui.copy.map.laneTask);
+    setText("lane-status-label", ui.copy.map.laneStatus);
+    setText("approval-org", ui.copy.roles.approvalOrg);
+    setText("nms-note", ui.copy.roles.nmsNote);
+  }
 }
 
 function copyRemaining(card) {

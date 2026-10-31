@@ -1,0 +1,95 @@
+"""Demo business rules of the pure A2A target negotiation.
+
+The protocol module (:mod:`protocol.pure_a2a`) knows how to ask and resume a Task; this module
+knows the RAN dataset's baseline/corrected targets and the deterministic answers used by the
+offline demo and tests. Keeping the two apart lets the pure mode reuse the demonstration data
+without teaching the protocol layer about any scenario.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Final
+
+from protocol.pure_a2a import RegexPureTargetPolicy
+from shared.run_constants import LANGUAGE_EN, LANGUAGE_ZH
+
+from demo.scenario import KIND_INFORMATION, KIND_TARGET, accept_filled_params
+
+#: Alternative non-overlapping target used as the first counter-proposal of the target scenario.
+_ALTERNATIVE_TARGETS: Final[dict[str, str]] = {
+    LANGUAGE_EN: "{00:00~17:30,10Mbps}, {17:30~20:00,20Mbps}, {20:00~00:00,10Mbps}",
+    LANGUAGE_ZH: "{00:00~17:30,10Mbps}、{17:30~20:00,20Mbps}、{20:00~00:00,10Mbps}",
+}
+
+
+def _target_for(kind: str, language: str) -> str:
+    """Return one accepted target of ``kind`` for ``language``."""
+    params = accept_filled_params(kind, language)
+    value = params.get("guaranteedThroughputTarget")
+    return value if isinstance(value, str) else ""
+
+
+def pure_base_target(language: str = LANGUAGE_EN) -> str:
+    """Return the complete, non-overlapping target of the night scenario."""
+    return _target_for(KIND_INFORMATION, language)
+
+
+def pure_corrected_target(language: str = LANGUAGE_EN) -> str:
+    """Return the target the server proposes for overlapping segments."""
+    return _target_for(KIND_TARGET, language)
+
+
+def build_demo_pure_policy(language: str = LANGUAGE_EN) -> RegexPureTargetPolicy:
+    """Build the pure target policy backed by the demonstration dataset."""
+    return RegexPureTargetPolicy(
+        base_targets={
+            LANGUAGE_EN: pure_corrected_target(LANGUAGE_EN),
+            LANGUAGE_ZH: pure_corrected_target(LANGUAGE_ZH),
+        }
+    )
+
+
+def pure_answer_for(kind: str, round_number: int, language: str = LANGUAGE_EN) -> str:
+    """Return the deterministic client answer of one pure negotiation round.
+
+    ``information`` supplies the omitted target. ``target`` first counter-proposes a different
+    valid target and then accepts the server's proposal, so the demo shows a real multi-round
+    exchange rather than an immediate accept.
+    """
+    if kind == KIND_INFORMATION:
+        return pure_base_target(language)
+    if kind == KIND_TARGET:
+        if round_number <= 1:
+            return _ALTERNATIVE_TARGETS.get(language, _ALTERNATIVE_TARGETS[LANGUAGE_EN])
+        return pure_corrected_target(language)
+    return pure_base_target(language)
+
+
+def pure_answer_from_event(
+    event: Mapping[str, object], language: str = LANGUAGE_EN
+) -> str:
+    """Answer one normalized pure ``INPUT_REQUIRED`` event from its ``pure`` metadata."""
+    metadata = event.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    raw = metadata.get("pure")
+    if not isinstance(raw, Mapping):
+        return ""
+    kind = raw.get("phase")
+    if not isinstance(kind, str) or not kind:
+        return ""
+    try:
+        round_number = int(raw.get("round", 1) or 1)
+    except (TypeError, ValueError):
+        round_number = 1
+    return pure_answer_for(kind, round_number, language)
+
+
+__all__ = [
+    "build_demo_pure_policy",
+    "pure_answer_for",
+    "pure_answer_from_event",
+    "pure_base_target",
+    "pure_corrected_target",
+]

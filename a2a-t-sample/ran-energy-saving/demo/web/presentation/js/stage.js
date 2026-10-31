@@ -184,8 +184,18 @@ export function createStage(els) {
   }
 
   /** Reflect the MIE decision immediately; the next frame carries the workflow. */
-  function approvalResolved(copy) {
+  function approvalResolved(copy, state) {
     directed = true;
+    if (state?.protocol === "pure") {
+      setMie("ok", copy.states.approvalConfirmed);
+      setActor("nms", {
+        cls: "active",
+        text: copy.states.nmsResuming || copy.states.nmsExecuted,
+      });
+      note("nms", copy.roles.nms, copy.pure?.mieApproved || copy.states.approvalConfirmed);
+      fly("lane-data", copy.pure?.mieApproved || copy.states.approvalConfirmed, "data", 900);
+      return;
+    }
     setActor("eng", { cls: "ok", text: copy.states.engAcknowledged });
     note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
     setMie("ok", copy.states.approvalConfirmed);
@@ -431,6 +441,20 @@ export function createStage(els) {
       return;
     }
     if (key === "approval-ready") {
+      if (state.protocol === "pure") {
+        setActors({
+          ...base,
+          eng: { cls: "wait", text: copy.pure?.engWait || copy.states.engWaiting },
+          oss: { cls: "active", text: copy.states.ossFollowing },
+          nms: { cls: "active", text: copy.states.nmsEvaluating },
+          cells: { cls: "", text: copy.states.cellsBaseline },
+        });
+        setMie("active", copy.states.approvalWaiting);
+        note("nms", roles.nms, copy.pure?.planReady || copy.approval.suggestionsReady, true);
+        note("oss", roles.oss, copy.states.ossFollowing, true);
+        note("eng", roles.eng, copy.pure?.engWait || copy.states.engWaiting, true);
+        return;
+      }
       setActors({
         ...base,
         eng: { cls: "active", text: copy.states.engReviewing },
@@ -449,6 +473,27 @@ export function createStage(els) {
         note("eng", roles.eng, copy.approval.checkingMml, true);
         fly("lane-approval", copy.approval.reviewInMie, "neg", 1600);
         setActor("eng", { cls: "wait", text: copy.states.engChecking });
+      });
+      return;
+    }
+    if (key === "approval-pure") {
+      setActors({
+        ...base,
+        eng: { cls: "wait", text: copy.pure?.engWait || copy.states.engWaiting },
+        oss: { cls: "wait", text: copy.states.ossWaitingResults },
+        nms: { cls: "wait", text: copy.states.nmsWaitingApproval || copy.states.nmsSuggestions },
+        cells: { cls: "", text: copy.states.cellsBaseline },
+      });
+      setMie("waiting", copy.states.approvalWaiting);
+      note("nms", roles.nms, copy.pure?.mieRequest || copy.approval.suggestions, true);
+      note("eng", roles.eng, copy.pure?.engWait || "");
+      fly("lane-mie-request", copy.pure?.mieRequest || copy.approval.suggestions, "neg", 1200);
+      later(700, () => {
+        note("oss", roles.oss, copy.pure?.mieWait || copy.approval.waiting, true);
+        setActor("nms", {
+          cls: "wait",
+          text: copy.states.nmsWaitingApproval || copy.states.nmsSuggestions,
+        });
       });
       return;
     }

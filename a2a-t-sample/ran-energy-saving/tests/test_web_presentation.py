@@ -71,6 +71,7 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
         'id="p-intent"',
         'id="p-nego"',
         'id="p-trace"',
+        'id="protocol-badge"',
         'id="turns"',
         'id="wire"',
         'id="wire-t"',
@@ -80,6 +81,10 @@ async def test_root_serves_the_presentation_shell(client: httpx.AsyncClient) -> 
         'id="trace-rows"',
     ):
         assert marker in page, marker
+    # The protocol is chosen at startup; the page has no in-page switch.
+    assert 'id="protocol-switch"' not in page
+    assert 'id="proto-a2at"' not in page
+    assert 'id="proto-plain"' not in page
     # One module script, no inline payload rendering.
     assert page.count("<script") == 1
     assert "innerHTML" not in page
@@ -129,6 +134,31 @@ async def test_meta_reports_the_presentation_mode_and_the_seven_scenarios(
     assert meta["approvalGate"] is False
     assert meta["approvalTimeoutSeconds"] == 240.0
     assert "confirm" in meta["modes"]
+
+
+async def test_pure_meta_exposes_its_scenarios_and_mie(
+    offline_config: SampleConfig,
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        offline_config,
+        runs_dir=tmp_path,
+        protocol="pure",
+        mie_url="http://127.0.0.1:8002",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        meta = (await http_client.get("/api/meta")).json()
+        page = (await http_client.get("/")).text
+
+    assert meta["protocol"] == "pure"
+    assert meta["protocols"] == ["pure"]
+    assert meta["defaultProtocol"] == "pure"
+    assert meta["scenarios"] == ["night", "information", "target"]
+    assert meta["pureScenarios"] == ["night", "information", "target"]
+    assert meta["mieEnabled"] is True
+    assert 'id="protocol-badge"' in page
+    assert 'id="protocol-switch"' not in page
 
 
 async def test_unknown_ui_mode_is_rejected(offline_config: SampleConfig, tmp_path: Path) -> None:

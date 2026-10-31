@@ -146,12 +146,19 @@ class NegotiationOutcome:
         task_request: request context to hand to the deterministic executor; ``None`` on short circuit.
         terminal_task: terminal ``REJECTED`` Task for an unmapped Task-T validation failure; it is
             enqueued as-is, so no agent runs and no Task lifecycle beyond REJECTED is produced.
+        input_required_task: non-terminal ``INPUT_REQUIRED`` Task of the pure A2A mode. The outer
+            executor enqueues the Task and then a status update carrying its message, so a standard
+            A2A client can read the question and continue the Task.
+        resume_prompt: prompt the pure A2A mode negotiated; the outer executor resumes the existing
+            ``INPUT_REQUIRED`` Task with this prompt instead of creating a new Task.
     """
 
     short_circuit: bool
     message: Message | None = None
     task_request: RequestContext | None = None
     terminal_task: Task | None = None
+    input_required_task: Task | None = None
+    resume_prompt: str | None = None
 
     @classmethod
     def execution(cls, context: RequestContext) -> NegotiationOutcome:
@@ -167,6 +174,16 @@ class NegotiationOutcome:
     def rejected(cls, task: Task) -> NegotiationOutcome:
         """Return an outcome that enqueues a terminal ``REJECTED`` Task without running the agent."""
         return cls(short_circuit=True, terminal_task=task)
+
+    @classmethod
+    def input_required(cls, task: Task) -> NegotiationOutcome:
+        """Return an outcome that enqueues a non-terminal ``INPUT_REQUIRED`` Task."""
+        return cls(short_circuit=True, input_required_task=task)
+
+    @classmethod
+    def resume(cls, context: RequestContext, prompt: str) -> NegotiationOutcome:
+        """Return an outcome that resumes the existing Task with a negotiated prompt."""
+        return cls(short_circuit=False, task_request=context, resume_prompt=prompt)
 
 
 @dataclass(frozen=True)

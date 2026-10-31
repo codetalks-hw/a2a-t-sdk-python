@@ -68,7 +68,7 @@ from shared.http_security import (
 )
 from shared.logging_setup import configure_logging
 from shared.registry_client import register_agentcard
-from shared.run_constants import MAX_ROUNDS
+from shared.run_constants import MAX_ROUNDS, PROTOCOL_A2A_T, PROTOCOL_PURE
 from shared.sdk_env import prepare_sdk_env
 from shared.trace import FileTraceEmitter, HttpTraceEmitter, set_global_sink
 from shared.traced_llm import register_traced_providers
@@ -79,9 +79,11 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from protocol.approval_gate import ApprovalRegistry
+from protocol.mie_client import MIEApprovalClient
 from protocol.negotiation_policy import NegotiationState, PolicyDecision
 from protocol.plain_a2a import PlainTaskHandler, ProtocolDispatchHandler
 from protocol.pre_task_negotiation import PreTaskNegotiationHandler, TaskTPrecheck
+from protocol.pure_a2a import PureTargetPolicy, PureTaskHandler
 from protocol.server_agent_spec import ServerAgentFactory
 from protocol.server_executor import (
     NegotiationAgentExecutor,
@@ -360,6 +362,12 @@ def build_server_runtime(
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
     install_offline_provider: Callable[[], None] | None = None,
+    protocol_mode: str = PROTOCOL_A2A_T,
+    pure_policy: PureTargetPolicy | None = None,
+    mie_url: str | None = None,
+    mie_client: MIEApprovalClient | None = None,
+    approval_gate: bool | None = None,
+    approval_timeout_seconds: float | None = None,
 ) -> ServerRuntime:
     """Assemble the full server runtime.
 
@@ -374,13 +382,28 @@ def build_server_runtime(
         logger: optional logger shared by the gate and the runtime.
         install_offline_provider: installer of the deterministic SDK LLM routing; required in
             offline mode.
+        protocol_mode: ``a2a-t`` keeps the existing pre-task gate; ``pure`` installs the
+            extension-free INPUT_REQUIRED handler.
+        pure_policy: business policy of the pure target negotiation; when omitted, a policy with
+            no configured baseline target is used (tests may inject one).
+        mie_url: MIE Agent base URL of the pure approval hop; defaults to
+            ``A2AT_SAMPLE_MIE_URL`` or ``http://127.0.0.1:8002``.
+        mie_client: optional pre-built MIE approval client (tests).
+        approval_gate: override of the ``A2AT_SAMPLE_APPROVAL_GATE`` switch (tests); ``None``
+            keeps the environment-driven behavior.
+        approval_timeout_seconds: override of the approval timeout (tests).
 
     Returns:
         The assembled runtime, including the Starlette app.
 
     Raises:
-        ValueError: when offline mode has no deterministic provider installer.
+        ValueError: when offline mode has no deterministic provider installer, or when
+            ``protocol_mode`` is unknown.
     """
+    if protocol_mode not in (PROTOCOL_A2A_T, PROTOCOL_PURE):
+        raise ValueError(
+            f"Unsupported server protocol mode: {protocol_mode}; expected a2a-t or pure"
+        )
     resolved_logger = logger or _LOGGER
     resolved_config = config or load_config(env_path=env_path)
     validate_bind_security(
@@ -400,31 +423,60 @@ def build_server_runtime(
         set_global_sink(trace_emitter)
     sdk_env_path = prepare_sdk_env_path(resolved_config, env_path)
     prompt_server = A2ATServer(env_path=sdk_env_path, logger=resolved_logger)
-    pre_task_handler = ProtocolDispatchHandler(
-        PreTaskNegotiationHandler(
-            prompt_server,
+    if protocol_mode == PROTOCOL_PURE:
+        from protocol.pure_a2a import RegexPureTargetPolicy
+
+        pre_task_handler: TaskRequestHandler = PureTaskHandler(
+            policy=pure_policy or RegexPureTargetPolicy(),
+            language=resolved_config.language,
             max_rounds=MAX_ROUNDS,
             logger=resolved_logger,
-            policy=policy,
-            precheck=precheck,
-        ),
-        PlainTaskHandler(logger=resolved_logger),
-    )
-    approval_enabled = os.environ.get("A2AT_SAMPLE_APPROVAL_GATE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-    approval_timeout = float(
-        os.environ.get("A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS", "240") or "240"
+        )
+    else:
+        pre_task_handler = ProtocolDispatchHandler(
+            PreTaskNegotiationHandler(
+                prompt_server,
+                max_rounds=MAX_ROUNDS,
+                logger=resolved_logger,
+                policy=policy,
+                precheck=precheck,
+            ),
+            PlainTaskHandler(logger=resolved_logger),
+        )
+    if approval_gate is None:
+        approval_enabled = os.environ.get(
+            "A2AT_SAMPLE_APPROVAL_GATE", ""
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+    else:
+        approval_enabled = approval_gate
+    approval_timeout = (
+        approval_timeout_seconds
+        if approval_timeout_seconds is not None
+        else float(os.environ.get("A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS", "240") or "240")
     )
     approval_registry = ApprovalRegistry() if approval_enabled else None
+    if protocol_mode == PROTOCOL_PURE and approval_enabled and mie_client is None:
+        resolved_mie_url = (
+            mie_url
+            or os.environ.get("A2AT_SAMPLE_MIE_URL", "http://127.0.0.1:8002")
+        ).strip()
+        if resolved_mie_url:
+            mie_client = MIEApprovalClient(
+                base_url=resolved_mie_url,
+                timeout_seconds=resolved_config.http_timeout_seconds,
+            )
     executor = build_negotiation_executor(
         handler=pre_task_handler,
         agent_factory=agent_factory,
         config=resolved_config,
         approval_registry=approval_registry,
         approval_timeout_seconds=approval_timeout,
+        pure=protocol_mode == PROTOCOL_PURE,
+        mie_client=mie_client,
     )
     task_store: TaskStore = (
         SqliteTaskStore(resolved_config.task_db_path)
@@ -451,6 +503,7 @@ def build_server_runtime(
     app.state.pre_task_handler = pre_task_handler
     app.state.trace_emitter = trace_emitter
     app.state.approval_registry = approval_registry
+    app.state.mie_client = mie_client
     return ServerRuntime(
         config=resolved_config,
         agent_card=agent_card,
@@ -472,6 +525,12 @@ def build_server_app(
     env_path: Path | None = None,
     logger: logging.Logger | None = None,
     install_offline_provider: Callable[[], None] | None = None,
+    protocol_mode: str = PROTOCOL_A2A_T,
+    pure_policy: PureTargetPolicy | None = None,
+    mie_url: str | None = None,
+    mie_client: MIEApprovalClient | None = None,
+    approval_gate: bool | None = None,
+    approval_timeout_seconds: float | None = None,
 ) -> Starlette:
     """Build only the Starlette app (see :func:`build_server_runtime` for the full runtime)."""
     return build_server_runtime(
@@ -482,6 +541,12 @@ def build_server_app(
         env_path=env_path,
         logger=logger,
         install_offline_provider=install_offline_provider,
+        protocol_mode=protocol_mode,
+        pure_policy=pure_policy,
+        mie_url=mie_url,
+        mie_client=mie_client,
+        approval_gate=approval_gate,
+        approval_timeout_seconds=approval_timeout_seconds,
     ).app
 
 
@@ -530,13 +595,27 @@ def main() -> None:
         build_demo_task_t_precheck,
         install_offline_provider,
     )
+    from demo.pure_policy import build_demo_pure_policy
 
+    resolved_config = load_config(env_path=resolved_env_path)
+    protocol_mode = (
+        os.environ.get("A2AT_SAMPLE_PROTOCOL_MODE", PROTOCOL_A2A_T).strip()
+        or PROTOCOL_A2A_T
+    )
+    pure_policy = (
+        build_demo_pure_policy(resolved_config.language)
+        if protocol_mode == PROTOCOL_PURE
+        else None
+    )
     runtime = build_server_runtime(
         agent_factory=build_server_agent,
         policy=build_demo_negotiation_policy(),
         precheck=build_demo_task_t_precheck(),
+        config=resolved_config,
         env_path=resolved_env_path,
         install_offline_provider=install_offline_provider,
+        protocol_mode=protocol_mode,
+        pure_policy=pure_policy,
     )
     asyncio.run(
         register_server_agent_card(

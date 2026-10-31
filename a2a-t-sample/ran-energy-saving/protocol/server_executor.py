@@ -23,7 +23,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Final, Protocol
 
@@ -59,6 +59,7 @@ from protocol.messages import (
     parse_negotiation_context,
     task_prompt_from_metadata,
 )
+from protocol.mie_client import MIEApprovalClient
 from protocol.pre_task_negotiation import NegotiationOutcome
 from protocol.server_agent_spec import ServerAgentFactory
 
@@ -158,17 +159,24 @@ def _report_metadata(
     context: RequestContext,
     summary: str,
     negotiation_context: dict[str, object] | None,
+    *,
+    pure: bool = False,
 ) -> dict[str, object]:
-    """Build the metadata stamped on the final report artifact and status."""
-    metadata: dict[str, object] = {
-        TASK_T_EXTENSION_URI: summary,
-        TEMPLATE_URI_METADATA_KEY: TASK_TEMPLATE_URI,
-    }
-    if negotiation_context is not None:
-        metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation_context
+    """Build the metadata stamped on the final report artifact and status.
+
+    Pure A2A runs must stay free of A2A-T metadata; only the sample's trace correlation id is
+    retained.
+    """
+    metadata: dict[str, object] = {}
     run_id = _run_id(context)
     if run_id:
         metadata[SAMPLE_RUN_ID_METADATA_KEY] = run_id
+    if pure:
+        return metadata
+    metadata[TASK_T_EXTENSION_URI] = summary
+    metadata[TEMPLATE_URI_METADATA_KEY] = TASK_TEMPLATE_URI
+    if negotiation_context is not None:
+        metadata[NEGOTIATION_CONTEXT_METADATA_KEY] = negotiation_context
     return metadata
 
 
@@ -326,6 +334,8 @@ class LangGraphTaskExecutor(AgentExecutor):
         config: SampleConfig | None = None,
         approval_registry: ApprovalRegistry | None = None,
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+        pure: bool = False,
+        mie_client: MIEApprovalClient | None = None,
     ) -> None:
         """Create one executor.
 
@@ -336,11 +346,17 @@ class LangGraphTaskExecutor(AgentExecutor):
             approval_registry: optional human gate registry; ``None`` applies plans without a pause.
             approval_timeout_seconds: seconds the gate waits before treating the approval as a
                 rejection.
+            pure: ``True`` for the pure A2A server; its final artifacts must not carry A2A-T
+                metadata.
+            mie_client: A2A client of the MIE Agent; when set in pure mode, the gate asks MIE
+                instead of waiting on the local HTTP approval registry.
         """
         self._config = config
         self._agent_factory = agent_factory
         self._approval_registry = approval_registry
         self._approval_timeout_seconds = approval_timeout_seconds
+        self._pure = pure
+        self._mie_client = mie_client
 
     @property
     def recursion_limit(self) -> int:
@@ -385,29 +401,76 @@ class LangGraphTaskExecutor(AgentExecutor):
             message=updater.new_agent_message([Part(text=DATA_COLLECTION_PROGRESS_TEXT)]),
         )
         _LOGGER.info("task accepted; running the planner")
-        execution_span_id = _emit_execution_span(context, task.id)
+        await self._execute_task(context, updater, task.id, _task_prompt(context))
 
+    async def execute_resumed(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+        *,
+        prompt: str,
+    ) -> None:
+        """Resume an existing ``INPUT_REQUIRED`` Task with a negotiated prompt.
+
+        The standard A2A server loads the Task and appends the follow-up message to its history
+        before calling the executor. This method reuses the Task id/context id, moves it back to
+        ``WORKING`` and runs the same planner as a fresh Task.
+
+        Args:
+            context: request context whose ``current_task`` is the ``INPUT_REQUIRED`` Task.
+            event_queue: A2A event queue of the follow-up request.
+            prompt: negotiated natural-language task prompt.
+        """
+        task = context.current_task
+        if task is None:
+            raise ValueError("Cannot resume a Task that was not loaded")
+        updater = TaskUpdater(event_queue, task.id, task.context_id)
+        await updater.start_work()
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING,
+            message=updater.new_agent_message([Part(text=DATA_COLLECTION_STARTED_TEXT)]),
+        )
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING,
+            message=updater.new_agent_message([Part(text=DATA_COLLECTION_PROGRESS_TEXT)]),
+        )
+        _LOGGER.info("task resumed after negotiation; running the planner")
+        await self._execute_task(context, updater, task.id, prompt)
+
+    async def _execute_task(
+        self,
+        context: RequestContext,
+        updater: TaskUpdater,
+        task_id: str,
+        prompt: str,
+    ) -> None:
+        """Run the planner and map every failure to a terminal Task state."""
+        execution_span_id = _emit_execution_span(context, task_id)
         negotiation_context = _negotiation_context(context)
         with log_context(
-            task_id=task.id,
-            context_id=task.context_id,
-            run_id=run_id or None,
+            task_id=task_id,
+            context_id=context.context_id,
+            run_id=_run_id(context) or None,
             role="server",
         ):
             try:
                 await self._run_graph(
                     context,
                     updater,
-                    task.id,
+                    task_id,
                     execution_span_id,
                     negotiation_context,
+                    prompt=prompt,
+                    approval_gate=self._build_approval_gate(
+                        context, updater, task_id, execution_span_id
+                    ),
                 )
             except asyncio.CancelledError:
                 _LOGGER.info("task cancelled")
                 raise
             except GraphRecursionError:
                 _LOGGER.warning(
-                    "planner exceeded %s steps for task %s", self.recursion_limit, task.id
+                    "planner exceeded %s steps for task %s", self.recursion_limit, task_id
                 )
                 SERVER_TASKS_TOTAL.inc({"state": "failed"})
                 await updater.failed(
@@ -431,6 +494,237 @@ class LangGraphTaskExecutor(AgentExecutor):
                     )
                 )
 
+    def _build_approval_gate(
+        self,
+        context: RequestContext,
+        updater: TaskUpdater,
+        task_id: str,
+        execution_span_id: str,
+    ) -> Callable[..., Awaitable[bool]] | None:
+        """Build the approval gate used by the planner, or ``None`` when the gate is disabled."""
+        if self._pure and self._mie_client is not None:
+            return self._build_mie_approval_gate(
+                context, updater, task_id, execution_span_id
+            )
+        if self._approval_registry is None:
+            return None
+
+        async def approval_gate(
+            cell_id: str,
+            window: str,
+            target_rate: str,
+            evaluation: Mapping[str, object] | None,
+        ) -> bool:
+            """Publish INPUT_REQUIRED, wait for the engineer, then resume or reject."""
+            key = _run_id(context) or task_id
+            rate_text = f"{target_rate}%"
+            await updater.update_status(
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                message=updater.new_agent_message(
+                    [
+                        Part(
+                            text=(
+                                "Waiting for the engineer's approval before applying the "
+                                f"plan: {cell_id}, {window}, {rate_text}."
+                            )
+                        )
+                    ]
+                ),
+            )
+            emit_span(
+                Span(
+                    run_id=_run_id(context),
+                    span_id=f"approval_server_{uuid.uuid4().hex}",
+                    parent_span_id=execution_span_id,
+                    context_id=context.context_id,
+                    task_id=task_id,
+                    phase=PHASE_EXECUTION,
+                    actor="human",
+                    side="server",
+                    kind="approval",
+                    stage=APPROVAL_STAGE,
+                    title="Approval requested",
+                    purpose="Human approval before a network change.",
+                    status="pending",
+                    detail={
+                        "cellId": cell_id,
+                        "window": window,
+                        "rate": rate_text,
+                        "taskId": task_id,
+                        "runId": key,
+                        "approvalState": "requested",
+                        "timeoutSeconds": self._approval_timeout_seconds,
+                        "savedPercent": (
+                            evaluation.get("estimated_saving_percent")
+                            if isinstance(evaluation, Mapping)
+                            else None
+                        ),
+                    },
+                )
+            )
+            approved = await self._approval_registry.wait(
+                key, self._approval_timeout_seconds
+            )
+            emit_span(
+                Span(
+                    run_id=_run_id(context),
+                    span_id=f"approval_server_{uuid.uuid4().hex}",
+                    parent_span_id=execution_span_id,
+                    context_id=context.context_id,
+                    task_id=task_id,
+                    phase=PHASE_EXECUTION,
+                    actor="human",
+                    side="server",
+                    kind="approval",
+                    stage=APPROVAL_STAGE,
+                    title="Approval resolved",
+                    purpose="Human approval before a network change.",
+                    status="ok" if approved else "error",
+                    detail={
+                        "cellId": cell_id,
+                        "window": window,
+                        "rate": rate_text,
+                        "taskId": task_id,
+                        "runId": key,
+                        "approved": approved,
+                        "approvalState": "approved" if approved else "rejected",
+                    },
+                )
+            )
+            if approved:
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(
+                        [Part(text="Approved. Applying the plan.")]
+                    ),
+                )
+            return approved
+
+        return approval_gate
+
+    def _build_mie_approval_gate(
+        self,
+        context: RequestContext,
+        updater: TaskUpdater,
+        task_id: str,
+        execution_span_id: str,
+    ) -> Callable[..., Awaitable[bool]]:
+        """Build the pure A2A gate that asks the MIE Agent over A2A."""
+        client = self._mie_client
+        if client is None:  # pragma: no cover - guarded by the caller
+            raise ValueError("MIE approval client is not configured")
+
+        async def approval_gate(
+            cell_id: str,
+            window: str,
+            target_rate: str,
+            evaluation: Mapping[str, object] | None,
+        ) -> bool:
+            """Publish INPUT_REQUIRED, ask MIE, then resume or reject."""
+            key = _run_id(context) or task_id
+            rate_text = f"{target_rate}%"
+            plan = {
+                "cellId": cell_id,
+                "window": window,
+                "rate": rate_text,
+                "savedPercent": (
+                    evaluation.get("estimated_saving_percent")
+                    if isinstance(evaluation, Mapping)
+                    else None
+                ),
+            }
+            await updater.update_status(
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                message=updater.new_agent_message(
+                    [
+                        Part(
+                            text=(
+                                "Waiting for MIE approval before applying the plan: "
+                                f"{cell_id}, {window}, {rate_text}."
+                            )
+                        )
+                    ],
+                    metadata={
+                        "pure": {
+                            "kind": "approval",
+                            "phase": "approval",
+                            "plan": plan,
+                            "round": 0,
+                        }
+                    },
+                ),
+            )
+            emit_span(
+                Span(
+                    run_id=_run_id(context),
+                    span_id=f"approval_mie_{uuid.uuid4().hex}",
+                    parent_span_id=execution_span_id,
+                    context_id=context.context_id,
+                    task_id=task_id,
+                    phase=PHASE_EXECUTION,
+                    actor="mie",
+                    side="server",
+                    kind="approval",
+                    stage=APPROVAL_STAGE,
+                    title="MIE approval requested",
+                    purpose="RAN asks the MIE Agent over standard A2A.",
+                    status="pending",
+                    detail={
+                        **plan,
+                        "taskId": task_id,
+                        "runId": key,
+                        "hop": "ran->mie",
+                        "pureKind": "approval",
+                        "approvalState": "requested",
+                    },
+                )
+            )
+            decision = await client.request_approval(
+                cell_id=cell_id,
+                window=window,
+                target_rate=target_rate,
+                evaluation=evaluation,
+                run_id=key,
+                ran_task_id=task_id,
+            )
+            emit_span(
+                Span(
+                    run_id=_run_id(context),
+                    span_id=f"approval_mie_{uuid.uuid4().hex}",
+                    parent_span_id=execution_span_id,
+                    context_id=context.context_id,
+                    task_id=task_id,
+                    phase=PHASE_EXECUTION,
+                    actor="mie",
+                    side="server",
+                    kind="approval",
+                    stage=APPROVAL_STAGE,
+                    title="MIE approval resolved",
+                    purpose="The MIE Agent returned the engineer's decision over A2A.",
+                    status="ok" if decision.approved else "error",
+                    detail={
+                        **plan,
+                        "taskId": task_id,
+                        "runId": key,
+                        "hop": "mie->ran",
+                        "pureKind": "approval",
+                        "approved": decision.approved,
+                        "reason": decision.reason,
+                        "approvalState": "approved" if decision.approved else "rejected",
+                    },
+                )
+            )
+            if decision.approved:
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(
+                        [Part(text="MIE approved. Applying the plan.")]
+                    ),
+                )
+            return decision.approved
+
+        return approval_gate
+
     async def _run_graph(
         self,
         context: RequestContext,
@@ -438,112 +732,21 @@ class LangGraphTaskExecutor(AgentExecutor):
         task_id: str,
         execution_span_id: str,
         negotiation_context: dict[str, object] | None,
+        *,
+        prompt: str,
+        approval_gate: Callable[..., Awaitable[bool]] | None,
     ) -> None:
         """Run the graph, publishing one artifact per tool result and the final report."""
-        approval_gate = None
-        if self._approval_registry is not None:
-
-            async def approval_gate(
-                cell_id: str,
-                window: str,
-                target_rate: str,
-                evaluation: Mapping[str, object] | None,
-            ) -> bool:
-                """Publish INPUT_REQUIRED, wait for the engineer, then resume or reject."""
-                key = _run_id(context) or task_id
-                rate_text = f"{target_rate}%"
-                await updater.update_status(
-                    TaskState.TASK_STATE_INPUT_REQUIRED,
-                    message=updater.new_agent_message(
-                        [
-                            Part(
-                                text=(
-                                    "Waiting for the engineer's approval before applying the "
-                                    f"plan: {cell_id}, {window}, {rate_text}."
-                                )
-                            )
-                        ]
-                    ),
-                )
-                emit_span(
-                    Span(
-                        run_id=_run_id(context),
-                        span_id=f"approval_server_{uuid.uuid4().hex}",
-                        parent_span_id=execution_span_id,
-                        context_id=context.context_id,
-                        task_id=task_id,
-                        phase=PHASE_EXECUTION,
-                        actor="human",
-                        side="server",
-                        kind="approval",
-                        stage=APPROVAL_STAGE,
-                        title="Approval requested",
-                        purpose="Human approval before a network change.",
-                        status="pending",
-                        detail={
-                            "cellId": cell_id,
-                            "window": window,
-                            "rate": rate_text,
-                            "taskId": task_id,
-                            "runId": key,
-                            "approvalState": "requested",
-                            "timeoutSeconds": self._approval_timeout_seconds,
-                            "savedPercent": (
-                                evaluation.get("estimated_saving_percent")
-                                if isinstance(evaluation, Mapping)
-                                else None
-                            ),
-                        },
-                    )
-                )
-                approved = await self._approval_registry.wait(
-                    key, self._approval_timeout_seconds
-                )
-                emit_span(
-                    Span(
-                        run_id=_run_id(context),
-                        span_id=f"approval_server_{uuid.uuid4().hex}",
-                        parent_span_id=execution_span_id,
-                        context_id=context.context_id,
-                        task_id=task_id,
-                        phase=PHASE_EXECUTION,
-                        actor="human",
-                        side="server",
-                        kind="approval",
-                        stage=APPROVAL_STAGE,
-                        title="Approval resolved",
-                        purpose="Human approval before a network change.",
-                        status="ok" if approved else "error",
-                        detail={
-                            "cellId": cell_id,
-                            "window": window,
-                            "rate": rate_text,
-                            "taskId": task_id,
-                            "runId": key,
-                            "approved": approved,
-                            "approvalState": "approved" if approved else "rejected",
-                        },
-                    )
-                )
-                if approved:
-                    await updater.update_status(
-                        TaskState.TASK_STATE_WORKING,
-                        message=updater.new_agent_message(
-                            [Part(text="Approved. Applying the plan.")]
-                        ),
-                    )
-                return approved
-
         if approval_gate is None:
             agent = self._agent_factory(
                 self._config,
-                task_prompt=_task_prompt(context),
+                task_prompt=prompt,
                 negotiation_context=negotiation_context,
             )
         else:
             agent = self._agent_factory(
                 self._config,
-                task_prompt=_task_prompt(context),
+                task_prompt=prompt,
                 negotiation_context=negotiation_context,
                 approval_gate=approval_gate,
             )
@@ -653,7 +856,9 @@ class LangGraphTaskExecutor(AgentExecutor):
 
         report = report_steps[-1].result
         summary = str(report.get("summary", ""))
-        metadata = _report_metadata(context, summary, negotiation_context)
+        metadata = _report_metadata(
+            context, summary, negotiation_context, pure=self._pure
+        )
         report_part = Part()
         ParseDict(report, report_part.data)
         await updater.add_artifact(
@@ -730,6 +935,19 @@ class NegotiationAgentExecutor(AgentExecutor):
             stage="server_execution_agent",
         ):
             outcome = await self._handler.handle(context)
+            if outcome.input_required_task is not None:
+                # Pure A2A negotiation: the Task is non-terminal. Enqueue it and a status update so
+                # a standard A2A client receives the question text and metadata (a bare Task event
+                # would be normalized to its state only).
+                task = outcome.input_required_task
+                await event_queue.enqueue_event(task)
+                updater = TaskUpdater(event_queue, task.id, task.context_id)
+                status_message = task.status.message if task.status.HasField("message") else None
+                await updater.update_status(
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
+                    message=status_message,
+                )
+                return
             if outcome.short_circuit:
                 if outcome.terminal_task is not None:
                     await event_queue.enqueue_event(outcome.terminal_task)
@@ -742,6 +960,16 @@ class NegotiationAgentExecutor(AgentExecutor):
                 return
             if outcome.task_request is None:
                 raise ValueError("The pre-task handler approved execution without a request context")
+            if outcome.resume_prompt is not None:
+                execute_resumed = getattr(self._inner, "execute_resumed", None)
+                if execute_resumed is None:
+                    raise ValueError("The inner executor does not support resuming a Task")
+                await execute_resumed(
+                    outcome.task_request,
+                    event_queue,
+                    prompt=outcome.resume_prompt,
+                )
+                return
             await self._inner.execute(outcome.task_request, event_queue)
 
     def _resolve_run_id(self, context: RequestContext) -> str | None:
@@ -768,6 +996,8 @@ def build_negotiation_executor(
     config: SampleConfig | None = None,
     approval_registry: ApprovalRegistry | None = None,
     approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+    pure: bool = False,
+    mie_client: MIEApprovalClient | None = None,
 ) -> NegotiationAgentExecutor:
     """Build the outer executor with the LangGraph executor inside.
 
@@ -777,6 +1007,8 @@ def build_negotiation_executor(
         config: resolved sample configuration.
         approval_registry: optional human gate registry.
         approval_timeout_seconds: seconds the gate waits before rejecting.
+        pure: ``True`` for the pure A2A server; final artifacts carry no A2A-T metadata.
+        mie_client: optional A2A client of the MIE Agent used by the pure approval gate.
     """
     return NegotiationAgentExecutor(
         handler=handler,
@@ -785,5 +1017,7 @@ def build_negotiation_executor(
             config=config,
             approval_registry=approval_registry,
             approval_timeout_seconds=approval_timeout_seconds,
+            pure=pure,
+            mie_client=mie_client,
         ),
     )

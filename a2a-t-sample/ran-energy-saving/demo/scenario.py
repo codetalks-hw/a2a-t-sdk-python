@@ -601,6 +601,13 @@ SUPPORTED_SCENARIO_NAMES = tuple(SCENARIOS)
 #: request whose negotiation A2A-T exists for.
 PLAIN_PROTOCOL_SCENARIOS: tuple[str, ...] = (SCENARIO_NIGHT, SCENARIO_INFORMATION)
 
+#: Scenarios the pure A2A mode supports: complete, missing-parameter and conflicting-target.
+PURE_PROTOCOL_SCENARIOS: tuple[str, ...] = (
+    SCENARIO_NIGHT,
+    SCENARIO_INFORMATION,
+    SCENARIO_TARGET,
+)
+
 
 def get_scenario(name: str) -> Scenario:
     """Return the scenario with the given name.

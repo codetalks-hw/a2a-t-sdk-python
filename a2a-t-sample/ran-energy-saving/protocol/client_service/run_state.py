@@ -418,7 +418,13 @@ class RunState:
             return {}
         phase = infer_event_phase(event)
         seq, step = self.allocate(phase)
-        entry = self.transcript.record_event(event, phase=phase, phase_step=step, seq=seq)
+        entry = self.transcript.record_event(
+            event,
+            phase=phase,
+            phase_step=step,
+            seq=seq,
+            detail=_pure_detail(event),
+        )
         round_number = entry.get("round")
         context_value = entry.get("contextId")
         span = self._recorder.emit(
@@ -674,6 +680,30 @@ class RunState:
             "traceCount": len(self.traces),
             "transcript": transcript,
         }
+
+
+def _pure_detail(event: Mapping[str, object]) -> dict[str, object] | None:
+    """Return the pure-mode hop detail of one event, or ``None`` for A2A-T events."""
+    metadata = event.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    pure = metadata.get("pure")
+    hop = metadata.get("hop")
+    tool_name = metadata.get("toolName")
+    if (
+        not isinstance(pure, Mapping)
+        and not isinstance(hop, str)
+        and not isinstance(tool_name, str)
+    ):
+        return None
+    detail: dict[str, object] = {}
+    if isinstance(hop, str) and hop:
+        detail["hop"] = hop
+    if isinstance(pure, Mapping):
+        detail["pure"] = dict(pure)
+    if isinstance(tool_name, str) and tool_name:
+        detail["toolName"] = tool_name
+    return detail or None
 
 
 def _string_value(value: object) -> str | None:

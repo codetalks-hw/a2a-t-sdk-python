@@ -98,7 +98,15 @@ def _server_env_dirs() -> set[Path]:
 
 
 @contextmanager
-def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]:
+def running_server(
+    config: SampleConfig,
+    *,
+    protocol_mode: str = "a2a-t",
+    pure_policy: Any | None = None,
+    mie_url: str | None = None,
+    approval_gate: bool | None = None,
+    approval_timeout_seconds: float | None = None,
+) -> Generator[ServerRuntime, None, None]:
     """Run one real server in a background thread and stop it afterwards.
 
     The server keeps its own event loop; teardown flips ``should_exit`` and joins the thread. The
@@ -112,6 +120,11 @@ def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]
         precheck=build_demo_task_t_precheck(),
         install_offline_provider=install_offline_provider,
         config=config,
+        protocol_mode=protocol_mode,
+        pure_policy=pure_policy,
+        mie_url=mie_url,
+        approval_gate=approval_gate,
+        approval_timeout_seconds=approval_timeout_seconds,
     )
     uvicorn_server = uvicorn.Server(
         uvicorn.Config(
@@ -147,6 +160,39 @@ def running_server(config: SampleConfig) -> Generator[ServerRuntime, None, None]
                 if child.is_file():
                     child.unlink(missing_ok=True)
             path.rmdir()
+
+
+@contextmanager
+def running_app_on_port(
+    app: Any,
+    port: int,
+    *,
+    host: str = "127.0.0.1",
+    label: str = "app",
+) -> Generator[None, None, None]:
+    """Serve one ASGI app on a known port (needed when its AgentCard advertises that port)."""
+    uvicorn_server = uvicorn.Server(
+        uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)
+    )
+    thread = threading.Thread(
+        target=uvicorn_server.run, name=f"ran-test-{label}-{port}", daemon=True
+    )
+    thread.start()
+    deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
+    try:
+        while not uvicorn_server.started:
+            if not thread.is_alive():
+                raise RuntimeError(f"The in-process {label} app exited before listening")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"The in-process {label} app did not start within "
+                    f"{SERVER_START_TIMEOUT_SECONDS:g}s"
+                )
+            time.sleep(0.01)
+        yield
+    finally:
+        uvicorn_server.should_exit = True
+        thread.join(timeout=SERVER_STOP_TIMEOUT_SECONDS)
 
 
 @contextmanager

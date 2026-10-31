@@ -53,6 +53,13 @@ export function createState() {
     approvalState: null,
     nmsTool: null,
     lastStatusText: "",
+    pure: null,
+    hop: null,
+    pureRound: 0,
+    pureMetrics: null,
+    mieApproval: null,
+    mieResolved: null,
+    mieWaiting: false,
   };
 }
 
@@ -67,6 +74,7 @@ export function applyFrame(state, frame) {
       if (typeof frame.scenario === "string") state.scenario = frame.scenario;
       if (typeof frame.mode === "string") state.mode = frame.mode;
       if (frame.protocol === "plain") state.protocol = "plain";
+      else if (frame.protocol === "pure") state.protocol = "pure";
       else if (frame.protocol === "a2a-t") state.protocol = "a2a-t";
       if (typeof frame.userRequest === "string") state.userRequest = frame.userRequest;
       if (Array.isArray(frame.expectedSequence)) state.expectedSequence = frame.expectedSequence;
@@ -135,6 +143,11 @@ export function applyFrame(state, frame) {
       if (state.approvalState === APPROVAL.WAITING) {
         state.approvalState = APPROVAL.REJECTED;
       }
+      if (state.mieResolved === null && (state.mieWaiting || state.mieApproval !== null)) {
+        state.mieResolved = { approved: false, reason: "finished" };
+      }
+      state.mieApproval = null;
+      state.mieWaiting = false;
       return state;
     }
     default:
@@ -153,6 +166,44 @@ function applyEvent(state, entry) {
   const maxRounds = intOrNull(entry.maxRounds);
   const summary = typeof entry.summary === "string" ? entry.summary : "";
   const content = typeof entry.content === "string" ? entry.content : "";
+  const pure = isObject(entry.detail?.pure) ? entry.detail.pure : null;
+  const hop = typeof entry.detail?.hop === "string" ? entry.detail.hop : null;
+
+  if (pure !== null || hop !== null) {
+    if (pure !== null) state.pure = { ...(state.pure || {}), ...pure };
+    if (hop !== null) state.hop = hop;
+    if (pure !== null && pure.kind === "negotiation") {
+      state.negotiation.push({
+        side: "nms",
+        action: "propose",
+        round: intOrNull(pure.round) ?? round,
+        maxRounds: intOrNull(pure.maxRounds) ?? maxRounds,
+        summary,
+        content,
+        pure: true,
+      });
+      if (Number.isInteger(pure.round)) {
+        state.pureRound = Math.max(state.pureRound || 0, pure.round);
+      }
+    }
+    if (pure !== null && hop === "oss" && pure.phase === "answer") {
+      state.negotiation.push({
+        side: "oss",
+        action: "accept",
+        round: intOrNull(pure.round) ?? round,
+        maxRounds: intOrNull(pure.maxRounds) ?? maxRounds,
+        summary,
+        content,
+        pure: true,
+      });
+    }
+    if (pure !== null && pure.kind === "approval") {
+      state.mieWaiting = true;
+    }
+    if (pure !== null && Number.isInteger(pure.hops)) {
+      state.pureMetrics = { ...pure, hop: hop ?? pure.hop ?? null };
+    }
+  }
 
   state.trace.push({
     tag: traceTag(entry),
@@ -407,6 +458,13 @@ export function endingOf(state) {
  * creates the task directly. The presentation must not show a negotiation phase for it.
  */
 export function negotiationExpected(state) {
+  if (state.protocol === "pure") {
+    return (
+      state.scenario === "information" ||
+      state.scenario === "target" ||
+      state.negotiation.length > 0
+    );
+  }
   return (
     state.protocol !== "plain" &&
     (state.expectedSequence.length > 0 || state.negotiation.length > 0)
@@ -437,6 +495,7 @@ export function executionSteps(state) {
 /** Whether the run currently waits for the engineer. */
 export function pendingHuman(state) {
   if (state.status !== STATUS.RUNNING) return null;
+  if (state.mieWaiting && state.mieResolved === null) return "approval";
   if (state.intentReview !== null && !state.intentReview.resolved) return "intent";
   if (state.approvalState === APPROVAL.WAITING) return "approval";
   if (state.decision !== null && !state.decision.resolved) return "decision";
@@ -456,6 +515,10 @@ function traceSpanTag(span, kind) {
 }
 
 function traceTag(entry) {
+  const hop = isObject(entry.detail) ? entry.detail.hop : null;
+  if (hop === "oss") return "oss";
+  if (hop === "ran") return "nms";
+  if (hop === "ran->mie" || hop === "mie->ran") return "mie";
   if (entry.entryType === "decision") return "oss";
   if (entry.direction === "client->server") return "a2at";
   if (entry.direction === "server->client") return "nms";

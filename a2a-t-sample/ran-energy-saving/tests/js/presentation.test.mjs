@@ -10,6 +10,7 @@ import {
   createState,
   endingOf,
   executionSteps,
+  negotiationExpected,
   pendingHuman,
   resolutionOf,
   roundInfo,
@@ -651,5 +652,132 @@ assert.match(comparison[1].a2at, /1/);
 assert.equal(comparison[1].plain, copy.compare.notApplicable);
 assert.match(comparison[3].plain, /拒绝/);
 assert.match(outcomeText(copy, a2atRecord), /30/);
+
+// --- Pure A2A three-hop mode ---------------------------------------------
+
+const pureCopy = copyFor("en-US");
+const pureView = createState();
+applyFrame(pureView, {
+  type: "run_started",
+  runId: "r8",
+  scenario: "information",
+  mode: "auto",
+  protocol: "pure",
+});
+assert.equal(pureView.protocol, "pure");
+assert.equal(negotiationExpected(pureView), true);
+assert.equal(pendingHuman(pureView), null);
+
+const receive = event({
+  seq: 1,
+  entryType: "event",
+  kind: "status",
+  phase: "execution",
+  state: "TASK_STATE_WORKING",
+  summary: "OSS Agent received the request and is forwarding it to the RAN Agent.",
+  detail: { hop: "oss", pure: { hop: "oss", phase: "receive" } },
+});
+assert.equal(sceneFor(receive, pureView).key, "understand");
+applyFrame(pureView, receive);
+
+const ask = event({
+  seq: 2,
+  entryType: "event",
+  kind: "status",
+  phase: "negotiation",
+  state: "TASK_STATE_WORKING",
+  summary: "Please provide the guaranteed throughput target.",
+  detail: {
+    hop: "ran",
+    pure: { kind: "negotiation", phase: "information", round: 1, maxRounds: 3 },
+  },
+});
+assert.equal(sceneFor(ask, pureView).key, "propose");
+applyFrame(pureView, ask);
+assert.equal(pureView.negotiation.at(-1).side, "nms");
+assert.equal(pureView.negotiation.at(-1).round, 1);
+
+const answer = event({
+  seq: 3,
+  entryType: "event",
+  kind: "status",
+  phase: "negotiation",
+  state: "TASK_STATE_WORKING",
+  summary: "OSS Agent answered the RAN Agent: {00:00~06:00,10Mbps}.",
+  detail: { hop: "oss", pure: { kind: "answer", phase: "answer", round: 1 } },
+});
+assert.equal(sceneFor(answer, pureView).key, "decision");
+applyFrame(pureView, answer);
+assert.equal(pureView.negotiation.at(-1).side, "oss");
+
+const pureApproval = event({
+  seq: 4,
+  entryType: "event",
+  kind: "status",
+  phase: "approval",
+  state: "TASK_STATE_WORKING",
+  summary: "RAN Agent is waiting for the MIE Agent's approval.",
+  detail: {
+    hop: "ran->mie",
+    pure: {
+      kind: "approval",
+      phase: "approval",
+      plan: { cellId: "cell-001", window: "00:00~06:00", rate: "30%" },
+    },
+  },
+});
+const approvalScene = sceneFor(pureApproval, pureView);
+assert.equal(approvalScene.key, "approval-pure");
+assert.equal(approvalScene.hold, true);
+applyFrame(pureView, pureApproval);
+assert.equal(pureView.mieWaiting, true);
+assert.equal(pendingHuman(pureView), "approval");
+assert.equal(approvalCard(pureView, pureCopy), null);
+
+pureView.mieApproval = {
+  taskId: "approval-1",
+  plan: { cellId: "cell-001", window: "00:00~06:00", rate: "30%" },
+  timeoutSeconds: 240,
+  requestedAt: new Date().toISOString(),
+};
+const mieCard = approvalCard(pureView, pureCopy);
+assert.ok(mieCard);
+assert.equal(mieCard.pure, true);
+assert.equal(mieCard.taskId, "approval-1");
+
+pureView.mieApproval = null;
+pureView.mieResolved = { approved: true, reason: null };
+assert.equal(pendingHuman(pureView), null);
+assert.equal(approvalCard(pureView, pureCopy), null);
+assert.equal(sceneFor(pureApproval, pureView).key, "trace");
+
+const completed = event({
+  seq: 5,
+  entryType: "event",
+  kind: "status",
+  phase: "execution",
+  state: "TASK_STATE_COMPLETED",
+  summary: "OSS Agent completed the request.",
+  detail: {
+    hop: "oss",
+    pure: { phase: "report", rounds: 1, messages: 13, hops: 3 },
+  },
+});
+applyFrame(pureView, completed);
+assert.equal(pureView.pureMetrics.hops, 3);
+assert.equal(pureView.pureMetrics.rounds, 1);
+
+applyFrame(pureView, finished("task_completed", { target_rate: 30 }));
+assert.equal(stageOf(pureView), "done");
+
+const pureNight = createState();
+applyFrame(pureNight, {
+  type: "run_started",
+  runId: "r9",
+  scenario: "night",
+  mode: "auto",
+  protocol: "pure",
+});
+assert.equal(negotiationExpected(pureNight), false);
 
 console.log("presentation model harness: ok");

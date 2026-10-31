@@ -18,10 +18,21 @@ LANGUAGE_ZH: Final[str] = "zh-CN"
 SUPPORTED_LANGUAGES: Final[tuple[str, ...]] = (LANGUAGE_EN, LANGUAGE_ZH)
 
 #: Interaction protocol of one client run. ``a2a-t`` uses Task-T and Negotiation-T; ``plain``
-#: sends one natural-language A2A message and has neither a task template nor a negotiation.
+#: sends one natural-language A2A message and has neither a task template nor a negotiation;
+#: ``pure`` uses standard A2A Task states (``INPUT_REQUIRED`` continuation) for a multi-turn
+#: negotiation without any A2A-T extension.
 PROTOCOL_A2A_T: Final[str] = "a2a-t"
 PROTOCOL_PLAIN: Final[str] = "plain"
-SUPPORTED_PROTOCOLS: Final[tuple[str, ...]] = (PROTOCOL_A2A_T, PROTOCOL_PLAIN)
+PROTOCOL_PURE: Final[str] = "pure"
+SUPPORTED_PROTOCOLS: Final[tuple[str, ...]] = (
+    PROTOCOL_A2A_T,
+    PROTOCOL_PLAIN,
+    PROTOCOL_PURE,
+)
+
+#: Protocols exposed by the presentation/CLI demo entry points. ``plain`` stays supported by
+#: ``/api/runs`` and the tests as an internal single-turn baseline, but is not advertised.
+DEMO_PROTOCOLS: Final[tuple[str, ...]] = (PROTOCOL_A2A_T, PROTOCOL_PURE)
 
 #: Terminal client outcomes.
 FinalState = Literal[

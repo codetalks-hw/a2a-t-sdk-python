@@ -40,7 +40,13 @@ from shared.config import (
 )
 from shared.model_factory import build_traced_adk_model
 from shared.models import NegotiationProposeView
-from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PLAIN, SUPPORTED_PROTOCOLS
+from shared.run_constants import (
+    MAX_ROUNDS,
+    PROTOCOL_A2A_T,
+    PROTOCOL_PLAIN,
+    PROTOCOL_PURE,
+    SUPPORTED_PROTOCOLS,
+)
 from shared.sdk_env import SdkEnvFile, prepare_sdk_env
 from shared.trace import set_global_sink, trace_scope
 from shared.traced_llm import register_traced_providers
@@ -64,6 +70,7 @@ from protocol.decision_provider import (
 )
 from protocol.discovery import DiscoveredAgent, discover_agent
 from protocol.plain_client_flow import run_plain_client_flow
+from protocol.pure_client_flow import run_pure_client_flow
 from protocol.run_spec import RunCatalog, RunSpec
 
 _LOGGER = logging.getLogger("ran_energy_saving.client_runtime")
@@ -178,15 +185,16 @@ class ClientRuntime:
         config: resolved sample configuration.
         run_spec: the named run being executed (catalog entry).
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
-        protocol: interaction protocol (``a2a-t`` / ``plain``).
+        protocol: interaction protocol (``a2a-t`` / ``plain`` / ``pure``).
         transport_name: event transport (``sse`` / ``webhook``).
-        prompt_client: A2A-T SDK prompt facade.
+        prompt_client: A2A-T SDK prompt facade; ``None`` in pure mode.
         a2a_client: a2a-sdk client used by the transports.
         transport: normalized-event transport.
-        provider: negotiation decision provider.
+        provider: negotiation decision provider; ``None`` in pure mode.
         discovered: discovered server endpoint.
-        sdk_env: generated SDK ``.env`` owned by this runtime.
+        sdk_env: generated SDK ``.env`` owned by this runtime; ``None`` in pure mode.
         manual_provider: manual provider when ``mode == "manual"``, else ``None``.
+        pure_answer: callback answering one pure ``INPUT_REQUIRED`` event.
     """
 
     config: SampleConfig
@@ -194,17 +202,18 @@ class ClientRuntime:
     mode: str
     protocol: str
     transport_name: str
-    prompt_client: A2ATClient
+    prompt_client: A2ATClient | None
     a2a_client: Any
     transport: ClientTransport
-    provider: NegotiationDecisionProvider
+    provider: NegotiationDecisionProvider | None
     discovered: DiscoveredAgent
-    sdk_env: SdkEnvFile
+    sdk_env: SdkEnvFile | None
     manual_provider: Any | None
     _httpx_client: httpx.AsyncClient
     _webhook_receiver: WebhookReceiver | None = None
     _closed: bool = False
     trace_sink: Callable[[dict[str, object]], None] | None = None
+    pure_answer: Callable[[dict[str, object]], str] | None = None
 
     def set_recommendation_sink(
         self,
@@ -269,6 +278,18 @@ class ClientRuntime:
                     if isinstance(user_request, str) and user_request.strip()
                     else self.run_spec.user_request
                 )
+                if self.protocol == PROTOCOL_PURE:
+                    # Pure A2A uses standard Task states only: the server may answer with
+                    # INPUT_REQUIRED and the flow continues the same Task with taskId/contextId.
+                    return await run_pure_client_flow(
+                        transport=self.transport,
+                        user_request=request_text,
+                        answer=self.pure_answer,
+                        max_rounds=MAX_ROUNDS,
+                        call_timeout_seconds=self.config.http_timeout_seconds,
+                        event_sink=event_sink,
+                        trace_sink=sink,
+                    )
                 if self.protocol == PROTOCOL_PLAIN:
                     # Plain A2A has no Task-T, no intent gate and no negotiation: one message in,
                     # task events out.
@@ -314,7 +335,8 @@ class ClientRuntime:
         await self._httpx_client.aclose()
         if self.trace_sink is not None:
             set_global_sink(None)
-        shutil.rmtree(self.sdk_env.directory, ignore_errors=True)
+        if self.sdk_env is not None:
+            shutil.rmtree(self.sdk_env.directory, ignore_errors=True)
 
 
 async def build_client_runtime(
@@ -330,6 +352,7 @@ async def build_client_runtime(
     offline_model_factory: Callable[[RunSpec], Any] | None = None,
     install_offline_provider: Callable[[], None] | None = None,
     client_agent_factory: Callable[[Any], Any] | None = None,
+    pure_answer: Callable[[dict[str, object]], str] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -338,7 +361,7 @@ async def build_client_runtime(
         scenario: run name resolved through ``catalog``.
         mode: decision mode (``auto`` / ``manual`` / ``scripted``).
         transport: event transport (``sse`` / ``webhook``).
-        protocol: interaction protocol (``a2a-t`` or ``plain``).
+        protocol: interaction protocol (``a2a-t`` / ``plain`` / ``pure``).
         catalog: run catalog supplied by the composition root.
         env_path: source ``.env`` used for discovery and for the per-run SDK ``.env``.
         trace_sink: optional Run Explorer sink attached **before** the SDK and ADK clients are
@@ -346,6 +369,8 @@ async def build_client_runtime(
         offline_model_factory: builder of the deterministic ADK model; required in offline mode.
         install_offline_provider: optional installer of the deterministic SDK LLM routing.
         client_agent_factory: optional builder of the ADK decision agent from its model.
+        pure_answer: callback answering one pure ``INPUT_REQUIRED`` event. Pure mode skips the
+            A2A-T SDK facade and the negotiation decision provider entirely.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -377,8 +402,13 @@ async def build_client_runtime(
             install_offline_provider()
     if trace_sink is not None:
         set_global_sink(trace_sink)
-    sdk_env = prepare_client_sdk_env(config, env_path)
-    prompt_client = A2ATClient(env_path=sdk_env.path, logger=None)
+    if protocol == PROTOCOL_PURE:
+        # A pure A2A client does not need the A2A-T SDK facade or its generated .env.
+        sdk_env: SdkEnvFile | None = None
+        prompt_client: A2ATClient | None = None
+    else:
+        sdk_env = prepare_client_sdk_env(config, env_path)
+        prompt_client = A2ATClient(env_path=sdk_env.path, logger=None)
 
     discovered = await discover_agent(
         discovery=config.discovery,
@@ -426,17 +456,23 @@ async def build_client_runtime(
             flow_transport = SseClientTransport(a2a_client)
     except Exception:
         await httpx_client.aclose()
-        shutil.rmtree(sdk_env.directory, ignore_errors=True)
+        if sdk_env is not None:
+            shutil.rmtree(sdk_env.directory, ignore_errors=True)
         raise
 
-    offline_model = offline_model_factory(run_spec) if offline_model_factory is not None else None
-    provider = _decision_provider(
-        config,
-        run_spec,
-        mode,
-        model=offline_model,
-        client_agent_factory=client_agent_factory,
-    )
+    if protocol == PROTOCOL_PURE:
+        provider: NegotiationDecisionProvider | None = None
+    else:
+        offline_model = (
+            offline_model_factory(run_spec) if offline_model_factory is not None else None
+        )
+        provider = _decision_provider(
+            config,
+            run_spec,
+            mode,
+            model=offline_model,
+            client_agent_factory=client_agent_factory,
+        )
     return ClientRuntime(
         config=config,
         run_spec=run_spec,
@@ -458,4 +494,5 @@ async def build_client_runtime(
         _httpx_client=httpx_client,
         _webhook_receiver=receiver,
         trace_sink=trace_sink,
+        pure_answer=pure_answer,
     )

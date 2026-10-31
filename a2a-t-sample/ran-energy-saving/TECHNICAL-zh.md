@@ -431,20 +431,49 @@ executor = build_negotiation_executor(
 | planner 超过步数上限 | 模型反复试错 | 调大 `A2AT_SAMPLE_PLANNER_MAX_STEPS` 或收紧提示词 |
 | UI 任务表为空 | 未设置 `A2AT_SAMPLE_TASK_DB` | 设置绝对路径后重启服务端 |
 
-### 4.6 普通 A2A 入口（协议对比）
+### 4.6 纯 A2A 三跳模式
 
-同一张 AgentCard 同时服务两种协议。`ProtocolDispatchHandler`（`protocol/plain_a2a.py`）把声明了
-Task-T 扩展（或携带 Task-T metadata）的请求交给 A2A-T 预检门；其余请求交给 `PlainTaskHandler`：
+`--protocol pure` 使用与 A2A-T 不同的进程拓扑：
 
-- 消息文本就是完整任务请求，仍由同一套受约束的 LangGraph 规划器执行；
-- 没有模板校验、没有意图审批、没有协商；
-- 样例拒绝猜测：请求里没有 `{HH:MM~HH:MM,<rate>Mbps}` 目标时，返回终态 `REJECTED` Task
-  （`MISSING_TARGET_TEXT`），而不是编一个方案。
+```
+工程师/UI ──A2A──► OSS Agent ──A2A──► RAN Agent ──A2A──► MIE Agent
+```
 
-客户端侧是 `run_plain_client_flow`（`protocol/plain_client_flow.py`）：一条不带扩展 metadata 的
-user 消息，然后消费普通的 A2A 任务事件。`POST /api/runs` 接受
-`protocol: "a2a-t" | "plain"`；`run_demo.py` 提供 `--protocol plain`。演示页在“夜间节能”“缺参数”
-两个场景提供协议切换，并把两次真实运行记录到结尾的对比卡。
+A2A-T 路径完全不变：`--protocol a2a-t` 仍安装
+`ProtocolDispatchHandler(PreTaskNegotiationHandler, PlainTaskHandler)`。纯 A2A 模式只在 RAN 进程中安装
+`PureTaskHandler`（`build_server_runtime(protocol_mode="pure")`），两种模式可以并行启动、互不影响。
+
+**RAN 协商（`protocol/pure_a2a.py`）。** `PureTaskHandler` 检查入站消息：
+
+- 完整且不重叠的 `{HH:MM~HH:MM,<rate>Mbps}` 目标直接交给规划器；
+- 缺目标时创建一个 `INPUT_REQUIRED` Task 并询问；
+- 目标重叠时同样进入 `INPUT_REQUIRED`，并给出修正后的非重叠目标；
+- 客户端带 `taskId`/`contextId` 续传；handler 合并回答、校验目标、把协商后的目标交给 planner。
+  `target` 场景会把不同的合法目标视为反提议并再次提案；预算 3 轮。
+
+状态更新携带样例私有的 `pure` metadata（`kind`、`phase`、`round`、`proposal`、`plan`），不是 A2A-T
+扩展。最终报告/状态 metadata 通过 `_report_metadata(..., pure=True)` 生成，不包含 `Task-T/v1`、
+`templateUri` 或 `negotiationContext`。
+
+**OSS 跳（`protocol/oss_agent.py`）。** `OSSPureExecutor` 转发工程师请求，用注入的决策函数回答 RAN 的
+`INPUT_REQUIRED(kind=negotiation)`，发布 OSS 回答状态，并把 RAN 的每个状态/artifact 映射到自己的 Task
+上，带 `hop` 标签。RAN 的审批 `INPUT_REQUIRED` 被转成 `WORKING`（`hop=ran->mie`、
+`pure.kind=approval`），工程师客户端只保留一条流，不会去回答审批。
+
+**MIE 跳（`protocol/mie_agent.py`、`protocol/mie_client.py`）。** RAN 通过标准 A2A 客户端
+`MIEApprovalClient` 调 MIE。MIE 创建 Task，通过 `GET /approvals/events` 推送审批请求，等待
+`POST /approvals/{taskId}`；人工决定作为 `approval decision` artifact 和最终状态 metadata 返回，RAN 据此
+继续或拒绝。默认超时 240 秒，与 A2A-T 审批门一致。
+
+**客户端与 UI。** `protocol/pure_client_flow.py` 发送纯文本消息，收到
+`INPUT_REQUIRED(kind=negotiation)` 后带 `taskId`/`contextId` 续传。演示进程是单模式的：
+`--protocol pure` 只暴露 pure 场景和 `mieEnabled`，移除协议开关与对比卡，代理
+`/api/mie/events` 与 `/api/mie/approvals/{taskId}`，并在结果卡展示 OSS 最终状态里的 per-run metrics。
+工程师客户端直接发现 OSS（`A2AT_SAMPLE_DIRECT_SERVER_URL`），OSS 发现 RAN
+（`A2AT_SAMPLE_RAN_URL`），RAN 发现 MIE（`A2AT_SAMPLE_MIE_URL`）。
+
+旧的单轮 `plain` 路径（`protocol/plain_a2a.py`、`run_plain_client_flow`）保留为测试内部基线。
+`POST /api/runs` 仍接受它，但 CLI 和页面不再暴露。
 
 ## 5. 协议参考
 

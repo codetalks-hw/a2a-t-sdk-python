@@ -58,6 +58,27 @@ export function sceneFor(frame, state) {
 function eventScene(entry, state, frame) {
   if (!isObject(entry)) return scene("event", 0, frame);
   if (entry.entryType === "decision") return scene("decision", 1600, frame);
+  const pure = isObject(entry.detail?.pure) ? entry.detail.pure : null;
+  const hop = typeof entry.detail?.hop === "string" ? entry.detail.hop : null;
+  if (pure !== null || hop !== null) {
+    if (entry.kind === "status") {
+      if (pure?.kind === "approval") {
+        // The OSS Agent relays RAN's approval wait as WORKING; the MIE card itself arrives on the
+        // separate MIE SSE. Hold at this scene until the human decision is known. A replay after
+        // the decision is evidence only.
+        if (state.mieResolved !== null) return scene("trace", 0, frame);
+        return scene("approval-pure", 0, frame, true);
+      }
+      if (pure?.kind === "negotiation") return scene("propose", 1800, frame);
+      if (hop === "oss" && pure?.phase === "receive") return scene("understand", 2600, frame);
+      if (hop === "oss" && pure?.phase === "answer") return scene("decision", 1600, frame);
+      if (hop === "oss" && pure?.phase === "report") return scene("report", 2600, frame);
+    }
+    if (entry.kind === "artifact" && artifactTool(entry) === "apply_energy_saving_plan") {
+      // Pure A2A has no MML dispatch; the apply artifact is RAN's execution confirmation.
+      return scene("execute", 1800, frame);
+    }
+  }
   switch (entry.kind) {
     case "propose":
       return scene("propose", 1800, frame);
@@ -206,6 +227,7 @@ function stepOf(key) {
     case "collect-done":
       return "collect";
     case "approval":
+    case "approval-pure":
     case "approval-ready":
     case "approval-rejected":
       return "approval";

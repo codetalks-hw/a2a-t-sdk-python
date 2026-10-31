@@ -522,22 +522,56 @@ edit an existing one.
 | the planner exceeds its step budget | the model keeps retrying | raise `A2AT_SAMPLE_PLANNER_MAX_STEPS` or tighten the prompt |
 | the UI task table is empty | `A2AT_SAMPLE_TASK_DB` is unset | set an absolute path and restart the server |
 
-### 4.6 Plain A2A entry (protocol comparison)
+### 4.6 Pure A2A three-hop mode
 
-One agent card serves both protocols. `ProtocolDispatchHandler` (`protocol/plain_a2a.py`) routes a
-request that declares the Task-T extension (or carries Task-T metadata) to the A2A-T pre-task gate;
-every other request goes to `PlainTaskHandler`:
+`--protocol pure` is a separate process topology from A2A-T:
 
-- the message text is the whole task request; the same guarded LangGraph planner runs it;
-- there is no template validation, no intent approval and no negotiation;
-- the sample refuses to guess: a request without a `{HH:MM~HH:MM,<rate>Mbps}` target is answered
-  with a terminal `REJECTED` Task (`MISSING_TARGET_TEXT`) instead of a plan.
+```
+Engineer/UI ──A2A──► OSS Agent ──A2A──► RAN Agent ──A2A──► MIE Agent
+```
 
-The client side is `run_plain_client_flow` (`protocol/plain_client_flow.py`): one user-role message
-with no extension metadata, then the ordinary A2A task events. `POST /api/runs` takes
-`protocol: "a2a-t" | "plain"`; `run_demo.py` exposes `--protocol plain`. The presentation page
-offers the switch for the night and missing-parameter examples and records both real runs for its
-comparison card.
+The A2A-T path is untouched: `--protocol a2a-t` still installs the
+`ProtocolDispatchHandler(PreTaskNegotiationHandler, PlainTaskHandler)` build. Pure mode installs
+`PureTaskHandler` only in the RAN process (`build_server_runtime(protocol_mode="pure")`), so the
+two modes can run side by side without changing each other's wiring.
+
+**RAN negotiation (`protocol/pure_a2a.py`).** `PureTaskHandler` inspects the inbound message:
+
+- a complete, non-overlapping `{HH:MM~HH:MM,<rate>Mbps}` target is handed to the planner directly;
+- a missing target creates a ticked Task in `INPUT_REQUIRED` and asks for the value;
+- overlapping targets create the same state and propose the corrected non-overlapping target;
+- the client continues the Task with `taskId`/`contextId`; the handler merges the answer, accepts a
+  non-overlapping target (the `target` scenario rejects a different valid target as a counter and
+  re-proposes), and resumes the planner with the negotiated target. The budget is three rounds.
+
+The status update carries sample-local `pure` metadata (`kind`, `phase`, `round`, `proposal`,
+`plan`). It is not an A2A-T extension. Final report/status metadata is pure-aware
+(`_report_metadata(..., pure=True)`) and contains no `Task-T/v1`, `templateUri` or
+`negotiationContext`.
+
+**OSS hop (`protocol/oss_agent.py`).** `OSSPureExecutor` forwards the engineer request, answers each
+RAN `INPUT_REQUIRED(kind=negotiation)` with an injected decision function, publishes an OSS-answer
+status, and maps every RAN status/artifact onto its own Task with a `hop` tag. RAN's approval
+`INPUT_REQUIRED` is relayed as `WORKING` (`hop=ran->mie`, `pure.kind=approval`) so the engineer
+client keeps one stream and does not try to answer the approval.
+
+**MIE hop (`protocol/mie_agent.py`, `protocol/mie_client.py`).** RAN calls the MIE Agent through a
+standard A2A client (`MIEApprovalClient`). MIE creates a Task, publishes its approval request on
+`GET /approvals/events`, and waits for `POST /approvals/{taskId}`. The human decision is returned as
+an `approval decision` artifact and final status metadata; RAN resumes or rejects. The default
+timeout is 240 s, the same as the A2A-T gate.
+
+**Client and UI.** `protocol/pure_client_flow.py` sends text-only messages and answers
+`INPUT_REQUIRED(kind=negotiation)` with a follow-up carrying `taskId`/`contextId`. The presentation
+process is single-mode: `--protocol pure` exposes the pure scenarios and `mieEnabled`, removes the
+protocol switch and comparison card, proxies `/api/mie/events` and `/api/mie/approvals/{taskId}`,
+and shows the per-run metrics from the OSS final status. The engineer client discovers the OSS card
+directly (`A2AT_SAMPLE_DIRECT_SERVER_URL`); the OSS discovers RAN (`A2AT_SAMPLE_RAN_URL`) and RAN
+discovers MIE (`A2AT_SAMPLE_MIE_URL`).
+
+The legacy single-turn `plain` path (`protocol/plain_a2a.py`, `run_plain_client_flow`) remains as an
+internal baseline for tests. `POST /api/runs` still validates it, but the CLI and the page no longer
+expose it.
 
 ## 5. Protocol reference
 

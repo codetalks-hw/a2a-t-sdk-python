@@ -66,7 +66,13 @@ from shared.http_security import (
     validate_bind_security,
 )
 from shared.models import NegotiationDecision
-from shared.run_constants import PROTOCOL_A2A_T, SUPPORTED_PROTOCOLS
+from shared.run_constants import (
+    DEMO_PROTOCOLS,
+    PROTOCOL_A2A_T,
+    PROTOCOL_PLAIN,
+    PROTOCOL_PURE,
+    SUPPORTED_PROTOCOLS,
+)
 from shared.trace import (
     PHASES,
     SCHEMA_VERSION,
@@ -75,11 +81,11 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from demo.scenario import PLAIN_PROTOCOL_SCENARIOS
+from demo.scenario import PLAIN_PROTOCOL_SCENARIOS, PURE_PROTOCOL_SCENARIOS
 
 _LOGGER = logging.getLogger("ran_energy_saving.web")
 
@@ -144,6 +150,8 @@ def create_app(
     approval_timeout_seconds: float = 240.0,
     allow_insecure_bind: bool = False,
     intent_review: bool | None = None,
+    protocol: str = PROTOCOL_A2A_T,
+    mie_url: str | None = None,
 ) -> Starlette:
     """Build the Starlette application of the Web UI.
 
@@ -175,6 +183,9 @@ def create_app(
             only the Web UI exposes this, never the A2A server.
         intent_review: whether confirm mode waits for approval 1; defaults to true only for the
             presentation view, because the explorer has no intent card.
+        protocol: active interaction protocol of this UI process; the page is single-mode and
+            offers only this protocol's scenarios.
+        mie_url: MIE Agent base URL; when set, the UI proxies its approval SSE/POST routes.
 
     Returns:
         The assembled Starlette application.
@@ -194,8 +205,21 @@ def create_app(
         catalog = DemoRunCatalog()
     resolved_catalog: RunCatalog = catalog
     scenario_names = resolved_catalog.names
+    resolved_protocol = protocol if protocol in DEMO_PROTOCOLS else PROTOCOL_A2A_T
+    if resolved_protocol == PROTOCOL_PURE:
+        active_scenarios = tuple(
+            name for name in PURE_PROTOCOL_SCENARIOS if name in scenario_names
+        )
+    elif resolved_protocol == PROTOCOL_PLAIN:
+        active_scenarios = tuple(
+            name for name in PLAIN_PROTOCOL_SCENARIOS if name in scenario_names
+        )
+    else:
+        active_scenarios = tuple(scenario_names)
+    if not active_scenarios:
+        active_scenarios = tuple(scenario_names)
     resolved_default_scenario = _resolve_default(
-        default_scenario, scenario_names, scenario_names[0], "scenario"
+        default_scenario, active_scenarios, active_scenarios[0], "scenario"
     )
     resolved_default_mode = _resolve_default(default_mode, UI_MODES, MODE_AUTO, "mode")
     config_transport = config.transport if config.transport in SUPPORTED_TRANSPORTS else SUPPORTED_TRANSPORTS[0]
@@ -271,15 +295,18 @@ def create_app(
                 "language": config.language,
                 "modelMode": config.model_mode,
                 "modelLabel": config.model_label,
-                "scenarios": list(scenario_names),
+                "scenarios": list(active_scenarios),
                 "scenarioRequests": {
                     name: resolved_catalog.spec(name, language=config.language).user_request
-                    for name in scenario_names
+                    for name in active_scenarios
                 },
                 "modes": list(UI_MODES),
-                "protocols": list(SUPPORTED_PROTOCOLS),
+                "protocol": resolved_protocol,
+                "protocols": [resolved_protocol],
+                "pureScenarios": list(PURE_PROTOCOL_SCENARIOS),
                 "plainScenarios": list(PLAIN_PROTOCOL_SCENARIOS),
-                "defaultProtocol": PROTOCOL_A2A_T,
+                "defaultProtocol": resolved_protocol,
+                "mieEnabled": bool(mie_url) and resolved_protocol == PROTOCOL_PURE,
                 "transports": list(SUPPORTED_TRANSPORTS),
                 "discoveries": list(SUPPORTED_DISCOVERY_MODES),
                 "defaultScenario": resolved_default_scenario,
@@ -411,7 +438,7 @@ def create_app(
             )
         scenario = body.get("scenario", resolved_default_scenario)
         mode = body.get("mode", resolved_default_mode)
-        protocol = body.get("protocol", PROTOCOL_A2A_T)
+        protocol = body.get("protocol", resolved_protocol)
         transport = body.get("transport", resolved_default_transport)
         discovery = body.get("discovery", resolved_default_discovery)
         raw_user_request = body.get("userRequest")
@@ -437,9 +464,21 @@ def create_app(
             optional_strings[field_name] = (
                 raw_value.strip() if isinstance(raw_value, str) and raw_value.strip() else None
             )
-        if scenario not in scenario_names:
+        requested_scenarios = (
+            PURE_PROTOCOL_SCENARIOS
+            if protocol == PROTOCOL_PURE
+            else PLAIN_PROTOCOL_SCENARIOS
+            if protocol == PROTOCOL_PLAIN
+            else scenario_names
+        )
+        if scenario not in requested_scenarios:
             return JSONResponse(
-                {"error": f"Unsupported scenario: {scenario}; expected one of {scenario_names}"},
+                {
+                    "error": (
+                        f"Unsupported scenario for protocol {protocol}: {scenario}; "
+                        f"expected one of {requested_scenarios}"
+                    )
+                },
                 status_code=400,
             )
         if mode not in UI_MODES:
@@ -665,6 +704,65 @@ def create_app(
             return {}
         return dict(value) if isinstance(value, dict) else {}
 
+    async def mie_events(request: Request) -> Response:
+        """Proxy the MIE Agent approval SSE stream to the browser."""
+        del request
+        if not mie_url:
+            return JSONResponse(
+                {"error": "The MIE Agent is not configured.", "code": "mie_disabled"},
+                status_code=404,
+            )
+
+        async def stream() -> AsyncIterator[bytes]:
+            try:
+                async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+                    async with client.stream(
+                        "GET", f"{mie_url.rstrip('/')}/approvals/events"
+                    ) as response:
+                        response.raise_for_status()
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+            except httpx.HTTPError as exc:
+                _LOGGER.warning("MIE event proxy stopped: %s", exc)
+                return
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    async def mie_decide(request: Request) -> Response:
+        """Forward one engineer decision to the MIE Agent."""
+        if not mie_url:
+            return JSONResponse(
+                {"error": "The MIE Agent is not configured.", "code": "mie_disabled"},
+                status_code=404,
+            )
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse(
+                {"error": "The body must be a JSON object.", "code": "body_not_object"},
+                status_code=400,
+            )
+        if not isinstance(body, dict) or not isinstance(body.get("approved"), bool):
+            return JSONResponse(
+                {"error": "The approved field must be a boolean.", "code": "approved_invalid"},
+                status_code=400,
+            )
+        task_id = request.path_params["task_id"]
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=10.0) as client:
+                forwarded = await client.post(
+                    f"{mie_url.rstrip('/')}/approvals/{task_id}",
+                    json={"approved": body["approved"]},
+                )
+        except httpx.HTTPError as exc:
+            _LOGGER.warning("MIE approval forward failed: %s", exc)
+            return JSONResponse(
+                {"error": "The MIE Agent is unreachable.", "code": "mie_unreachable"},
+                status_code=502,
+            )
+        payload = await _json_or_empty(forwarded)
+        return JSONResponse(payload, status_code=forwarded.status_code)
+
     async def _stored_transcript(request: Request, field_name: str) -> str | None:
         """Read one transcript path persisted with a finished run."""
         path = config.client_db_path
@@ -798,6 +896,8 @@ def create_app(
             Route("/api/runs/{run_id}/decisions", submit_decision, methods=["POST"]),
             Route("/api/runs/{run_id}/intent", submit_intent, methods=["POST"]),
             Route("/api/runs/{run_id}/approvals", submit_approval, methods=["POST"]),
+            Route("/api/mie/events", mie_events),
+            Route("/api/mie/approvals/{task_id}", mie_decide, methods=["POST"]),
             Route("/api/runs/{run_id}/transcript.json", transcript_json),
             Route("/api/runs/{run_id}/transcript.md", transcript_markdown),
             Route("/api/runs/{run_id}/trace", ingest_trace, methods=["POST"]),

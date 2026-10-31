@@ -14,7 +14,7 @@ from protocol.client_runtime import build_client_runtime
 from protocol.pre_task_negotiation import TaskTPrecheck
 from protocol.run_spec import RunSpec
 from shared.config import SampleConfig
-from shared.run_constants import PROTOCOL_A2A_T
+from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
 
 
 def offline_model_factory(run_spec: RunSpec) -> Any:
@@ -65,6 +65,7 @@ async def build_demo_runtime(
     """Build one client runtime with the demo catalog and offline assets."""
     from demo.agents.client_agent.agent import build_client_agent
     from demo.catalog import DemoRunCatalog
+    from demo.pure_policy import pure_answer_from_event
 
     return await build_client_runtime(
         replace(config, discovery=discovery),
@@ -78,4 +79,9 @@ async def build_demo_runtime(
         offline_model_factory=offline_model_factory,
         install_offline_provider=install_offline_provider,
         client_agent_factory=build_client_agent,
+        pure_answer=(
+            (lambda event: pure_answer_from_event(event, config.language))
+            if protocol == PROTOCOL_PURE
+            else None
+        ),
     )

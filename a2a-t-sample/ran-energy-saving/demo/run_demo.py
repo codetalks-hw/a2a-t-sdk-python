@@ -48,7 +48,7 @@ import uuid
 from pathlib import Path
 from typing import TextIO
 
-from shared.run_constants import PROTOCOL_A2A_T
+from shared.run_constants import DEMO_PROTOCOLS, PROTOCOL_A2A_T
 
 #: The demo lives one level below the sample directory that owns ``runs/`` and the SDK path.
 CASE_DIR = Path(__file__).resolve().parent.parent
@@ -66,9 +66,13 @@ ENV_CANDIDATES = (CASE_DIR / ".env", SAMPLE_DIR / ".env", SAMPLE_DIR / "env.exam
 REGISTRY_MODULE = "demo.registry.registry_main"
 SERVER_MODULE = "protocol.server_app"
 GATEWAY_MODULE = "protocol.client_gateway"
+OSS_MODULE = "protocol.oss_agent"
+MIE_MODULE = "protocol.mie_agent"
 
 DEFAULT_REGISTRY_PORT = 5001
 DEFAULT_SERVER_PORT = 8000
+DEFAULT_OSS_PORT = 8001
+DEFAULT_MIE_PORT = 8002
 DEFAULT_UI_PORT = 8080
 DEFAULT_UI_HOST = "127.0.0.1"
 
@@ -236,20 +240,33 @@ def _write_run_env(
     ui_port: int,
     gateway_port: int = 8001,
     gateway_register: bool = False,
+    protocol: str = PROTOCOL_A2A_T,
+    oss_port: int = 8001,
+    mie_port: int = 8002,
 ) -> Path:
     """Write the per-run ``.env`` and return its path."""
     values = _read_env(source) if source is not None else {}
+    direct_port = oss_port if protocol == "pure" else server_port
+    # The pure engineer client must discover the OSS Agent, not the RAN Agent. The OSS card is
+    # not registered under the RAN card's name, so direct discovery of its URL is the only path.
+    client_discovery = "direct" if protocol == "pure" else discovery
     values.update(
         {
             "A2AT_LANGUAGE": language,
             "A2AT_SAMPLE_MODEL_MODE": model_mode,
-            "A2AT_SAMPLE_DISCOVERY": discovery,
+            "A2AT_SAMPLE_DISCOVERY": client_discovery,
             "A2AT_SAMPLE_TRANSPORT": transport,
             "A2AT_SAMPLE_WEBHOOK_PORT": str(webhook_port),
             "A2AT_SAMPLE_HOST": server_host,
             "A2AT_SAMPLE_PORT": str(server_port),
             "A2AT_SAMPLE_UI_PORT": str(ui_port),
-            "A2AT_SAMPLE_DIRECT_SERVER_URL": f"http://{server_host}:{server_port}",
+            "A2AT_SAMPLE_DIRECT_SERVER_URL": f"http://{server_host}:{direct_port}",
+            "A2AT_SAMPLE_PROTOCOL_MODE": protocol,
+            "A2AT_SAMPLE_RAN_URL": f"http://{server_host}:{server_port}",
+            "A2AT_SAMPLE_OSS_HOST": server_host,
+            "A2AT_SAMPLE_OSS_PORT": str(oss_port),
+            "A2AT_SAMPLE_MIE_URL": f"http://{server_host}:{mie_port}",
+            "A2AT_SAMPLE_MIE_PORT": str(mie_port),
             "A2AT_SAMPLE_TASK_DB": str(TASK_DB_PATH),
             "A2AT_SAMPLE_CLIENT_DB": str(CLIENT_DB_PATH),
             "A2AT_SAMPLE_GATEWAY_TASK_DB": str(GATEWAY_TASK_DB_PATH),
@@ -630,6 +647,8 @@ def _run_ui(
     approval_gate: bool = False,
     approval_timeout: float = 240.0,
     allow_insecure_bind: bool = False,
+    protocol: str = PROTOCOL_A2A_T,
+    mie_url: str | None = None,
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
     import uvicorn
@@ -664,6 +683,8 @@ def _run_ui(
             approval_gate=approval_gate,
             approval_timeout_seconds=approval_timeout,
             allow_insecure_bind=allow_insecure_bind,
+            protocol=protocol,
+            mie_url=mie_url,
         )
     except ValueError as exc:
         print(f"[run_demo] {exc}")
@@ -755,11 +776,11 @@ def _build_parser(
     )
     parser.add_argument(
         "--protocol",
-        default="a2a-t",
-        choices=("a2a-t", "plain"),
+        default=PROTOCOL_A2A_T,
+        choices=list(DEMO_PROTOCOLS),
         help=(
-            "interaction protocol: a2a-t (Task-T + Negotiation-T, default) or plain (one "
-            "natural-language message, no task template and no negotiation)"
+            "interaction protocol: a2a-t (Task-T + Negotiation-T, default) or pure (standard "
+            "A2A Task INPUT_REQUIRED continuation, no A2A-T extension)"
         ),
     )
     parser.add_argument(
@@ -827,6 +848,18 @@ def _build_parser(
         ),
     )
     parser.add_argument(
+        "--oss-port",
+        type=int,
+        default=DEFAULT_OSS_PORT,
+        help=f"bind port of the OSS Agent in pure mode (default: {DEFAULT_OSS_PORT})",
+    )
+    parser.add_argument(
+        "--mie-port",
+        type=int,
+        default=DEFAULT_MIE_PORT,
+        help=f"bind port of the MIE Agent in pure mode (default: {DEFAULT_MIE_PORT})",
+    )
+    parser.add_argument(
         "--gateway",
         action="store_true",
         help="also serve the client agent's inbound A2A gateway (Gemini Enterprise path)",
@@ -885,6 +918,15 @@ def main() -> int:
         parser.error(
             f"--mode {args.mode} requires --ui (the decision lives in the Web UI)"
         )
+    if args.protocol == "pure":
+        from demo.scenario import PURE_PROTOCOL_SCENARIOS
+
+        if args.scenario not in PURE_PROTOCOL_SCENARIOS:
+            parser.error(
+                f"--protocol pure supports only {', '.join(PURE_PROTOCOL_SCENARIOS)}"
+            )
+        if args.gateway:
+            parser.error("--gateway is not supported with --protocol pure")
 
     python = sys.executable
     if not _preflight(python, source_env):
@@ -921,6 +963,9 @@ def main() -> int:
         ui_port=args.ui_port,
         gateway_port=args.gateway_port,
         gateway_register=args.gateway_register,
+        protocol=args.protocol,
+        oss_port=args.oss_port,
+        mie_port=args.mie_port,
     )
 
     from shared.config import load_config
@@ -1079,9 +1124,31 @@ def main() -> int:
             # The UI process checks the same token the server sends; the URL is only read by the
             # server process, but keeping both keys together documents the paired configuration.
             os.environ["A2AT_SAMPLE_TRACE_TOKEN"] = server_trace_env["A2AT_SAMPLE_TRACE_TOKEN"]
-        if start("server", SERVER_MODULE, server_port, server_trace_env) is None:
+        server_env = dict(server_trace_env)
+        server_env["A2AT_SAMPLE_PROTOCOL_MODE"] = args.protocol
+        if args.protocol == "pure":
+            mie_env = {"A2AT_SAMPLE_MIE_PORT": str(args.mie_port)}
+            if start("mie", MIE_MODULE, args.mie_port, mie_env) is None:
+                return 1
+            server_env["A2AT_SAMPLE_MIE_URL"] = (
+                f"http://{server_host}:{args.mie_port}"
+            )
+            if args.ui or args.approval_gate:
+                server_env["A2AT_SAMPLE_APPROVAL_GATE"] = "1"
+                server_env["A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS"] = str(
+                    args.approval_timeout
+                )
+        if start("server", SERVER_MODULE, server_port, server_env) is None:
             return 1
-        if args.gateway and start("gateway", GATEWAY_MODULE, args.gateway_port) is None:
+        if args.protocol == "pure":
+            oss_env = {
+                "A2AT_SAMPLE_RAN_URL": f"http://{server_host}:{server_port}",
+                "A2AT_SAMPLE_OSS_HOST": server_host,
+                "A2AT_SAMPLE_OSS_PORT": str(args.oss_port),
+            }
+            if start("oss", OSS_MODULE, args.oss_port, oss_env) is None:
+                return 1
+        elif args.gateway and start("gateway", GATEWAY_MODULE, args.gateway_port) is None:
             return 1
         _save_state(
             list(dict.fromkeys(managed)),
@@ -1101,6 +1168,16 @@ def main() -> int:
                 f"[run_demo] starting Web UI (scenario selectable, mode manual/auto, "
                 f"transport={args.transport}, language={args.language}, model_mode={args.model_mode}) ..."
             )
+            ui_server_url = args.server_url or (
+                f"http://{server_host}:{args.oss_port}"
+                if args.protocol == "pure"
+                else f"http://{server_host}:{server_port}"
+            )
+            mie_url = (
+                f"http://{server_host}:{args.mie_port}"
+                if args.protocol == "pure"
+                else None
+            )
             return_code = _run_ui(
                 env_path=env_path,
                 ui_port=args.ui_port,
@@ -1109,10 +1186,12 @@ def main() -> int:
                 mode=args.mode,
                 transport=args.transport,
                 ui_mode=args.ui_mode,
-                server_url=args.server_url or f"http://127.0.0.1:{server_port}",
-                approval_gate=args.approval_gate,
+                server_url=ui_server_url,
+                approval_gate=args.approval_gate or args.protocol == "pure",
                 approval_timeout=args.approval_timeout,
                 allow_insecure_bind=args.allow_insecure_bind,
+                protocol=args.protocol,
+                mie_url=mie_url,
             )
         else:
             print(

@@ -143,13 +143,39 @@ real A2A request headers and JSON body with the Task-T metadata; its **Plain A2A
 same request as one natural-language sentence without the extension header or Task-T fields (a
 format view of the same message). Clicking a trace row selects that message in the inspector.
 
-The page also has a **protocol switch**. The night and missing-parameter examples can run over
-**plain A2A** too: one natural-language message, no Task-T template and no negotiation. The same
-agent card serves both — a request that does not declare the Task-T extension enters the plain path,
-which hands the text to the same guarded planner. In plain mode the intent approval and negotiation
-steps are marked *not applicable*, and a request without a time-segmented guaranteed throughput
-target is rejected instead of guessed. At the end, a comparison card puts the two real runs side by
-side: intent, negotiation rounds, validation and outcome. `--protocol plain` runs it from the CLI.
+### Pure A2A mode (three hops, standard A2A only)
+
+The page is single-mode: the protocol is fixed when the process starts, and the page has no
+protocol switch or comparison card. Run the A2A-T demo and the pure A2A demo separately to compare
+them.
+
+`--protocol pure` starts a real three-hop A2A chain:
+
+```
+Engineer/UI ──A2A──► OSS Agent (:8001) ──A2A──► RAN Agent (:8000) ──A2A──► MIE Agent (:8002)
+```
+
+- The OSS Agent forwards the engineer request to the RAN Agent. When the request needs a value or
+  has a conflicting target, the RAN Agent returns a standard A2A Task in `INPUT_REQUIRED`; the OSS
+  Agent answers on the same Task with a follow-up message carrying `taskId`/`contextId`. Up to three
+  rounds. No `Task-T/v1` or `Negotiation-T/v1` metadata is generated or returned.
+- Before applying a plan, the RAN Agent asks the MIE Agent over A2A. The MIE Agent pushes the
+  approval card to the page over its own SSE stream and receives the engineer's decision on
+  `POST /api/mie/approvals/{taskId}`.
+- The presentation shows the OSS, RAN and MIE hops, the negotiation turns, the MIE approval card and
+  a per-run metrics block (hops, negotiation rounds, A2A messages). The examples are `night`
+  (no negotiation), `information` (one missing-parameter round) and `target` (a counter-proposal
+  then an accept).
+- The old single-turn `plain` path remains in the code and tests as an internal baseline, but it is
+  not exposed by the CLI or the page.
+
+```bash
+# Pure A2A, three hops and human approval in MIE
+uv run python -m demo.run_demo --protocol pure --ui --approval-gate --scenario information
+
+# Existing A2A-T mode (Task-T + Negotiation-T), unchanged
+uv run python -m demo.run_demo --protocol a2a-t --ui --mode confirm --approval-gate --scenario information
+```
 
 Approval 1 is real: in `--mode confirm`, the Task-T is held before it leaves the OSS Agent until the
 engineer confirms the structured intent. Approval 2 is the MIE MML review: with `--approval-gate`,
