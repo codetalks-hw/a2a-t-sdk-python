@@ -339,6 +339,7 @@ assert.equal(approvalCard(namedApproval, copy).options.length, 2);
 
 applyFrame(approval, status(5, "TASK_STATE_WORKING"));
 assert.equal(approval.approvalState, "approved");
+assert.equal(approval.mmlSent, true);
 assert.equal(pendingHuman(approval), null);
 
 // A late approval-requested span (server spans arrive in batches) must not reopen the gate.
@@ -443,6 +444,25 @@ artifactState.approvalState = "approved";
 assert.equal(sceneFor(artifact(25, "execution", "apply_energy_saving_plan"), artifactState).key, "apply");
 // An unknown artifact is never mistaken for an applied plan.
 assert.equal(sceneFor(artifact(26, "execution"), artifactState).key, "trace");
+
+// The apply artifact is the execution report once MIE has dispatched the MML; only a run
+// without that dispatch shows it as the apply beat.
+artifactState.mmlSent = true;
+assert.equal(
+  sceneFor(artifact(27, "execution", "apply_energy_saving_plan"), artifactState).key,
+  "execute",
+);
+artifactState.mmlSent = false;
+assert.equal(
+  sceneFor(artifact(28, "execution", "apply_energy_saving_plan"), artifactState).key,
+  "apply",
+);
+
+const executedState = createState();
+applyFrame(executedState, { type: "run_started", runId: "s3", scenario: "night", mode: "auto" });
+applyFrame(executedState, artifact(1, "execution", "apply_energy_saving_plan"));
+assert.equal(executedState.mmlSent, true);
+assert.equal(executedState.executed, true);
 
 // --- Player: a hold waits for the engineer, then resumes ----------------
 

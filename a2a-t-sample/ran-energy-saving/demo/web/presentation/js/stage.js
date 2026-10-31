@@ -174,7 +174,7 @@ export function createStage(els) {
     }
     if (key === "collect-progress") {
       note("nms", copy.roles.nms, copy.dataCollection.progress);
-      note("cells", copy.roles.cells, copy.dataCollection.noMml);
+      note("cells", copy.roles.cells, copy.dataCollection.measuring);
       animateDays(copy);
       return;
     }
@@ -183,7 +183,7 @@ export function createStage(els) {
       dayProgress = 1;
       els.nmsBar.style.width = "100%";
       note("nms", copy.roles.nms, copy.dataCollection.done);
-      note("cells", copy.roles.cells, copy.states.cellsBaseline);
+      note("cells", copy.roles.cells, copy.dataCollection.baselineMeasured);
       return;
     }
     if (key === "approval-ready") {
@@ -217,16 +217,45 @@ export function createStage(els) {
       // order the approval before the apply artifact; this guard keeps a stray frame from
       // showing the MML anyway.
       if (state.approvalState === "waiting") return;
-      fly("lane-apply", copy.approval.mmlCommands, "cfg", 1200);
-      note("nms", copy.roles.nms, copy.approval.sendingMml);
-      note("cells", copy.roles.cells, copy.states.cellsApplying);
+      // MIE owns the dispatch: the MML commands leave the MIE box directly for the radio sites.
+      fly("lane-mie-apply", copy.approval.mmlCommands, "cfg", 1400);
+      note("nms", copy.roles.nms, copy.approval.awaitingResults);
+      note("oss", copy.roles.oss, copy.states.ossWaitingResults);
       note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
+      note("cells", copy.roles.cells, copy.states.cellsApplying);
+      return;
+    }
+    if (key === "execute") {
+      // The sites executed the MML and report the result back through the RAN Agent.
+      fly("lane-data", copy.approval.executionResults, "data", 1200);
+      note("cells", copy.roles.cells, copy.states.cellsApplied);
+      note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
+      window.setTimeout(() => {
+        note("nms", copy.roles.nms, copy.states.nmsExecuted);
+        fly("lane-status", copy.approval.executionResults, "status", 900);
+      }, 600);
+      window.setTimeout(() => {
+        note("oss", copy.roles.oss, copy.states.ossResultsReceived);
+      }, 700);
       return;
     }
     if (key === "report") {
       fly("lane-status", "REPORT", "status", 1200);
       note("nms", copy.roles.nms, copy.states.nmsReporting);
-      note("oss", copy.roles.oss, copy.states.ossFollowing);
+      note("oss", copy.roles.oss, copy.states.ossSummarising);
+      note("eng", copy.roles.eng, copy.states.engApproved);
+      window.setTimeout(() => {
+        fly("lane-return", copy.approval.reportToEngineer, "req", 900);
+        note("eng", copy.roles.eng, copy.states.engReportReceived);
+      }, 900);
+      return;
+    }
+    if (key === "finish") {
+      if (state.report !== null || state.reportArtifact) {
+        note("nms", copy.roles.nms, copy.states.nmsDone);
+        note("oss", copy.roles.oss, copy.states.ossDone);
+        note("eng", copy.roles.eng, copy.states.engReportReceived);
+      }
       return;
     }
     if (key === "end" || key === "abort") {
@@ -283,31 +312,43 @@ export function createStage(els) {
       if (state.approvalState === "waiting") {
         nms = { cls: "wait", text: copy.states.nmsApproval };
         eng = { cls: "wait", text: copy.states.engReviewing };
+      } else if (state.reportArtifact || state.report !== null) {
+        // The sites executed the plan and the RAN Agent returned the intent report.
+        eng = { cls: "ok", text: copy.states.engReportReceived };
+        oss = { cls: "ok", text: copy.states.ossDone };
+        nms = { cls: "ok", text: copy.states.nmsDone };
+        cells = { cls: "ok", text: copy.states.cellsApplied };
+      } else if (applyDone || state.executed) {
+        // The radio sites reported the execution results back to the RAN Agent.
+        oss = { cls: "ok", text: copy.states.ossResultsReceived };
+        nms = { cls: "active", text: copy.states.nmsExecuted };
+        cells = { cls: "ok", text: copy.states.cellsApplied };
+      } else if (state.mmlSent) {
+        // MIE dispatched the MML; the RAN Agent waits for the sites to execute it.
+        oss = { cls: "ok", text: copy.states.ossWaitingResults };
+        nms = { cls: "active", text: copy.states.nmsWaitingResults };
+        cells = { cls: "active", text: copy.states.cellsApplying };
       } else if (state.approvalState === "approved") {
-        nms = { cls: "active", text: copy.states.nmsApplying };
+        // The engineer approved; the server has not confirmed the MIE dispatch yet.
+        oss = { cls: "ok", text: copy.states.ossWaitingResults };
+        nms = { cls: "wait", text: copy.states.nmsWaitingDispatch };
+        cells = { cls: "", text: copy.states.cellsBaseline };
       } else if (state.dataCollection === "started" || state.dataCollection === "progress") {
         const day = Math.max(1, Math.min(8, Math.round(1 + dayProgress * 7)));
         nms = {
           cls: "active",
           text: format(copy.states.nmsCollecting, { day }),
         };
+        cells = { cls: "active", text: copy.states.cellsMeasuring };
       } else if (state.dataCollection === "completed") {
         nms = { cls: "active", text: copy.states.nmsCollectingDone };
-      } else if (applyDone) {
-        nms = { cls: "active", text: copy.states.nmsReporting };
+        cells = { cls: "", text: copy.states.cellsBaseline };
       } else {
         nms = { cls: "active", text: copy.states.nmsStrategy };
+        cells = { cls: "", text: copy.states.cellsNormal };
       }
-      cells = {
-        cls: applyDone ? "ok" : "active",
-        text: applyDone
-          ? copy.states.cellsApplied
-          : state.dataCollection === "completed"
-            ? copy.states.cellsBaseline
-            : copy.states.cellsMeasuring,
-      };
     } else if (stage === "done") {
-      eng = { cls: "ok", text: copy.states.engApproved };
+      eng = { cls: "ok", text: copy.states.engReportReceived };
       oss = { cls: "ok", text: copy.states.ossDone };
       nms = { cls: "ok", text: copy.states.nmsDone };
       cells = { cls: "ok", text: copy.states.cellsApplied };
@@ -368,7 +409,9 @@ export function createStage(els) {
       els.approvalState.textContent = copy.states.approvalWaiting;
     } else if (state.approvalState === "approved") {
       els.approval.className = "approval approved";
-      els.approvalState.textContent = copy.states.approvalApproved;
+      els.approvalState.textContent = state.mmlSent
+        ? copy.states.approvalApproved
+        : copy.states.approvalConfirmed;
     } else if (state.approvalState === "rejected") {
       els.approval.className = "approval rejected";
       els.approvalState.textContent = copy.states.approvalRejected;
@@ -377,8 +420,11 @@ export function createStage(els) {
       els.approvalState.textContent = copy.states.approvalIdle;
     }
 
-    const carriers = stage === "done" ? 2 : stage === "executing" && applyDone ? 2 : 3;
-    const battery = stage === "done" || (stage === "executing" && applyDone);
+    // The sites change when MIE dispatches the MML, not when the execution report arrives.
+    const savingOn =
+      stage === "done" || (stage === "executing" && (state.mmlSent || applyDone));
+    const carriers = savingOn ? 2 : 3;
+    const battery = savingOn;
     for (let index = 0; index < 6; index += 1) setCell(index, carriers, battery, false);
   }
 

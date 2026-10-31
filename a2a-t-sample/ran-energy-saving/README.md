@@ -157,8 +157,9 @@ the RAN Agent publishes the real A2A `INPUT_REQUIRED` state before applying a pl
 MML suggestion and asks the engineer to approve it in MIE. A rejection applies nothing and
 ends the run without a report. The data-collection phase is driven by three real `WORKING` status
 updates (started, in progress, completed); the page animates days 1–8 and never invents measurements.
-No MML command reaches the network before the MIE acknowledgment; the green `MML commands` packet
-appears only in the apply step.
+No MML command reaches the network before the MIE approval: after it, the green `MML commands`
+packet leaves MIE directly for the radio sites, the sites execute it, and the execution results
+travel back through the RAN Agent to the OSS Agent.
 
 The playback controls (auto / step by step, speed, pause, previous / next, loop) only pace the
 presentation; the backend run is real. Transport, model and language are fixed when the process

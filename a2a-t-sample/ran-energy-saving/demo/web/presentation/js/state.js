@@ -45,6 +45,8 @@ export function createState() {
     intentText: null,
     intentReview: null,
     dataCollection: null,
+    mmlSent: false,
+    executed: false,
     trace: [],
     decision: null,
     approval: null,
@@ -240,8 +242,14 @@ function applyEvent(state, entry) {
           state.approvalState = APPROVAL.WAITING;
         }
       } else if (working && state.approvalState === APPROVAL.WAITING) {
-        // A WORKING update after the gate means the change was approved (or the gate was off).
+        // A WORKING update after the gate means the change was approved and MIE is dispatching
+        // the MML to the radio sites.
         state.approvalState = APPROVAL.APPROVED;
+        state.mmlSent = true;
+      } else if (working && state.approvalState === APPROVAL.APPROVED) {
+        // The page already marked the gate approved when the engineer clicked; this WORKING
+        // update is the server confirming that MIE is dispatching.
+        state.mmlSent = true;
       } else if (taskState === "TASK_STATE_REJECTED" || label.includes("REJECTED")) {
         state.approvalState = APPROVAL.REJECTED;
       }
@@ -253,6 +261,12 @@ function applyEvent(state, entry) {
       else state.executionArtifacts += 1;
       const tool = artifactTool(entry);
       if (tool) state.artifactTools.push(tool);
+      if (tool === "apply_energy_saving_plan") {
+        // The artifact is the execution confirmation: MIE dispatched the MML and the sites
+        // executed it. A gate-off run has no earlier WORKING update to mark the dispatch.
+        state.mmlSent = true;
+        state.executed = true;
+      }
       break;
     }
     default:

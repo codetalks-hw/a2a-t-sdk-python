@@ -144,8 +144,8 @@ Web UI 默认打开演示视图：左侧是 16:9 的舞台，依次是网络工�
 发送。审批 2 是 MIE 的 MML 审核：`--approval-gate` 下，RAN Agent 在下发前发布真实的 A2A
 `INPUT_REQUIRED` 状态；页面直接展示 MML 建议，请工程师在 MIE 中审核并确认。驳回则不下发、不出报告。
 数据采集阶段由 RAN Agent 的三条真实 `WORKING` 状态驱动（started / in progress / completed）；页面
-把第 1–8 天压缩成几秒，不伪造测量值。MML 命令只有在 MIE 确认之后才下发，绿色 `MML commands` 包只
-出现在最后的 apply 步骤。
+把第 1–8 天压缩成几秒，不伪造测量值。MML 命令只有在 MIE 确认之后才下发：绿色 `MML commands` 包
+从 MIE 直接飞向无线站点，站点执行后把执行结果经 RAN Agent 上报给 OSS Agent。
 
 播放控制（自动 / 单步、速度、暂停、上一步 / 下一步、循环）只影响演示节奏，后端运行是真实的。
 传输、模型与语言在进程启动时确定，页面上只保留场景切换和请求编辑。

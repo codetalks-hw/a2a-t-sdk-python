@@ -119,8 +119,11 @@ function eventScene(entry, state, frame) {
       }
       if (tool === "evaluate_energy_saving_plan") return scene("approval-ready", 1400, frame);
       if (tool === "apply_energy_saving_plan") {
-        // Never show MML going to the network while the MIE review is still open.
-        return state.approvalState === "waiting" ? scene("trace", 0, frame) : scene("apply", 1600, frame);
+        // Never show MML going to the network while the MIE review is still open. The artifact
+        // is the execution confirmation: after the MIE dispatch it is the sites' report, not a
+        // second dispatch.
+        if (state.approvalState === "waiting") return scene("trace", 0, frame);
+        return state.mmlSent ? scene("execute", 1600, frame) : scene("apply", 1600, frame);
       }
       return scene("trace", 0, frame);
     }
@@ -207,6 +210,7 @@ function stepOf(key) {
     case "approval-rejected":
       return "approval";
     case "apply":
+    case "execute":
     case "report":
     case "finish":
       return "apply";

@@ -113,11 +113,12 @@ Two human approvals can be enabled at startup:
   MIE. A rejection applies nothing and ends the run without a report.
 
 The data-collection step is driven by three real `WORKING` status updates (started, in progress,
-completed); the page animates days 1–8, shows the network-side bubble "No MML applied yet", and
-keeps the RAN Agent at "Data collection completed" until the MIE review starts. The green
-`MML commands` packet only appears in the apply step, after the engineer approves the suggestion
-in MIE. The stage shows six radio sites: the two dataset cells (`cell-001`, `cell-002`) plus four
-illustrative sites of the same test cluster.
+completed); the page animates days 1–8, says "No MML applied yet" once while the baseline is being
+measured, and keeps the RAN Agent at "Data collection completed" until the MIE review starts. After
+the engineer approves the suggestion in MIE, the green `MML commands` packet goes from the MIE box
+directly to the radio sites; the sites execute it and the execution results travel back to the RAN
+Agent, which reports them over A2A-T. The stage shows six radio sites: the two dataset cells
+(`cell-001`, `cell-002`) plus four illustrative sites of the same test cluster.
 
 The playback controls (auto / step, speed, pause, previous / next, loop) pace the presentation only;
 the backend run is real. Transport, model and language come from the CLI. The stage follows the
@@ -125,7 +126,7 @@ client's A2A events (status updates and artifacts); server-side trace spans are 
 right-hand panels and never replay a stage beat, because they are posted in batches and can arrive
 after the events they explain. Artifacts are classified by the tool that produced them, so a live
 planner that reads several cells and evaluates several candidates still shows MML only after the
-MIE approval and the apply artifact.
+MIE approval, and reads the apply artifact as the sites' execution report rather than a dispatch.
 
 For phases, LLM and tool spans, raw payloads and run history, start with `--ui-mode explorer` and
 use the Run Explorer's left rail, timeline and inspector.
