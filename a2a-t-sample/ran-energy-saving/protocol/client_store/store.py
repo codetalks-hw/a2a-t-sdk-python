@@ -61,6 +61,38 @@ TURN_ROLE_SYSTEM: Final[str] = "system"
 NEGOTIATION_DIRECTION_INBOUND: Final[str] = "inbound"
 NEGOTIATION_DIRECTION_OUTBOUND: Final[str] = "outbound"
 
+#: Per-run comparison metrics (the A2A-T vs pure A2A analysis carrier).
+_RUN_METRICS_SCHEMA: Final[str] = """
+CREATE TABLE IF NOT EXISTS run_metrics (
+  run_id            TEXT PRIMARY KEY,
+  conversation_id   TEXT,
+  protocol          TEXT NOT NULL,
+  scenario          TEXT NOT NULL,
+  mode              TEXT NOT NULL,
+  transport         TEXT NOT NULL,
+  language          TEXT NOT NULL,
+  model_mode        TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  final_state       TEXT,
+  passed            INTEGER,
+  accuracy_score    REAL,
+  duration_ms       REAL,
+  model_ms          REAL,
+  tool_ms           REAL,
+  approval_wait_ms  REAL,
+  prompt_tokens     INTEGER,
+  completion_tokens INTEGER,
+  total_tokens      INTEGER,
+  llm_calls         INTEGER,
+  token_available   INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  metric_json       TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_group
+  ON run_metrics(protocol, scenario, created_at DESC);
+"""
+
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS conversations (
   conversation_id  TEXT PRIMARY KEY,
@@ -136,7 +168,7 @@ CREATE TABLE IF NOT EXISTS task_snapshots (
   updated_at   TEXT NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
-"""
+""" + _RUN_METRICS_SCHEMA
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:
@@ -176,8 +208,17 @@ def _enforce_one_active_run(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_run_metrics(connection: sqlite3.Connection) -> None:
+    """Add the per-run metrics table to a database written by version 2."""
+    connection.executescript(_RUN_METRICS_SCHEMA)
+
+
 #: Ordered schema migrations; index ``i`` upgrades version ``i`` to ``i + 1``.
-_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (_create_schema, _enforce_one_active_run)
+_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
+    _create_schema,
+    _enforce_one_active_run,
+    _create_run_metrics,
+)
 
 
 #: Fields ``update_run`` may change (keeps the SQL dynamic but closed).
@@ -228,6 +269,30 @@ def _truncate(value: str, limit: int = SUMMARY_LIMIT) -> str:
     """Truncate one display string."""
     text = " ".join(value.split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _section(value: object) -> dict[str, object]:
+    """Return one nested metrics section as a plain mapping."""
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _optional_int(value: object) -> int | None:
+    """Return an integer value, ``None`` when absent or not numeric."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _optional_float(value: object) -> float | None:
+    """Return a float value, ``None`` when absent or not numeric."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _optional_bool(value: object) -> int | None:
+    """Return a SQLite integer for a tri-state boolean (``None`` when not applicable)."""
+    return 1 if value is True else 0 if value is False else None
 
 
 def _dump_json(value: Mapping[str, object] | None) -> str:
@@ -429,6 +494,10 @@ class ClientStore(Protocol):
     async def save_task_snapshot(self, record: TaskSnapshotRecord) -> None: ...
 
     async def get_task_snapshot(self, run_id: str) -> TaskSnapshotRecord | None: ...
+
+    async def save_run_metrics(self, metrics: Mapping[str, object]) -> None:
+        """Upsert the per-run comparison metrics of one run."""
+        ...
 
     async def mark_running_interrupted(self) -> int: ...
 
@@ -662,6 +731,13 @@ class SqliteClientStore:
         except sqlite3.Error as exc:
             _LOGGER.warning("task snapshot read failed for %s: %s", run_id, exc)
             return None
+
+    async def save_run_metrics(self, metrics: Mapping[str, object]) -> None:
+        """Upsert the per-run comparison metrics of one run."""
+        try:
+            await asyncio.to_thread(self._save_run_metrics, metrics)
+        except sqlite3.Error as exc:
+            _LOGGER.warning("run metrics persistence failed for %s: %s", metrics.get("runId"), exc)
 
     async def mark_running_interrupted(self) -> int:
         """Mark every run left ``running`` by a previous process as ``interrupted``."""
@@ -996,6 +1072,75 @@ class SqliteClientStore:
                     record.state,
                     record.updated_at,
                     _dump_json(record.payload),
+                ),
+            )
+
+    def _save_run_metrics(self, metrics: Mapping[str, object]) -> None:
+        accuracy = _section(metrics.get("accuracy"))
+        tokens = _section(metrics.get("tokens"))
+        latency = _section(metrics.get("latency"))
+        stamp = now_iso()
+        started = metrics.get("startedAt")
+        created_at = started if isinstance(started, str) and started else stamp
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_metrics
+                    (run_id, conversation_id, protocol, scenario, mode, transport, language,
+                     model_mode, status, final_state, passed, accuracy_score, duration_ms,
+                     model_ms, tool_ms, approval_wait_ms, prompt_tokens, completion_tokens,
+                     total_tokens, llm_calls, token_available, created_at, updated_at,
+                     metric_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    conversation_id=excluded.conversation_id,
+                    protocol=excluded.protocol,
+                    scenario=excluded.scenario,
+                    mode=excluded.mode,
+                    transport=excluded.transport,
+                    language=excluded.language,
+                    model_mode=excluded.model_mode,
+                    status=excluded.status,
+                    final_state=excluded.final_state,
+                    passed=excluded.passed,
+                    accuracy_score=excluded.accuracy_score,
+                    duration_ms=excluded.duration_ms,
+                    model_ms=excluded.model_ms,
+                    tool_ms=excluded.tool_ms,
+                    approval_wait_ms=excluded.approval_wait_ms,
+                    prompt_tokens=excluded.prompt_tokens,
+                    completion_tokens=excluded.completion_tokens,
+                    total_tokens=excluded.total_tokens,
+                    llm_calls=excluded.llm_calls,
+                    token_available=excluded.token_available,
+                    updated_at=excluded.updated_at,
+                    metric_json=excluded.metric_json
+                """,
+                (
+                    str(metrics.get("runId") or ""),
+                    metrics.get("conversationId"),
+                    str(metrics.get("protocol") or ""),
+                    str(metrics.get("scenario") or ""),
+                    str(metrics.get("mode") or ""),
+                    str(metrics.get("transport") or ""),
+                    str(metrics.get("language") or ""),
+                    str(metrics.get("modelMode") or ""),
+                    str(metrics.get("status") or ""),
+                    metrics.get("finalState"),
+                    _optional_bool(accuracy.get("passed")),
+                    _optional_float(accuracy.get("score")),
+                    _optional_float(metrics.get("durationMs")),
+                    _optional_float(latency.get("modelMs")),
+                    _optional_float(latency.get("toolMs")),
+                    _optional_float(latency.get("approvalWaitMs")),
+                    _optional_int(tokens.get("prompt")),
+                    _optional_int(tokens.get("completion")),
+                    _optional_int(tokens.get("total")),
+                    _optional_int(tokens.get("llmCalls")),
+                    1 if tokens.get("available") is True else 0,
+                    created_at,
+                    stamp,
+                    _dump_json(dict(metrics)),
                 ),
             )
 

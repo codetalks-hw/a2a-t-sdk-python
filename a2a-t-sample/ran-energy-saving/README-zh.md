@@ -176,6 +176,32 @@ uv run python -m demo.run_demo --protocol a2a-t --ui --mode confirm --approval-g
 需要协议级视图（阶段、LLM 与工具调用、原始报文、历史记录）时，在同一条命令后加 `--ui-mode explorer`。
 安装、环境变量与完整参数见[技术指南](TECHNICAL-zh.md)。
 
+### 指标与协议对比
+
+每次 run 都会生成一条指标记录：token 消耗、耗时拆分（模型 / 工具 / 人工审批 / 其他）以及
+相对场景 ground truth 的准确率（终态、协商轮次、达成目标的吞吐目标、报告是否存在）。记录写入
+客户端 SQLite 的 `run_metrics` 表，并追加到 `runs/metrics/run-metrics.jsonl`；Web UI 同时提供
+`/api/metrics/runs`、`/api/metrics/summary`、`/api/runs/{runId}/metrics` 和
+`/api/metrics/export.csv`。
+
+打开 `http://127.0.0.1:8080/comparison` 可按协议 / 场景查看成功率、平均 token、模型与总耗时、
+P95 和审批等待时间。页面读取的就是这些持久化记录。
+
+协议是进程级选择，因此基准脚本会为每种协议分别拉起一套 demo，跑同一组场景，在固定延迟
+（默认 0.3 秒）后自动通过人工审批 gate，最后把 `metrics.json`、`metrics.jsonl`、`summary.csv`、
+`summary.json` 和 `report.html` 写到 `runs/benchmarks/<timestamp>/`：
+
+```bash
+# 用真实模型做 token / 耗时 / 准确率对比
+uv run python -m demo.benchmark --model-mode live --scenarios information,target --repeats 3
+
+# 一次快速离线 smoke（脚本模型不上报 token，因此 token 为 N/A）
+uv run python -m demo.benchmark --protocols pure --scenarios information --repeats 1
+```
+
+离线模式仍可对比耗时和准确率；token 因 scripted 模型没有 usage 而显示为 `N/A`。人工审批时间单独
+统计，不计入模型/协议耗时对比。
+
 ## 5. 集成边界
 
 | OSS 侧 | 网管侧 |

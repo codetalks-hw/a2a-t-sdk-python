@@ -17,6 +17,7 @@ from demo.scenario import (
     accept_confirmation_text,
     accept_filled_params,
     complete_initial_params,
+    expected_negotiation_target,
     get_scenario,
     resolve_user_request,
     task_t_data_schema,
@@ -50,6 +51,8 @@ def to_run_spec(scenario: Scenario, *, language: str = LANGUAGE_ZH) -> RunSpec:
             for step in scenario.expected_sequence
         ),
         policy=policy,
+        expected_final_state=scenario.expected_final_state,
+        expected_negotiation_target=expected_negotiation_target(scenario, language),
     )
 
 

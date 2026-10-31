@@ -475,6 +475,38 @@ A2A-T 路径完全不变：`--protocol a2a-t` 仍安装
 旧的单轮 `plain` 路径（`protocol/plain_a2a.py`、`run_plain_client_flow`）保留为测试内部基线。
 `POST /api/runs` 仍接受它，但 CLI 和页面不再暴露。
 
+### 4.7 单次运行指标与协议基准
+
+`protocol/run_metrics.py` 为每次结束的 run 生成一条指标记录，直接读取已经存在的 trace span，
+不引入第二套埋点：
+
+- **Token**：统一三种生产者格式（ADK 与 A2A-T SDK 的 `prompt/completion/total`，LangGraph
+  planner 的 `input_tokens/output_tokens/total_tokens`），并按 side 和 `stage` 分组（例如
+  `client:negotiation_accept_extraction`、`server:server_planner`）。脚本模式标记为
+  `available=false, scripted=true`。
+- **耗时**：把总时间拆成模型、工具、人工审批等待和其余编排时间。审批等待由
+  `requested`/`approved|rejected` 两个 span 配对计算，基准不会把人工点击时间算进模型耗时。
+- **准确率**：对比 `RunSpec.expected_final_state`、期望轮次、`RunSpec.expected_negotiation_target`
+  和报告是否存在。A2A-T 还比较完整的 performative 序列；pure A2A 没有 Negotiation-T performative，
+  因此用协商轮次和最终目标作为可比项。期望目标来自 `demo/scenario.py` 中场景的接受/修正目标。
+
+`RunManager` 在短暂的 trace 刷写窗口后（`metrics_grace_seconds`，`run_demo.py` 中为 2 秒）持久化，
+因为服务端 trace 是批量上报的。记录会 upsert 到客户端数据库的 `run_metrics` 表（schema 版本 3），
+并追加到 `runs/metrics/run-metrics.jsonl`。进程仍持有 run 时，`GET /api/runs/{runId}/metrics`
+实时计算；进程重启后回退到持久化记录。
+
+对比入口是 `GET /comparison`，另有：
+
+- `GET /api/metrics/runs?protocol=&scenario=&limit=`
+- `GET /api/metrics/summary`（协议 × 场景分组，以及按协议的总览）
+- `GET /api/metrics/export.csv`
+
+`demo/benchmark.py` 是进程级矩阵 runner：每种协议启动一套 demo，通过 Web UI API 跑
+`scenario × repeats`，在 `--approval-delay` 秒后自动通过审批 gate，轮询
+`/api/runs/{id}/metrics` 直到 `traceFinal`，最后把 JSON/CSV/HTML 报告写到
+`runs/benchmarks/<timestamp>/`。`summary.csv` 含每个协议 × 场景的成功率、平均 token、模型/总耗时、
+P95 和审批等待。
+
 ## 5. 协议参考
 
 ### 5.1 消息结构

@@ -685,6 +685,9 @@ def _run_ui(
             allow_insecure_bind=allow_insecure_bind,
             protocol=protocol,
             mie_url=mie_url,
+            # The server trace emitter flushes in batches; aggregate the persisted metrics after
+            # the same short window the SSE stream uses to forward its last spans.
+            metrics_grace_seconds=2.0,
         )
     except ValueError as exc:
         print(f"[run_demo] {exc}")

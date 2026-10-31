@@ -81,6 +81,9 @@ class RunSpec:
         scripted_decisions: decisions replayed by the scripted provider and the offline model.
         expected_sequence: expected performative sequence (UI hints and acceptance tests).
         policy: business values filled on accept.
+        expected_final_state: terminal state the run must reach, when the catalog provides one.
+        expected_negotiation_target: guaranteed-throughput target the negotiation must agree on,
+            when the scenario ends with a completed task.
     """
 
     name: str
@@ -89,6 +92,8 @@ class RunSpec:
     scripted_decisions: tuple[NegotiationDecision, ...] = ()
     expected_sequence: tuple[ExpectedStep, ...] = ()
     policy: ClientPolicy = DEFAULT_CLIENT_POLICY
+    expected_final_state: str | None = None
+    expected_negotiation_target: str | None = None
 
 
 @runtime_checkable

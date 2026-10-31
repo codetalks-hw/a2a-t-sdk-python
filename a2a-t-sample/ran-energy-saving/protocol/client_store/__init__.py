@@ -11,6 +11,8 @@ from protocol.client_store.reader import (
     read_client_run_summaries,
     read_conversation_detail,
     read_conversation_summaries,
+    read_run_metrics,
+    read_run_metrics_rows,
 )
 from protocol.client_store.store import (
     NEGOTIATION_DIRECTION_INBOUND,
@@ -60,4 +62,6 @@ __all__ = [
     "read_client_run_summaries",
     "read_conversation_detail",
     "read_conversation_summaries",
+    "read_run_metrics",
+    "read_run_metrics_rows",
 ]

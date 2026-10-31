@@ -197,6 +197,35 @@ For the protocol-level view (phases, LLM and tool calls, raw payloads, run histo
 command with `--ui-mode explorer`. Installation, environment variables and the full command
 reference are in the [technical guide](TECHNICAL.md).
 
+### Metrics and protocol comparison
+
+Every run writes one metrics record: token usage, a latency split (model / tool / human approval /
+other) and accuracy against the scenario's ground truth (terminal state, negotiation rounds, agreed
+throughput target and report presence). The record is stored in the client SQLite database
+(`run_metrics`) and appended to `runs/metrics/run-metrics.jsonl`; the Web UI also serves
+`/api/metrics/runs`, `/api/metrics/summary`, `/api/runs/{runId}/metrics` and
+`/api/metrics/export.csv`.
+
+Open `http://127.0.0.1:8080/comparison` to compare protocols and scenarios: success rate, token
+averages, model/total latency, P95 and approval wait. The page reads the same persisted records.
+
+Because the protocol is process-level, the benchmark starts one demo stack per protocol. It drives
+the same scenarios, approves the human gate after a fixed delay (0.3 s by default), and writes
+`metrics.json`, `metrics.jsonl`, `summary.csv`, `summary.json` and `report.html` under
+`runs/benchmarks/<timestamp>/`:
+
+```bash
+# Token/latency/accuracy comparison with the live model
+uv run python -m demo.benchmark --model-mode live --scenarios information,target --repeats 3
+
+# One quick offline smoke (tokens are N/A because the scripted model reports no usage)
+uv run python -m demo.benchmark --protocols pure --scenarios information --repeats 1
+```
+
+Offline runs still measure latency and accuracy; token fields are reported as `N/A` because the
+scripted model produces no usage. Human approval time is recorded separately and excluded from the
+model/protocol latency comparison.
+
 ## 5. Integration boundary
 
 | OSS side | NMS side |

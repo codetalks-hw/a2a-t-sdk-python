@@ -248,7 +248,7 @@ def test_v2_migration_dedupes_active_runs(tmp_path: Path) -> None:
     # Constructing the store applies migration 2.
     SqliteClientStore(path)
     with connect(path) as connection:
-        assert schema_version(connection) == 2
+        assert schema_version(connection) == 3
         statuses = {
             str(run_id): str(status)
             for run_id, status in connection.execute(

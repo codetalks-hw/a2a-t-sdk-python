@@ -573,6 +573,43 @@ The legacy single-turn `plain` path (`protocol/plain_a2a.py`, `run_plain_client_
 internal baseline for tests. `POST /api/runs` still validates it, but the CLI and the page no longer
 expose it.
 
+### 4.7 Per-run metrics and the protocol benchmark
+
+`protocol/run_metrics.py` builds one record per finished run. It reads the already-emitted trace
+spans, so the protocol layers do not need a second instrumentation path:
+
+- **Tokens** are normalized across the three producer shapes (`prompt/completion/total` from ADK and
+  the A2A-T SDK, `input_tokens/output_tokens/total_tokens` from the LangGraph planner) and grouped by
+  side and by `stage` (for example `client:negotiation_accept_extraction` and
+  `server:server_planner`). Scripted runs are marked `available=false, scripted=true`.
+- **Latency** splits total wall time into model, tool, human approval wait and the remaining
+  orchestration time. Approval wait is paired from the `requested`/`approved|rejected` spans, so the
+  benchmark never compares human click time with model time.
+- **Accuracy** compares the run with `RunSpec.expected_final_state`, the expected round count and
+  `RunSpec.expected_negotiation_target`, plus report presence. A2A-T also compares the exact
+  performative sequence; pure A2A has no Negotiation-T performatives, so its answer rounds and final
+  target are the comparable checks. The expected target comes from the scenario's accepted/corrected
+  target in `demo/scenario.py`.
+
+`RunManager` persists the record after a short trace-flush window (`metrics_grace_seconds`, 2 s in
+`run_demo.py`), because the server trace emitter batches spans. The record is upserted into the
+client database table `run_metrics` (schema version 3) and appended to
+`runs/metrics/run-metrics.jsonl`. Live runs are also computed on demand by
+`GET /api/runs/{runId}/metrics` while the process still holds them; a persisted fallback survives a
+restart.
+
+The comparison surface is `GET /comparison` plus:
+
+- `GET /api/metrics/runs?protocol=&scenario=&limit=`
+- `GET /api/metrics/summary` (protocol × scenario groups and the per-protocol headline)
+- `GET /api/metrics/export.csv`
+
+`demo/benchmark.py` is a process-level matrix runner. It starts one demo stack per protocol, drives
+`scenario × repeats` through the Web UI API, auto-approves the gate after `--approval-delay`
+seconds, polls `/api/runs/{id}/metrics` until `traceFinal`, and writes a JSON/CSV/HTML report under
+`runs/benchmarks/<timestamp>/`. `summary.csv` contains success rate, token averages, model/total
+latency, P95 and approval wait per protocol × scenario.
+
 ## 5. Protocol reference
 
 ### 5.1 Message shape

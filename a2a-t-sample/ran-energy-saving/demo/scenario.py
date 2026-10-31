@@ -626,3 +626,23 @@ def resolve_user_request(scenario: Scenario, language: str) -> str:
     if language not in scenario.user_request:
         raise KeyError(f"Scenario '{scenario.name}' has no request for language '{language}'")
     return scenario.user_request[language]
+
+
+def expected_negotiation_target(
+    scenario: Scenario,
+    language: str = LANGUAGE_ZH,
+) -> str | None:
+    """Return the guaranteed-throughput target a completed scenario must agree on.
+
+    Only a negotiation scenario agrees on a target; a complete request already carries it in the
+    user request, so it is not a negotiation accuracy check. Scenarios that do not complete
+    (reject/abort) have no agreed target either.
+    """
+    if (
+        scenario.expected_final_state != FINAL_STATE_TASK_COMPLETED
+        or scenario.expected_kind == KIND_NONE
+    ):
+        return None
+    params = accept_filled_params(scenario.expected_kind, language)
+    value = params.get("guaranteedThroughputTarget") if params else None
+    return value if isinstance(value, str) else None

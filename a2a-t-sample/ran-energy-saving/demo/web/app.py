@@ -21,6 +21,8 @@ through ``GET /api/meta`` (design D18).
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -49,7 +51,10 @@ from protocol.client_store import (
     read_client_run_summaries,
     read_conversation_detail,
     read_conversation_summaries,
+    read_run_metrics,
+    read_run_metrics_rows,
 )
+from protocol.metrics_summary import summarize_metrics, summarize_protocols
 from protocol.run_spec import RunCatalog
 from protocol.sqlite_task_store import read_task_summaries
 from shared.config import (
@@ -98,6 +103,9 @@ STATIC_DIR: Final[Path] = Path(__file__).resolve().parent / "static"
 #: Static directory of the presentation page served to an audience.
 PRESENTATION_DIR: Final[Path] = Path(__file__).resolve().parent / "presentation"
 
+#: Static directory of the protocol comparison (`/comparison`) page.
+COMPARISON_DIR: Final[Path] = Path(__file__).resolve().parent / "comparison"
+
 #: Web UI variants: the audience-facing presentation and the technical Run Explorer.
 WEB_UI_PRESENTATION: Final[str] = "presentation"
 WEB_UI_EXPLORER: Final[str] = "explorer"
@@ -143,6 +151,7 @@ def create_app(
     default_transport: str | None = None,
     default_discovery: str | None = None,
     finished_grace_seconds: float = FINISHED_GRACE_SECONDS,
+    metrics_grace_seconds: float = 0.0,
     bind_host: str = "127.0.0.1",
     ui_mode: str = WEB_UI_PRESENTATION,
     server_url: str | None = None,
@@ -173,6 +182,9 @@ def create_app(
         finished_grace_seconds: seconds an event stream stays open after ``finished`` to forward
             the server spans that a cross-process run posts just after completion; ``0`` closes
             immediately (tests that do not exercise the race).
+        metrics_grace_seconds: seconds a finished run waits before its per-run metrics are
+            persisted, so the last batched server spans are included; ``0`` persists immediately
+            (tests and callers that query live metrics only).
         bind_host: address the caller will bind; a non-loopback bind needs an auth token.
         ui_mode: ``presentation`` (audience-facing page) or ``explorer`` (technical Run
             Explorer); both serve the same API and event stream.
@@ -266,6 +278,7 @@ def create_app(
         store=client_store,
         memory_turns=memory_turns,
         intent_review=resolved_intent_review,
+        metrics_grace_seconds=metrics_grace_seconds,
     )
 
     @asynccontextmanager
@@ -318,6 +331,7 @@ def create_app(
                 "intentReview": resolved_intent_review and resolved_default_mode == "confirm",
                 "approvalGate": approval_gate,
                 "approvalTimeoutSeconds": approval_timeout_seconds,
+                "metricsEnabled": config.client_db_path is not None,
                 # The UI must keep its stream open at least as long as the backend grace window,
                 # otherwise the server's last trace batch is posted to a closed subscriber.
                 "finishedGraceMs": int(round(finished_grace_seconds * 1000)),
@@ -422,6 +436,143 @@ def create_app(
                 status_code=404,
             )
         return JSONResponse(detail)
+
+    def metrics_filter(request: Request) -> tuple[str | None, str | None]:
+        """Return the optional protocol/scenario filters of a metrics request."""
+        protocol = (request.query_params.get("protocol") or "").strip() or None
+        scenario = (request.query_params.get("scenario") or "").strip() or None
+        return protocol, scenario
+
+    def metrics_limit(request: Request) -> int:
+        """Parse the metrics list limit (1..5000)."""
+        try:
+            return max(1, min(int(request.query_params.get("limit", "500")), 5000))
+        except ValueError:
+            return 500
+
+    def stored_metrics(request: Request) -> list[dict[str, object]] | None:
+        """Read persisted metrics rows; ``None`` when the client database is disabled."""
+        path = config.client_db_path
+        if path is None or not Path(path).is_file():
+            return None
+        protocol, scenario = metrics_filter(request)
+        return read_run_metrics_rows(
+            path,
+            protocol=protocol,
+            scenario=scenario,
+            limit=metrics_limit(request),
+        )
+
+    async def run_metrics_detail(request: Request) -> Response:
+        """Return one run's metrics: live while the process holds it, persisted otherwise."""
+        run_id = request.path_params["run_id"]
+        run = manager.get(run_id)
+        metrics = manager.metrics_for(run_id)
+        if metrics is not None and run is not None:
+            elapsed = time.monotonic() - run.finished_at if run.finished_at is not None else 0.0
+            metrics["traceFinal"] = run.finished() and elapsed >= manager.metrics_grace_seconds
+            return JSONResponse(metrics)
+        path = config.client_db_path
+        stored = read_run_metrics(path, run_id) if path is not None else None
+        if stored is None:
+            return JSONResponse(
+                {"error": "No metrics have been recorded for this run.", "code": "metrics_unknown"},
+                status_code=404,
+            )
+        stored["traceFinal"] = True
+        return JSONResponse(stored)
+
+    async def metrics_runs(request: Request) -> Response:
+        """Return the persisted per-run metrics rows."""
+        rows = await asyncio.to_thread(stored_metrics, request)
+        if rows is None:
+            return JSONResponse({"enabled": False, "runs": []})
+        return JSONResponse({"enabled": True, "runs": rows})
+
+    async def metrics_summary(request: Request) -> Response:
+        """Return protocol/scenario aggregates and the headline protocol comparison."""
+        rows = await asyncio.to_thread(stored_metrics, request)
+        if rows is None:
+            return JSONResponse({"enabled": False, "groups": [], "protocols": [], "runs": 0})
+        return JSONResponse(
+            {
+                "enabled": True,
+                "runs": len(rows),
+                "groups": summarize_metrics(rows),
+                "protocols": summarize_protocols(rows),
+            }
+        )
+
+    async def metrics_csv(request: Request) -> Response:
+        """Download the persisted metrics as CSV (one row per run)."""
+        rows = await asyncio.to_thread(stored_metrics, request)
+        if rows is None:
+            return JSONResponse({"enabled": False, "runs": []})
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "runId",
+                "protocol",
+                "scenario",
+                "mode",
+                "modelMode",
+                "status",
+                "finalState",
+                "passed",
+                "accuracy",
+                "rounds",
+                "promptTokens",
+                "completionTokens",
+                "totalTokens",
+                "llmCalls",
+                "durationMs",
+                "modelMs",
+                "approvalWaitMs",
+                "startedAt",
+                "finishedAt",
+            ]
+        )
+        for row in rows:
+            accuracy = row.get("accuracy") if isinstance(row.get("accuracy"), Mapping) else {}
+            negotiation = (
+                row.get("negotiation") if isinstance(row.get("negotiation"), Mapping) else {}
+            )
+            tokens = row.get("tokens") if isinstance(row.get("tokens"), Mapping) else {}
+            latency = row.get("latency") if isinstance(row.get("latency"), Mapping) else {}
+            writer.writerow(
+                [
+                    row.get("runId"),
+                    row.get("protocol"),
+                    row.get("scenario"),
+                    row.get("mode"),
+                    row.get("modelMode"),
+                    row.get("status"),
+                    row.get("finalState"),
+                    accuracy.get("passed"),
+                    accuracy.get("score"),
+                    negotiation.get("rounds"),
+                    tokens.get("prompt"),
+                    tokens.get("completion"),
+                    tokens.get("total"),
+                    tokens.get("llmCalls"),
+                    latency.get("totalMs"),
+                    latency.get("modelMs"),
+                    latency.get("approvalWaitMs"),
+                    row.get("startedAt"),
+                    row.get("finishedAt"),
+                ]
+            )
+        return Response(
+            buffer.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="run-metrics.csv"'},
+        )
+
+    async def comparison_page(request: Request) -> Response:
+        """Serve the protocol comparison page."""
+        del request
+        return FileResponse(COMPARISON_DIR / "index.html")
 
     async def start_run(request: Request) -> Response:
         try:
@@ -890,6 +1041,11 @@ def create_app(
             Route("/api/client/runs/{run_id}", client_run_detail),
             Route("/api/client/conversations", client_conversations),
             Route("/api/client/conversations/{conversation_id}", client_conversation_detail),
+            Route("/api/runs/{run_id}/metrics", run_metrics_detail),
+            Route("/api/metrics/runs", metrics_runs),
+            Route("/api/metrics/summary", metrics_summary),
+            Route("/api/metrics/export.csv", metrics_csv),
+            Route("/comparison", comparison_page),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{run_id}", run_status),
             Route("/api/runs/{run_id}/events", run_events),

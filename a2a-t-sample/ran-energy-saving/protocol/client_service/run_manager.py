@@ -49,6 +49,7 @@ from protocol.client_store import (
     now_iso,
 )
 from protocol.decision_provider import sweep_stale_sessions
+from protocol.run_metrics import append_metrics_jsonl, build_run_metrics
 from protocol.run_spec import RunCatalog
 from protocol.transcript import DEFAULT_RUNS_DIR, NegotiationTranscript
 
@@ -77,6 +78,7 @@ class RunManager:
         store: ClientStore | None = None,
         memory_turns: int = 6,
         intent_review: bool = True,
+        metrics_grace_seconds: float = 0.0,
     ) -> None:
         self._config = config
         self._runtime_factory = runtime_factory
@@ -85,9 +87,13 @@ class RunManager:
         self._store = store
         self._intent_review = intent_review
         self._memory_turns = max(0, memory_turns)
+        # The server trace emitter flushes in batches; waiting briefly before aggregating keeps
+        # the final planner/tool spans in the token and latency totals.
+        self._metrics_grace_seconds = max(0.0, metrics_grace_seconds)
         self._runs: dict[str, RunState] = {}
         self._active_by_conversation: dict[str, RunState] = {}
         self._last_session_sweep = 0.0
+        self._metric_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def store(self) -> ClientStore | None:
@@ -273,6 +279,75 @@ class RunManager:
                     run.result.task_id if run.result is not None and run.result.task_id else "-",
                     duration,
                 )
+                self._schedule_metrics(run)
+
+    @property
+    def metrics_grace_seconds(self) -> float:
+        """Return how long a finished run waits for the last server trace spans."""
+        return self._metrics_grace_seconds
+
+    def metrics_for(self, run_id: str) -> dict[str, object] | None:
+        """Return the live metrics of one run, ``None`` for an unknown run.
+
+        A live run is the authority: the Web UI may ask for its metrics before the delayed
+        persistence task has written them, and the in-memory spans are complete for that process.
+        """
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        return self._build_metrics(run)
+
+    def _schedule_metrics(self, run: RunState) -> None:
+        """Aggregate and persist one finished run's metrics after the trace flush window."""
+        try:
+            task = asyncio.create_task(
+                self._persist_metrics(run), name=f"ran-metrics-{run.run_id}"
+            )
+        except RuntimeError:
+            # The event loop is already closing (a synchronous test helper or shutdown).
+            return
+        self._metric_tasks.add(task)
+        task.add_done_callback(self._metric_tasks.discard)
+
+    async def _persist_metrics(self, run: RunState) -> None:
+        """Build, persist and mirror the metrics of one finished run."""
+        try:
+            if self._metrics_grace_seconds:
+                await asyncio.sleep(self._metrics_grace_seconds)
+            metrics = self._build_metrics(run)
+            if self._store is not None:
+                await self._store.save_run_metrics(metrics)
+            await asyncio.to_thread(
+                append_metrics_jsonl,
+                self._runs_dir or DEFAULT_RUNS_DIR,
+                metrics,
+            )
+        except Exception:  # noqa: BLE001 - metrics must never break a run
+            _LOGGER.exception("run metrics aggregation failed for %s", run.run_id)
+
+    def _build_metrics(self, run: RunState) -> dict[str, object]:
+        """Build the metrics document of one run from its result, transcript and spans."""
+        try:
+            expected = self._catalog.spec(run.scenario, language=self._config.language)
+        except KeyError:
+            expected = None
+        return build_run_metrics(
+            run_id=run.run_id,
+            conversation_id=run.conversation_id,
+            protocol=run.protocol,
+            scenario=run.scenario,
+            mode=run.mode,
+            transport=run.transport,
+            language=self._config.language,
+            model_mode=self._config.model_mode,
+            model_label=self._config.model_label,
+            status=run.status,
+            transcript=run.transcript,
+            result=run.result,
+            spans=run.spans.values(),
+            expected=expected,
+            error=run.error,
+        )
 
     def _reuse_run(self, record: ClientRunRecord) -> RunState:
         """Build a read-only run view for an idempotent replay."""
@@ -603,6 +678,11 @@ class RunManager:
         if tasks:
             with suppress(asyncio.CancelledError, Exception):
                 await asyncio.gather(*tasks, return_exceptions=True)
+        if self._metric_tasks:
+            # The run has finished; let the short trace-flush window elapse so its metrics are
+            # persisted before the process exits.
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.gather(*tuple(self._metric_tasks), return_exceptions=True)
 
 
 def _format_conversation_context(turns: list[Any]) -> str:

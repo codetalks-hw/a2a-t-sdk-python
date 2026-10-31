@@ -153,6 +153,78 @@ def read_client_run_detail(path: str | Path, run_id: str) -> dict[str, object] |
         connection.close()
 
 
+def read_run_metrics(path: str | Path, run_id: str) -> dict[str, object] | None:
+    """Return the persisted metrics document of one run, ``None`` when absent."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return None
+    try:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT metric_json, created_at, updated_at FROM run_metrics WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        _LOGGER.warning("run metrics read failed: %s", exc)
+        return None
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    metrics = _load_json(row["metric_json"])
+    metrics.setdefault("createdAt", str(row["created_at"]))
+    metrics["updatedAt"] = str(row["updated_at"])
+    return metrics
+
+
+def read_run_metrics_rows(
+    path: str | Path,
+    *,
+    protocol: str | None = None,
+    scenario: str | None = None,
+    limit: int = 500,
+) -> builtins.list[dict[str, object]]:
+    """Return persisted metrics rows, newest first, optionally filtered."""
+    connection = _readonly_connection(path)
+    if connection is None:
+        return []
+    resolved_limit = max(1, min(limit, 5000))
+    clauses: list[str] = []
+    params: list[object] = []
+    if protocol:
+        clauses.append("protocol=?")
+        params.append(protocol)
+    if scenario:
+        clauses.append("scenario=?")
+        params.append(scenario)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(resolved_limit)
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT metric_json, created_at, updated_at
+              FROM run_metrics
+              {where}
+             ORDER BY created_at DESC, run_id DESC
+             LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        _LOGGER.warning("run metrics list failed: %s", exc)
+        return []
+    finally:
+        connection.close()
+    results: builtins.list[dict[str, object]] = []
+    for row in rows:
+        metrics = _load_json(row["metric_json"])
+        metrics.setdefault("createdAt", str(row["created_at"]))
+        metrics["updatedAt"] = str(row["updated_at"])
+        results.append(metrics)
+    return results
+
+
 def read_conversation_summaries(
     path: str | Path,
     limit: int = 50,
