@@ -188,6 +188,7 @@ const ui = {
   seenFrames: new Set(),
   lastScene: null,
   lastQueuedScene: null,
+  terminalApplied: null,
   source: null,
   busy: false,
   tab: "business",
@@ -199,6 +200,7 @@ const ui = {
   counterOpen: false,
   counterText: "",
   cardKey: null,
+  cardError: "",
   deadline: null,
   countdownTimer: null,
   rendering: false,
@@ -495,6 +497,7 @@ function selectScenario(name, { start = false } = {}) {
   ui.seenFrames = new Set();
   ui.lastScene = null;
   ui.lastQueuedScene = null;
+  ui.terminalApplied = null;
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
@@ -537,6 +540,7 @@ async function startRun() {
   ui.seenFrames = new Set();
   ui.lastScene = null;
   ui.lastQueuedScene = null;
+  ui.terminalApplied = null;
   ui.tab = "business";
   ui.selectedTurn = -1;
   ui.wireEntry = null;
@@ -600,6 +604,15 @@ function subscribe(runId) {
       applyFrame(ui.view, frame);
       applyFrame(ui.shadow, frame);
       render();
+    }
+    // A gate the server has already closed (timeout or rejection) must not deadlock the player:
+    // its REJECTED/COMPLETED/finished frames are otherwise queued behind the held card and never
+    // applied, leaving the page stuck on "review needed".
+    if (isTerminalFrame(frame) && player.status().hold) {
+      applyFrame(ui.view, frame);
+      applyFrame(ui.shadow, frame);
+      render();
+      if (pendingHuman(ui.view) === null) player.release();
     }
     enqueueFrame(frame);
     if (frame.type === "finished") {
@@ -841,6 +854,18 @@ function renderSteps() {
 }
 
 function renderNarrator() {
+  // A terminal frame may already be queued behind a held card (the server closed the gate while
+  // the player was still pacing earlier scenes). Apply it now instead of waiting forever for a
+  // click the server no longer expects.
+  const terminal = queuedTerminalFrame();
+  if (terminal !== null && terminal !== ui.terminalApplied && player.status().hold) {
+    ui.terminalApplied = terminal;
+    applyFrame(ui.view, terminal);
+    applyFrame(ui.shadow, terminal);
+    render();
+    if (pendingHuman(ui.view) === null) player.release();
+    return;
+  }
   const card = pendingCard();
   if (card) {
     els.say.classList.add("ask");
@@ -859,6 +884,7 @@ function renderNarrator() {
       els.sayDetail.append(block);
     }
     if (card.policy) els.sayDetail.append(el("span", "policy", card.policy));
+    if (ui.cardError) els.sayDetail.append(el("p", "card-error", ui.cardError));
     if (card.remaining !== null) {
       const line = el("span", "reason");
       line.append(el("span", "", `${copyRemaining(card)} `));
@@ -904,6 +930,7 @@ function revealCard(card) {
   const key = `${card.type}:${card.title}:${card.options.map((option) => option.action).join(",")}`;
   if (ui.cardKey === key) return;
   ui.cardKey = key;
+  ui.cardError = "";
   requestAnimationFrame(() => {
     const left = document.querySelector(".left");
     if (!left) return;
@@ -1060,6 +1087,7 @@ async function submitApproval(approved) {
       throw new Error(detail.error || `HTTP ${response.status}`);
     }
     ui.submitting = false;
+    ui.cardError = "";
     ui.view.approvalState = approved ? "approved" : "rejected";
     // The scene of the next frame is chosen from the shadow state at enqueue time. The server's
     // "Approved. Applying the plan." frame arrives before its approval-resolved span, so without
@@ -1071,7 +1099,8 @@ async function submitApproval(approved) {
   } catch (error) {
     ui.submitting = false;
     const message = error instanceof Error ? error.message : String(error);
-    els.sayDetail.append(el("span", "error", `${ui.copy.approval.submitFailed} ${message}`));
+    ui.cardError = `${ui.copy.approval.submitFailed} ${message}`;
+    render();
     if (card) renderChoices(card);
   }
 }
@@ -1392,6 +1421,29 @@ function handleLoop(scene) {
 
 function isApprovalTrace(span) {
   return Boolean(span && typeof span === "object" && span.kind === "approval");
+}
+
+/** Whether one frame ends the run (or its Task) while a human gate is still held. */
+/** The newest terminal frame already received for this run, or ``null``. */
+function queuedTerminalFrame() {
+  for (let index = ui.frameLog.length - 1; index >= 0; index -= 1) {
+    if (isTerminalFrame(ui.frameLog[index])) return ui.frameLog[index];
+  }
+  return null;
+}
+
+function isTerminalFrame(frame) {
+  if (!frame || typeof frame !== "object") return false;
+  if (frame.type === "finished") return true;
+  if (frame.type !== "event") return false;
+  const entry = frame.event;
+  if (!entry || entry.kind !== "status") return false;
+  return [
+    "TASK_STATE_REJECTED",
+    "TASK_STATE_COMPLETED",
+    "TASK_STATE_FAILED",
+    "TASK_STATE_CANCELED",
+  ].includes(entry.state);
 }
 
 function logFrame(frame) {

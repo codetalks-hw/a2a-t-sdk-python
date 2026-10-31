@@ -97,7 +97,9 @@ Task-T metadata；切换到 **普通 A2A** 时，Task-T 字段被替换成一句
 - `--mode confirm`：审批 1 在 Task-T 离开 OSS Agent 之前停住，工程师确认结构化意图（或修改请求）；
   同一模式下，OSS Agent 也会先给出协商决策建议，再由工程师确认、改判、接受 RAN Agent 方案或拒绝；
 - `--approval-gate`：审批 2 是 MIE 的 MML 审核。RAN Agent 在下发前发布 `INPUT_REQUIRED`，页面直接展示
-  MML 建议，请工程师在 MIE 中审核并确认；驳回则不下发、不出报告，以未变更结束。
+  MML 建议，请工程师在 MIE 中审核并确认；审核窗口默认 240 秒，超时（或运行在卡片打开期间结束）
+  会关闭卡片并显示结局。驳回则不下发、不出报告，以未变更结束。Web UI 把决定转发给它启动的 A2A
+  服务器；`--server-url`（`A2AT_SAMPLE_SERVER_URL`）可指向外部服务器。
 
 数据采集步骤由三条真实 `WORKING` 状态驱动（started / in progress / completed）；页面把第 1–8 天做成
 动画，在测量基线时只提示一次 “No MML applied yet”，RAN Agent 在 MIE 审核开始前保持 “Data
@@ -645,7 +647,7 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 curl http://127.0.0.1:8080/api/meta
 # 人机回路：确认 OSS 决策，并在下发前批准变更
 python run_demo.py --ui --ui-port 8081 --scenario target --mode confirm --approval-gate \
-  --approval-timeout 120 --model-mode offline
+  --approval-timeout 240 --model-mode offline
 ```
 
 `/api/meta` 返回 §1.1 所示的语言、模型模式、场景、模式、传输与默认值，且 `/api/client/runs` 返回带轮次的运行，即视为 UI smoke 通过。

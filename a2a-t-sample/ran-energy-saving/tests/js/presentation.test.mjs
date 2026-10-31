@@ -355,6 +355,15 @@ applyFrame(approval, {
 assert.equal(approval.approvalState, "approved");
 assert.equal(approvalCard(approval, copy), null);
 
+// A gate still marked waiting when the run ends must not keep the card on screen.
+const timedOut = createState();
+applyFrame(timedOut, { type: "run_started", runId: "r71", scenario: "night", mode: "confirm" });
+applyFrame(timedOut, status(1, "TASK_STATE_INPUT_REQUIRED"));
+assert.ok(approvalCard(timedOut, copy));
+applyFrame(timedOut, finished("task_rejected", null, "approval timeout"));
+assert.equal(timedOut.approvalState, "rejected");
+assert.equal(approvalCard(timedOut, copy), null);
+
 const notApplied = createState();
 applyFrame(notApplied, { type: "run_started", runId: "r8", scenario: "information", mode: "confirm" });
 applyFrame(notApplied, status(1, "TASK_STATE_SUBMITTED"));

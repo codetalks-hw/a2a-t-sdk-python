@@ -141,7 +141,7 @@ def create_app(
     ui_mode: str = WEB_UI_PRESENTATION,
     server_url: str | None = None,
     approval_gate: bool = False,
-    approval_timeout_seconds: float = 120.0,
+    approval_timeout_seconds: float = 240.0,
     allow_insecure_bind: bool = False,
     intent_review: bool | None = None,
 ) -> Starlette:
@@ -618,9 +618,15 @@ def create_app(
                 },
                 status_code=400,
             )
-        if not approval_gate or not server_url:
+        # The page's gate flag only controls whether it expects the MIE card. Forward whenever the
+        # server URL is configured: a Web UI started separately from the A2A server must still be
+        # able to resolve a gate the server is actually holding.
+        if not server_url:
             return JSONResponse(
-                {"error": "The approval gate is disabled.", "code": "approval_gate_disabled"},
+                {
+                    "error": "This Web UI has no A2A server URL to forward the approval to.",
+                    "code": "approval_forward_unconfigured",
+                },
                 status_code=404,
             )
         if run.status != STATUS_RUNNING:

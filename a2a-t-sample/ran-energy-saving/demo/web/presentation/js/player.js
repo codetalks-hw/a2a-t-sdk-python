@@ -37,9 +37,12 @@ export function createPlayer({ onApply, onRewind, onChange, onScene }) {
     const scene = scenes[playhead];
     playhead += 1;
     onApply(scene.frame);
+    // Mark the hold before the scene callback so a terminal frame already queued behind the gate
+    // can be applied and release it (the server may have closed the gate while the player was
+    // still pacing earlier scenes).
+    if (scene.hold) hold = true;
     if (onScene) onScene(scene);
     if (scene.hold) {
-      hold = true;
       onChange();
       return;
     }

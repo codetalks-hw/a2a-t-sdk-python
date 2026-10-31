@@ -130,6 +130,11 @@ export function applyFrame(state, frame) {
         typeof frame.error === "string" && frame.error ? frame.error : state.error;
       if (state.decision !== null) state.decision.resolved = true;
       if (state.intentReview !== null) state.intentReview.resolved = true;
+      // If the run ended while a gate was still open (timeout, disconnect or failure), close the
+      // card so the ending is visible instead of an immovable "waiting" card.
+      if (state.approvalState === APPROVAL.WAITING) {
+        state.approvalState = APPROVAL.REJECTED;
+      }
       return state;
     }
     default:

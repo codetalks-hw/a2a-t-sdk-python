@@ -416,7 +416,7 @@ def build_server_runtime(
         "yes",
     }
     approval_timeout = float(
-        os.environ.get("A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS", "120") or "120"
+        os.environ.get("A2AT_SAMPLE_APPROVAL_TIMEOUT_SECONDS", "240") or "240"
     )
     approval_registry = ApprovalRegistry() if approval_enabled else None
     executor = build_negotiation_executor(

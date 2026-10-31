@@ -12,7 +12,7 @@ import asyncio
 from typing import Final
 
 #: Default seconds an approval may wait before it is treated as rejected.
-DEFAULT_APPROVAL_TIMEOUT_SECONDS: Final[float] = 120.0
+DEFAULT_APPROVAL_TIMEOUT_SECONDS: Final[float] = 240.0
 
 
 class ApprovalRegistry:

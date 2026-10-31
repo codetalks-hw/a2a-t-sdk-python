@@ -110,7 +110,10 @@ Two human approvals can be enabled at startup:
   rejects it;
 - `--approval-gate`: approval 2 is the MIE MML review. The RAN Agent publishes `INPUT_REQUIRED`
   before applying a plan; the page shows the MML suggestion and asks the engineer to approve it in
-  MIE. A rejection applies nothing and ends the run without a report.
+  MIE. The review window defaults to 240 s; a timeout (or a run that ends while the card is open)
+  closes the card and shows the ending. A rejection applies nothing and ends the run without a
+  report. The Web UI forwards the decision to the A2A server it started; `--server-url`
+  (`A2AT_SAMPLE_SERVER_URL`) points it at an external server.
 
 The data-collection step is driven by three real `WORKING` status updates (started, in progress,
 completed); the page animates days 1–8, says "No MML applied yet" once while the baseline is being
@@ -795,10 +798,10 @@ python run_demo.py --ui --ui-port 8080 --scenario information --model-mode offli
 curl http://127.0.0.1:8080/api/meta
 # Human-in-the-loop: confirm the OSS decision and approve the change before apply
 python run_demo.py --ui --ui-port 8081 --scenario target --mode confirm --approval-gate \
-  --approval-timeout 120 --model-mode offline
+  --approval-timeout 240 --model-mode offline
 # approval 1 + approval 2 with the complete night scenario
 python run_demo.py --ui --ui-port 8082 --scenario night --mode confirm --approval-gate \
-  --approval-timeout 120 --model-mode offline
+  --approval-timeout 240 --model-mode offline
 ```
 
 The UI smoke is confirmed when `/api/meta` returns the language, model mode, scenarios, modes,

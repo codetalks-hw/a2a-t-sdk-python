@@ -5,7 +5,7 @@ import { actionLabel, format, proposalLine } from "../copy.js";
 /** Build approval 1: the engineer confirms the structured intent before the Task-T is sent. */
 export function intentCard(state, copy) {
   const review = state.intentReview;
-  if (review === null || review.resolved) return null;
+  if (review === null || review.resolved || state.finished) return null;
   return {
     type: "intent",
     kicker: copy.intentReview.kicker,
@@ -24,7 +24,7 @@ export function intentCard(state, copy) {
 /** Build the negotiation decision card, or ``null`` when no decision is pending. */
 export function decisionCard(state, copy) {
   const decision = state.decision;
-  if (decision === null || decision.resolved) return null;
+  if (decision === null || decision.resolved || state.finished) return null;
   const round = decision.round ?? decision.proposal?.round ?? 1;
   const maxRounds = decision.maxRounds ?? decision.proposal?.max_rounds ?? 1;
   const kind = decision.proposal?.kind || "";
@@ -71,7 +71,9 @@ export function decisionCard(state, copy) {
 
 /** Build approval 2 (the MIE MML review), or ``null`` when no review is pending. */
 export function approvalCard(state, copy) {
-  if (state.approvalState !== "waiting") return null;
+  // A gate that is still marked waiting when the run has already ended must not keep the page
+  // stuck on the card: the ending card has to take over.
+  if (state.approvalState !== "waiting" || state.finished || state.status !== "running") return null;
   const approval = state.approval || {};
   const cell = approval.cellId || "—";
   const window = approval.window || "—";

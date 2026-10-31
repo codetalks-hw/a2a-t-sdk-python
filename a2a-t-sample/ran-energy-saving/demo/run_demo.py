@@ -164,7 +164,7 @@ def _server_trace_env(
     ui_port: int,
     trace_token: str | None = None,
     approval_gate: bool = False,
-    approval_timeout: float = 120.0,
+    approval_timeout: float = 240.0,
 ) -> dict[str, str]:
     """Return the Run Explorer and approval-gate environment of the server process.
 
@@ -334,7 +334,7 @@ def _save_state(
     ui_port: int | None = None,
     gateway_port: int | None = None,
     approval_gate: bool = False,
-    approval_timeout: float = 120.0,
+    approval_timeout: float = 240.0,
 ) -> None:
     """Persist the managed PIDs and their run metadata atomically.
 
@@ -372,7 +372,7 @@ def _server_reuse_decision(
     trace_url: str = "",
     ui_port: int | None = None,
     approval_gate: bool = False,
-    approval_timeout: float = 120.0,
+    approval_timeout: float = 240.0,
 ) -> str:
     """Decide whether a listening A2A server may be reused for the requested run.
 
@@ -405,7 +405,7 @@ def _server_reuse_decision(
         return REUSE_RESTART
     if bool(state.get("approval_gate")) != approval_gate:
         return REUSE_RESTART
-    if approval_gate and float(state.get("approval_timeout") or 120.0) != approval_timeout:
+    if approval_gate and float(state.get("approval_timeout") or 240.0) != approval_timeout:
         return REUSE_RESTART
     recorded_token = str(state.get("trace_token") or "")
     if ui and not recorded_token:
@@ -628,7 +628,7 @@ def _run_ui(
     host: str = "127.0.0.1",
     server_url: str = "",
     approval_gate: bool = False,
-    approval_timeout: float = 120.0,
+    approval_timeout: float = 240.0,
     allow_insecure_bind: bool = False,
 ) -> int:
     """Serve the Web UI of the client process until interrupted."""
@@ -750,8 +750,8 @@ def _build_parser(
     parser.add_argument(
         "--approval-timeout",
         type=float,
-        default=120.0,
-        help="seconds the approval gate waits before treating silence as a rejection (default: 120)",
+        default=240.0,
+        help="seconds the approval gate waits before treating silence as a rejection (default: 240)",
     )
     parser.add_argument(
         "--protocol",
@@ -808,6 +808,14 @@ def _build_parser(
         help=(
             f"bind host of the Web UI (default: {default_ui_host}; A2AT_SAMPLE_UI_HOST). "
             "Use 0.0.0.0 to expose it on all interfaces."
+        ),
+    )
+    parser.add_argument(
+        "--server-url",
+        default=os.environ.get("A2AT_SAMPLE_SERVER_URL", ""),
+        help=(
+            "A2A server base URL the Web UI forwards the MIE approval to; defaults to the "
+            "server this launcher starts (A2AT_SAMPLE_SERVER_URL)"
         ),
     )
     parser.add_argument(
@@ -1101,7 +1109,7 @@ def main() -> int:
                 mode=args.mode,
                 transport=args.transport,
                 ui_mode=args.ui_mode,
-                server_url=f"http://127.0.0.1:{server_port}",
+                server_url=args.server_url or f"http://127.0.0.1:{server_port}",
                 approval_gate=args.approval_gate,
                 approval_timeout=args.approval_timeout,
                 allow_insecure_bind=args.allow_insecure_bind,
