@@ -537,10 +537,19 @@ async def run_client_flow(
         )
 
     with trace_stage("task_t_slot_extraction"):
-        prompt_content = prompt_client.generate_task_prompt_from_text(
-            _request_with_context(user_request, conversation_context),
-            task_template_uri,
-        )
+        initial_data = policy.initial_data(language)
+        if initial_data is not None:
+            data, data_schema = initial_data
+            prompt_content = prompt_client.generate_task_prompt_from_data_with_schema(
+                data,
+                data_schema,
+                task_template_uri,
+            )
+        else:
+            prompt_content = prompt_client.generate_task_prompt_from_text(
+                _request_with_context(user_request, conversation_context),
+                task_template_uri,
+            )
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
     emit_trace(
         "task_prompt_rendered",

@@ -486,6 +486,10 @@ def route_structured_call(
     if "semantic_verdict" in property_names and "negotiation_type" in property_names:
         return STAGE_NEGOTIATION_SEMANTIC_VALIDATION
     if "slots" in property_names and "slot_errors" in property_names:
+        # A structured (data + schema) initial request carries the outage markers but not the raw
+        # scenario request; route it to the outage variant as well.
+        if any(marker in user_content for marker in _OUTAGE_VALIDATION_MARKERS):
+            return STAGE_SLOT_EXTRACTION_OUTAGE
         if any(scenario_input in user_content for scenario_input in _OUTAGE_SCENARIO_INPUTS):
             return STAGE_SLOT_EXTRACTION_OUTAGE
         if any(scenario_input in user_content for scenario_input in _COMPLETE_SCENARIO_INPUTS):

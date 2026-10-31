@@ -423,7 +423,11 @@ function applyStaticCopy() {
   const skills = byId("oss-skills");
   if (skills) {
     skills.replaceChildren();
-    for (const skill of copy.roles.ossSkills) skills.append(el("span", "", skill));
+    copy.roles.ossSkills.forEach((skill, index) => {
+      const node = el("span", "", skill);
+      node.title = copy.roles.ossSkillTools?.[index] || "";
+      skills.append(node);
+    });
   }
 }
 

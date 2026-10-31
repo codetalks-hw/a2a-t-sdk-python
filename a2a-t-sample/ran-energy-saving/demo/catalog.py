@@ -6,7 +6,7 @@ scenarios to it, including the business values filled into an accepted Task-T.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from protocol.run_spec import ClientPolicy, ExpectedStep, RunSpec
 from shared.run_constants import LANGUAGE_ZH
@@ -16,8 +16,10 @@ from demo.scenario import (
     Scenario,
     accept_confirmation_text,
     accept_filled_params,
+    complete_initial_params,
     get_scenario,
     resolve_user_request,
+    task_t_data_schema,
 )
 
 #: Business values of the sample OSS: the negotiated Task-T parameters and its accept text.
@@ -29,6 +31,15 @@ DEMO_CLIENT_POLICY: ClientPolicy = ClientPolicy(
 
 def to_run_spec(scenario: Scenario, *, language: str = LANGUAGE_ZH) -> RunSpec:
     """Convert one demonstration scenario into the core run specification."""
+    initial = complete_initial_params(scenario.name, language)
+    policy = DEMO_CLIENT_POLICY
+    if initial is not None:
+        # A complete request must never open a negotiation. Generate its Task-T from explicit
+        # values (still through the SDK's LLM extraction) instead of free-text slot extraction,
+        # which a live model can leave incomplete.
+        schema = task_t_data_schema(language)
+        values = dict(initial)
+        policy = replace(DEMO_CLIENT_POLICY, initial_data=lambda _language: (values, schema))
     return RunSpec(
         name=scenario.name,
         description=scenario.description,
@@ -38,7 +49,7 @@ def to_run_spec(scenario: Scenario, *, language: str = LANGUAGE_ZH) -> RunSpec:
             ExpectedStep(actor=step.actor, performative=step.performative, round=step.round)
             for step in scenario.expected_sequence
         ),
-        policy=DEMO_CLIENT_POLICY,
+        policy=policy,
     )
 
 

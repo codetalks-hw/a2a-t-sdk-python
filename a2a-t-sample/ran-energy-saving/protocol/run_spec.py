@@ -12,7 +12,7 @@ them; ``protocol`` and ``shared`` only see these interfaces.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -41,6 +41,14 @@ def _no_accept_text(kind: str, language: str) -> str:
     return ""
 
 
+def _no_initial_data(
+    language: str,
+) -> tuple[Mapping[str, object], Mapping[str, object]] | None:
+    """Default policy: generate the initial Task-T from the natural-language request."""
+    del language
+    return None
+
+
 @dataclass(frozen=True)
 class ClientPolicy:
     """Business values of one OSS integration, supplied by the composition root.
@@ -48,10 +56,15 @@ class ClientPolicy:
     Attributes:
         filled_params: values filled into the Task-T when the client accepts a proposal.
         accept_text: natural-language accept confirmation, when the integration provides one.
+        initial_data: structured Task-T values plus their data schema for integrations whose
+            initial request is already complete; returning ``None`` keeps the text-extraction path.
     """
 
     filled_params: Callable[[str, str], dict[str, object]] = _no_filled_params
     accept_text: Callable[[str, str], str | None] = _no_accept_text
+    initial_data: Callable[[str], tuple[Mapping[str, object], Mapping[str, object]] | None] = (
+        _no_initial_data
+    )
 
 
 DEFAULT_CLIENT_POLICY: ClientPolicy = ClientPolicy()

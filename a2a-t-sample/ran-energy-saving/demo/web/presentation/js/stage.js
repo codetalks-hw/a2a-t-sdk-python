@@ -286,7 +286,7 @@ export function createStage(els) {
         eng: { cls: "", text: copy.states.engSent },
         oss: { cls: "active", text: copy.states.ossUnderstanding },
       });
-      highlightSkill(scenario === "outage" ? 2 : 1);
+      highlightSkill(0);
       note("oss", roles.oss, copy.states.ossReading);
       later(1200, () => {
         const intent = parseIntent(state.intentText || state.userRequest || "");
@@ -340,6 +340,7 @@ export function createStage(els) {
         oss: { cls: "active", text: copy.states.ossAsking },
         nms: { cls: "wait", text: copy.states.nmsNeedsConfirm },
       });
+      highlightSkill(1);
       note("nms", roles.nms, proposalLine(copy, scenario, round) || copy.negotiation.generic, true);
       fly("lane-status", copy.negotiation.inputRequired, "neg", 1400);
       later(500, () => {
@@ -356,6 +357,7 @@ export function createStage(els) {
         oss: { cls: "active", text: copy.states.ossSendingAnswer },
         nms: { cls: "active", text: copy.states.nmsReadingAnswer },
       });
+      highlightSkill(2);
       const answer = decisionLine(copy, scenario, round) || action;
       note("oss", roles.oss, answer, true);
       note("eng", roles.eng, answer, true);

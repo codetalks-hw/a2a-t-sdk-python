@@ -59,6 +59,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_ZH = (
     "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
     "在满足任务上下文的前提下最大化节能；分时段保障速率目标为 {00:00~17:30,10Mbps}、"
     "{17:30~23:00,20Mbps}、{23:00~23:59,10Mbps}。"
+    "预期输出为无线网络节能任务的意图报告。"
 )
 
 #: English natural-language task request used for prompt generation (UC1, complete input).
@@ -69,6 +70,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_EN = (
     "energy saving result in the format defined in the expected output. The time-segment-based "
     "guaranteed throughput target is {00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, "
     "{23:00~23:59,10Mbps}."
+    "The expected output is the intent report of the wireless network energy saving task."
 )
 
 #: Chinese natural-language task request of use case 2 (planned power outage, complete input).
@@ -77,6 +79,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_ZH = (
     "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
     "站点列表1为[站点1, 站点2]；明天计划停电，停电期间 03:00~05:00 将分时段保障速率下调到 "
     "2Mbps 以节省电池，停电之外保持 {00:00~03:00,10Mbps}、{05:00~24:00,10Mbps}。"
+    "预期输出为无线网络节能任务的意图报告。"
 )
 
 #: English natural-language task request of use case 2 (planned power outage, complete input).
@@ -88,6 +91,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_OUTAGE_EN = (
     "[\"Site 1\", \"Site 2\"]. Planned power outage tomorrow; during the outage, 03:00~05:00, "
     "lower the guaranteed throughput to 2Mbps to save battery; outside the outage, keep "
     "{00:00~03:00,10Mbps} and {05:00~24:00,10Mbps}."
+    "The expected output is the intent report of the wireless network energy saving task."
 )
 
 #: Chinese natural-language task request of the information negotiation: the region is present but
@@ -98,6 +102,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_ZH = (
     "在松山湖管委会创建无线网络节能任务：基于任务对象和任务上下文，输出无线网络节能方案，"
     "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
     "在满足任务上下文的前提下最大化节能。"
+    "预期输出为无线网络节能任务的意图报告。"
 )
 
 #: English natural-language task request of the information negotiation (throughput target
@@ -109,6 +114,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_MISSING_EN = (
     "task object and task context, output a wireless network energy saving plan that achieves the "
     "energy saving goal defined in the task target and returns the energy saving result in the "
     "format defined in the expected output; maximize energy saving under the task context."
+    "The expected output is the intent report of the wireless network energy saving task."
 )
 
 #: Chinese natural-language task request of the target negotiation: the guaranteed throughput
@@ -119,6 +125,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_ZH = (
     "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
     "在满足任务上下文的前提下最大化节能；分时段保障速率目标为 {00:00~07:00,2Mbps}、"
     "{07:00~09:00,10Mbps}、{09:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{20:00~00:00,10Mbps}。"
+    "预期输出为无线网络节能任务的意图报告。"
 )
 
 #: English natural-language task request of the target negotiation (overlapping segments).
@@ -129,6 +136,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_TARGET_EN = (
     "energy saving result in the format defined in the expected output. The time-segment-based "
     "guaranteed throughput target is {00:00~07:00,2Mbps}, {07:00~09:00,10Mbps}, "
     "{09:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {20:00~00:00,10Mbps}."
+    "The expected output is the intent report of the wireless network energy saving task."
 )
 
 #: Chinese natural-language task request of the feasibility negotiation: two stations must keep a
@@ -139,6 +147,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_ZH = (
     "达成任务目标中定义的无线网络节能目标，并按照预期输出中定义的格式返回无线网络节能结果；"
     "站点列表1为[站点名称1, 站点名称2]；分时段保障速率目标为 {00:00~06:00,2Mbps}、"
     "{06:00~18:00,10Mbps}；背景事件为在00:00~18:00停电；在满足任务上下文的前提下最大化节能。"
+    "预期输出为无线网络节能任务的意图报告。"
 )
 
 #: English natural-language task request of the feasibility negotiation (outage case).
@@ -150,6 +159,7 @@ NATURAL_LANGUAGE_PROMPT_INPUT_FEASIBILITY_EN = (
     "[Station 1, Station 2]; the time-segment-based guaranteed throughput target is "
     "{00:00~06:00,2Mbps}, {06:00~18:00,10Mbps}; the background event is a power outage from "
     "00:00 to 18:00."
+    "The expected output is the intent report of the wireless network energy saving task."
 )
 
 #: Region display string per language (used by the scripted LLM routing fallback and the accept
@@ -179,6 +189,7 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
         "guaranteedThroughputTarget": (
             "{00:00~17:30,10Mbps}, {17:30~23:00,20Mbps}, {23:00~23:59,10Mbps}"
         ),
+        "expectedOutput": "Output the intent report of the wireless network energy saving task.",
     },
     LANGUAGE_ZH: {
         "operationType": "Create",
@@ -191,8 +202,78 @@ _ACCEPT_BASE_PARAMS: dict[str, dict[str, object]] = {
         "guaranteedThroughputTarget": (
             "{00:00~17:30,10Mbps}、{17:30~23:00,20Mbps}、{23:00~23:59,10Mbps}"
         ),
+        "expectedOutput": "输出无线网络节能任务的意图报告。",
     },
 }
+
+#: Task-T data schema used by the structured initial generation of complete requests.
+TASK_T_DATA_SCHEMA: dict[str, dict[str, object]] = {
+    LANGUAGE_EN: {
+        "operationType": "operation type: Create or Modify",
+        "task_description": "task description",
+        "region": "region name",
+        "energySavingGoal": "energy saving goal",
+        "guaranteedThroughputTarget": (
+            "time-segmented guaranteed throughput target, format {HH:MM~HH:MM,NMbps}"
+        ),
+        "expectedOutput": "expected output of the task",
+        "siteList": "site list",
+        "backgroundEvent": "background event, for example a planned power outage",
+    },
+    LANGUAGE_ZH: {
+        "operationType": "操作类型：创建或修改",
+        "task_description": "任务描述",
+        "region": "区域名称",
+        "energySavingGoal": "节能目标",
+        "guaranteedThroughputTarget": "分时段保障速率目标，格式 {HH:MM~HH:MM,NMbps}",
+        "expectedOutput": "任务的预期输出",
+        "siteList": "站点列表",
+        "backgroundEvent": "背景事件，例如计划停电",
+    },
+}
+
+#: Values a complete scenario supplies on top of the base parameters, per language.
+_COMPLETE_INITIAL_OVERRIDES: dict[str, dict[str, dict[str, str]]] = {
+    SCENARIO_OUTAGE: {
+        LANGUAGE_EN: {
+            "siteList": "Site 1,Site 2",
+            "backgroundEvent": "planned power outage tomorrow 03:00~05:00",
+            "guaranteedThroughputTarget": (
+                "{00:00~03:00,10Mbps}, {03:00~05:00,2Mbps}, {05:00~24:00,10Mbps}"
+            ),
+        },
+        LANGUAGE_ZH: {
+            "siteList": "站点1,站点2",
+            "backgroundEvent": "明天 03:00~05:00 计划停电",
+            "guaranteedThroughputTarget": (
+                "{00:00~03:00,10Mbps}、{03:00~05:00,2Mbps}、{05:00~24:00,10Mbps}"
+            ),
+        },
+    },
+}
+
+
+def complete_initial_params(name: str, language: str = LANGUAGE_ZH) -> dict[str, object] | None:
+    """Return the complete Task-T parameters of a complete scenario, or ``None``.
+
+    Complete scenarios (``night`` and ``outage``) must never open a pre-task negotiation. Their
+    Task-T is generated from these explicit values instead of relying on a live model to extract
+    every required slot from free text; negotiation scenarios keep the text path so their flawed
+    input can trigger the intended negotiation.
+    """
+    if name not in (SCENARIO_NIGHT, SCENARIO_OUTAGE):
+        return None
+    params = dict(_ACCEPT_BASE_PARAMS.get(language, _ACCEPT_BASE_PARAMS[LANGUAGE_ZH]))
+    overrides = _COMPLETE_INITIAL_OVERRIDES.get(name, {})
+    if overrides:
+        params.update(overrides.get(language, overrides[LANGUAGE_ZH]))
+    return params
+
+
+def task_t_data_schema(language: str = LANGUAGE_ZH) -> dict[str, object]:
+    """Return the Task-T data schema used with :func:`complete_initial_params`."""
+    return dict(TASK_T_DATA_SCHEMA.get(language, TASK_T_DATA_SCHEMA[LANGUAGE_ZH]))
+
 
 #: Corrected guaranteed-throughput targets agreed by each negotiation kind, per language.
 _ACCEPT_TARGET_OVERRIDES: dict[str, dict[str, str]] = {
