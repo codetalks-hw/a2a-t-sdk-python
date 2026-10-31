@@ -35,7 +35,7 @@ export function sceneFor(frame, state) {
   if (!isObject(frame)) return null;
   switch (frame.type) {
     case "run_started":
-      return scene("request", 1400, frame);
+      return scene("request", 2200, frame);
     case "event":
       return eventScene(frame.event, state, frame);
     case "trace":
@@ -49,7 +49,7 @@ export function sceneFor(frame, state) {
     case "decision_recommended":
       return scene("decision", 0, frame, false);
     case "finished":
-      return scene("finish", 1000, frame);
+      return scene("finish", 1200, frame);
     default:
       return null;
   }
@@ -57,31 +57,31 @@ export function sceneFor(frame, state) {
 
 function eventScene(entry, state, frame) {
   if (!isObject(entry)) return scene("event", 0, frame);
-  if (entry.entryType === "decision") return scene("decision", 1100, frame);
+  if (entry.entryType === "decision") return scene("decision", 1600, frame);
   switch (entry.kind) {
     case "propose":
       return scene("propose", 1800, frame);
     case "abort":
       return scene("abort", 1400, frame);
     case "reject":
-      return scene("decision", 1400, frame);
+      return scene("decision", 1600, frame);
     case "accept":
-      return scene("decision", 1400, frame);
+      return scene("decision", 1600, frame);
     case "counter":
-      return scene("decision", 1400, frame);
+      return scene("decision", 1600, frame);
     case "message":
       return entry.phase === "negotiation" ? scene("end", 1100, frame) : scene("event", 0, frame);
     case "status": {
       const label = typeof entry.summary === "string" ? entry.summary : "";
       const taskState = typeof entry.state === "string" ? entry.state : "";
       if (label.includes("Data collection started")) {
-        return scene("collect-start", 2000, frame);
+        return scene("collect-start", 2200, frame);
       }
       if (label.includes("Data collection in progress")) {
         return scene("collect-progress", 3000, frame);
       }
       if (label.includes("Data collection completed")) {
-        return scene("collect-done", 1500, frame);
+        return scene("collect-done", 1800, frame);
       }
       if (taskState === "TASK_STATE_INPUT_REQUIRED" || label.includes("INPUT_REQUIRED")) {
         // The MIE review is a human gate by definition. The status only names the state; the
@@ -89,13 +89,13 @@ function eventScene(entry, state, frame) {
         return scene("approval", 0, frame, true);
       }
       if (taskState === "TASK_STATE_SUBMITTED" || label.includes("SUBMITTED")) {
-        return scene("strategy", 1400, frame);
+        return scene("strategy", 4200, frame);
       }
       if (taskState === "TASK_STATE_WORKING" || label.includes("WORKING")) {
         // Only a change the engineer approved may reach the network. Without that approval a
         // WORKING update is just progress; the apply artifact is the only other apply signal.
-        if (state.approvalState === "approved") return scene("apply", 1600, frame);
-        return scene("strategy", 1400, frame);
+        if (state.approvalState === "approved") return scene("apply", 6500, frame);
+        return scene("strategy", 4200, frame);
       }
       if (taskState === "TASK_STATE_REJECTED" || label.includes("REJECTED")) {
         return scene("approval-rejected", 1200, frame);
@@ -105,25 +105,25 @@ function eventScene(entry, state, frame) {
         label.includes("COMPLETED") ||
         label.includes("FAILED")
       ) {
-        return scene("finish", 1000, frame);
+        return scene("finish", 1200, frame);
       }
       return scene("event", 0, frame);
     }
     case "artifact": {
-      if (entry.phase === "report") return scene("report", 1400, frame);
+      if (entry.phase === "report") return scene("report", 2600, frame);
       const tool = artifactTool(entry);
       if (tool === "get_cell_energy_profile") {
         return state.dataCollection === "completed"
           ? scene("trace", 0, frame)
           : scene("collect-done", 1400, frame);
       }
-      if (tool === "evaluate_energy_saving_plan") return scene("approval-ready", 1400, frame);
+      if (tool === "evaluate_energy_saving_plan") return scene("approval-ready", 2000, frame);
       if (tool === "apply_energy_saving_plan") {
         // Never show MML going to the network while the MIE review is still open. The artifact
         // is the execution confirmation: after the MIE dispatch it is the sites' report, not a
         // second dispatch.
         if (state.approvalState === "waiting") return scene("trace", 0, frame);
-        return state.mmlSent ? scene("execute", 1600, frame) : scene("apply", 1600, frame);
+        return state.mmlSent ? scene("execute", 1800, frame) : scene("apply", 6500, frame);
       }
       return scene("trace", 0, frame);
     }
@@ -143,12 +143,12 @@ function traceScene(span, state, frame) {
     return null;
   }
   if (span.kind === "task_prompt_rendered") {
-    return state.intentText === null ? scene("understand", 1200, frame) : scene("trace", 0, frame);
+    return state.intentText === null ? scene("understand", 2600, frame) : scene("trace", 0, frame);
   }
   if (span.kind === "message_sent") {
     const detail = isObject(span.detail) ? span.detail : {};
     const performative = typeof detail.performative === "string" ? detail.performative : "";
-    if (performative === "TASK_T") return scene("send", 1200, frame);
+    if (performative === "TASK_T") return scene("send", 1800, frame);
     return scene("negotiate-send", 500, frame);
   }
   if (span.kind === "tool") {

@@ -78,21 +78,23 @@
             <line class="divider" x1="600" y1="0" x2="600" y2="520"/>
             <text class="zone-lbl" x="300" y="505" text-anchor="middle" id="zone-label-it">IT environment · OSS side</text>
             <text class="zone-lbl" x="900" y="505" text-anchor="middle" id="zone-label-net">Network environment · Songshanhu</text>
-            <rect class="chan" x="470" y="220" width="260" height="120"/>
-            <text class="chan-lbl" x="600" y="210" text-anchor="middle" id="chan-label">A2A-T</text>
-            <text class="chan-sub" x="600" y="368" text-anchor="middle" id="chan-sub1">A2A message + Task-T extension</text>
-            <text class="chan-sub" x="600" y="384" text-anchor="middle" id="chan-sub2">Negotiation-T · status updates</text>
-            <text class="lane-lbl" x="600" y="250" text-anchor="middle" id="lane-task-label">tasks →</text>
-            <text class="lane-lbl" x="600" y="342" text-anchor="middle" id="lane-status-label">← status, questions</text>
-            <path id="lane-request" class="lane" d="M184 272 L224 272" marker-end="url(#arrow)"/>
-            <path id="lane-return" class="lane" d="M224 312 L184 312" marker-end="url(#arrow)"/>
-            <path id="lane-task" class="lane" d="M436 266 L680 266" marker-end="url(#arrow)"/>
-            <path id="lane-status" class="lane" d="M680 318 L438 318" marker-end="url(#arrow)"/>
-            <path id="lane-mie-apply" class="lane" d="M896 434 L928 434 L928 336 L946 336" marker-end="url(#arrow)"/>
-            <path id="lane-data" class="lane" d="M946 316 L894 316" marker-end="url(#arrow)"/>
-            <path id="lane-approval" class="lane dash" d="M110 404 L110 436 L684 436" marker-end="url(#arrow)"/>
-            <line class="lane dash" x1="788" y1="404" x2="788" y2="414"/>
-            <text class="lane-lbl" x="400" y="454" text-anchor="middle" id="lane-approval-label">engineer approval before any change</text>
+            <rect class="chan" x="480" y="232" width="240" height="126"/>
+            <text class="chan-lbl" x="600" y="222" text-anchor="middle" id="chan-label">A2A-T</text>
+            <text class="chan-sub" x="600" y="378" text-anchor="middle" id="chan-sub1">A2A message + Task-T extension</text>
+            <text class="chan-sub" x="600" y="394" text-anchor="middle" id="chan-sub2">Negotiation-T · status updates</text>
+            <text class="lane-lbl" x="600" y="255" text-anchor="middle" id="lane-task-label">tasks →</text>
+            <rect x="556" y="287" width="88" height="16" fill="#fff"/>
+            <text class="div-lbl" x="600" y="299" text-anchor="middle">interconnection</text>
+            <text class="lane-lbl" x="600" y="346" text-anchor="middle" id="lane-status-label">← status, questions</text>
+            <path id="lane-request" class="lane" d="M198 275 L262 275" marker-end="url(#arrow)"/>
+            <path id="lane-return" class="lane" d="M264 315 L200 315" marker-end="url(#arrow)"/>
+            <path id="lane-task" class="lane" d="M480 268 L718 268" marker-end="url(#arrow)"/>
+            <path id="lane-status" class="lane" d="M720 322 L482 322" marker-end="url(#arrow)"/>
+            <path id="lane-mie-apply" class="lane" d="M936 433 L966 433 L966 340 L996 340" marker-end="url(#arrow)"/>
+            <path id="lane-data" class="lane" d="M996 316 L938 316" marker-end="url(#arrow)"/>
+            <path id="lane-approval" class="lane dash" d="M108 402 L108 433 L718 433" marker-end="url(#arrow)"/>
+            <line class="lane dash" x1="828" y1="401" x2="828" y2="411"/>
+            <text class="lane-lbl" x="400" y="450" text-anchor="middle" id="lane-approval-label">engineer approval before any change</text>
           </svg>
 
           <div class="bubble" id="b-eng"></div>
@@ -151,11 +153,11 @@
           </div>
 
           <div class="actor" id="a-cells">
-            <div class="cells-head">
-              <b id="cells-name">Cells / base stations</b>
-              <span id="cells-org">Songshanhu · test cluster</span>
+            <div class="cells-clock">
+              <b id="cells-clock-main">Region A</b>
+              <span id="cells-clock-sub">test cluster</span>
             </div>
-            <svg class="cells-figure" id="cells-figure" viewBox="0 0 360 128" aria-label="Six radio sites"></svg>
+            <svg class="cells-figure" id="cells-figure" viewBox="0 0 168 116" aria-label="Six radio sites"></svg>
             <div class="actor-state" id="s-cells">Normal operation</div>
           </div>
 

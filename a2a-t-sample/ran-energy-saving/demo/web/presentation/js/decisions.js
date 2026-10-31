@@ -84,13 +84,14 @@ export function approvalCard(state, copy) {
     kicker: copy.approval.kicker,
     title: copy.approval.title,
     text: detail,
-    detail: copy.approval.note,
-    // Review is one step: the commands are shown, then the engineer approves or rejects them.
+    detail: null,
+    // Review is one step: the command stays visible on one line; the policy note is already a
+    // stage bubble, so the card stays compact enough to keep the whole stage on screen.
     mml: {
       label: copy.approval.sample,
       text: copy.approval.mml(cell, window, String(rate).replace("%", "")),
     },
-    policy: copy.approval.policy,
+    policy: null,
     remaining: remainingSeconds(approval.requestedAt, approval.timeoutSeconds),
     options: [
       { action: "approve", label: copy.approval.approve, primary: true },

@@ -58,7 +58,6 @@ const REPEATED_SILENT = new Set([
   "approval",
   "apply",
   "report",
-  "finish",
   "end",
   "abort",
   "approval-rejected",
@@ -113,8 +112,9 @@ const els = {
   nmsBar: byId("nms-bar"),
   approval: byId("a-approval"),
   approvalState: byId("approval-state"),
+  cellsClockMain: byId("cells-clock-main"),
+  cellsClockSub: byId("cells-clock-sub"),
   cellsFigure: byId("cells-figure"),
-  cellsName: byId("cells-name"),
   say: byId("say"),
   sayKicker: byId("say-kicker"),
   sayText: byId("say-text-content"),
@@ -420,8 +420,6 @@ function applyStaticCopy() {
   els.legendCfg.textContent = copy.legend.cfg;
   els.legendData.textContent = copy.legend.data;
   setStageCopy(copy);
-  const cellsName = byId("cells-name");
-  if (cellsName) cellsName.textContent = copy.roles.cells;
   const skills = byId("oss-skills");
   if (skills) {
     skills.replaceChildren();
@@ -679,8 +677,19 @@ function rebuild(index) {
     applyFrame(view, ui.frameLog[cursor]);
   }
   ui.view = view;
-  ui.lastScene = index > 0 ? player.sceneAt(index - 1) : null;
+  ui.lastScene = lastStoryScene(index - 1);
   render();
+  // The authored scenes own the stage; a rewind restores the scene it lands on.
+  if (ui.lastScene !== null) stage.scene(ui.lastScene, ui.view, ui.copy);
+}
+
+/** The nearest story scene at or before ``index`` (evidence rows do not own the stage). */
+function lastStoryScene(index) {
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    const scene = player.sceneAt(cursor);
+    if (scene && scene.key !== "trace" && scene.key !== "event") return scene;
+  }
+  return null;
 }
 
 function closeStream() {
@@ -727,7 +736,10 @@ function render() {
  */
 function renderRequest() {
   const text = (ui.view.userRequest || els.requestText.value || "").trim();
-  els.requestCard.hidden = text === "";
+  // The card introduces the ask at the start. Once the story moves on, the engineer bubble and
+  // the intent panel carry the request, and the space goes to the stage and the decision card.
+  const early = !ui.view.started || (ui.lastScene !== null && ui.lastScene.step <= 3);
+  els.requestCard.hidden = text === "" || !early;
   if (text !== "") els.requestCardText.textContent = text;
 }
 
@@ -835,10 +847,10 @@ function renderNarrator() {
     els.sayDetail.append(el("span", "", card.text));
     if (card.detail) els.sayDetail.append(el("span", "reason", card.detail));
     if (card.mml) {
-      const block = el("div", "mml-block");
+      const block = el("div", "mml-inline");
       block.append(
         el("span", "mml-label", card.mml.label),
-        el("pre", "mml-code", card.mml.text),
+        el("code", "", card.mml.text),
       );
       els.sayDetail.append(block);
     }
@@ -1011,6 +1023,7 @@ async function submitIntent(action) {
       throw new Error(detail.error || `HTTP ${response.status}`);
     }
     ui.submitting = false;
+    stage.intentResolved(ui.copy);
     if (ui.view.intentReview !== null) ui.view.intentReview.resolved = true;
     if (!approved && action === "edit") {
       els.drawer.hidden = false;
@@ -1048,6 +1061,7 @@ async function submitApproval(approved) {
     // "Approved. Applying the plan." frame arrives before its approval-resolved span, so without
     // this the show would replay "strategy & start" after the MIE review.
     ui.shadow.approvalState = ui.view.approvalState;
+    if (approved) stage.approvalResolved(ui.copy);
     player.release();
     render();
   } catch (error) {

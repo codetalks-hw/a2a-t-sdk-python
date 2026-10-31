@@ -10,6 +10,7 @@ import {
   stageOf,
 } from "./state.js";
 import { svg } from "./dom.js";
+import { hhmm, parseIntent, plainSentence } from "./intent.js";
 
 const REDUCED =
   typeof window !== "undefined" &&
@@ -22,12 +23,108 @@ export function createStage(els) {
   const packetTimers = new Set();
   let dayProgress = 0;
   let dayTimer = null;
+  let previewTimer = null;
+  let barTimer = null;
+  // The authored scenes own the actor/MIE/clock states once a run starts; the derived view is
+  // only the idle/summary fallback. This mirrors the reference demo's explicit actor() calls.
+  let directed = false;
+  let sceneToken = 0;
 
   function stopDays() {
     if (dayTimer !== null) {
       window.cancelAnimationFrame(dayTimer);
       dayTimer = null;
     }
+  }
+
+  function stopPreview() {
+    if (previewTimer !== null) {
+      window.cancelAnimationFrame(previewTimer);
+      previewTimer = null;
+    }
+  }
+
+  function stopBar() {
+    if (barTimer !== null) {
+      window.cancelAnimationFrame(barTimer);
+      barTimer = null;
+    }
+  }
+
+  function setClock(main, sub) {
+    if (els.cellsClockMain) els.cellsClockMain.textContent = main;
+    if (els.cellsClockSub) els.cellsClockSub.textContent = sub;
+  }
+
+  function setMie(cls, text) {
+    els.approval.className = `approval${cls ? ` ${cls}` : ""}`;
+    els.approvalState.textContent = text;
+  }
+
+  function focusIntent(on) {
+    const panel = document.getElementById("p-intent");
+    if (panel) panel.classList.toggle("focus", Boolean(on));
+  }
+
+  function highlightSkill(index) {
+    const nodes = document.querySelectorAll("#oss-skills span");
+    nodes.forEach((node, position) => node.classList.toggle("on", position === index - 1));
+  }
+
+  function progressBar(to, ms) {
+    stopBar();
+    const from = parseFloat(els.nmsBar.style.width) || 0;
+    const start = performance.now();
+    const frame = (now) => {
+      const t = Math.min(1, (now - start) / ms);
+      els.nmsBar.style.width = `${from + (to - from) * t}%`;
+      if (t < 1) barTimer = window.requestAnimationFrame(frame);
+      else barTimer = null;
+    };
+    barTimer = window.requestAnimationFrame(frame);
+  }
+
+  function typeBubble(actor, who, text, duration) {
+    if (REDUCED || !text) {
+      note(actor, who, text);
+      return;
+    }
+    bubbles[actor] = { who, text: "", neg: false };
+    paintBubble(actor);
+    const start = performance.now();
+    const length = text.length;
+    const frame = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      bubbles[actor].text = text.slice(0, Math.ceil(length * t));
+      paintBubble(actor);
+      if (t < 1) window.requestAnimationFrame(frame);
+    };
+    window.requestAnimationFrame(frame);
+  }
+
+  function animatePreview(state, copy) {
+    stopPreview();
+    const intent = parseIntent(state.intentText || state.userRequest || "");
+    const slots = intent && Array.isArray(intent.slots) ? intent.slots : [];
+    const rateAt = (minute) => {
+      for (const slot of slots) {
+        if (minute >= slot.start && minute < slot.end) return slot.rate;
+      }
+      return null;
+    };
+    const start = performance.now();
+    const duration = 4800;
+    const frame = (now) => {
+      const t = Math.min(1, (now - start) / duration);
+      const minute = Math.min(1439, Math.floor(t * 1440));
+      const rate = rateAt(minute);
+      const carriers = rate === null ? 2 : rate >= 20 ? 3 : rate >= 10 ? 2 : 1;
+      for (let index = 0; index < 6; index += 1) setCell(index, carriers, false, false);
+      setClock(hhmm(minute), copy.dataCollection.savingOn);
+      if (t < 1) previewTimer = window.requestAnimationFrame(frame);
+      else previewTimer = null;
+    };
+    previewTimer = window.requestAnimationFrame(frame);
   }
 
   function animateDays(copy) {
@@ -38,11 +135,8 @@ export function createStage(els) {
       dayProgress = t;
       const day = Math.max(1, Math.min(8, Math.round(1 + t * 7)));
       els.nmsBar.style.width = `${Math.round(t * 100)}%`;
-      setActor(
-        "nms",
-        { cls: "active", text: format(copy.states.nmsCollecting, { day }) },
-        copy,
-      );
+      setActor("nms", { cls: "active", text: format(copy.states.nmsCollecting, { day }) });
+      setClock(format(copy.dataCollection.dayClock, { day }), copy.dataCollection.clockSub);
       if (t < 1) {
         dayTimer = window.requestAnimationFrame(frame);
       } else {
@@ -60,8 +154,14 @@ export function createStage(els) {
   }
 
   function reset() {
+    sceneToken += 1;
+    directed = false;
     clearPackets();
     stopDays();
+    stopPreview();
+    stopBar();
+    focusIntent(false);
+    highlightSkill(0);
     dayProgress = 0;
     bubbles = {};
     for (const node of Object.values(els.bubbles)) {
@@ -72,6 +172,23 @@ export function createStage(els) {
     els.approval.className = "approval";
     els.approvalState.textContent = "";
     for (let index = 0; index < 6; index += 1) setCell(index, 3, false, false);
+  }
+
+  /** Reflect the engineer's intent decision before the next frame arrives. */
+  function intentResolved(copy) {
+    directed = true;
+    setActor("eng", { cls: "ok", text: copy.states.engApproved });
+    note("eng", copy.roles.eng, copy.states.engApproved);
+    fly("lane-request", copy.intentReview.approvedPacket, "req", 900);
+    focusIntent(false);
+  }
+
+  /** Reflect the MIE decision immediately; the next frame carries the workflow. */
+  function approvalResolved(copy) {
+    directed = true;
+    setActor("eng", { cls: "ok", text: copy.states.engAcknowledged });
+    note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
+    setMie("ok", copy.states.approvalConfirmed);
   }
 
   function note(actor, who, text, neg = false) {
@@ -134,145 +251,354 @@ export function createStage(els) {
 
   /** React to one scene: transient packet and bubble. */
   function scene(scene, state, copy) {
+    sceneToken += 1;
+    const token = sceneToken;
+    directed = true;
+    stopBar();
+    const later = (ms, fn) =>
+      window.setTimeout(() => {
+        if (token === sceneToken) fn();
+      }, ms);
     const key = scene.key;
     const scenario = state.scenario;
-    const { round, maxRounds } = roundInfo(state);
+    const { round } = roundInfo(state);
+    const roles = copy.roles;
+    const base = {
+      oss: { cls: "", text: copy.states.ossWaiting },
+      nms: { cls: "", text: copy.states.nmsWaiting },
+      cells: { cls: "", text: copy.states.cellsNormal },
+    };
 
     if (key === "request") {
-      fly("lane-request", copy.start, "req", 900);
-      // Put the real request on the stage: the audience should see the ask, not only "typing".
-      note("eng", copy.roles.eng, (state.userRequest || "").trim() || copy.states.engWriting);
+      setActors({ ...base, eng: { cls: "active", text: copy.states.engWriting } });
+      setClock(roles.cellsRegion, roles.cellsSub);
+      setMie("", copy.states.approvalIdle);
+      highlightSkill(0);
+      focusIntent(false);
+      typeBubble("eng", roles.eng, (state.userRequest || "").trim() || copy.states.engWriting, 1400);
+      fly("lane-request", copy.packet.request, "req", 1000);
+      later(1400, () => setActor("eng", { cls: "", text: copy.states.engSent }));
       return;
     }
     if (key === "understand") {
-      note("oss", copy.roles.oss, copy.states.ossUnderstanding);
+      setActors({
+        ...base,
+        eng: { cls: "", text: copy.states.engSent },
+        oss: { cls: "active", text: copy.states.ossUnderstanding },
+      });
+      highlightSkill(scenario === "outage" ? 2 : 1);
+      note("oss", roles.oss, copy.states.ossReading);
+      later(1200, () => {
+        const intent = parseIntent(state.intentText || state.userRequest || "");
+        const sentence = intent ? plainSentence(intent, copy.lang) : "";
+        note(
+          "oss",
+          roles.oss,
+          sentence ? `${copy.intent.summaryPrefix}${sentence}` : copy.states.ossUnderstanding,
+        );
+      });
       return;
     }
     if (key === "intent-review") {
-      note("oss", copy.roles.oss, copy.intentReview.text, true);
-      note("eng", copy.roles.eng, copy.states.engIntent, true);
+      setActors({
+        ...base,
+        eng: { cls: "wait", text: copy.states.engIntent },
+        oss: { cls: "wait", text: copy.states.ossWaitingHuman },
+      });
+      focusIntent(true);
+      fly("lane-return", copy.intentReview.checkPacket, "req", 1000);
+      note("oss", roles.oss, copy.intentReview.text, true);
+      note("eng", roles.eng, copy.states.engIntent, true);
       return;
     }
     if (key === "send") {
       const plain = (state.protocol || "a2a-t") === "plain";
-      fly("lane-task", plain ? copy.packet.plain : copy.packet.taskT, "task", 1400);
-      note("oss", copy.roles.oss, plain ? copy.states.ossSendingPlain : copy.states.ossSending);
-      note("nms", copy.roles.nms, plain ? copy.states.nmsPlainReading : copy.states.nmsValidating);
-      note("eng", copy.roles.eng, copy.states.engApproved);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "active", text: plain ? copy.states.ossSendingPlain : copy.states.ossBuilding },
+        nms: { cls: "active", text: plain ? copy.states.nmsPlainReading : copy.states.nmsReading },
+      });
+      focusIntent(false);
+      fly("lane-task", plain ? copy.packet.plain : copy.packet.taskT, "task", 1600);
+      note("oss", roles.oss, plain ? copy.states.ossSendingPlain : copy.states.ossSending);
+      note(
+        "nms",
+        roles.nms,
+        plain ? copy.states.nmsPlainReadingBubble : copy.states.nmsReadingBubble,
+      );
+      later(900, () => {
+        setActor("oss", { cls: "", text: copy.states.ossSent });
+        setActor("nms", { cls: "active", text: copy.states.nmsReading });
+      });
+      return;
+    }
+    if (key === "propose") {
+      setActors({
+        ...base,
+        eng: { cls: "wait", text: copy.states.engAnswering },
+        oss: { cls: "active", text: copy.states.ossAsking },
+        nms: { cls: "wait", text: copy.states.nmsNeedsConfirm },
+      });
+      note("nms", roles.nms, proposalLine(copy, scenario, round) || copy.negotiation.generic, true);
+      fly("lane-status", copy.negotiation.inputRequired, "neg", 1400);
+      later(500, () => {
+        note("oss", roles.oss, copy.states.ossAskingBubble, true);
+        fly("lane-return", copy.negotiation.question, "neg", 1000);
+      });
+      return;
+    }
+    if (key === "decision") {
+      const action = latestDecisionAction(state);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engAnswered },
+        oss: { cls: "active", text: copy.states.ossSendingAnswer },
+        nms: { cls: "active", text: copy.states.nmsReadingAnswer },
+      });
+      const answer = decisionLine(copy, scenario, round) || action;
+      note("oss", roles.oss, answer, true);
+      note("eng", roles.eng, answer, true);
+      fly("lane-request", copy.negotiation.answer, "neg", 1000);
+      later(400, () => fly("lane-task", copy.negotiation.clarified, "task", 1400));
+      later(900, () => note("nms", roles.nms, copy.states.nmsClarified));
       return;
     }
     if (key === "strategy") {
-      note("nms", copy.roles.nms, copy.states.nmsStrategy);
-      note("oss", copy.roles.oss, copy.states.ossFollowing);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "", text: copy.states.ossFollowing },
+        nms: { cls: "active", text: copy.states.nmsStrategy },
+      });
+      note("nms", roles.nms, copy.states.nmsStrategyBubble);
+      note("oss", roles.oss, copy.states.ossTaskRunningBubble);
+      fly("lane-status", "SUBMITTED", "status", 900);
+      later(400, () => progressBar(100, 2400));
+      later(2900, () => {
+        setActor("nms", { cls: "ok", text: copy.states.nmsTaskStarted });
+        note("nms", roles.nms, copy.states.nmsStrategyReadyBubble);
+        note("cells", roles.cells, copy.dataCollection.noMml);
+        fly("lane-status", copy.states.nmsStrategyReadyShort, "status", 900);
+      });
       return;
     }
     if (key === "collect-start") {
-      note("nms", copy.roles.nms, copy.dataCollection.start);
-      note("cells", copy.roles.cells, copy.dataCollection.noMml);
-      note("eng", copy.roles.eng, copy.states.engApproved);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "", text: copy.states.ossFollowing },
+        nms: { cls: "active", text: format(copy.states.nmsCollecting, { day: 1 }) },
+        cells: { cls: "active", text: copy.states.cellsMeasuring },
+      });
+      setClock(format(copy.dataCollection.dayClock, { day: 1 }), copy.dataCollection.clockSub);
+      note("nms", roles.nms, copy.dataCollection.start);
+      fly("lane-data", copy.dataCollection.measurements, "data", 900);
+      later(1100, () => fly("lane-data", copy.dataCollection.measurements, "data", 900));
       return;
     }
     if (key === "collect-progress") {
-      note("nms", copy.roles.nms, copy.dataCollection.progress);
-      note("cells", copy.roles.cells, copy.dataCollection.measuring);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "", text: copy.states.ossFollowing },
+        cells: { cls: "active", text: copy.states.cellsMeasuring },
+      });
+      note("nms", roles.nms, copy.dataCollection.progress);
       animateDays(copy);
+      fly("lane-data", copy.dataCollection.measurements, "data", 900);
+      later(1400, () => fly("lane-data", copy.dataCollection.measurements, "data", 900));
       return;
     }
     if (key === "collect-done") {
       stopDays();
       dayProgress = 1;
       els.nmsBar.style.width = "100%";
-      note("nms", copy.roles.nms, copy.dataCollection.done);
-      note("cells", copy.roles.cells, copy.dataCollection.baselineMeasured);
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "", text: copy.states.ossFollowing },
+        nms: { cls: "ok", text: copy.states.nmsCollectingDone },
+        cells: { cls: "", text: copy.states.cellsBaseline },
+      });
+      setClock(format(copy.dataCollection.dayClock, { day: 8 }), copy.dataCollection.clockSub);
+      note("nms", roles.nms, copy.dataCollection.done);
+      note("oss", roles.oss, copy.dataCollection.ossDone);
+      note("cells", roles.cells, copy.dataCollection.baselineMeasured);
+      fly("lane-status", copy.dataCollection.donePacket, "status", 900);
       return;
     }
     if (key === "approval-ready") {
-      note("nms", copy.roles.nms, copy.states.nmsEvaluating);
-      return;
-    }
-    if (key === "propose") {
-      fly("lane-status", "PROPOSE", "neg", 1200);
-      note("nms", copy.roles.nms, proposalLine(copy, scenario, round) || copy.negotiation.generic, true);
-      note("oss", copy.roles.oss, copy.states.ossNegotiating, true);
-      return;
-    }
-    if (key === "decision") {
-      const action = latestDecisionAction(state);
-      fly("lane-task", action ? action.toUpperCase() : "DECISION", "task", 1000);
-      note("oss", copy.roles.oss, decisionLine(copy, scenario, round) || action, true);
+      setActors({
+        ...base,
+        eng: { cls: "active", text: copy.states.engReviewing },
+        oss: { cls: "active", text: copy.states.ossTelling },
+        nms: { cls: "wait", text: copy.states.nmsSuggestions },
+        cells: { cls: "", text: copy.states.cellsBaseline },
+      });
+      setMie("active", copy.states.approvalWaiting);
+      note("nms", roles.nms, copy.approval.suggestionsReady, true);
+      fly("lane-status", copy.approval.confirmInMie, "neg", 1300);
+      later(500, () => {
+        note("oss", roles.oss, copy.approval.tellingEngineer, true);
+        fly("lane-return", copy.approval.reviewNeeded, "neg", 1000);
+      });
+      later(1100, () => {
+        note("eng", roles.eng, copy.approval.checkingMml, true);
+        fly("lane-approval", copy.approval.reviewInMie, "neg", 1600);
+        setActor("eng", { cls: "wait", text: copy.states.engChecking });
+      });
       return;
     }
     if (key === "approval") {
-      fly("lane-status", copy.approval.confirmInMie, "neg", 1300);
-      fly("lane-return", copy.approval.reviewNeeded, "neg", 1100);
-      note("nms", copy.roles.nms, copy.approval.suggestions, true);
-      note("oss", copy.roles.oss, copy.approval.waiting, true);
-      note("eng", copy.roles.eng, copy.approval.checkingMml, true);
-      fly("lane-approval", copy.approval.reviewInMie, "neg", 2000);
-      note("cells", copy.roles.cells, copy.approval.policy, true);
+      setActors({
+        ...base,
+        eng: { cls: "wait", text: copy.states.engChecking },
+        oss: { cls: "wait", text: copy.states.ossWaitingHuman },
+        nms: { cls: "wait", text: copy.states.nmsSuggestions },
+        cells: { cls: "", text: copy.states.cellsBaseline },
+      });
+      setMie("waiting", copy.states.approvalWaiting);
+      note("nms", roles.nms, copy.approval.suggestions, true);
+      note("oss", roles.oss, copy.approval.waiting, true);
+      note("eng", roles.eng, copy.approval.checkingMml, true);
+      note("cells", roles.cells, copy.approval.policy, true);
       return;
     }
     if (key === "apply") {
-      // Nothing reaches the network while the MIE review is open. The client events already
-      // order the approval before the apply artifact; this guard keeps a stray frame from
-      // showing the MML anyway.
       if (state.approvalState === "waiting") return;
-      // MIE owns the dispatch: the MML commands leave the MIE box directly for the radio sites.
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engAcknowledged },
+        oss: { cls: "", text: copy.states.ossWaitingResults },
+        nms: { cls: "active", text: copy.states.nmsWaitingResults },
+        cells: { cls: "active", text: copy.states.cellsApplying },
+      });
+      setMie("ok", copy.states.approvalApproved);
+      note("nms", roles.nms, copy.approval.awaitingResults);
+      note("oss", roles.oss, copy.states.ossWaitingResults);
+      note("eng", roles.eng, copy.approval.acknowledgedInMie);
+      note("cells", roles.cells, copy.approval.previewBubble);
       fly("lane-mie-apply", copy.approval.mmlCommands, "cfg", 1400);
-      note("nms", copy.roles.nms, copy.approval.awaitingResults);
-      note("oss", copy.roles.oss, copy.states.ossWaitingResults);
-      note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
-      note("cells", copy.roles.cells, copy.states.cellsApplying);
+      later(1300, () => animatePreview(state, copy));
       return;
     }
     if (key === "execute") {
-      // The sites executed the MML and report the result back through the RAN Agent.
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engAcknowledged },
+        oss: { cls: "", text: copy.states.ossWaitingResults },
+        nms: { cls: "active", text: copy.states.nmsExecuted },
+        cells: { cls: "ok", text: copy.states.cellsApplied },
+      });
+      note("cells", roles.cells, copy.states.cellsApplied);
       fly("lane-data", copy.approval.executionResults, "data", 1200);
-      note("cells", copy.roles.cells, copy.states.cellsApplied);
-      note("eng", copy.roles.eng, copy.approval.acknowledgedInMie);
-      window.setTimeout(() => {
-        note("nms", copy.roles.nms, copy.states.nmsExecuted);
+      later(600, () => {
+        setActor("nms", { cls: "active", text: copy.states.nmsExecuted });
+        note("nms", roles.nms, copy.states.nmsExecutedBubble);
         fly("lane-status", copy.approval.executionResults, "status", 900);
-      }, 600);
-      window.setTimeout(() => {
-        note("oss", copy.roles.oss, copy.states.ossResultsReceived);
-      }, 700);
+      });
+      later(800, () => {
+        setActor("oss", { cls: "ok", text: copy.states.ossResultsReceived });
+        note("oss", roles.oss, copy.states.ossResultsReceived);
+      });
       return;
     }
     if (key === "report") {
-      fly("lane-status", "REPORT", "status", 1200);
-      note("nms", copy.roles.nms, copy.states.nmsReporting);
-      note("oss", copy.roles.oss, copy.states.ossSummarising);
-      note("eng", copy.roles.eng, copy.states.engApproved);
-      window.setTimeout(() => {
+      setActors({
+        ...base,
+        eng: { cls: "ok", text: copy.states.engApproved },
+        oss: { cls: "active", text: copy.states.ossSummarising },
+        nms: { cls: "active", text: copy.states.nmsReporting },
+        cells: { cls: "ok", text: copy.states.cellsApplied },
+      });
+      note("nms", roles.nms, copy.states.nmsReporting);
+      note("oss", roles.oss, copy.states.ossSummarising);
+      note("eng", roles.eng, copy.states.engApproved);
+      fly("lane-data", copy.dataCollection.dailyKpis, "data", 900);
+      later(700, () => fly("lane-status", copy.approval.reportToEngineer, "status", 1100));
+      later(1400, () => {
+        setActor("eng", { cls: "ok", text: copy.states.engReportReceived });
+        note("eng", roles.eng, copy.states.engReportReceived);
         fly("lane-return", copy.approval.reportToEngineer, "req", 900);
-        note("eng", copy.roles.eng, copy.states.engReportReceived);
-      }, 900);
+      });
       return;
     }
     if (key === "finish") {
-      if (state.report !== null || state.reportArtifact) {
-        note("nms", copy.roles.nms, copy.states.nmsDone);
-        note("oss", copy.roles.oss, copy.states.ossDone);
-        note("eng", copy.roles.eng, copy.states.engReportReceived);
+      const completed =
+        state.finalState === "task_completed" || state.report !== null || state.reportArtifact;
+      const ending = completed ? "done" : stageOf(state);
+      if (ending === "done") {
+        setActors({
+          eng: { cls: "ok", text: copy.states.engReportReceived },
+          oss: { cls: "ok", text: copy.states.ossDone },
+          nms: { cls: "ok", text: copy.states.nmsDone },
+          cells: { cls: "ok", text: copy.states.cellsApplied },
+        });
+        note("eng", roles.eng, copy.states.engReportReceived);
+        note("oss", roles.oss, copy.states.ossDone);
+        note("nms", roles.nms, copy.states.nmsDone);
+      } else if (ending === "notSent") {
+        setActors({
+          eng: { cls: "wait", text: copy.result.intentNotConfirmedTitle },
+          oss: { cls: "", text: copy.states.ossWaiting },
+          nms: { cls: "", text: copy.states.nmsWaiting },
+          cells: { cls: "", text: copy.states.cellsNormal },
+        });
+      } else if (ending === "notApplied" || ending === "plainRejected") {
+        setActors({
+          eng: { cls: "fail", text: copy.approval.rejected },
+          oss: { cls: "", text: copy.states.ossDone },
+          nms: { cls: "fail", text: copy.approval.rejected },
+          cells: { cls: "", text: copy.states.cellsUnchanged },
+        });
+      } else if (ending === "failed") {
+        setActors({
+          eng: { cls: "", text: copy.states.engSent },
+          oss: { cls: "", text: copy.states.ossDone },
+          nms: { cls: "fail", text: copy.states.nmsDone },
+          cells: { cls: "", text: copy.states.cellsNormal },
+        });
       }
       return;
     }
     if (key === "end" || key === "abort") {
-      note("nms", copy.roles.nms, copy.negotiation.endLine);
-      note("oss", copy.roles.oss, copy.negotiation.endLine);
+      setActors({
+        eng: { cls: "", text: copy.states.engSent },
+        oss: { cls: "", text: copy.negotiation.statusEnded },
+        nms: { cls: "", text: copy.negotiation.statusEnded },
+        cells: { cls: "", text: copy.states.cellsNormal },
+      });
+      note("nms", roles.nms, copy.negotiation.endLine);
+      note("oss", roles.oss, copy.negotiation.endLine);
       return;
     }
     if (key === "approval-rejected") {
+      setActors({
+        ...base,
+        eng: { cls: "fail", text: copy.approval.rejected },
+        oss: { cls: "", text: copy.states.ossDone },
+        nms: { cls: "fail", text: copy.approval.rejected },
+        cells: { cls: "", text: copy.states.cellsUnchanged },
+      });
+      setMie("no", copy.states.approvalRejected);
       fly("lane-status", "REJECTED", "no", 900);
-      note("nms", copy.roles.nms, copy.approval.rejected, true);
-      note("cells", copy.roles.cells, copy.states.cellsUnchanged);
+      note("nms", roles.nms, copy.approval.rejected, true);
+      note("cells", roles.cells, copy.states.cellsUnchanged);
     }
   }
 
   /** Draw the persistent actor state of the current run. */
   function render(state, copy) {
+    // Once a run starts, the authored scenes own the actor/MIE/clock state.
+    if (directed) return;
     const stage = stageOf(state);
+    if (stage === "idle") {
+      setClock(copy.roles.cellsRegion, copy.roles.cellsSub);
+      setMie("", copy.states.approvalIdle);
+      highlightSkill(0);
+      focusIntent(false);
+    }
     const pending = pendingHuman(state);
     const { round, maxRounds } = roundInfo(state);
     const resolution = resolutionOf(state);
@@ -385,10 +711,10 @@ export function createStage(els) {
       nms = { cls: stage === "failed" ? "fail" : "", text: copy.negotiation.statusEnded };
     }
 
-    setActor("eng", eng, copy);
-    setActor("oss", oss, copy);
-    setActor("nms", nms, copy);
-    setActor("cells", cells, copy);
+    setActor("eng", eng);
+    setActor("oss", oss);
+    setActor("nms", nms);
+    setActor("cells", cells);
 
     const progress =
       stage === "done"
@@ -428,12 +754,15 @@ export function createStage(els) {
     for (let index = 0; index < 6; index += 1) setCell(index, carriers, battery, false);
   }
 
-  function setActor(name, value, copy) {
+  function setActor(name, value) {
     const actor = els.actors[name];
     actor.classList.remove("active", "wait", "ok", "fail");
     if (value.cls) actor.classList.add(value.cls);
     els.states[name].textContent = value.text;
-    if (name === "cells") els.cellsName.textContent = copy.roles.cells;
+  }
+
+  function setActors(map) {
+    for (const [name, value] of Object.entries(map)) setActor(name, value);
   }
 
   function buildCells(figure) {
@@ -441,12 +770,13 @@ export function createStage(els) {
     for (let index = 0; index < 6; index += 1) {
       const column = index % 3;
       const row = Math.floor(index / 3);
-      const cx = 58 + column * 122;
-      const ay = 30 + row * 62;
+      const cx = 28 + column * 56;
+      const cy = 10 + row * 56;
+      const ay = cy + 12;
       const group = svg("g", { id: `cell-${index}` });
-      for (let ring = 1; ring <= 2; ring += 1) {
-        const r = 4 + ring * 5;
-        const angle = (42 * Math.PI) / 180;
+      for (let ring = 1; ring <= 3; ring += 1) {
+        const r = 5 + ring * 5;
+        const angle = (40 * Math.PI) / 180;
         const x1 = cx + r * Math.cos(-angle);
         const y1 = ay + r * Math.sin(-angle);
         const x2 = cx + r * Math.cos(angle);
@@ -467,24 +797,24 @@ export function createStage(els) {
       group.append(
         svg("path", {
           class: "cell-mast",
-          d: `M${cx} ${ay}L${cx - 6} ${ay + 26}M${cx} ${ay}L${cx + 6} ${ay + 26}M${cx - 4} ${ay + 20}h8`,
+          d: `M${cx} ${ay}L${cx - 7} ${cy + 36}M${cx} ${ay}L${cx + 7} ${cy + 36}M${cx - 4} ${cy + 27}h8`,
         }),
-        svg("circle", { cx, cy: ay, r: 2.2, fill: "#000" }),
+        svg("circle", { cx, cy: ay, r: 2.6, fill: "#000" }),
         svg("g", { class: "cell-bat", id: `cell-bat-${index}` }),
       );
       const batteryGroup = group.querySelector(`#cell-bat-${index}`);
       batteryGroup.append(
         svg("rect", {
           x: cx + 9,
-          y: ay + 15,
-          width: 12,
-          height: 7,
+          y: cy + 24,
+          width: 13,
+          height: 8,
           fill: "#fff",
           stroke: "#000",
-          "stroke-width": 1.1,
+          "stroke-width": 1.3,
         }),
-        svg("rect", { x: cx + 21, y: ay + 17.2, width: 2, height: 2.6, fill: "#000" }),
-        svg("rect", { x: cx + 10.2, y: ay + 16.2, width: 4, height: 4.6, fill: "#FFD200" }),
+        svg("rect", { x: cx + 22, y: cy + 26.5, width: 2, height: 3, fill: "#000" }),
+        svg("rect", { x: cx + 10.5, y: cy + 25.5, width: 5, height: 5, fill: "#FFD200" }),
       );
       group.append(
         svg(
@@ -493,7 +823,7 @@ export function createStage(els) {
             class: "cell-lbl",
             id: `cell-lbl-${index}`,
             x: cx,
-            y: ay + 38,
+            y: cy + 47,
             "text-anchor": "middle",
           },
           index < 2 ? `cell-00${index + 1}` : `site-${index + 1}`,
@@ -523,7 +853,7 @@ export function createStage(els) {
     return null;
   }
 
-  return { render, scene, note, reset, fly };
+  return { render, scene, note, reset, fly, intentResolved, approvalResolved };
 }
 
 export function setStageCopy(copy) {
@@ -548,5 +878,6 @@ export function setStageCopy(copy) {
   set("nms-note", copy.roles.nmsNote);
   set("approval-name", copy.roles.approval);
   set("approval-org", copy.roles.approvalOrg);
-  set("cells-org", copy.roles.cellsOrg);
+  set("cells-clock-main", copy.roles.cellsRegion);
+  set("cells-clock-sub", copy.roles.cellsSub);
 }
