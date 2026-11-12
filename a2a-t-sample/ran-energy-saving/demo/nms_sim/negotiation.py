@@ -241,12 +241,24 @@ class NegotiationStore:
         self._sessions.pop(session.id, None)
 
 
-def propose_metadata(issue: NegotiationIssue, context: NegotiationContext) -> dict[str, object]:
-    """Build the metadata map of one proposal."""
+def propose_metadata(
+    issue: NegotiationIssue,
+    context: NegotiationContext,
+    *,
+    extra: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the metadata map of one proposal.
+
+    Args:
+        issue: The issue the proposal is about.
+        context: Negotiation context of this round.
+        extra: Optional additional entries, e.g. the machine-readable missing-item list.
+    """
     return {
         NEGOTIATION_T_EXTENSION_URI: issue.body(),
         TEMPLATE_URI_METADATA_KEY: template_uri(issue.kind),
         NEGOTIATION_CONTEXT_METADATA_KEY: context.as_metadata(),
+        **(extra or {}),
     }
 
 
@@ -268,11 +280,17 @@ def negotiation_message(
     body: str,
     metadata: Mapping[str, object],
 ) -> dict[str, object]:
-    """Build one standalone agent Message carrying a negotiation body."""
+    """Build one standalone agent Message carrying a negotiation body.
+
+    The text part is only a pointer when the metadata *is* the content, i.e. when it carries the
+    Negotiation-T body. An annex added next to a plain-text question must not replace that text:
+    the prose is the vendor's question and a client that cannot read the annex still needs it.
+    """
+    carries_body = NEGOTIATION_T_EXTENSION_URI in metadata
     return {
         "messageId": str(uuid.uuid4()),
         "contextId": context_id,
         "role": "ROLE_AGENT",
-        "parts": [{"text": "See metadata for details." if metadata else body}],
+        "parts": [{"text": "See metadata for details." if carries_body else body}],
         "metadata": dict(metadata),
     }

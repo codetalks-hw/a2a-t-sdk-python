@@ -56,6 +56,9 @@ _TERMINOLOGY_RATES: Final[tuple[tuple[re.Pattern[str], float], ...]] = (
     (re.compile(r"(?<!\d)4k\b", re.IGNORECASE), 20.0),
 )
 
+#: One percentage value in the operator's request ("Set the Power Savings Ratio to 10%").
+_PERCENT: Final[re.Pattern[str]] = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
 #: One ``HH:MM`` clock pair written with any of the request separators.
 _WINDOW: Final[re.Pattern[str]] = re.compile(
     r"(\d{1,2}:\d{2})(?::\d{2})?\s*(?:[~\-–—]|to|until|至)\s*(\d{1,2}:\d{2})(?::\d{2})?",
@@ -171,6 +174,25 @@ def _concede(rate: float, floor: float | None) -> float | None:
     return next_rate
 
 
+def rate_floor(policy: ClientPolicy) -> float | None:
+    """Return the lowest rate this client may concede to, ``None`` when it has no floor."""
+    return _policy_floor(policy)
+
+
+def stated_rate(request_text: str) -> float | None:
+    """Return the highest rate the operator's own words state or imply, ``None`` when none."""
+    explicit = [float(match.group(1)) for match in _RATE.finditer(request_text)]
+    if explicit:
+        return max(explicit)
+    return _derived_rate(request_text)
+
+
+def stated_percent(request_text: str) -> float | None:
+    """Return the first percentage the operator's request states, ``None`` when none."""
+    match = _PERCENT.search(request_text)
+    return float(match.group(1)) if match is not None else None
+
+
 def _window_text(request_text: str) -> str | None:
     """Return the request's first time window as ``HH:MM-HH:MM``, or ``None``."""
     match = _WINDOW.search(request_text)
@@ -185,4 +207,11 @@ def _clock(value: str) -> str:
     return f"{int(hour):02d}:{minute}"
 
 
-__all__ = ["FEASIBILITY_FLOOR_MBPS", "PureConcession", "plan_pure_answer"]
+__all__ = [
+    "FEASIBILITY_FLOOR_MBPS",
+    "PureConcession",
+    "plan_pure_answer",
+    "rate_floor",
+    "stated_percent",
+    "stated_rate",
+]

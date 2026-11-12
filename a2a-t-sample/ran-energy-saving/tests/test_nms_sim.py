@@ -33,6 +33,9 @@ from demo.nms_sim.config import (
 )
 from demo.nms_sim.sse import task_stream
 from demo.nms_sim.tasks import TASK_SUBMITTED, SimTask, TaskStore
+from demo.pure_items_answer import answer_missing_items
+from shared.energy_rules import FEASIBILITY_RATE_MBPS
+from shared.missing_items import MISSING_ITEMS_METADATA_KEY
 from starlette.applications import Starlette
 
 TOKEN_URL = "/rest/plat/smapp/v1/sessions"
@@ -515,6 +518,133 @@ async def test_confirm_mode_asks_the_vendor_sentence_before_accepting() -> None:
         assert any(frame.get("artifactUpdate") for frame in resumed)
 
 
+async def test_missing_items_let_one_answer_close_a_long_outage_question() -> None:
+    """E1: a plain-A2A question that names its ceiling is answerable in one round."""
+    config = SimConfig(
+        fidelity=FIDELITY_FAST,
+        negotiation_carrier=CARRIER_MESSAGE,
+        window_policy=WINDOW_POLICY_ANY,
+        rate_policy=RATE_POLICY_OPTIONAL,
+        long_outage_feasibility=True,
+        pure_question=PURE_QUESTION_CONFIRM,
+        missing_items=True,
+    )
+    async for client in _client(config):
+        token = await _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        frames = await _frames(
+            client,
+            _pure_message(
+                "Create a RAN energy saving task in A2ATestRegion from 08:00 to 18:00 "
+                "guaranteeing 10Mbps during the power outage."
+            ),
+            headers,
+        )
+        question = frames[0]["message"]
+        assert isinstance(question, dict)
+        # The prose stays the vendor's fixed sentence; the envelope is what the client reads.
+        assert question["parts"][0]["text"] == "Not feasible, please confirm"
+        envelope = question["metadata"][MISSING_ITEMS_METADATA_KEY]["items"]
+        assert envelope[0]["field"] == "guaranteedThroughputTarget"
+        assert envelope[0]["acceptable"] == {"maxMbps": FEASIBILITY_RATE_MBPS, "during": "outage"}
+
+        answer = answer_missing_items(question)
+        assert answer == "Guarantee 2 Mbps during the power outage period."
+
+        resumed = await _frames(
+            client,
+            _pure_message(answer, context_id=str(question["contextId"])),
+            headers,
+        )
+
+        assert any(frame.get("artifactUpdate") for frame in resumed)
+
+
+async def test_a_non_streamed_question_keeps_its_prose_next_to_the_envelope() -> None:
+    """The envelope is an annex: a client that cannot read it still needs the vendor sentence."""
+    config = SimConfig(
+        fidelity=FIDELITY_FAST,
+        negotiation_carrier=CARRIER_MESSAGE,
+        window_policy=WINDOW_POLICY_ANY,
+        rate_policy=RATE_POLICY_OPTIONAL,
+        long_outage_feasibility=True,
+        pure_question=PURE_QUESTION_CONFIRM,
+        missing_items=True,
+    )
+    async for client in _client(config):
+        token = await _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        response = await _send(
+            client,
+            _pure_message(
+                "Create a RAN energy saving task in A2ATestRegion from 08:00 to 18:00 "
+                "guaranteeing 10Mbps during the power outage."
+            ),
+            headers,
+        )
+
+        assert response.status_code == 200
+        message = response.json()["message"]
+        assert message["parts"][0]["text"] == "Not feasible, please confirm"
+        assert MISSING_ITEMS_METADATA_KEY in message["metadata"]
+
+
+async def test_the_a2a_t_proposal_carries_the_same_envelope() -> None:
+    """On an A2A-T hop the capability is an extension of the proposal that already exists."""
+    config = SimConfig(
+        fidelity=FIDELITY_FAST,
+        negotiation_carrier=CARRIER_MESSAGE,
+        window_policy=WINDOW_POLICY_ANY,
+        rate_policy=RATE_POLICY_OPTIONAL,
+        long_outage_feasibility=True,
+        missing_items=True,
+    )
+    async for client in _client(config):
+        token = await _token(client)
+        headers = _headers(token)
+        frames = await _frames(
+            client,
+            _body(
+                _prompt(window="08:00~18:00", rate="10 Mbps")
+                + "\n\nBackground event: a power outage from 08:00 to 18:00."
+            ),
+            headers,
+        )
+
+        message = frames[0]["message"]
+        assert isinstance(message, dict)
+        metadata = message["metadata"]
+        # The vendor's own three keys are untouched; the envelope is added next to them.
+        assert NEGOTIATION_T_EXTENSION_URI in metadata
+        assert NEGOTIATION_CONTEXT_METADATA_KEY in metadata
+        envelope = metadata[MISSING_ITEMS_METADATA_KEY]["items"]
+        assert envelope[0]["field"] == "guaranteedThroughputTarget"
+        assert envelope[0]["acceptable"] == {"maxMbps": FEASIBILITY_RATE_MBPS, "during": "outage"}
+
+
+async def test_the_envelope_is_off_unless_the_switch_is_set() -> None:
+    """The prose-only behaviour stays the default, so the baseline remains reproducible."""
+    config = SimConfig(
+        fidelity=FIDELITY_FAST,
+        negotiation_carrier=CARRIER_MESSAGE,
+        window_policy=WINDOW_POLICY_ANY,
+        pure_question=PURE_QUESTION_CONFIRM,
+    )
+    async for client in _client(config):
+        token = await _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        frames = await _frames(
+            client,
+            _pure_message("Create a RAN energy saving task in A2ATestRegion from 00:00 to 22:00."),
+            headers,
+        )
+
+        message = frames[0]["message"]
+        assert isinstance(message, dict)
+        assert message["metadata"] == {}
+        assert answer_missing_items(message) is None
+
+
 async def test_an_explicit_rejection_terminates_the_pure_task() -> None:
     """A client that cannot obtain a server-owned value refuses; the vendor skill terminates."""
     config = SimConfig(
@@ -779,6 +909,18 @@ def test_sim_config_reads_the_hold_working_switch(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv(HOLD_WORKING_ENV_KEY, "1")
     assert SimConfig.from_env().hold_working is True
+
+
+def test_sim_config_reads_the_missing_items_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """E1 is opt-in: the prose-only baseline is what a comparison run starts from."""
+    from demo.nms_sim.config import FIDELITY_ENV_KEY, MISSING_ITEMS_ENV_KEY
+
+    monkeypatch.setenv(FIDELITY_ENV_KEY, FIDELITY_FAST)
+    monkeypatch.delenv(MISSING_ITEMS_ENV_KEY, raising=False)
+    assert SimConfig.from_env().missing_items is False
+
+    monkeypatch.setenv(MISSING_ITEMS_ENV_KEY, "1")
+    assert SimConfig.from_env().missing_items is True
 
 
 def test_sim_config_reads_the_pure_failure_and_window_policies(
@@ -1338,3 +1480,29 @@ async def test_server_metrics_count_the_a2a_t_request() -> None:
     pure = snapshot["protocols"]["a2a"]
     assert pure["requests"] == 0
     assert pure["rounds"] == 0
+    # A count without its switches is not evidence: the snapshot states the profile.
+    assert snapshot["settings"]["pure_question"] == "issue"
+    assert snapshot["settings"]["missing_items"] is False
+
+
+async def test_server_metrics_separate_the_question_shape_from_the_kind() -> None:
+    """An E1 run must not look like a different kind of negotiation in the counters."""
+    config = SimConfig(
+        fidelity=FIDELITY_FAST,
+        negotiation_carrier=CARRIER_MESSAGE,
+        window_policy=WINDOW_POLICY_ANY,
+        pure_question=PURE_QUESTION_CONFIRM,
+        missing_items=True,
+    )
+    async for client in _client(config):
+        token = await _token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        await _frames(client, _pure_message("Create a task in NowhereRegion at 10Mbps."), headers)
+
+        snapshot = (await client.get("/a2a/json/metrics")).json()
+
+    pure = snapshot["protocols"]["a2a"]
+    assert pure["questions"] == 1
+    assert pure["questionsByKind"] == {"information": 1}
+    assert pure["questionsByShape"] == {"items": 1}
+    assert snapshot["settings"]["missing_items"] is True

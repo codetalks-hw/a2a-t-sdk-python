@@ -136,30 +136,33 @@ async def message_stream(
 
     When ``structured`` is true (the request declared Negotiation-T), the full negotiation body
     travels in the ``Negotiation-T`` metadata and the text part is only a pointer, matching the
-    vendor. When it is false, the message is a bare Message with empty metadata and the full text
-    in its part, which the client must treat as an explicit negotiation-required signal.
+    vendor. When it is false, the message is a bare Message whose text part carries the full body,
+    which the client must treat as an explicit negotiation-required signal; an explicit ``metadata``
+    map still rides along, which is how a plain-A2A question can carry a machine-readable annex.
 
     Args:
         text: Rendered Negotiation-T body.
         context_id: A2A context id of the proposal.
         config: fidelity settings.
         structured: whether the request declared the Negotiation-T extension.
-        metadata: explicit metadata of a state-machine proposal; built from ``text`` when absent.
+        metadata: explicit metadata of a state-machine proposal; built from ``text`` when absent
+            on the structured path.
     """
     resolved_context = context_id or str(uuid.uuid4())
-    resolved_metadata: dict[str, object] = {}
+    resolved_metadata: dict[str, object] = dict(metadata) if metadata is not None else {}
     part_text = text
     if structured:
-        resolved_metadata = dict(metadata) if metadata is not None else {
-            NEGOTIATION_T_EXTENSION_URI: text,
-            TEMPLATE_URI_METADATA_KEY: "Negotiation-T/info-negotiation/propose/v1",
-            NEGOTIATION_CONTEXT_METADATA_KEY: {
-                "id": str(uuid.uuid4()),
-                "round": 1,
-                "maxRounds": 5,
-                "performative": "PROPOSE",
-            },
-        }
+        if metadata is None:
+            resolved_metadata = {
+                NEGOTIATION_T_EXTENSION_URI: text,
+                TEMPLATE_URI_METADATA_KEY: "Negotiation-T/info-negotiation/propose/v1",
+                NEGOTIATION_CONTEXT_METADATA_KEY: {
+                    "id": str(uuid.uuid4()),
+                    "round": 1,
+                    "maxRounds": 5,
+                    "performative": "PROPOSE",
+                },
+            }
         part_text = "See metadata for details."
     message = {
         "messageId": str(uuid.uuid4()),

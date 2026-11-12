@@ -12,6 +12,7 @@ from demo.pure_auto import (
     build_auto_pure_answer,
 )
 from protocol.client_policy import ClientPolicy
+from shared.missing_items import MISSING_ITEMS_METADATA_KEY
 from shared.models import NegotiationDecision, NegotiationProposeView
 
 
@@ -178,3 +179,101 @@ def test_the_answer_object_exposes_the_runtime_hooks() -> None:
     assert callable(answer.set_user_request)
     assert callable(answer.set_proposal_sink)
     assert callable(answer.set_decision_sink)
+
+
+def _outage_envelope(max_mbps: float = 2.0) -> dict[str, object]:
+    """Return one normalized question carrying an outage rate ceiling."""
+    event = _event()
+    event["metadata"] = {
+        MISSING_ITEMS_METADATA_KEY: {
+            "version": 1,
+            "kind": "feasibility",
+            "items": [
+                {
+                    "item": "Guaranteed throughput target",
+                    "field": "guaranteedThroughputTarget",
+                    "source": "operator",
+                    "acceptable": {"maxMbps": max_mbps, "during": "outage"},
+                }
+            ],
+        }
+    }
+    return event
+
+
+@pytest.mark.asyncio
+async def test_the_missing_items_envelope_is_answered_before_the_agent() -> None:
+    """E1: a structured list lets one message close the exchange, without a model turn."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="unused"))
+    answer = build_auto_pure_answer(provider, ClientPolicy())
+    answer.set_user_request("A power outage from 08:00 to 18:00 at 10Mbps.")
+
+    text = await answer(_outage_envelope())
+
+    assert text == "Guarantee 2 Mbps during the power outage period."
+    # The envelope is a protocol fact, not a model decision: no agent turn is spent on it.
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_agent_tier_still_answers_a_structured_question_itself() -> None:
+    """The ``agent`` tier is the comparison control: it must not be short-circuited."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="Lower to 2Mbps."))
+    answer = build_auto_pure_answer(provider, ClientPolicy(), use_deterministic=False)
+    answer.set_user_request("A power outage from 08:00 to 18:00 at 10Mbps.")
+
+    await answer(_outage_envelope())
+
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_envelope_never_goes_below_the_client_floor() -> None:
+    """A ceiling under the client's own floor is not a concession the client may make."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="unused"))
+    answer = build_auto_pure_answer(provider, ClientPolicy(min_throughput_mbps=8.0))
+    answer.set_user_request("A power outage from 08:00 to 18:00 at 10Mbps.")
+
+    text = await answer(_outage_envelope())
+
+    assert text.startswith("Please provide the available value")
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_envelope_never_offers_more_than_the_operator_asked() -> None:
+    """A request that already states less than the ceiling keeps its own value."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="unused"))
+    answer = build_auto_pure_answer(provider, ClientPolicy())
+    answer.set_user_request("A power outage from 08:00 to 18:00 at 1Mbps.")
+
+    text = await answer(_outage_envelope(max_mbps=20.0))
+
+    assert text == "Guarantee 1 Mbps during the power outage period."
+
+
+@pytest.mark.asyncio
+async def test_a_server_owned_item_falls_through_to_the_ordinary_policy() -> None:
+    """A region only the network knows must still become an explicit ask, not an invention."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="unused"))
+    answer = build_auto_pure_answer(provider, ClientPolicy(), use_deterministic=False)
+    answer.set_user_request("Create an energy saving task.")
+    event = _event("Please provide the correct region name.")
+    event["metadata"] = {
+        MISSING_ITEMS_METADATA_KEY: {
+            "version": 1,
+            "kind": "information",
+            "items": [
+                {
+                    "item": "Energy saving region",
+                    "field": "energySavingRegion",
+                    "source": "server",
+                    "acceptable": {},
+                }
+            ],
+        }
+    }
+
+    text = await answer(event)
+
+    assert text == ASK_TEMPLATE.format(item="Region")

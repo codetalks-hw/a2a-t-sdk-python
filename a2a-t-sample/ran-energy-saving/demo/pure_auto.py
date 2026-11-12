@@ -1,8 +1,10 @@
 """Automatic answer of a direct standard-A2A (pure) negotiation.
 
 The direct hop has no OSS Agent in front of it: the client talks to the vendor NMS itself, and the
-vendor negotiates in prose. The answer is built in two tiers:
+vendor negotiates in prose. The answer is built in three tiers:
 
+0. the machine-readable missing-item list, when the server sends one
+   (:mod:`demo.pure_items_answer`): one message closes every item the caller owns;
 1. a deterministic plan (:mod:`demo.pure_concession`) when the terse question has a value the
    request itself implies (a rate-quality term, a bare rate, or a long-outage concession);
 2. the ADK decision agent for everything else, sanitized by
@@ -29,6 +31,7 @@ from protocol.pure_client_flow import pure_proposal_view
 from shared.models import NegotiationDecision
 
 from demo.pure_concession import plan_pure_answer
+from demo.pure_items_answer import answer_missing_items
 from demo.pure_policy import render_pure_answer
 
 PureAnswer = Callable[[Mapping[str, object]], str | Awaitable[str]]
@@ -82,6 +85,10 @@ class AutoPureAnswer:
         self._max_server_asks = max(1, max_server_asks)
         self._use_deterministic = use_deterministic
         self._server_asks = 0
+        #: Questions answered so far; the fallback round for a peer that does not number them.
+        #: Without it every proposal is round 1, and the exported round count of a multi-round
+        #: exchange reads as 1 -- exactly the cost this comparison is supposed to measure.
+        self._rounds = 0
         self._proposal_sink: Callable[..., None] | None = None
         self._decision_sink: Callable[..., None] | None = None
 
@@ -108,10 +115,30 @@ class AutoPureAnswer:
 
     async def __call__(self, event: Mapping[str, object]) -> str:
         """Return the free-text answer of one pure-A2A question."""
-        propose, session = pure_proposal_view(event)
+        self._rounds += 1
+        propose, session = pure_proposal_view(event, fallback_round=self._rounds)
         if self._proposal_sink is not None:
             self._proposal_sink(propose, session)
         request_text = self._request_text or _provider_text(self._provider)
+        if self._use_deterministic:
+            # The envelope is a protocol fact rendered deterministically, so it belongs to the same
+            # tier as the concession plan: the ``agent`` tier must still cost one agent turn.
+            structured = answer_missing_items(
+                event, request_text=request_text, policy=self._policy
+            )
+            if structured is not None:
+                # The server named what it is missing, so one message can close the exchange.
+                self._server_asks = 0
+                self._announce(
+                    NegotiationDecision(
+                        action="counter",
+                        rationale=f"Answered the missing items the server listed: {structured}",
+                        counter_proposal=structured,
+                    ),
+                    propose,
+                    session,
+                )
+                return structured
         if (
             self._use_deterministic
             and propose.kind in ("feasibility", "target")

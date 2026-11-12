@@ -38,6 +38,9 @@ PURE_QUESTION_ISSUE: Final[str] = "issue"
 PURE_QUESTION_CONFIRM: Final[str] = "confirm"
 SUPPORTED_PURE_QUESTIONS: Final[tuple[str, ...]] = (PURE_QUESTION_ISSUE, PURE_QUESTION_CONFIRM)
 PURE_QUESTION_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_PURE_QUESTION"
+#: Evolution-candidate E1: attach a machine-readable missing-item list to the question, next to the
+#: prose the vendor sends. Off by default so the prose-only baseline stays reproducible.
+MISSING_ITEMS_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_MISSING_ITEMS"
 
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
@@ -131,6 +134,8 @@ class SimConfig:
         window_policy: ``exact`` accepts only ``window``; ``any`` accepts every parsed window.
         pure_question: ``issue`` renders the business issue it found; ``confirm`` asks the vendor's
             fixed ``Not feasible, please confirm`` on every new pure exchange.
+        missing_items: Attach a machine-readable missing-item list to every question and to every
+            Negotiation-T proposal (evolution candidate E1).
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -156,6 +161,7 @@ class SimConfig:
     rate_policy: str = RATE_POLICY_REQUIRED
     long_outage_feasibility: bool = False
     pure_question: str = PURE_QUESTION_ISSUE
+    missing_items: bool = False
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -257,6 +263,7 @@ class SimConfig:
             rate_policy=rate_policy,
             long_outage_feasibility=_truthy(os.environ.get(LONG_OUTAGE_FEASIBILITY_ENV_KEY, "")),
             pure_question=pure_question,
+            missing_items=_truthy(os.environ.get(MISSING_ITEMS_ENV_KEY, "")),
         )
         # The fast profile keeps the wire contract but removes the wall-clock delays; the dataclass
         # applies that normalization in ``__post_init__``, so ``profile`` is ready as built.

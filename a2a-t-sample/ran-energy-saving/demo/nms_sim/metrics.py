@@ -33,6 +33,10 @@ class _Counters:
     questions: int = 0
     rounds: int = 0
     questions_by_kind: dict[str, int] = field(default_factory=dict)
+    #: How the question was carried: ``prose`` (text only) or ``items`` (text plus the
+    #: machine-readable missing-item envelope). Kept apart from ``questionsByKind`` so the
+    #: negotiation kind is not polluted by a wire-shape experiment.
+    questions_by_shape: dict[str, int] = field(default_factory=dict)
     outcomes: dict[str, int] = field(default_factory=dict)
 
     def snapshot(self) -> dict[str, object]:
@@ -41,6 +45,7 @@ class _Counters:
             "requests": self.requests,
             "questions": self.questions,
             "questionsByKind": dict(self.questions_by_kind),
+            "questionsByShape": dict(self.questions_by_shape),
             "rounds": self.rounds,
             "outcomes": dict(self.outcomes),
         }
@@ -52,16 +57,27 @@ class ServerMetrics:
     def __init__(self) -> None:
         self._a2a_t = _Counters()
         self._pure = _Counters()
+        self._settings: dict[str, object] = {}
+
+    def describe(self, settings: dict[str, object]) -> None:
+        """Record the fidelity switches the counters were produced under.
+
+        A count without its switches is not evidence: the same batch run under a stricter rate or
+        window policy reports different failures. The snapshot carries them so a report can state
+        which configuration produced its numbers.
+        """
+        self._settings = dict(settings)
 
     def request(self, protocol: str) -> None:
         """Count one inbound message request."""
         self._bucket(protocol).requests += 1
 
-    def question(self, protocol: str, kind: str) -> None:
-        """Count one question the server had to ask, by negotiation kind."""
+    def question(self, protocol: str, kind: str, *, shape: str = "prose") -> None:
+        """Count one question the server had to ask, by negotiation kind and wire shape."""
         bucket = self._bucket(protocol)
         bucket.questions += 1
         bucket.questions_by_kind[kind] = bucket.questions_by_kind.get(kind, 0) + 1
+        bucket.questions_by_shape[shape] = bucket.questions_by_shape.get(shape, 0) + 1
 
     def round(self, protocol: str) -> None:
         """Count one negotiation round the server advanced."""
@@ -75,10 +91,11 @@ class ServerMetrics:
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-serializable copy of every counter."""
         return {
+            "settings": dict(self._settings),
             "protocols": {
                 PROTOCOL_A2A_T: self._a2a_t.snapshot(),
                 PROTOCOL_A2A: self._pure.snapshot(),
-            }
+            },
         }
 
     def _bucket(self, protocol: str) -> _Counters:

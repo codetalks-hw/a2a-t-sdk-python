@@ -259,6 +259,9 @@ def _nms_sim_settings(values: dict[str, str], port: int) -> dict[str, str]:
         "A2AT_SAMPLE_NMS_SIM_PURE_QUESTION": _env_str(
             values, "A2AT_SAMPLE_NMS_SIM_PURE_QUESTION", "issue"
         ),
+        "A2AT_SAMPLE_NMS_SIM_MISSING_ITEMS": _env_str(
+            values, "A2AT_SAMPLE_NMS_SIM_MISSING_ITEMS", "0"
+        ),
     }
 
 

@@ -62,6 +62,7 @@ from demo.nms_sim.metrics import (
     PROTOCOL_A2A_T,
     ServerMetrics,
 )
+from demo.nms_sim.missing_items import missing_items_metadata
 from demo.nms_sim.negotiation import (
     PERFORMATIVE_ABORT,
     PERFORMATIVE_ACCEPT,
@@ -171,6 +172,20 @@ def build_routes(
     resolved = runtime or build_runtime(config)
     # Server-side work counters for the A2A-T vs A2A comparison; they observe, never decide.
     metrics = ServerMetrics()
+    # A count without its switches is not evidence: the same batch under a stricter rate or window
+    # policy fails differently, so the snapshot states the profile it was produced under.
+    metrics.describe(
+        {
+            "fidelity": config.fidelity,
+            "window_policy": config.window_policy,
+            "rate_policy": config.rate_policy,
+            "long_outage_feasibility": config.long_outage_feasibility,
+            "pure_question": config.pure_question,
+            "missing_items": config.missing_items,
+            "max_saving_rate": config.max_saving_rate,
+            "window": config.window,
+        }
+    )
     resolved_store = resolved.store
     resolved_tokens = resolved.tokens
     negotiations = resolved.negotiations
@@ -419,7 +434,11 @@ def build_routes(
                 {"message": negotiation_message(context_id=context_id, body=issue.body(), metadata={})},
                 status_code=200,
             )
-        metadata = propose_metadata(issue, context)
+        metadata = propose_metadata(
+            issue,
+            context,
+            extra=missing_items_metadata(issue, config) if config.missing_items else None,
+        )
         if config.negotiation_carrier != CARRIER_TASK:
             if stream:
                 return StreamingResponse(
@@ -741,7 +760,14 @@ def build_routes(
         if config.pure_question == PURE_QUESTION_CONFIRM and not is_answer:
             # The vendor's plain-A2A front end asks the same terse sentence whatever the business
             # issue is; the caller's free-text answer is merged over this request and re-validated.
-            return _pure_question_response(task, PURE_CONFIRM_TEXT, stream=stream)
+            # The prose stays that sentence even under ``missing_items``: the envelope is the only
+            # variable the E1 comparison changes.
+            return _pure_question_response(
+                task,
+                PURE_CONFIRM_TEXT,
+                stream=stream,
+                issue=select_issue(content, config),
+            )
         issue = select_issue(content, config, effective_rate_only=is_answer)
         if issue is not None:
             return _pure_issue(task, issue, content, stream=stream, is_answer=is_answer)
@@ -791,17 +817,32 @@ def build_routes(
         if config.pure_question == PURE_QUESTION_CONFIRM:
             # The vendor's front end never renders the business issue: every round is the same
             # terse sentence, and the answer is merged over the request before re-validating.
-            return _pure_question_response(task, PURE_CONFIRM_TEXT, stream=stream)
-        return _pure_question_response(task, issue.body(), stream=stream)
+            return _pure_question_response(task, PURE_CONFIRM_TEXT, stream=stream, issue=issue)
+        return _pure_question_response(task, issue.body(), stream=stream, issue=issue)
 
-    def _pure_question_response(task: SimTask, text: str, *, stream: bool) -> Response:
+    def _pure_question_response(
+        task: SimTask,
+        text: str,
+        *,
+        stream: bool,
+        issue: NegotiationIssue | None = None,
+    ) -> Response:
         """Ask one plain-A2A question as a standalone agent Message.
 
         The real NMS asks a plain-A2A question as a standalone message with no negotiation
         metadata, even when it also marks its internal Task ``INPUT_REQUIRED``. Returning a Task
         status here would make the OSS answer it itself instead of relaying the question.
         """
-        metrics.question(PROTOCOL_A2A, "prose")
+        metadata: dict[str, object] = (
+            missing_items_metadata(issue, config) if config.missing_items else {}
+        )
+        # The negotiation kind stays the business kind; the shape is a separate axis so an E1 run
+        # does not look like a different kind of negotiation.
+        metrics.question(
+            PROTOCOL_A2A,
+            issue.kind if issue is not None else "unknown",
+            shape="items" if metadata else "prose",
+        )
         metrics.round(PROTOCOL_A2A)
         resolved_store.update(task.task_id, state=TASK_INPUT_REQUIRED, message=text)
         if stream:
@@ -811,6 +852,7 @@ def build_routes(
                     context_id=task.context_id,
                     config=config,
                     structured=False,
+                    metadata=metadata or None,
                 ),
                 media_type=EVENT_STREAM,
                 headers={"Cache-Control": "no-cache"},
@@ -820,7 +862,7 @@ def build_routes(
                 "message": negotiation_message(
                     context_id=task.context_id,
                     body=text,
-                    metadata={},
+                    metadata=metadata,
                 )
             },
             status_code=200,
