@@ -182,6 +182,7 @@ def build_tester_routes(
                 working_timeout_seconds=_optional_float(body.get("workingTimeoutSeconds")),
                 decision_mode=_optional_str(body.get("decisionMode")),
                 keep_tasks=bool(body.get("keepTasks")),
+                pure_answer_source=_optional_str(body.get("pureAnswerSource")),
                 owner=_client_id(request),
             )
         except (TypeError, ValueError) as exc:

@@ -100,6 +100,18 @@ CASE_PARTIAL: Final[str] = "partial"
 #: Decision modes of a batch.
 DECISION_MODE_SCRIPTED: Final[str] = "scripted"
 DECISION_MODE_LIVE: Final[str] = "live"
+
+#: Where a pure-A2A item's answers come from. ``script`` replays the OSP P column, which is the
+#: corpus' expected reply; ``agent`` lets the runtime's own pure answer (deterministic plan plus
+#: decision agent) answer live. ``agent`` is the A2A-T vs A2A comparison control: without it the
+#: pure arm is a perfect-answer replay and the comparison cannot separate protocol from
+#: implementation.
+PURE_ANSWER_SOURCE_SCRIPT: Final[str] = "script"
+PURE_ANSWER_SOURCE_AGENT: Final[str] = "agent"
+SUPPORTED_PURE_ANSWER_SOURCES: Final[tuple[str, ...]] = (
+    PURE_ANSWER_SOURCE_SCRIPT,
+    PURE_ANSWER_SOURCE_AGENT,
+)
 DECISION_MODES: Final[tuple[str, ...]] = (DECISION_MODE_SCRIPTED, DECISION_MODE_LIVE)
 
 #: Batch decision mode used when the caller does not choose one. An online model should exercise
@@ -345,6 +357,8 @@ class _Batch:
     excluded_case_ids: list[int] = field(default_factory=list)
     working_timeout_seconds: float | None = None
     decision_mode: str = DECISION_MODE_SCRIPTED
+    #: Where a pure-A2A item's answers come from; see ``PURE_ANSWER_SOURCE_*``.
+    pure_answer_source: str = PURE_ANSWER_SOURCE_SCRIPT
     #: Keep every Task this batch created alive after its item ends. Off by default: a finished
     #: tester item releases its remote Task so a long acceptance run does not exhaust the NMS quota.
     keep_tasks: bool = False
@@ -426,6 +440,7 @@ class EvalBatchManager:
         working_timeout_seconds: float | None = None,
         decision_mode: str | None = None,
         keep_tasks: bool = False,
+        pure_answer_source: str | None = None,
         owner: str = "",
     ) -> dict[str, object]:
         """Register one draft batch from the selected cases and protocols.
@@ -435,6 +450,8 @@ class EvalBatchManager:
         ``decision_mode`` defaults to the process mode: live for an online model, scripted offline.
         ``keep_tasks`` keeps every Task alive after its item ends (long-task verification); by
         default each item releases its remote Task once its evidence is collected.
+        ``pure_answer_source`` selects where a pure-A2A answer comes from: ``script`` (default)
+        replays the OSP P column, ``agent`` lets the runtime's own agent answer live.
         """
         if stop_after not in ALL_STAGES:
             raise ValueError(f"unknown stop_after {stop_after!r}")
@@ -442,6 +459,12 @@ class EvalBatchManager:
         resolved_decision_mode = self._validate_decision_mode(
             decision_mode or default_decision_mode(self._model_mode)
         )
+        resolved_answer_source = (pure_answer_source or PURE_ANSWER_SOURCE_SCRIPT).strip().lower()
+        if resolved_answer_source not in SUPPORTED_PURE_ANSWER_SOURCES:
+            raise ValueError(
+                f"unsupported pureAnswerSource {resolved_answer_source!r}; "
+                f"expected one of {SUPPORTED_PURE_ANSWER_SOURCES}"
+            )
         selected_protocols = [protocol for protocol in protocols if protocol in {PROTOCOL_A2A_T, PROTOCOL_A2A}]
         if not selected_protocols:
             raise ValueError("至少选择一个协议。")
@@ -477,6 +500,7 @@ class EvalBatchManager:
             working_timeout_seconds=_positive_or_none(working_timeout_seconds),
             decision_mode=resolved_decision_mode,
             keep_tasks=keep_tasks,
+            pure_answer_source=resolved_answer_source,
             transport=defaults.get("transport", "sse"),
             discovery=defaults.get("discovery", "direct"),
             items=items,
@@ -944,8 +968,21 @@ class EvalBatchManager:
         discovery = defaults.get("discovery", "direct")
         negotiation_expected = _negotiation_expected(case, PROTOCOL_A2A_T)
         decisions = a2at_decisions(case) if runtime_protocol == RUNTIME_A2A_T else []
-        answers = pure_answers(case) if runtime_protocol == PROTOCOL_PURE else []
-        reply_error = _scripted_reply_error(case, runtime_protocol, decisions, answers)
+        agent_answers = (
+            runtime_protocol == PROTOCOL_PURE
+            and batch.pure_answer_source == PURE_ANSWER_SOURCE_AGENT
+        )
+        # ``agent`` leaves the answer to the runtime so the pure arm's own deterministic plan and
+        # decision agent respond, which is the only way to compare protocol against protocol
+        # instead of comparing a scripted dialogue against a live one.
+        answers = (
+            pure_answers(case) if runtime_protocol == PROTOCOL_PURE and not agent_answers else []
+        )
+        reply_error = (
+            None
+            if agent_answers
+            else _scripted_reply_error(case, runtime_protocol, decisions, answers)
+        )
         if reply_error is not None:
             # The reply is case data. Failing before the run keeps the failure attributable and,
             # for a Modify, avoids creating a baseline Task the run can never continue.
@@ -1994,6 +2031,9 @@ class EvalBatchManager:
             timeout_seconds=_optional_float(document.get("timeoutSeconds")),
             working_timeout_seconds=_optional_float(document.get("workingTimeoutSeconds")),
             decision_mode=str(document.get("decisionMode") or DECISION_MODE_SCRIPTED),
+            pure_answer_source=str(
+                document.get("pureAnswerSource") or PURE_ANSWER_SOURCE_SCRIPT
+            ),
             keep_tasks=bool(document.get("keepTasks")),
             transport=str(document.get("transport") or defaults.get("transport", "sse")),
             discovery=str(document.get("discovery") or defaults.get("discovery", "direct")),
@@ -2048,6 +2088,7 @@ class EvalBatchManager:
             "timeoutSeconds": batch.timeout_seconds,
             "workingTimeoutSeconds": batch.working_timeout_seconds,
             "decisionMode": batch.decision_mode,
+            "pureAnswerSource": batch.pure_answer_source,
             "keepTasks": batch.keep_tasks,
             "transport": batch.transport,
             "discovery": batch.discovery,

@@ -1894,3 +1894,35 @@ def test_a_single_protocol_batch_keeps_blocked_cases(tmp_path: Path) -> None:
 
     assert created["excludedCaseIds"] == []
     assert [item["caseId"] for item in created["items"]] == [22]
+
+
+def test_a_batch_can_run_the_pure_agent_instead_of_the_scripted_answer(
+    tmp_path: Path,
+) -> None:
+    """`agent` is the comparison control: the pure arm answers with its own agent."""
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A],
+        stop_after="negotiate",
+        approval=None,
+        timeout_seconds=2,
+        pure_answer_source="agent",
+    )
+
+    assert created["pureAnswerSource"] == "agent"
+
+
+def test_a_batch_rejects_an_unknown_pure_answer_source(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+
+    with pytest.raises(ValueError, match="pureAnswerSource"):
+        manager.create(
+            case_ids=[1],
+            protocols=[PROTOCOL_A2A],
+            stop_after="negotiate",
+            approval=None,
+            timeout_seconds=2,
+            pure_answer_source="guessed",
+        )
