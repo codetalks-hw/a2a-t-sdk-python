@@ -86,6 +86,15 @@ PURE_MESSAGE_SEND = "send"
 SUPPORTED_PURE_MESSAGE_MODES = (PURE_MESSAGE_AUTO, PURE_MESSAGE_STREAM, PURE_MESSAGE_SEND)
 DEFAULT_PURE_MESSAGE_MODE = PURE_MESSAGE_AUTO
 
+#: Which tier answers a pure-A2A question in automatic mode. ``auto`` tries the deterministic
+#: concession plan first and falls back to the decision agent; ``agent`` skips the deterministic
+#: tier so every question costs one agent turn. ``agent`` exists for the A2A-T vs A2A comparison:
+#: it holds the pure client at the same "agent answers everything" capability as the A2A-T client.
+PURE_AUTO_TIER_AUTO = "auto"
+PURE_AUTO_TIER_AGENT = "agent"
+SUPPORTED_PURE_AUTO_TIERS = (PURE_AUTO_TIER_AUTO, PURE_AUTO_TIER_AGENT)
+DEFAULT_PURE_AUTO_TIER = PURE_AUTO_TIER_AUTO
+
 #: ``.env`` keys.
 MODEL_MODE_ENV_KEY = "A2AT_SAMPLE_MODEL_MODE"
 LANGUAGE_ENV_KEY = "A2AT_LANGUAGE"
@@ -134,6 +143,7 @@ PURE_FOLLOWUP_ENV_KEY = "A2AT_SAMPLE_PURE_FOLLOWUP"
 #: Hop a standard A2A client takes: ``oss`` (proxy, default) or ``nms`` (vendor direct).
 PURE_HOP_ENV_KEY = "A2AT_SAMPLE_PURE_HOP"
 PURE_MESSAGE_MODE_ENV_KEY = "A2AT_SAMPLE_PURE_MESSAGE_MODE"
+PURE_AUTO_TIER_ENV_KEY = "A2AT_SAMPLE_PURE_AUTO_TIER"
 HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
 LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
@@ -429,6 +439,17 @@ def _pure_hop(values: dict[str, str | None], discovery: str) -> str:
     if value not in SUPPORTED_PURE_HOPS:
         raise ValueError(
             f"Unsupported {PURE_HOP_ENV_KEY}: {value}; expected one of {SUPPORTED_PURE_HOPS}"
+        )
+    return value
+
+
+def _pure_auto_tier(values: dict[str, str | None]) -> str:
+    """Resolve which tier answers an automatic pure-A2A question, rejecting an unknown value."""
+    value = _env_value(values, PURE_AUTO_TIER_ENV_KEY, DEFAULT_PURE_AUTO_TIER).strip().lower()
+    if value not in SUPPORTED_PURE_AUTO_TIERS:
+        raise ValueError(
+            f"Unsupported {PURE_AUTO_TIER_ENV_KEY}: {value}; "
+            f"expected one of {SUPPORTED_PURE_AUTO_TIERS}"
         )
     return value
 
@@ -781,6 +802,7 @@ class SampleConfig:
     pure_followup: str = PURE_FOLLOWUP_BOTH
     pure_hop: str = DEFAULT_PURE_HOP
     pure_message_mode: str = DEFAULT_PURE_MESSAGE_MODE
+    pure_auto_tier: str = DEFAULT_PURE_AUTO_TIER
     gateway_task_db_path: str | None = None
     auth_token: str = ""
     server_auth_token: str = ""
@@ -1072,6 +1094,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         pure_followup=_pure_followup(values),
         pure_hop=pure_hop,
         pure_message_mode=_pure_message_mode(values),
+        pure_auto_tier=_pure_auto_tier(values),
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
         auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         server_auth_token=_env_value(values, SERVER_AUTH_TOKEN_ENV_KEY, "").strip(),

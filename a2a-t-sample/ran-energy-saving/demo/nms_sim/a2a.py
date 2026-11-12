@@ -52,6 +52,16 @@ from demo.nms_sim.intent import (
     read_message_request,
     select_issue,
 )
+from demo.nms_sim.metrics import (
+    OUTCOME_ABORTED,
+    OUTCOME_ACCEPTED,
+    OUTCOME_INVALID,
+    OUTCOME_REFUSED,
+    OUTCOME_REJECTED,
+    PROTOCOL_A2A,
+    PROTOCOL_A2A_T,
+    ServerMetrics,
+)
 from demo.nms_sim.negotiation import (
     PERFORMATIVE_ABORT,
     PERFORMATIVE_ACCEPT,
@@ -159,6 +169,8 @@ def build_routes(
 ) -> tuple[list[BaseRoute], SimRuntime]:
     """Build the simulator routes and their runtime."""
     resolved = runtime or build_runtime(config)
+    # Server-side work counters for the A2A-T vs A2A comparison; they observe, never decide.
+    metrics = ServerMetrics()
     resolved_store = resolved.store
     resolved_tokens = resolved.tokens
     negotiations = resolved.negotiations
@@ -324,6 +336,7 @@ def build_routes(
 
     def _register_config_error(exc: PushConfigExistsError) -> JSONResponse:
         """Return the vendor's 500 answer for a second registration."""
+        metrics.outcome(PROTOCOL_A2A_T, OUTCOME_INVALID)
         return JSONResponse(
             {"error": {"code": 500, "status": "INTERNAL", "message": str(exc)}},
             status_code=500,
@@ -391,6 +404,8 @@ def build_routes(
         explicit_task: bool = False,
     ) -> Response:
         """Answer one request with a Negotiation-T proposal."""
+        metrics.question(PROTOCOL_A2A_T, issue.kind)
+        metrics.round(PROTOCOL_A2A_T)
         context = negotiations.context(session, performative="PROPOSE")
         if not structured:
             # Root-cause path: the vendor answers an undeclared negotiation as a bare message.
@@ -460,6 +475,7 @@ def build_routes(
         stream: bool,
     ) -> Response:
         """Complete an accepted negotiation, continuing the carried Task when there is one."""
+        metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
         intent = accepted_intent(content, session.baseline, config)
         context_id = _context_id(body) or session.context_id
         task, is_new = _resolve_task(body, context_id=context_id, fallback_task_id=session.task_id)
@@ -484,6 +500,7 @@ def build_routes(
         context_id: str,
     ) -> Response:
         """End a negotiation with ``TASK_STATE_REJECTED`` (no Task is created)."""
+        metrics.outcome(PROTOCOL_A2A_T, OUTCOME_REJECTED)
         task = resolved_store.get(session.task_id) if session.task_id else None
         negotiations.close(session)
         if task is not None:
@@ -515,6 +532,7 @@ def build_routes(
         context_id: str,
     ) -> Response:
         """End a negotiation that exhausted its round budget."""
+        metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ABORTED)
         task = resolved_store.get(session.task_id) if session.task_id else None
         context = negotiations.context(session)
         metadata = abort_metadata(context)
@@ -716,6 +734,7 @@ def build_routes(
             # The vendor skill terminates on a clear refusal. Without this the simulator would
             # treat the client's "Reject: ..." as another answer and keep asking until the round
             # budget ran out, leaving the flow without a terminal state.
+            metrics.outcome(PROTOCOL_A2A, OUTCOME_REJECTED)
             resolved_store.update(task.task_id, state=TASK_REJECTED, message=text)
             return _pure_task_response(task, stream=stream)
         if config.pure_question == PURE_QUESTION_CONFIRM and not is_answer:
@@ -725,6 +744,7 @@ def build_routes(
         issue = select_issue(content, config, effective_rate_only=is_answer)
         if issue is not None:
             return _pure_issue(task, issue, content, stream=stream, is_answer=is_answer)
+        metrics.outcome(PROTOCOL_A2A, OUTCOME_ACCEPTED)
         intent = accepted_intent(content, None, config)
         if stream:
             # The pure stream owns the same rehearsal switch as the webhook path: a held Task must
@@ -748,6 +768,7 @@ def build_routes(
         ``retry`` asks again until the round budget; ``rejected`` ends the Task.
         """
         if is_answer and config.pure_failure == PURE_FAILURE_COMPLETED:
+            metrics.outcome(PROTOCOL_A2A, OUTCOME_REFUSED)
             resolved_store.update(
                 task.task_id,
                 state=TASK_COMPLETED,
@@ -755,9 +776,11 @@ def build_routes(
             )
             return _pure_task_response(task, stream=stream)
         if is_answer and config.pure_failure == PURE_FAILURE_REJECTED:
+            metrics.outcome(PROTOCOL_A2A, OUTCOME_REJECTED)
             resolved_store.update(task.task_id, state=TASK_REJECTED, message=issue.body())
             return _pure_task_response(task, stream=stream)
         if task.pure_round >= task.pure_max_rounds:
+            metrics.outcome(PROTOCOL_A2A, OUTCOME_ABORTED)
             resolved_store.update(
                 task.task_id,
                 state=TASK_REJECTED,
@@ -777,6 +800,8 @@ def build_routes(
         metadata, even when it also marks its internal Task ``INPUT_REQUIRED``. Returning a Task
         status here would make the OSS answer it itself instead of relaying the question.
         """
+        metrics.question(PROTOCOL_A2A, "prose")
+        metrics.round(PROTOCOL_A2A)
         resolved_store.update(task.task_id, state=TASK_INPUT_REQUIRED, message=text)
         if stream:
             return StreamingResponse(
@@ -824,7 +849,9 @@ def build_routes(
         if body is None:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         if _is_pure_request(body, request):
+            metrics.request(PROTOCOL_A2A)
             return _pure_request(body, request, stream=stream)
+        metrics.request(PROTOCOL_A2A_T)
         return _a2a_t_request(body, request, stream=stream)
 
     async def send_message(request: Request) -> Response:
@@ -871,8 +898,14 @@ def build_routes(
             resolved_store.update(task_id, state=TASK_CANCELED, message="Task canceled.")
         return JSONResponse({"task": task.to_dict()}, status_code=200)
 
+    async def server_metrics(request: Request) -> Response:
+        """Return the server-side work counters of this simulator process."""
+        del request
+        return JSONResponse(metrics.snapshot(), status_code=200)
+
     routes: list[BaseRoute] = [
         Route("/rest/plat/smapp/v1/sessions", sessions, methods=["PUT"]),
+        Route("/a2a/json/metrics", server_metrics, methods=["GET"]),
         Route("/a2a/json/message:stream", send_message, methods=["POST"]),
         Route("/a2a/json/message:send", send_message_json, methods=["POST"]),
         Route("/a2a/json/tasks", list_tasks, methods=["GET"]),

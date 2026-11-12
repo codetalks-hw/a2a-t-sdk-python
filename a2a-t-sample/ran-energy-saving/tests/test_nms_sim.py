@@ -1318,3 +1318,23 @@ def test_the_simulator_keeps_a_whole_hour_window_unchanged() -> None:
         "04:00:00-04:59:59",
         "05:00:00-05:59:59",
     ]
+
+
+async def test_server_metrics_count_the_a2a_t_request() -> None:
+    """The server-side counters make the NMS work visible, per protocol."""
+    async for client in _client():
+        token = await _token(client)
+        response = await client.post(
+            STREAM_URL,
+            json=_body(_prompt()),
+            headers=_headers(token),
+        )
+        assert response.status_code == 200
+
+        snapshot = (await client.get("/a2a/json/metrics")).json()
+
+    a2a_t = snapshot["protocols"]["a2a-t"]
+    assert a2a_t["requests"] == 1
+    pure = snapshot["protocols"]["a2a"]
+    assert pure["requests"] == 0
+    assert pure["rounds"] == 0

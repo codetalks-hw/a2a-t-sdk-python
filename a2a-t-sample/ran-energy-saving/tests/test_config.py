@@ -79,6 +79,8 @@ from shared.config import (
     PLANNER_TIMEOUT_ENV_KEY,
     PROTOCOL_MODE_ENV_KEY,
     PURE_APPROVAL_GATE_ENV_KEY,
+    PURE_AUTO_TIER_AGENT,
+    PURE_AUTO_TIER_ENV_KEY,
     PURE_FOLLOWUP_ENV_KEY,
     PURE_HOP_DIRECT,
     PURE_HOP_ENV_KEY,
@@ -1413,3 +1415,27 @@ def test_the_sdk_env_mounts_the_sample_slot_overlay(offline_config: SampleConfig
         assert "preserve the operator's own wording; do not normalize it" in text
     finally:
         shutil.rmtree(sdk_env.directory)
+
+
+def test_pure_auto_tier_defaults_to_the_deterministic_plan(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    from shared.config import PURE_AUTO_TIER_AUTO
+
+    assert load_config(env_path=env_file).pure_auto_tier == PURE_AUTO_TIER_AUTO
+
+
+def test_pure_auto_tier_accepts_the_agent_override(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{PURE_AUTO_TIER_ENV_KEY}={PURE_AUTO_TIER_AGENT}\n", encoding="utf-8")
+
+    assert load_config(env_path=env_file).pure_auto_tier == PURE_AUTO_TIER_AGENT
+
+
+def test_pure_auto_tier_rejects_an_unknown_value(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{PURE_AUTO_TIER_ENV_KEY}=guessed\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=PURE_AUTO_TIER_ENV_KEY):
+        load_config(env_path=env_file)

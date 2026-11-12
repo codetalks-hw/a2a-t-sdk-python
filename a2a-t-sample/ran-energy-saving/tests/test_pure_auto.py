@@ -59,6 +59,21 @@ async def test_a_bitrate_term_is_answered_by_the_deterministic_plan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_deterministic_tier_can_be_skipped_for_the_comparison() -> None:
+    """``agent`` holds the pure client at the A2A-T client's capability for a fair A/B."""
+    provider = _Provider(NegotiationDecision(action="accept", rationale="answer"))
+    answer = build_auto_pure_answer(provider, ClientPolicy(), use_deterministic=False)
+    answer.set_user_request(
+        "Implement energy-saving in A2ATestRegion region, the time range is from 00:00 to 22:00. "
+        "ensuring user experience for 720p video."
+    )
+
+    await answer(_event())
+
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_the_model_answer_is_rendered_as_free_text() -> None:
     provider = _Provider(
         NegotiationDecision(

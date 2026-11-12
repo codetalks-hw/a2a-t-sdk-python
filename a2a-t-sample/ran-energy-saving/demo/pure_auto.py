@@ -62,6 +62,7 @@ class AutoPureAnswer:
         *,
         request_text: str = "",
         max_server_asks: int = MAX_SERVER_ASKS,
+        use_deterministic: bool = True,
     ) -> None:
         """Create one automatic answer.
 
@@ -70,11 +71,16 @@ class AutoPureAnswer:
             policy: Client acceptance limits.
             request_text: Operator request used for grounding; the runtime keeps it current.
             max_server_asks: Questions answered with "please provide" before the client rejects.
+            use_deterministic: try the deterministic concession plan first. Turning it off makes
+                every question cost one agent turn, which is the comparison control: the pure
+                client then has the same "an agent answers everything" capability as the A2A-T
+                client instead of a cheaper deterministic short-cut.
         """
         self._provider = provider
         self._policy = policy
         self._request_text = request_text
         self._max_server_asks = max(1, max_server_asks)
+        self._use_deterministic = use_deterministic
         self._server_asks = 0
         self._proposal_sink: Callable[..., None] | None = None
         self._decision_sink: Callable[..., None] | None = None
@@ -106,7 +112,11 @@ class AutoPureAnswer:
         if self._proposal_sink is not None:
             self._proposal_sink(propose, session)
         request_text = self._request_text or _provider_text(self._provider)
-        if propose.kind in ("feasibility", "target") and not server_target_rates(propose):
+        if (
+            self._use_deterministic
+            and propose.kind in ("feasibility", "target")
+            and not server_target_rates(propose)
+        ):
             plan = plan_pure_answer(request_text, propose, self._policy)
             if plan is not None:
                 self._server_asks = 0
@@ -179,6 +189,7 @@ def build_auto_pure_answer(
     *,
     request_text: str = "",
     max_server_asks: int = MAX_SERVER_ASKS,
+    use_deterministic: bool = True,
 ) -> AutoPureAnswer:
     """Build the automatic pure-A2A answer callback."""
     return AutoPureAnswer(
@@ -186,6 +197,7 @@ def build_auto_pure_answer(
         policy,
         request_text=request_text,
         max_server_asks=max_server_asks,
+        use_deterministic=use_deterministic,
     )
 
 

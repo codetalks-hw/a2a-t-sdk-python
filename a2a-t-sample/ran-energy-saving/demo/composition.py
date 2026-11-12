@@ -13,7 +13,12 @@ from typing import Any
 from protocol.client_runtime import MODE_CONFIRM, MODE_MANUAL, build_client_runtime
 from protocol.pre_task_negotiation import TaskTPrecheck
 from protocol.run_spec import RunSpec
-from shared.config import DISCOVERY_NMS, INTENT_MODE_PROCESSED, SampleConfig
+from shared.config import (
+    DISCOVERY_NMS,
+    INTENT_MODE_PROCESSED,
+    PURE_AUTO_TIER_AUTO,
+    SampleConfig,
+)
 from shared.models import NegotiationDecision
 from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
 
@@ -136,6 +141,7 @@ async def build_demo_runtime(
                 provider,
                 policy,
                 request_text=run_spec.user_request,
+                use_deterministic=config.pure_auto_tier == PURE_AUTO_TIER_AUTO,
             )
         else:
             from demo.pure_policy import pure_answer_from_recommendation
