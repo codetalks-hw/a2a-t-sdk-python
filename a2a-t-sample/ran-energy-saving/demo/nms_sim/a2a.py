@@ -638,6 +638,7 @@ def build_routes(
             except PushConfigExistsError as exc:
                 return _register_config_error(exc)
             intent = parse_message_request(body, request.headers, config)
+            metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
             if stream:
                 return _stream_completion(task, intent, hold=config.hold_working and is_new)
             return _json_completion(task, intent, hold=config.hold_working and is_new, push=push)
