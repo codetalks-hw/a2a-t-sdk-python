@@ -74,8 +74,11 @@ def test_the_annex_names_the_corrected_target_without_a_model_turn() -> None:
     decision = envelope_decision(_view(_outage_envelope()), request_text="10Mbps outage")
 
     assert decision is not None
-    assert decision.action == "counter"
-    assert decision.counter_proposal == "Guarantee 2 Mbps during the power outage period."
+    # An ACCEPT that names the rate: the flow applies it to every window the event covers, which a
+    # prose counter could not do for a segmented plan.
+    assert decision.action == "accept"
+    assert decision.agreed_rate_mbps == 2.0
+    assert decision.feasibility_summary == "Guarantee 2 Mbps during the power outage period."
 
 
 def test_the_annex_never_answers_below_the_client_floor() -> None:
@@ -131,7 +134,7 @@ async def test_the_wrapper_answers_without_consulting_the_delegate() -> None:
     decision = await provider.respond(_view(_outage_envelope()), _session())
 
     assert delegate.calls == 0
-    assert decision.action == "counter"
+    assert decision.action == "accept"
 
 
 def test_the_wrapper_forwards_the_sinks_the_runtime_installs() -> None:

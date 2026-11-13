@@ -9,6 +9,10 @@ that may not match this vendor.
 
 This is the A2A-T half of E1. It is a provider wrapper rather than a change to the decision prompt,
 so the agent stays in the loop for every proposal the annex cannot answer.
+
+The answer is an ACCEPT carrying the agreed rate, not a prose counter: the flow then applies that
+rate to every baseline window the event covers, which is what keeps a segmented outage whole. A
+prose counter would only fill the segment the sentence happens to name.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from protocol.client_policy import ClientPolicy
 from protocol.decision_provider import NegotiationDecisionProvider
 from shared.models import NegotiationDecision, NegotiationProposeView
 
-from demo.pure_items_answer import answer_from_envelope
+from demo.pure_items_answer import resolve_envelope
 
 _LOGGER = logging.getLogger("ran_energy_saving.envelope_decision")
 
@@ -102,15 +106,17 @@ def envelope_decision(
     envelope = propose.missing_items
     if envelope is None:
         return None
-    text = answer_from_envelope(envelope, request_text=request_text, policy=policy)
-    if text is None:
+    answer = resolve_envelope(envelope, request_text=request_text, policy=policy)
+    if answer is None:
         return None
-    # A2A-T has no counter performative: the flow turns this into an ACCEPT whose result names the
-    # corrected target, which is exactly the shape the annex describes.
+    # An ACCEPT, not a counter: the annex named the ceiling, and the flow already knows how to
+    # apply a rate to every baseline window the event covers. Handing it the value keeps a
+    # segmented plan whole -- a prose counter would only fill the segment the sentence names.
     return NegotiationDecision(
-        action="counter",
-        rationale=f"Answered the missing items the server listed: {text}",
-        counter_proposal=text,
+        action="accept",
+        rationale=f"Answered the missing items the server listed: {answer.text}",
+        feasibility_summary=answer.text,
+        agreed_rate_mbps=answer.rate_mbps,
     )
 
 

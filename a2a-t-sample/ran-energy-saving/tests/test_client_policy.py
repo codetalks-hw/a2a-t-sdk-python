@@ -140,6 +140,26 @@ def test_agreed_target_applies_the_alternative_rate_to_the_outage_window() -> No
     assert agreed_target_value(_propose(), _BASELINE) == "{08:00-18:00,2Mbps}"
 
 
+def test_agreed_target_uses_the_rate_the_decision_read_from_the_annex() -> None:
+    """A client that knows the server's ceiling must not depend on the prose naming it."""
+    assert agreed_target_value(_propose(), _BASELINE, rate_override=1.0) == (
+        "{08:00-18:00,1Mbps}"
+    )
+
+
+def test_agreed_target_override_covers_every_segment_of_a_segmented_outage() -> None:
+    """The ceiling applies to the whole event, not only to the first matching segment."""
+    baseline = {
+        **_BASELINE,
+        "backgroundEvent": "power outage from 08:00 to 10:00 and 15:00 to 18:00",
+        "guaranteedThroughputTarget": "{08:00~10:00,10Mbps}, {15:00~18:00,10Mbps}",
+    }
+
+    assert agreed_target_value(_propose(), baseline, rate_override=2.0) == (
+        "{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}"
+    )
+
+
 def test_agreed_target_splits_a_window_that_extends_past_the_outage() -> None:
     """Only the outage portion takes the alternative rate; the rest keeps its own rate."""
     baseline = {**_BASELINE, "guaranteedThroughputTarget": "{00:00~24:00,10Mbps}"}

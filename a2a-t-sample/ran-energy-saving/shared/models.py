@@ -34,6 +34,11 @@ class NegotiationDecision(BaseModel):
             type requires one.
         feasibility_summary: On ``accept``, the client's feasibility summary, when the negotiation
             type requires one.
+        agreed_rate_mbps: On a feasibility ``accept``, the rate the client agrees to guarantee.
+            The flow applies it to every baseline window that overlaps the event, so the reply
+            names concrete segments instead of leaving the vendor the rejected plan. A decision
+            that read the ceiling from a structured proposal sets it; a model decision leaves it
+            unset and the flow derives the rate from the proposal's prose.
     """
 
     action: NegotiationAction
@@ -43,6 +48,7 @@ class NegotiationDecision(BaseModel):
     counter_params: dict[str, object] | None = None
     confirmed_intent: str | None = None
     feasibility_summary: str | None = None
+    agreed_rate_mbps: float | None = None
 
 
 class NegotiationAreaOption(BaseModel):

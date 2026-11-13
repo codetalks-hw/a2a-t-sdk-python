@@ -3195,8 +3195,11 @@ def _prefer_the_agreed_target(
         # The decision took the non-rate alternative (a shorter outage). Naming the rate cut would
         # claim a choice the client did not make.
         return None
-    agreed = normalize_text(agreed_target_value(propose, filled)) or normalize_text(
-        agreed_target_value(propose, {**(baseline or {}), **filled})
+    override = decision.agreed_rate_mbps
+    agreed = normalize_text(
+        agreed_target_value(propose, filled, rate_override=override)
+    ) or normalize_text(
+        agreed_target_value(propose, {**(baseline or {}), **filled}, rate_override=override)
     )
     if agreed is not None:
         filled[RATE_TARGET_FIELD] = agreed
