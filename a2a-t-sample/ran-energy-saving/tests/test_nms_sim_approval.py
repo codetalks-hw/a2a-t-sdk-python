@@ -341,6 +341,41 @@ async def test_a_client_that_only_echoes_the_digest_accepts_a_tampered_request()
         assert _status(completed)["state"] == "TASK_STATE_COMPLETED"
 
 
+async def test_a_restarted_client_can_still_answer_from_the_task_state() -> None:
+    """S7 at the contract level: the pending approval lives on the Task, not in the client.
+
+    A fresh client has no memory of the request; it reads the Task, finds the request object and
+    answers it. Anything held only in the first client's process would be lost here.
+    """
+    # One simulator, two client instances: the store must survive the first client's lifetime.
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        task, _raw = await _accept_and_wait(client, token)
+        task_id = str(task["id"])
+        context_id = str(task["contextId"])
+
+    # A new client instance: no state carried over, only the Task id.
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as restarted:
+        token = await _token(restarted)
+        fetched = await restarted.get(
+            f"/a2a/json/tasks/{task_id}", headers={"X-Auth-Token": token}
+        )
+        stored = fetched.json()["task"]
+        raw = _metadata(stored).get(APPROVAL_METADATA_KEY)
+        assert isinstance(raw, dict)
+
+        response = await restarted.post(
+            SEND_URL,
+            json=_decision_body(_approve(raw), task_id=task_id, context_id=context_id),
+            headers=_headers(token),
+        )
+        assert response.status_code == 200
+
+        completed = await _wait_task(restarted, token, task_id)
+        assert _status(completed)["state"] == "TASK_STATE_COMPLETED"
+
+
 async def test_without_the_switch_an_accepted_plan_runs_immediately() -> None:
     """T6: an unaware peer keeps the old behaviour; the gate is opt-in."""
     async for client in _client(_config(approval=False)):
