@@ -334,7 +334,10 @@ async def run_scenario_flow(
         AssertionError: when the auto mode silently used a different decision provider.
     """
     client = await build_demo_runtime(config, scenario_name, MODE_AUTO, transport, config.discovery)
-    assert isinstance(client.provider, AdkDecisionProvider), (
+    # The envelope wrapper answers a structurally answerable proposal itself; everything else
+    # still goes to the ADK runner, so the assertion looks through the wrapper.
+    decision_provider = getattr(client.provider, "delegate", client.provider)
+    assert isinstance(decision_provider, AdkDecisionProvider), (
         "The auto mode must keep the ADK runner in the decision loop"
     )
     recorder = RecordingTransport(client.transport)

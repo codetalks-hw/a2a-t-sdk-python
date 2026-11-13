@@ -51,6 +51,20 @@ def answer_missing_items(
     envelope = read_missing_items(metadata if isinstance(metadata, Mapping) else None)
     if envelope is None:
         return None
+    return answer_from_envelope(envelope, request_text=request_text, policy=policy)
+
+
+def answer_from_envelope(
+    envelope: MissingItems,
+    *,
+    request_text: str = "",
+    policy: ClientPolicy | None = None,
+) -> str | None:
+    """Render one answer from an already-parsed envelope, ``None`` when it is not answerable.
+
+    Shared by both hops: the plain client reads the envelope off a message event, an A2A-T client
+    reads it off the proposal view. Keeping one renderer is what makes the two comparable.
+    """
     resolved = policy if policy is not None else ClientPolicy()
     return _render(envelope, request_text=request_text, policy=resolved)
 
@@ -110,4 +124,4 @@ def _number(value: object) -> float | None:
     return float(value)
 
 
-__all__ = ["answer_missing_items"]
+__all__ = ["answer_from_envelope", "answer_missing_items"]

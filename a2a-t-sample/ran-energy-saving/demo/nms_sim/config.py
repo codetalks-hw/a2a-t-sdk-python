@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from typing import Final
 
+from shared.energy_rules import FEASIBILITY_RATE_MBPS
+
 #: Fidelity profiles.
 FIDELITY_STRICT: Final[str] = "strict"
 FIDELITY_FAST: Final[str] = "fast"
@@ -59,6 +61,10 @@ RATE_POLICY_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_RATE_POLICY"
 #: The vendor's feasibility dialogue covers long outages; short outages (<= 4h) stay at zero
 #: rounds, which is what the OSP corpus expects.
 LONG_OUTAGE_FEASIBILITY_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_LONG_OUTAGE_FEASIBILITY"
+#: The highest rate the simulated cell can guarantee through a long outage. Defaults to the rule
+#: the protocol documents; a different value exposes clients that assume that default instead of
+#: reading the ceiling the server states.
+FEASIBILITY_RATE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_FEASIBILITY_RATE_MBPS"
 
 #: Environment keys read by the standalone simulator entry point.
 FIDELITY_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_FIDELITY"
@@ -136,6 +142,7 @@ class SimConfig:
             fixed ``Not feasible, please confirm`` on every new pure exchange.
         missing_items: Attach a machine-readable missing-item list to every question and to every
             Negotiation-T proposal (evolution candidate E1).
+        feasibility_rate_mbps: Highest rate the cell can guarantee through a long outage.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -162,6 +169,7 @@ class SimConfig:
     long_outage_feasibility: bool = False
     pure_question: str = PURE_QUESTION_ISSUE
     missing_items: bool = False
+    feasibility_rate_mbps: float = FEASIBILITY_RATE_MBPS
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -264,6 +272,9 @@ class SimConfig:
             long_outage_feasibility=_truthy(os.environ.get(LONG_OUTAGE_FEASIBILITY_ENV_KEY, "")),
             pure_question=pure_question,
             missing_items=_truthy(os.environ.get(MISSING_ITEMS_ENV_KEY, "")),
+            feasibility_rate_mbps=_rate(
+                os.environ.get(FEASIBILITY_RATE_ENV_KEY, str(FEASIBILITY_RATE_MBPS))
+            ),
         )
         # The fast profile keeps the wire contract but removes the wall-clock delays; the dataclass
         # applies that normalization in ``__post_init__``, so ``profile`` is ready as built.
@@ -273,6 +284,17 @@ class SimConfig:
 def _truthy(value: str) -> bool:
     """Return whether one environment value means "on"."""
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rate(value: str) -> float:
+    """Parse one non-negative Mbps ceiling."""
+    try:
+        rate = float(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid {FEASIBILITY_RATE_ENV_KEY}: {value!r}") from exc
+    if rate < 0:
+        raise ValueError(f"{FEASIBILITY_RATE_ENV_KEY} must not be negative")
+    return rate
 
 
 def _parse_kinds(value: str) -> tuple[str, ...]:

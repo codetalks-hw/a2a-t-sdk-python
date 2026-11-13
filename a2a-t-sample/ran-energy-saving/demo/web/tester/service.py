@@ -112,6 +112,16 @@ SUPPORTED_PURE_ANSWER_SOURCES: Final[tuple[str, ...]] = (
     PURE_ANSWER_SOURCE_SCRIPT,
     PURE_ANSWER_SOURCE_AGENT,
 )
+#: Where an A2A-T item's negotiation replies come from. ``script`` replays the OSP Q column, which
+#: is the corpus' expected reply; ``agent`` drops the script so the runtime's own decision provider
+#: answers. Pair it with ``pureAnswerSource=agent`` for an agent-vs-agent comparison: mixing the
+#: two turns one arm into a perfect-answer replay.
+A2AT_ANSWER_SOURCE_SCRIPT: Final[str] = PURE_ANSWER_SOURCE_SCRIPT
+A2AT_ANSWER_SOURCE_AGENT: Final[str] = PURE_ANSWER_SOURCE_AGENT
+SUPPORTED_A2AT_ANSWER_SOURCES: Final[tuple[str, ...]] = (
+    A2AT_ANSWER_SOURCE_SCRIPT,
+    A2AT_ANSWER_SOURCE_AGENT,
+)
 DECISION_MODES: Final[tuple[str, ...]] = (DECISION_MODE_SCRIPTED, DECISION_MODE_LIVE)
 
 #: Batch decision mode used when the caller does not choose one. An online model should exercise
@@ -359,6 +369,8 @@ class _Batch:
     decision_mode: str = DECISION_MODE_SCRIPTED
     #: Where a pure-A2A item's answers come from; see ``PURE_ANSWER_SOURCE_*``.
     pure_answer_source: str = PURE_ANSWER_SOURCE_SCRIPT
+    #: Where an A2A-T item's negotiation replies come from; see ``A2AT_ANSWER_SOURCE_*``.
+    a2at_answer_source: str = A2AT_ANSWER_SOURCE_SCRIPT
     #: Keep every Task this batch created alive after its item ends. Off by default: a finished
     #: tester item releases its remote Task so a long acceptance run does not exhaust the NMS quota.
     keep_tasks: bool = False
@@ -441,6 +453,7 @@ class EvalBatchManager:
         decision_mode: str | None = None,
         keep_tasks: bool = False,
         pure_answer_source: str | None = None,
+        a2at_answer_source: str | None = None,
         owner: str = "",
     ) -> dict[str, object]:
         """Register one draft batch from the selected cases and protocols.
@@ -464,6 +477,12 @@ class EvalBatchManager:
             raise ValueError(
                 f"unsupported pureAnswerSource {resolved_answer_source!r}; "
                 f"expected one of {SUPPORTED_PURE_ANSWER_SOURCES}"
+            )
+        resolved_a2at_source = (a2at_answer_source or A2AT_ANSWER_SOURCE_SCRIPT).strip().lower()
+        if resolved_a2at_source not in SUPPORTED_A2AT_ANSWER_SOURCES:
+            raise ValueError(
+                f"unsupported a2atAnswerSource {resolved_a2at_source!r}; "
+                f"expected one of {SUPPORTED_A2AT_ANSWER_SOURCES}"
             )
         selected_protocols = [protocol for protocol in protocols if protocol in {PROTOCOL_A2A_T, PROTOCOL_A2A}]
         if not selected_protocols:
@@ -501,6 +520,7 @@ class EvalBatchManager:
             decision_mode=resolved_decision_mode,
             keep_tasks=keep_tasks,
             pure_answer_source=resolved_answer_source,
+            a2at_answer_source=resolved_a2at_source,
             transport=defaults.get("transport", "sse"),
             discovery=defaults.get("discovery", "direct"),
             items=items,
@@ -967,7 +987,18 @@ class EvalBatchManager:
         transport = defaults.get("transport", "sse")
         discovery = defaults.get("discovery", "direct")
         negotiation_expected = _negotiation_expected(case, PROTOCOL_A2A_T)
-        decisions = a2at_decisions(case) if runtime_protocol == RUNTIME_A2A_T else []
+        a2at_agent_answers = (
+            runtime_protocol == RUNTIME_A2A_T
+            and batch.a2at_answer_source == A2AT_ANSWER_SOURCE_AGENT
+        )
+        # ``agent`` drops the Q-column replay so the runtime's own decision provider answers,
+        # which is the only way to compare an agent with an agent instead of with a perfect
+        # reply the corpus already knows the answer to.
+        decisions = (
+            [] if a2at_agent_answers else a2at_decisions(case)
+            if runtime_protocol == RUNTIME_A2A_T
+            else []
+        )
         agent_answers = (
             runtime_protocol == PROTOCOL_PURE
             and batch.pure_answer_source == PURE_ANSWER_SOURCE_AGENT
@@ -980,7 +1011,7 @@ class EvalBatchManager:
         )
         reply_error = (
             None
-            if agent_answers
+            if agent_answers or a2at_agent_answers
             else _scripted_reply_error(case, runtime_protocol, decisions, answers)
         )
         if reply_error is not None:
@@ -1021,9 +1052,14 @@ class EvalBatchManager:
 
         conversation_id, idempotency_key = self._run_identity(batch, index, item)
         mode = self._mode_for(batch, item.protocol)
-        if runtime_protocol == RUNTIME_A2A_T and negotiation_expected:
+        if (
+            runtime_protocol == RUNTIME_A2A_T
+            and negotiation_expected
+            and not a2at_agent_answers
+        ):
             # The OSP Q column is the expected negotiation dialogue. Replaying it verifies the
             # protocol path deterministically; the SDK intent/Task-T stages still run in live mode.
+            # ``a2atAnswerSource=agent`` keeps automatic mode so the runtime decides instead.
             mode = MODE_SCRIPTED
         run = await self._runs.start(
             scenario,
@@ -2032,7 +2068,10 @@ class EvalBatchManager:
             working_timeout_seconds=_optional_float(document.get("workingTimeoutSeconds")),
             decision_mode=str(document.get("decisionMode") or DECISION_MODE_SCRIPTED),
             pure_answer_source=str(
-                document.get("pureAnswerSource") or PURE_ANSWER_SOURCE_SCRIPT
+                document.get("pureAnswerSource") or PURE_ANSWER_SOURCE_SCRIPT,
+            ),
+            a2at_answer_source=str(
+                document.get("a2atAnswerSource") or A2AT_ANSWER_SOURCE_SCRIPT,
             ),
             keep_tasks=bool(document.get("keepTasks")),
             transport=str(document.get("transport") or defaults.get("transport", "sse")),
@@ -2089,6 +2128,7 @@ class EvalBatchManager:
             "workingTimeoutSeconds": batch.working_timeout_seconds,
             "decisionMode": batch.decision_mode,
             "pureAnswerSource": batch.pure_answer_source,
+            "a2atAnswerSource": batch.a2at_answer_source,
             "keepTasks": batch.keep_tasks,
             "transport": batch.transport,
             "discovery": batch.discovery,

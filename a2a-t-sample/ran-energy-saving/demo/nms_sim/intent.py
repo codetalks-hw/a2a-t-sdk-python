@@ -297,12 +297,14 @@ def validate_content(
             if effective_rate_only and content.rate_mbps is not None
             else [float(value) for value in _THROUGHPUT_PATTERN.findall(content.source)]
         )
-        if energy_rules.is_outage_infeasible(outage_hours, rates):
+        if energy_rules.is_outage_infeasible(
+            outage_hours, rates, limit=config.feasibility_rate_mbps
+        ):
             return NegotiationIssue(
                 KIND_FEASIBILITY,
                 ("Guaranteed throughput target",),
                 f"The {outage_hours:g}-hour power outage with a rate above "
-                f"{energy_rules.FEASIBILITY_RATE_MBPS:g}Mbps exceeds the "
+                f"{config.feasibility_rate_mbps:g}Mbps exceeds the "
                 f"{energy_rules.FEASIBILITY_OUTAGE_HOURS}-hour feasibility limit. Reduce the "
                 "guaranteed throughput target for the outage period.",
             )

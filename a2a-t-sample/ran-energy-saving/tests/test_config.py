@@ -1439,3 +1439,18 @@ def test_pure_auto_tier_rejects_an_unknown_value(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=PURE_AUTO_TIER_ENV_KEY):
         load_config(env_path=env_file)
+
+
+def test_envelope_decision_is_off_by_default(tmp_path: Path) -> None:
+    """The annex can answer an A2A-T proposal, but it is an experiment until it fills a plan."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    assert load_config(env_path=env_file).envelope_decision is False
+
+
+def test_envelope_decision_reads_the_switch(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("A2AT_SAMPLE_ENVELOPE_DECISION=1\n", encoding="utf-8")
+
+    assert load_config(env_path=env_file).envelope_decision is True

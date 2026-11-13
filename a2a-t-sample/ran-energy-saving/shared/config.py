@@ -144,6 +144,10 @@ PURE_FOLLOWUP_ENV_KEY = "A2AT_SAMPLE_PURE_FOLLOWUP"
 PURE_HOP_ENV_KEY = "A2AT_SAMPLE_PURE_HOP"
 PURE_MESSAGE_MODE_ENV_KEY = "A2AT_SAMPLE_PURE_MESSAGE_MODE"
 PURE_AUTO_TIER_ENV_KEY = "A2AT_SAMPLE_PURE_AUTO_TIER"
+#: Answer an A2A-T proposal from the server's structured missing-item annex instead of a
+#: model turn. Off by default: the annex answer is prose and cannot yet fill every segment of a
+#: segmented plan, so it is an experiment, not the shipped decision path.
+ENVELOPE_DECISION_ENV_KEY = "A2AT_SAMPLE_ENVELOPE_DECISION"
 HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
 LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
@@ -803,6 +807,8 @@ class SampleConfig:
     pure_hop: str = DEFAULT_PURE_HOP
     pure_message_mode: str = DEFAULT_PURE_MESSAGE_MODE
     pure_auto_tier: str = DEFAULT_PURE_AUTO_TIER
+    #: Answer an A2A-T proposal from the structured annex instead of a model turn.
+    envelope_decision: bool = False
     gateway_task_db_path: str | None = None
     auth_token: str = ""
     server_auth_token: str = ""
@@ -1095,6 +1101,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         pure_hop=pure_hop,
         pure_message_mode=_pure_message_mode(values),
         pure_auto_tier=_pure_auto_tier(values),
+        envelope_decision=_env_bool(values, ENVELOPE_DECISION_ENV_KEY, False),
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
         auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         server_auth_token=_env_value(values, SERVER_AUTH_TOKEN_ENV_KEY, "").strip(),

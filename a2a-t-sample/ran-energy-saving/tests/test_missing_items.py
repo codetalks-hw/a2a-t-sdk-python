@@ -49,6 +49,19 @@ def test_outage_item_carries_the_feasibility_ceiling() -> None:
     assert items[0]["acceptable"] == {"maxMbps": FEASIBILITY_RATE_MBPS, "during": "outage"}
 
 
+def test_the_outage_ceiling_follows_the_configured_rule() -> None:
+    """A cell that can only guarantee 1 Mbps must say 1, not the documented default."""
+    raw = _envelope(
+        NegotiationIssue("feasibility", ("Guaranteed throughput target",), "too high"),
+        long_outage_feasibility=True,
+        feasibility_rate_mbps=1.0,
+    )
+
+    items = raw["items"]
+    assert isinstance(items, list)
+    assert items[0]["acceptable"] == {"maxMbps": 1.0, "during": "outage"}
+
+
 def test_saving_rate_item_carries_the_cell_maximum() -> None:
     """The saving-rate ceiling is a configured fact, so it travels as a value, not as prose."""
     raw = _envelope(NegotiationIssue("target", ("Energy saving rate",), "too high"), max_saving_rate=7.0)

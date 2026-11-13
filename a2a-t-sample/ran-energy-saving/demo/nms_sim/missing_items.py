@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from shared.energy_rules import FEASIBILITY_RATE_MBPS
 from shared.missing_items import SOURCE_OPERATOR, SOURCE_SERVER, MissingItem, MissingItems
 
 if TYPE_CHECKING:
@@ -74,7 +73,7 @@ def _item(name: str, config: SimConfig) -> MissingItem:
         acceptable = {"window": config.window}
     elif name == "Guaranteed throughput target":
         # The long-outage rule: a rate above this limit cannot be guaranteed through the outage.
-        acceptable = {"maxMbps": FEASIBILITY_RATE_MBPS, "during": "outage"}
+        acceptable = {"maxMbps": config.feasibility_rate_mbps, "during": "outage"}
     elif name == "Time-segmented guaranteed throughput target":
         acceptable = {"requiredMbps": True}
     elif name == "Energy saving rate":

@@ -106,22 +106,29 @@ def outage_duration_hours(text: str) -> float | None:
     return duration_hours(*span)
 
 
-def is_outage_infeasible(hours: float | None, rates: Iterable[float | None]) -> bool:
+def is_outage_infeasible(
+    hours: float | None,
+    rates: Iterable[float | None],
+    *,
+    limit: float = FEASIBILITY_RATE_MBPS,
+) -> bool:
     """Return whether the vendor's feasibility rule fires.
 
     Both conditions must hold strictly: the outage is longer than four hours and at least one
-    guaranteed rate is above 2 Mbps.
+    guaranteed rate is above the ceiling.
 
     Args:
         hours: outage duration, or ``None`` when the request names no outage window.
         rates: guaranteed rates in Mbps; ``None`` entries are ignored.
+        limit: the highest rate the cell can guarantee through the outage. A simulator may tighten
+            it so a client that assumes the default ceiling has to read the real one.
 
     Returns:
         ``True`` when the request must open a feasibility negotiation.
     """
     if hours is None or hours <= FEASIBILITY_OUTAGE_HOURS:
         return False
-    return any(rate is not None and rate > FEASIBILITY_RATE_MBPS for rate in rates)
+    return any(rate is not None and rate > limit for rate in rates)
 
 
 __all__ = [

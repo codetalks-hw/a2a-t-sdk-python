@@ -75,6 +75,7 @@ from a2a_t.negotiation.content import (
 from google.protobuf.json_format import ParseDict
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
+from shared.missing_items import read_missing_items
 from shared.models import (
     NegotiationAreaOption,
     NegotiationDecision,
@@ -1899,7 +1900,12 @@ def _requires_auto_verification(provider: NegotiationDecisionProvider) -> bool:
     A scripted provider is a recorded operator answer. An offline ADK provider is the
     deterministic fake model used by the demo/tests. Manual and confirm providers return the
     operator's submitted decision. Only a live automatic ADK decision is verified.
+
+    A wrapper that shadows the provider (for example one that answers a structured proposal
+    before asking the agent) is looked through, so it inherits the decision's real nature
+    instead of being judged by its own type.
     """
+    provider = getattr(provider, "delegate", provider)
     if isinstance(provider, ScriptedDecisionProvider):
         return False
     if isinstance(provider, AdkDecisionProvider):
@@ -3140,6 +3146,9 @@ def _propose_view(
         template_uri=template_uri,
         context_id=_string_field(event, "context_id") or context_id,
         options=_proposal_options(metadata.get(SAMPLE_NEGOTIATION_OPTIONS_METADATA_KEY)),
+        # A vendor that names what it is missing lets the client answer deterministically instead of
+        # parsing the prose; absent on a prose-only vendor, in which case the provider decides.
+        missing_items=read_missing_items(metadata),
     )
     return view, rules
 

@@ -911,6 +911,22 @@ def test_sim_config_reads_the_hold_working_switch(monkeypatch: pytest.MonkeyPatc
     assert SimConfig.from_env().hold_working is True
 
 
+def test_sim_config_reads_the_feasibility_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tighter cell ceiling is how a client that assumes the default gets exposed."""
+    from demo.nms_sim.config import FEASIBILITY_RATE_ENV_KEY, FIDELITY_ENV_KEY
+
+    monkeypatch.setenv(FIDELITY_ENV_KEY, FIDELITY_FAST)
+    monkeypatch.delenv(FEASIBILITY_RATE_ENV_KEY, raising=False)
+    assert SimConfig.from_env().feasibility_rate_mbps == FEASIBILITY_RATE_MBPS
+
+    monkeypatch.setenv(FEASIBILITY_RATE_ENV_KEY, "1")
+    assert SimConfig.from_env().feasibility_rate_mbps == 1.0
+
+    monkeypatch.setenv(FEASIBILITY_RATE_ENV_KEY, "fast")
+    with pytest.raises(ValueError):
+        SimConfig.from_env()
+
+
 def test_sim_config_reads_the_missing_items_switch(monkeypatch: pytest.MonkeyPatch) -> None:
     """E1 is opt-in: the prose-only baseline is what a comparison run starts from."""
     from demo.nms_sim.config import FIDELITY_ENV_KEY, MISSING_ITEMS_ENV_KEY

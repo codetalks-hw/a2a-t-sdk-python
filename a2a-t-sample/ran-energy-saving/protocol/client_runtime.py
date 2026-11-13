@@ -904,6 +904,9 @@ async def build_client_runtime(
     pure_answer: Callable[[dict[str, object]], str | Awaitable[str]] | None = None,
     scripted_decisions: Sequence[NegotiationDecision] | None = None,
     intent_processor_factory: Callable[[SampleConfig], IntentProcessor] | None = None,
+    decision_provider_factory: (
+        Callable[[NegotiationDecisionProvider], NegotiationDecisionProvider] | None
+    ) = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -927,6 +930,8 @@ async def build_client_runtime(
             replays the scenario's catalog script.
         intent_processor_factory: optional builder of the business intent layer; when omitted,
             processed mode falls back to the raw text.
+        decision_provider_factory: optional last-step wrapper of the A2A-T decision provider, used
+            by the composition root to answer a structured proposal before the agent is asked.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -1125,6 +1130,10 @@ async def build_client_runtime(
         if sink_token is not None:
             reset_task_sink(sink_token)
         raise
+    if provider is not None and decision_provider_factory is not None:
+        # Wrap last, so the factory sees the provider the runtime actually built and the capability
+        # checks above (confirming/manual) still see the real class.
+        provider = decision_provider_factory(provider)
     return ClientRuntime(
         config=config,
         run_spec=run_spec,

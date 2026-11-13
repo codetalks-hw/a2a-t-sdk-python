@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from shared.missing_items import MissingItems
+
 #: Decision intents the client agent may return.
 NegotiationAction = Literal["accept", "reject", "abort", "counter"]
 
@@ -107,3 +109,6 @@ class NegotiationProposeView(BaseModel):
     context_id: str | None = None
     parameters: dict[str, object] | None = None
     options: NegotiationOptions | None = None
+    #: Sample-local structured annex: what the server says the request is missing, what it accepts
+    #: and who can answer. ``None`` on a vendor that sends prose only.
+    missing_items: MissingItems | None = None

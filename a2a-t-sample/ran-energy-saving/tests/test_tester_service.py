@@ -1914,6 +1914,38 @@ def test_a_batch_can_run_the_pure_agent_instead_of_the_scripted_answer(
     assert created["pureAnswerSource"] == "agent"
 
 
+def test_a_batch_can_run_the_a2at_agent_instead_of_the_q_column(
+    tmp_path: Path,
+) -> None:
+    """`agent` drops the Q-column replay so the A2A-T arm decides for itself."""
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T],
+        stop_after="negotiate",
+        approval=None,
+        timeout_seconds=2,
+        a2at_answer_source="agent",
+    )
+
+    assert created["a2atAnswerSource"] == "agent"
+
+
+def test_a_batch_rejects_an_unknown_a2at_answer_source(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+
+    with pytest.raises(ValueError, match="a2atAnswerSource"):
+        manager.create(
+            case_ids=[1],
+            protocols=[PROTOCOL_A2A_T],
+            stop_after="negotiate",
+            approval=None,
+            timeout_seconds=2,
+            a2at_answer_source="guessed",
+        )
+
+
 def test_a_batch_rejects_an_unknown_pure_answer_source(tmp_path: Path) -> None:
     manager = _manager(tmp_path, _FakeRuns(_finish))
 

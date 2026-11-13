@@ -167,9 +167,10 @@ async def test_auto_live_mode_uses_the_live_decision_model(
         env_path=tmp_path / "missing.env",
     )
     try:
-        assert isinstance(runtime.provider, AdkDecisionProvider)
-        assert runtime.provider.is_offline is False
-        model = runtime.provider.runner.agent.model
+        provider = getattr(runtime.provider, "delegate", runtime.provider)
+        assert isinstance(provider, AdkDecisionProvider)
+        assert provider.is_offline is False
+        model = provider.runner.agent.model
         assert isinstance(model, TracingLlm)
         assert isinstance(model.inner, LiteLlm)
     finally:
@@ -213,8 +214,9 @@ async def test_auto_offline_mode_scripts_the_scenario_decisions(
         env_path=tmp_path / "missing.env",
     )
     try:
-        assert isinstance(runtime.provider, AdkDecisionProvider)
-        agent = runtime.provider.runner.agent
+        provider = getattr(runtime.provider, "delegate", runtime.provider)
+        assert isinstance(provider, AdkDecisionProvider)
+        agent = provider.runner.agent
         assert isinstance(agent, LlmAgent)
         model = agent.model
         assert isinstance(model, TracingLlm)

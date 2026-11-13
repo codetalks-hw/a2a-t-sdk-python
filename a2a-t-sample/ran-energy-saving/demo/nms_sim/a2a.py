@@ -180,6 +180,7 @@ def build_routes(
             "window_policy": config.window_policy,
             "rate_policy": config.rate_policy,
             "long_outage_feasibility": config.long_outage_feasibility,
+            "feasibility_rate_mbps": config.feasibility_rate_mbps,
             "pure_question": config.pure_question,
             "missing_items": config.missing_items,
             "max_saving_rate": config.max_saving_rate,

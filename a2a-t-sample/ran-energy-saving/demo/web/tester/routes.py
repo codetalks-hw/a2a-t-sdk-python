@@ -183,6 +183,7 @@ def build_tester_routes(
                 decision_mode=_optional_str(body.get("decisionMode")),
                 keep_tasks=bool(body.get("keepTasks")),
                 pure_answer_source=_optional_str(body.get("pureAnswerSource")),
+                a2at_answer_source=_optional_str(body.get("a2atAnswerSource")),
                 owner=_client_id(request),
             )
         except (TypeError, ValueError) as exc:

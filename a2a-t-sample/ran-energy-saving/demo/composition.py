@@ -10,7 +10,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from protocol.client_policy import ClientPolicy
 from protocol.client_runtime import MODE_CONFIRM, MODE_MANUAL, build_client_runtime
+from protocol.decision_provider import (
+    ConfirmingDecisionProvider,
+    ManualDecisionProvider,
+    NegotiationDecisionProvider,
+    ScriptedDecisionProvider,
+)
 from protocol.pre_task_negotiation import TaskTPrecheck
 from protocol.run_spec import RunSpec
 from shared.config import (
@@ -21,6 +28,8 @@ from shared.config import (
 )
 from shared.models import NegotiationDecision
 from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
+
+from demo.envelope_decision import EnvelopeDecisionProvider
 
 
 def offline_model_factory(run_spec: RunSpec) -> Any:
@@ -178,4 +187,31 @@ async def build_demo_runtime(
         pure_answer=pure_answer,
         scripted_decisions=scripted_decisions,
         intent_processor_factory=intent_processor_factory,
+        decision_provider_factory=(
+            _envelope_provider_factory(policy)
+            if protocol == PROTOCOL_A2A_T and config.envelope_decision
+            else None
+        ),
     )
+
+
+def _envelope_provider_factory(
+    policy: ClientPolicy,
+) -> Callable[[NegotiationDecisionProvider], NegotiationDecisionProvider]:
+    """Wrap the A2A-T decision provider so a structured proposal is answered before the agent.
+
+    The wrapper is inert on a vendor that sends prose only: with no annex on the proposal it
+    delegates immediately, so the ordinary decision path is untouched.
+    """
+
+    def factory(provider: NegotiationDecisionProvider) -> NegotiationDecisionProvider:
+        if isinstance(
+            provider,
+            (ManualDecisionProvider, ConfirmingDecisionProvider, ScriptedDecisionProvider),
+        ):
+            # A human answer, a confirmation card and a recorded script are not automatic
+            # decisions: the annex must never answer in their place.
+            return provider
+        return EnvelopeDecisionProvider(provider, policy=policy)
+
+    return factory
