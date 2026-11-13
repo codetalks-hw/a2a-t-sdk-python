@@ -73,6 +73,7 @@ from a2a_t.negotiation.content import (
     TargetEndingContent,
 )
 from google.protobuf.json_format import ParseDict
+from shared.approval import ApprovalDecision, ApprovalRequest, read_approval_request
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
 from shared.missing_items import read_missing_items
@@ -954,6 +955,7 @@ async def run_client_flow(
     run_mode: str = RUN_MODE_CREATE,
     target_task_id: str | None = None,
     target_context_id: str | None = None,
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -1016,6 +1018,9 @@ async def run_client_flow(
             as the first message so an existing running Task is continued.
         target_task_id: Task the Modify-only run continues; required by ``run_mode="modify"``.
         target_context_id: Context of the target Task; required by ``run_mode="modify"``.
+        approval_answer: optional callback answering an ``a2at-sample/approval`` request with a
+            decision. Without it the request is an observation and the flow ends; it never invents
+            an approval.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -1389,7 +1394,43 @@ async def run_client_flow(
         )
         return result
 
+    answered_approvals: set[str] = set()
     while True:
+        approval = _find_approval_request(batch)
+        if approval is not None and approval_answer is not None:
+            approval_event, approval_request = approval
+            if approval_request.approval_id in answered_approvals:
+                # The server did not apply the decision (stale / expired / unknown). Repeating the
+                # same answer would loop; the Task is left waiting and the run reports that state.
+                return finish(_final_state(batch))
+            decision = approval_answer(approval_request)
+            follow = _build_message_request(
+                metadata=decision.to_metadata(),
+                label="approval decision",
+                context_id=_string_field(approval_event, "context_id") or context_id,
+                task_id=_string_field(approval_event, "task_id") or task_id,
+            )
+            emit_message_sent(
+                follow,
+                phase=PHASE_RESOLUTION,
+                title="Approval decision sent",
+                performative=decision.outcome.upper(),
+                round_number=None,
+                context_id=context_id,
+            )
+            # Keep one extension header so the peer still classifies this hop as A2A-T; the
+            # decision itself rides on the sample-local metadata, not on a Task-T.
+            batch = await send_with_wait_activity(
+                follow,
+                _call_context((TASK_T_EXTENSION_URI,), call_timeout_seconds),
+                stage="approval_send",
+            )
+            exchanges += 1
+            collect(batch)
+            context_id = context_id or _context_id_of(batch)
+            task_id = task_id or _task_id_of(batch)
+            answered_approvals.add(approval_request.approval_id)
+            continue
         inbound = _find_negotiation_message(batch)
         if inbound is None:
             # Only the last phase can terminate the flow: an earlier round's proposal must not be
@@ -2402,6 +2443,28 @@ def _vendor_negotiation_session(
         ),
         tuple(dict.fromkeys(rules)),
     )
+
+
+def _find_approval_request(
+    events: list[dict[str, object]],
+) -> tuple[dict[str, object], ApprovalRequest] | None:
+    """Return the newest approval request carried by an ``INPUT_REQUIRED`` status.
+
+    An approval is not a negotiation: it has no performative and no round, it is bound to the plan
+    by a digest, and the answer is a decision object rather than a Task-T. Reading it here keeps it
+    out of ``_find_negotiation_message``, where it would look like an unreadable proposal.
+    """
+    input_required = TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED)
+    for event in reversed(events):
+        if event.get("kind") != "status" or event.get("state") != input_required:
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        request = read_approval_request(metadata_to_dict(metadata))
+        if request is not None:
+            return event, request
+    return None
 
 
 def _find_negotiation_message(

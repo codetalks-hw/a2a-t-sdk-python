@@ -845,6 +845,7 @@ class ClientRuntime:
                     run_mode=run_mode,
                     target_task_id=target_task_id,
                     target_context_id=target_context_id,
+                    approval_answer=self.approval_answer,
                 )
         finally:
             if intent_task is not None and not intent_task.done():

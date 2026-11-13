@@ -44,6 +44,7 @@ from a2a_t.negotiation.content import (
     NegotiationEndingData,
     TargetEndingContent,
 )
+from demo.approval_answer import approval_answer
 from demo.scenario import (
     FINAL_STATE_NEGOTIATION_ENDED,
     FINAL_STATE_TASK_COMPLETED,
@@ -80,6 +81,12 @@ from protocol.messages import (
     SAMPLE_NEGOTIATION_OPTIONS_METADATA_KEY,
     SAMPLE_PHASE_METADATA_KEY,
     SAMPLE_PROPOSAL_METADATA_KEY,
+)
+from shared.approval import (
+    OUTCOME_APPROVE,
+    ApprovalRequest,
+    plan_digest,
+    read_approval_decision,
 )
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
@@ -3713,3 +3720,63 @@ async def test_metadata_normalizations_are_recorded_in_the_trace() -> None:
 
     detail = next(span["detail"] for span in spans if span["kind"] == "decision_requested")
     assert "decode.embedded" in detail["metadataNormalizations"]
+
+
+def _approval_status() -> tuple[dict[str, object], ApprovalRequest]:
+    """Return an INPUT_REQUIRED event carrying one S6 approval request."""
+    request = ApprovalRequest(
+        approval_id="apv-1",
+        plan_digest=plan_digest({"region": "A2ATestRegion", "rateMbps": 5.0}),
+        summary="Create A2ATestRegion at 5 Mbps.",
+        task_id="task-1",
+    )
+    event = status_event("TASK_STATE_INPUT_REQUIRED")
+    event["metadata"] = request.to_metadata()
+    return event, request
+
+
+async def test_an_a2a_t_approval_request_is_answered_with_a_decision() -> None:
+    """S6 on the A2A-T hop: the post-accept loop answers the request, it does not end the run."""
+    approval_event, request = _approval_status()
+    transport = ScriptedTransport(
+        [[status_event("TASK_STATE_WORKING"), approval_event], _task_completed_batch()]
+    )
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        approval_answer=approval_answer(OUTCOME_APPROVE),
+    )
+
+    assert len(transport.requests) == 2
+    metadata = MessageToDict(transport.requests[1].message.metadata)
+    decision = read_approval_decision(metadata)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_APPROVE
+    assert decision.approval_id == request.approval_id
+    assert decision.plan_digest == request.plan_digest
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    # The decision is not a Task-T: the extension header stays, the document does not.
+    assert TASK_T_EXTENSION_URI not in metadata
+
+
+async def test_an_a2a_t_approval_request_without_a_policy_ends_the_run() -> None:
+    """No callback means no invented approval; the Task is left waiting."""
+    approval_event, _request = _approval_status()
+    transport = ScriptedTransport([[status_event("TASK_STATE_WORKING"), approval_event]])
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+    )
+
+    assert len(transport.requests) == 1
+    assert result.final_state != FINAL_STATE_TASK_COMPLETED
