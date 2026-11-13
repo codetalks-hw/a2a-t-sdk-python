@@ -24,6 +24,7 @@ from shared.config import (
     PURE_FOLLOWUP_TASK,
 )
 from shared.models import NegotiationProposeView
+from shared.readback import STATUS_UNVERIFIED
 from shared.trace import PHASE_TASK_PROMPT, TraceRecorder, current_trace
 
 from protocol.client_flow import (
@@ -31,6 +32,7 @@ from protocol.client_flow import (
     ClientTransport,
     _fill_result,
     _final_state,
+    _latest_readback,
 )
 from protocol.grounding import server_target_rates
 from protocol.manual_answer import requires_operator_decision
@@ -281,6 +283,16 @@ async def _drive_negotiation(
     # message there is a question/observation, not a terminal signal.
     result.final_state = _final_state(batch, message_ends_flow=message_ends_flow)
     _fill_result(result, _context_id_of(result.events))
+    # A plain-A2A client holds no accepted plan object, so an S8 readback can only be displayed,
+    # never verified: report it as unverified instead of pretending it matched.
+    readback = _latest_readback(result.events)
+    if readback is not None:
+        result.readback = {
+            "status": STATUS_UNVERIFIED,
+            "planDigest": readback.plan_digest,
+            "executed": dict(readback.executed),
+            "deviations": [dict(entry) for entry in readback.deviations],
+        }
     _LOGGER.info(
         "pure client flow finished: state=%s task_id=%s rounds=%s",
         result.final_state,

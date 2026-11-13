@@ -32,10 +32,12 @@ from shared.approval import (
     VERIFY_EXPIRED,
     VERIFY_UNKNOWN,
     ApprovalDecision,
+    plan_digest,
     read_approval_decision,
     read_approval_request,
     verify_decision,
 )
+from shared.readback import Readback, compare_plans
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
@@ -269,7 +271,8 @@ def build_routes(
             _LOGGER.warning("simulator execution failed: %s", exc)
             resolved_store.update(task.task_id, state=TASK_FAILED, message=str(exc))
             return None
-        return report, report_artifact(task.task_id, report)
+        readback = _readback_for(intent, config)
+        return report, report_artifact(task.task_id, report, readback=readback)
 
     def _stream_completion(
         task: SimTask,
@@ -1127,6 +1130,28 @@ def build_routes(
 async def _single_message_stream(message: Mapping[str, object]) -> AsyncIterator[str]:
     """Yield one ``message`` SSE frame and close."""
     yield f"data: {json.dumps({'message': dict(message)}, ensure_ascii=False)}\n\n"
+
+
+def _readback_for(intent: ParsedIntent, config: SimConfig) -> dict[str, object]:
+    """Build the S8 readback envelope of one executed plan.
+
+    The executed plan is the accepted one; ``readback_deviation`` is a measurement switch that
+    reports a different rate, standing in for a network that applied something else.
+    """
+    planned = plan_for(intent)
+    executed = dict(planned)
+    if config.readback_deviation:
+        rate = planned.get("rateMbps")
+        executed["rateMbps"] = (
+            round(float(rate) * 0.8, 2)
+            if isinstance(rate, (int, float)) and not isinstance(rate, bool)
+            else 0.0
+        )
+    return Readback(
+        plan_digest=plan_digest(planned),
+        executed=executed,
+        deviations=compare_plans(planned, executed),
+    ).to_metadata()
 
 
 def _pure_failure_text(issue: NegotiationIssue, content: ExtractedContent) -> str:

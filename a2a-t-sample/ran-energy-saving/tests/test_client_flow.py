@@ -3841,3 +3841,74 @@ async def test_an_a2a_t_approval_request_without_a_policy_ends_the_run() -> None
 
     assert len(transport.requests) == 1
     assert result.final_state != FINAL_STATE_TASK_COMPLETED
+
+
+def _readback_artifact(digest: str, executed: dict[str, object]) -> dict[str, object]:
+    """Return a completion artifact whose metadata carries one S8 readback."""
+    from shared.readback import Readback, compare_plans
+
+    event = artifact_event()
+    plan = dict(_CLIENT_PLAN)
+    event["metadata"] = Readback(
+        plan_digest=digest,
+        executed=executed,
+        deviations=compare_plans(plan, executed),
+    ).to_metadata()
+    return event
+
+
+async def _run_with_readback(
+    artifact: dict[str, object],
+    *,
+    with_plan: bool = True,
+    spans: list[dict[str, object]] | None = None,
+) -> ClientFlowResult:
+    transport = ScriptedTransport(
+        [[status_event("TASK_STATE_WORKING"), artifact, status_event("TASK_STATE_COMPLETED")]]
+    )
+    return await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        trace_sink=spans.append if spans is not None else None,
+        approval_plan=(lambda filled: _CLIENT_PLAN) if with_plan else None,
+    )
+
+
+async def test_the_readback_matches_the_plan_the_client_accepted() -> None:
+    result = await _run_with_readback(
+        _readback_artifact(plan_digest(_CLIENT_PLAN), dict(_CLIENT_PLAN))
+    )
+
+    assert result.readback is not None
+    assert result.readback["status"] == "matched"
+    assert result.readback["deviations"] == []
+
+
+async def test_an_executed_deviation_is_reported_and_traced() -> None:
+    executed = {**_CLIENT_PLAN, "rateMbps": 1.0}
+    spans: list[dict[str, object]] = []
+
+    result = await _run_with_readback(
+        _readback_artifact(plan_digest(_CLIENT_PLAN), executed), spans=spans
+    )
+
+    assert result.readback is not None
+    assert result.readback["status"] == "deviated"
+    assert result.readback["deviations"] == [
+        {"field": "rateMbps", "planned": 0.0, "actual": 1.0}
+    ]
+    assert any(span["kind"] == "readback_deviation" for span in spans)
+
+
+async def test_without_an_accepted_plan_the_readback_is_unverified() -> None:
+    """The plain hop's shape: the object arrives, but nothing can vouch for it."""
+    result = await _run_with_readback(
+        _readback_artifact(plan_digest(_CLIENT_PLAN), dict(_CLIENT_PLAN)), with_plan=False
+    )
+
+    assert result.readback is not None
+    assert result.readback["status"] == "unverified"

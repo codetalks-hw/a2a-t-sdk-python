@@ -54,6 +54,9 @@ DEFAULT_APPROVAL_TTL_SECONDS: Final[float] = 900.0
 #: plan that will be executed. A client that computes its own digest refuses it; one that can only
 #: echo the server's digest accepts it. Off by default; it is a measurement switch, not behaviour.
 APPROVAL_TAMPER_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL_TAMPER"
+#: S8 measurement switch: the readback reports an executed plan that differs from the approved one,
+#: as a network that applied something else would. The report artifact is still produced.
+READBACK_DEVIATION_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_READBACK_DEVIATION"
 
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
@@ -190,6 +193,8 @@ class SimConfig:
     approval_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS
     #: Measurement-only fault injection: the request's digest does not match the executed plan.
     approval_tamper: bool = False
+    #: Measurement-only fault injection: the readback reports a plan other than the approved one.
+    readback_deviation: bool = False
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -294,6 +299,7 @@ class SimConfig:
             missing_items=_truthy(os.environ.get(MISSING_ITEMS_ENV_KEY, "")),
             approval=_truthy(os.environ.get(APPROVAL_ENV_KEY, "")),
             approval_tamper=_truthy(os.environ.get(APPROVAL_TAMPER_ENV_KEY, "")),
+            readback_deviation=_truthy(os.environ.get(READBACK_DEVIATION_ENV_KEY, "")),
             approval_ttl_seconds=_seconds(
                 os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
             ),

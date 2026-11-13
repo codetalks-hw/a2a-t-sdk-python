@@ -90,6 +90,12 @@ from shared.models import (
     NegotiationOptions,
     NegotiationProposeView,
 )
+from shared.readback import (
+    STATUS_DEVIATED,
+    Readback,
+    read_readback,
+)
+from shared.readback import verify as verify_readback
 from shared.run_constants import (
     FINAL_STATE_DECISION_UNGROUNDED,
     FINAL_STATE_INPUT_INVALID,
@@ -720,6 +726,9 @@ class ClientFlowResult:
     reports: list[dict[str, object]] = field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
+    #: S8 execution readback: ``status`` is ``matched`` / ``deviated`` / ``unverified``, with the
+    #: executed plan and the field-level deviations the peer reported.
+    readback: dict[str, object] | None = None
 
 
 def is_terminal_event(event: Mapping[str, object]) -> bool:
@@ -1403,6 +1412,28 @@ async def run_client_flow(
         """Record the terminal state, fill the result and log the outcome."""
         result.final_state = state
         _fill_result(result, context_id)
+        readback = _latest_readback(result.events)
+        if readback is not None:
+            status = verify_readback(readback, accepted_digest)
+            result.readback = {
+                "status": status,
+                "planDigest": readback.plan_digest,
+                "executed": dict(readback.executed),
+                "deviations": [dict(entry) for entry in readback.deviations],
+            }
+            if status == STATUS_DEVIATED:
+                emit_trace(
+                    "readback_deviation",
+                    phase=PHASE_RESOLUTION,
+                    title="Execution does not match the accepted plan",
+                    round_number=None,
+                    context_id=context_id,
+                    detail={
+                        "acceptedDigest": accepted_digest,
+                        "readbackDigest": readback.plan_digest,
+                        "deviations": result.readback["deviations"],
+                    },
+                )
         _LOGGER.info(
             "client flow finished: state=%s task_id=%s decisions=%d",
             result.final_state,
@@ -2319,6 +2350,20 @@ def _require_prompt_text(content: MetadataContent, what: str) -> str:
     if not isinstance(text, str) or not text.strip():
         raise ClientFlowError(f"The SDK did not generate {what}.")
     return text
+
+
+def _latest_readback(events: list[dict[str, object]]) -> Readback | None:
+    """Return the newest S8 readback carried by an artifact event, ``None`` when absent."""
+    for event in reversed(events):
+        if event.get("kind") != "artifact":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        readback = read_readback(metadata)
+        if readback is not None:
+            return readback
+    return None
 
 
 def _plan_digest_for(

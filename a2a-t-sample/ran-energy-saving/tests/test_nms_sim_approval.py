@@ -385,10 +385,13 @@ async def test_a_plain_a2a_plan_waits_for_the_same_object() -> None:
         assert _status(completed)["state"] == "TASK_STATE_COMPLETED"
 
 
-async def _run_pure_client(*, tamper: bool) -> object:
+async def _run_pure_client(*, tamper: bool, deviation: bool = False) -> object:
     """Drive the pure client against the in-process simulator and return its result."""
     config = _config(
-        pure_question=PURE_QUESTION_ISSUE, rate_policy="optional", approval_tamper=tamper
+        pure_question=PURE_QUESTION_ISSUE,
+        rate_policy="optional",
+        approval_tamper=tamper,
+        readback_deviation=deviation,
     )
     http_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=build_sim_app(config)), base_url="http://sim"
@@ -437,6 +440,24 @@ async def test_a_plain_client_executes_a_misstated_plan() -> None:
 
     assert result.final_state == FINAL_STATE_TASK_COMPLETED
     assert any(_is_approval_event(event) for event in result.events)
+
+
+async def test_the_plain_client_reports_the_readback_as_unverified() -> None:
+    """S8 on the plain hop: the object arrives, but nothing can vouch for it."""
+    result = await _run_pure_client(tamper=False)
+
+    assert result.readback is not None
+    assert result.readback["status"] == "unverified"
+    assert result.readback["deviations"] == []
+
+
+async def test_the_plain_client_cannot_tell_a_deviation_from_a_match() -> None:
+    """The deviation is visible in the payload, but the client cannot verify it happened."""
+    result = await _run_pure_client(tamper=False, deviation=True)
+
+    assert result.readback is not None
+    assert result.readback["status"] == "unverified"
+    assert result.readback["deviations"]
 
 
 def _is_approval_event(event: Mapping[str, object]) -> bool:

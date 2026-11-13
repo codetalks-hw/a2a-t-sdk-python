@@ -7,6 +7,7 @@ artifact handling is exercised end to end.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Final
 
 from demo import ran_data
@@ -79,8 +80,20 @@ def apply_intent(intent: ParsedIntent, *, allow_any_window: bool = False) -> dic
     }
 
 
-def report_artifact(task_id: str, report: dict[str, object]) -> dict[str, object]:
-    """Build the report artifact of one completed Task."""
+def report_artifact(
+    task_id: str,
+    report: dict[str, object],
+    *,
+    readback: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the report artifact of one completed Task.
+
+    ``readback`` is the S8 envelope: the executed plan next to the digest of the approved one. It
+    rides on the artifact metadata so a client that holds the accepted plan can verify it.
+    """
+    metadata: dict[str, object] = {"taskId": task_id}
+    if readback is not None:
+        metadata.update(readback)
     return {
         "artifactId": f"{task_id}-report",
         "name": "energy saving intent report",
@@ -88,7 +101,7 @@ def report_artifact(task_id: str, report: dict[str, object]) -> dict[str, object
             {"data": report},
             {"text": str(report.get("summary") or "")},
         ],
-        "metadata": {"taskId": task_id},
+        "metadata": metadata,
     }
 
 
