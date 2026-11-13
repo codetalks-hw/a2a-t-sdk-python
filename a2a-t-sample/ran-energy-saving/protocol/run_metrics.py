@@ -215,11 +215,25 @@ def _tokens(spans: list[dict[str, object]], *, model_mode: str) -> dict[str, obj
         _add_usage(by_side.setdefault(side, _empty_usage()), usage)
         _add_usage(by_component.setdefault(component, _empty_usage()), usage)
     available = known > 0 and not scripted
+    # A ``None`` total is only readable when the report says why it is missing: an offline model,
+    # a run that never called a model, or a provider that returned no usage.
+    if available:
+        unavailable_reason: str | None = None
+    elif model_mode == "offline":
+        unavailable_reason = "offline"
+    elif calls == 0:
+        unavailable_reason = "no_llm_call"
+    elif scripted:
+        unavailable_reason = "scripted"
+    else:
+        unavailable_reason = "unreported"
     cache_reported = available and cached_calls > 0
     _finalize_cache_buckets(by_side)
     _finalize_cache_buckets(by_component)
     return {
         "available": available,
+        # ``None`` when the counts are usable; otherwise why they are not.
+        "unavailableReason": unavailable_reason,
         "scripted": scripted,
         "estimated": estimated,
         "llmCalls": calls,

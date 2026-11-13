@@ -59,6 +59,7 @@ def build_variant_report(
         "只比较两边都存在的用例；请求数按 `wire.jsonl` 的 out 帧计。",
         "",
     ]
+    lines += _settings_diff(left, right, left_label, right_label)
     lines += _summary(left_items, right_items, left_label, right_label)
     lines += _matrix(
         keys,
@@ -80,6 +81,66 @@ def build_variant_report(
 def _items(batch: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """Return the batch items as mappings."""
     return [item for item in batch.get("items") or [] if isinstance(item, Mapping)]
+
+
+def _settings_diff(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    left_label: str,
+    right_label: str,
+) -> list[str]:
+    """Return the manifest comparison: a variant report is only readable if the delta is intended."""
+    left_settings = _flat_settings(left.get("settings"))
+    right_settings = _flat_settings(right.get("settings"))
+    lines = ["## 0. 口径对比", ""]
+    if not left_settings and not right_settings:
+        lines += ["两边都**未记录**口径 manifest；本报告的差值不可复核。", ""]
+        return lines
+    if not left_settings or not right_settings:
+        missing = left_label if not left_settings else right_label
+        lines += [f"**{missing} 未记录口径 manifest**；无法证明两侧只差一个变量。", ""]
+        return lines
+    keys = sorted(set(left_settings) | set(right_settings))
+    changed = [key for key in keys if left_settings.get(key) != right_settings.get(key)]
+    if not changed:
+        lines += ["两侧口径完全一致。", ""]
+        return lines
+    lines += [
+        "以下键不同。**一个变体实验只应有一个**；多于一个时，差值不能归给其中任何一个。",
+        "",
+        f"| 键 | {left_label} | {right_label} |",
+        "|---|---|---|",
+    ]
+    for key in changed:
+        lines.append(
+            f"| {key} | {_display(left_settings.get(key))} | {_display(right_settings.get(key))} |"
+        )
+    if len(changed) > 1:
+        lines += ["", f"> **注意**：共有 {len(changed)} 个键不同，本轮不是单变量实验。"]
+    return lines + [""]
+
+
+def _flat_settings(settings: object) -> dict[str, object]:
+    """Flatten the batch manifest so a nested simulator block compares key by key."""
+    if not isinstance(settings, Mapping):
+        return {}
+    flat: dict[str, object] = {}
+    for key, value in settings.items():
+        if isinstance(value, Mapping):
+            for inner_key, inner_value in value.items():
+                flat[f"{key}.{inner_key}"] = inner_value
+        else:
+            flat[str(key)] = value
+    return flat
+
+
+def _display(value: object) -> str:
+    """Render one manifest value compactly."""
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return f"`{value}`"
 
 
 def _summary(

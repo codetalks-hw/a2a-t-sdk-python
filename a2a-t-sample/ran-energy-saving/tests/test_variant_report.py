@@ -88,3 +88,46 @@ def test_a_case_missing_from_one_side_is_not_compared(tmp_path: Path) -> None:
 
     assert "| 7 | a2a |" not in report
     assert "| — | — | — | — | — | — | — | — |" in report
+
+
+def test_a_single_differing_switch_is_reported_as_the_variable(tmp_path: Path) -> None:
+    """A variant report must show which keys differ; exactly one is what makes it a variant."""
+    runs = tmp_path / "runs"
+    _wire(runs, "run-one", 2)
+    left = _batch("left", status="passed", rounds=2, run_id="run-one")
+    right = _batch("right", status="passed", rounds=1, run_id="run-one")
+    left["settings"] = {"stopAfter": "accepted", "simulator": {"missing_items": False}}
+    right["settings"] = {"stopAfter": "accepted", "simulator": {"missing_items": True}}
+
+    report = build_variant_report(left, right, left_runs_dir=runs, right_runs_dir=runs)
+
+    assert "## 0. 口径对比" in report
+    assert "| simulator.missing_items | false | true |" in report
+    assert "单变量实验" not in report
+
+
+def test_several_differing_switches_are_flagged_as_not_a_single_variable(tmp_path: Path) -> None:
+    """Two changed switches make the delta unattributable, so the report has to say so."""
+    runs = tmp_path / "runs"
+    _wire(runs, "run-one", 2)
+    left = _batch("left", status="passed", rounds=2, run_id="run-one")
+    right = _batch("right", status="passed", rounds=1, run_id="run-one")
+    left["settings"] = {"pureAnswerSource": "script", "simulator": {"missing_items": False}}
+    right["settings"] = {"pureAnswerSource": "agent", "simulator": {"missing_items": True}}
+
+    report = build_variant_report(left, right, left_runs_dir=runs, right_runs_dir=runs)
+
+    assert "共有 2 个键不同" in report
+
+
+def test_a_missing_manifest_on_one_side_is_stated(tmp_path: Path) -> None:
+    """A batch that predates the manifest cannot be compared with one that has it."""
+    runs = tmp_path / "runs"
+    _wire(runs, "run-one", 2)
+    left = _batch("left", status="passed", rounds=2, run_id="run-one")
+    right = _batch("right", status="passed", rounds=1, run_id="run-one")
+    right["settings"] = {"stopAfter": "accepted"}
+
+    report = build_variant_report(left, right, left_runs_dir=runs, right_runs_dir=runs)
+
+    assert "left 未记录口径 manifest" in report

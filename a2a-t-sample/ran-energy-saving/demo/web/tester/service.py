@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -45,6 +46,7 @@ from eval.osp.runner import (
 from protocol.client_runtime import MODE_AUTO, MODE_SCRIPTED
 from protocol.client_service import STATUS_FAILED, RunManager, RunState
 from protocol.run_metrics import build_run_metrics
+from protocol.target_grammar import TargetSegment, find_segments
 from shared.config import DISCOVERY_NMS, MODEL_MODE_LIVE, MODEL_MODE_OFFLINE
 from shared.models import NegotiationDecision
 from shared.run_constants import (
@@ -295,6 +297,9 @@ class CaseItem:
     duration_ms: int | None = None
     tokens: dict[str, object] = field(default_factory=dict)
     error: str | None = None
+    #: Machine-readable code behind ``error`` (for example ``llm.invocation_failed``). A report
+    #: buckets a failure by this code instead of guessing from the operator-facing text.
+    error_code: str = ""
     baseline: dict[str, object] | None = None
     scratch: str | None = None
     #: Previous executions of this item (a rerun appends before it resets the row).
@@ -336,6 +341,7 @@ class CaseItem:
             "durationMs": self.duration_ms,
             "tokens": dict(self.tokens),
             "error": self.error,
+            "errorCode": self.error_code,
             "baseline": self.baseline,
             "scratch": self.scratch,
             "attempts": [dict(attempt) for attempt in self.attempts],
@@ -384,6 +390,10 @@ class _Batch:
     current_index: int | None = None
     cancel_requested: bool = False
     error: str | None = None
+    #: The configuration this batch actually ran under: the simulator's own switch snapshot, the
+    #: model and whether thinking was disabled, both answer sources, and the code identity. A report
+    #: that cannot show this cannot be compared with another batch.
+    settings: dict[str, object] = field(default_factory=dict)
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
@@ -432,6 +442,81 @@ class EvalBatchManager:
     def _replays_pure_dialogue(self) -> bool:
         """Return whether the simulator replays the vendor's plain-A2A confirmation dialogue."""
         return self._nms_sim and self._nms_sim_pure_question == "confirm"
+
+    async def _settings_snapshot(self, batch: _Batch) -> dict[str, object]:
+        """Return the configuration this batch runs under, recorded in the batch document.
+
+        A result without this block cannot be compared with another batch: the first pass of the
+        A2A/A2A-T comparison reported a pass-rate gap that was entirely the simulator's rate policy.
+        The simulator's own switch snapshot is fetched rather than inferred, so the server and the
+        report can never disagree about which profile produced a number.
+        """
+        settings: dict[str, object] = {
+            "modelMode": self._model_mode,
+            "modelLabel": self._model_label,
+            # Observation only: the SDK reads this key; recording it is what makes "thinking was
+            # off" a fact about the run instead of a memory about the shell.
+            "llmExtraBody": os.environ.get("A2AT_LLM_EXTRA_BODY", ""),
+            "language": self._language,
+            "decisionMode": batch.decision_mode,
+            "pureAnswerSource": batch.pure_answer_source,
+            "a2atAnswerSource": batch.a2at_answer_source,
+            "stopAfter": batch.stop_after,
+            "timeoutSeconds": batch.timeout_seconds,
+            "workingTimeoutSeconds": batch.working_timeout_seconds,
+            "transport": batch.transport,
+            "discovery": batch.discovery,
+            "nmsSim": self._nms_sim,
+            "pureQuestion": self._nms_sim_pure_question if self._nms_sim else None,
+            **self._git_identity(),
+        }
+        simulator = await self._simulator_settings()
+        if simulator is not None:
+            settings["simulator"] = simulator
+        return settings
+
+    async def _simulator_settings(self) -> dict[str, object] | None:
+        """Return the simulator's own switch snapshot, ``None`` when it cannot be read."""
+        if not self._nms_sim or not self._server_url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+                response = await client.get(f"{self._server_url}/metrics")
+                response.raise_for_status()
+                document = response.json()
+        except (httpx.HTTPError, ValueError):
+            _LOGGER.warning("tester could not read the simulator settings", exc_info=True)
+            return None
+        settings = document.get("settings") if isinstance(document, Mapping) else None
+        return dict(settings) if isinstance(settings, Mapping) else None
+
+    @staticmethod
+    def _git_identity() -> dict[str, object]:
+        """Return the worktree head and dirty flag, empty when git is unavailable."""
+        root = Path(__file__).resolve().parents[3]
+        try:
+            head = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            status = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        if head.returncode != 0:
+            return {}
+        return {
+            "gitHead": head.stdout.strip(),
+            "gitDirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+        }
 
     # ------------------------------------------------------------------
     # Catalog and batch lifecycle
@@ -594,6 +679,9 @@ class EvalBatchManager:
             raise ValueError("该批次已经执行过。")
         batch.status = BATCH_RUNNING
         batch.started_at = _now_iso()
+        # Capture the profile before the first run: the simulator's switch snapshot belongs to the
+        # batch, not to the report a human remembers to write down afterwards.
+        batch.settings = await self._settings_snapshot(batch)
         self._persist(batch)
         batch.task = asyncio.create_task(self._run_batch(batch), name=f"tester-{batch_id}")
         await asyncio.sleep(0)
@@ -1383,6 +1471,7 @@ class EvalBatchManager:
         """Wait for the last requested runtime stage and record its assertion."""
         expected_send = True
         expected_rounds = 0
+        min_rounds = 0
         expected_kinds: list[str] | None = None
         expected_final: object = None
         if case is not None:
@@ -1392,6 +1481,10 @@ class EvalBatchManager:
                 expected_send = bool(protocol_block.get("send"))
             negotiation = protocol_block["negotiation"]
             expected_rounds = int(negotiation.get("expected_rounds", 0))
+            # ``expected_rounds`` is an upper bound, not an equality: it encodes how long the prose
+            # dialogue took on the vendor, and a client that converges earlier is better, not
+            # failed. ``min_rounds`` keeps "a negotiation was expected at all" assertable.
+            min_rounds = int(negotiation.get("min_rounds", 1 if expected_rounds > 0 else 0))
             expected_kinds = negotiation.get("kinds")
 
         # ``accepted``/``working`` only make sense when the case expects a send. Disabling the
@@ -1433,17 +1526,37 @@ class EvalBatchManager:
                 await asyncio.sleep(_SIM_PURE_ROUND_SETTLE_SECONDS)
             actual_rounds = len(run.proposals)
             actual_kinds = [proposal.kind for proposal in run.proposals]
-            rounds_ok = actual_rounds == expected_rounds
+            rounds_ok = min_rounds <= actual_rounds <= expected_rounds
             kinds_ok = expected_kinds is None or all(
                 kind in actual_kinds for kind in expected_kinds
             )
-            status = STAGE_PASSED if rounds_ok and kinds_ok else STAGE_FAILED
+            expected_target = negotiation.get("accepted_target")
+            target_ok, sent_targets = _assert_accepted_target(
+                run, expected_target, exact=bool(negotiation.get("accepted_target_exact"))
+            )
+            status = STAGE_PASSED if rounds_ok and kinds_ok and target_ok else STAGE_FAILED
+            message = ""
+            if status == STAGE_FAILED:
+                message = (
+                    "协商轮次或类型与预期不一致。"
+                    if not (rounds_ok and kinds_ok)
+                    else "协商后被接受的目标与预期不一致。"
+                )
             negotiate_result = StageResult(
                 "negotiate",
                 status,
-                "" if status == STAGE_PASSED else "协商轮次或类型与预期不一致。",
-                expected={"rounds": expected_rounds, "kinds": expected_kinds},
-                actual={"rounds": actual_rounds, "kinds": actual_kinds},
+                message,
+                expected={
+                    "rounds": expected_rounds,
+                    "minRounds": min_rounds,
+                    "kinds": expected_kinds,
+                    **({"target": expected_target} if expected_target else {}),
+                },
+                actual={
+                    "rounds": actual_rounds,
+                    "kinds": actual_kinds,
+                    **({"targets": sent_targets} if expected_target else {}),
+                },
                 duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             if case is not None:
@@ -1719,6 +1832,9 @@ class EvalBatchManager:
         # The export evidence does not depend on the metrics pipeline; collect it even when the
         # metrics builder fails, because a missing answer is worse than missing token counts.
         self._collect_run_evidence(item, run, case)
+        error_code = getattr(run.result, "error_code", None) if run.result is not None else None
+        if isinstance(error_code, str) and error_code:
+            item.error_code = error_code
         try:
             metrics = build_run_metrics(
                 run_id=run.run_id,
@@ -2137,6 +2253,8 @@ class EvalBatchManager:
                 "timeoutSeconds": batch.timeout_seconds,
                 "workingTimeoutSeconds": batch.working_timeout_seconds,
             },
+            # Empty until the batch starts: a draft has not run under any profile yet.
+            "settings": dict(batch.settings),
             "ownerId": batch.owner_id,
             "createdAt": batch.created_at,
             "startedAt": batch.started_at,
@@ -2147,8 +2265,60 @@ class EvalBatchManager:
             "summary": _summary(batch.items),
             # A paired batch exists to compare the two protocols case by case; the flat item list
             # makes that join manual, so the snapshot carries it ready-made.
-            "pairs": _pairs(batch.items),
+            "pairs": _paired_rows(batch),
         }
+
+
+def _paired_rows(batch: _Batch) -> list[dict[str, object]]:
+    """Return the paired rows, marked incomparable when the two arms answered differently.
+
+    ``pureAnswerSource=agent`` against ``a2atAnswerSource=script`` compares a live client with the
+    OSP Q column, which is a perfect answer, not a protocol. The delta is still exported (it is
+    evidence about the harness), but it must never read as a protocol result.
+    """
+    rows = _pairs(batch.items)
+    if batch.pure_answer_source == batch.a2at_answer_source:
+        return rows
+    for row in rows:
+        row["comparable"] = False
+        row["nonComparableReason"] = "answer-source"
+    return rows
+
+
+def _sent_target_segments(run: RunState) -> list[TargetSegment]:
+    """Return the target segments of the last outbound message.
+
+    A segmented plan is the case a pass/fail count cannot judge: the simulator reads only the first
+    rate, so a second segment left at a rejected rate still "passes". The assertion has to read what
+    the client actually sent.
+    """
+    for span in reversed(run.traces):
+        if span.get("kind") != "message_sent":
+            continue
+        detail = span.get("detail")
+        if not isinstance(detail, Mapping):
+            continue
+        text = " ".join(
+            str(detail.get(key) or "") for key in ("taskT", "summary", "negotiationT")
+        )
+        return find_segments(text)
+    return []
+
+
+def _assert_accepted_target(
+    run: RunState, expected: object, *, exact: bool = False
+) -> tuple[bool, list[str]]:
+    """Return whether the client sent every expected segment, plus what it did send."""
+    sent = [segment.canonical() for segment in _sent_target_segments(run)]
+    if not isinstance(expected, str) or not expected.strip():
+        return True, sent
+    required = [segment.canonical() for segment in find_segments(expected)]
+    if not required:
+        return True, sent
+    ok = all(segment in sent for segment in required)
+    if ok and exact:
+        ok = set(sent) == set(required)
+    return ok, sent
 
 
 def _pairs(items: Sequence[CaseItem]) -> list[dict[str, object]]:

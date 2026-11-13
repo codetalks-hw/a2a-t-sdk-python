@@ -226,6 +226,24 @@ A2A-T 只有 6 条需要协商（32/34/35/36/37/38），其余 45 条断言 0 �
 
 ### 5.4 协商
 
+`expected_rounds` 是**上界**，不是等号：断言 `min_rounds <= actual <= expected_rounds`。
+它编码的是散文对话在厂商侧花了多少轮；客户端更早收敛是改进，不是回归——E1（缺项清单）
+把 32/35/36 从 4 轮不收敛降到 1–2 轮 accepted，精确相等会把更好的结果判成 failed。
+
+`min_rounds` 缺省为 `1 if expected_rounds > 0 else 0`，防止"跳过协商"被上界放过。
+
+`accepted_target`（可选）断言**客户端实际发出的目标段**：
+
+```yaml
+negotiation:
+  expected_rounds: 3
+  accepted_target: "{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}"
+  accepted_target_exact: false   # true 时要求集合完全相等
+```
+
+涉及多段/分段的用例**必须**写这一条：模拟器只读第一个速率，漏掉第二段时通过率不会暴露问题
+（2026-11-13，case 36）。断言读取的是 `message_sent` span 里实际发出的文本，不是用例里的期望值。
+
 - **A2A**：51 条全部有 P 列协商答复，`expected_rounds = len(rounds)`（1–3）；协商类型原表未给，
   `kinds: null`，不判定类型。
 - **A2A-T**：仅 6 条有 Q 列协商答复，各 1 轮；`kinds` 由答复里的标题派生：

@@ -105,7 +105,74 @@ def _context(batch: Mapping[str, Any]) -> list[str]:
         f"| 用例数 | {len(batch.get('items') or [])} 项 / {len(batch.get('pairs') or [])} 对 |",
         f"| 排除用例（blocked，两臂文本不同） | {', '.join(str(v) for v in excluded) or '无'} |",
     ]
-    return rows + [""]
+    rows += _settings_rows(batch)
+    return rows + _symmetry_warning(batch) + [""]
+
+
+def _settings_rows(batch: Mapping[str, Any]) -> list[str]:
+    """Return the manifest rows, saying so plainly when the batch predates the manifest."""
+    settings = batch.get("settings")
+    if not isinstance(settings, Mapping) or not settings:
+        return ["| 口径 manifest | **未记录**（该批次早于 manifest；任何跨批次比较都不可复核） |"]
+    simulator = settings.get("simulator")
+    rows = [
+        "| 模型 / 思考 | {model} / {thinking} |".format(
+            model=settings.get("modelLabel") or settings.get("modelMode") or "—",
+            thinking=_thinking_label(settings.get("llmExtraBody")),
+        ),
+        "| 答源（pure / a2at） | {pure} / {a2at} |".format(
+            pure=settings.get("pureAnswerSource"),
+            a2at=settings.get("a2atAnswerSource"),
+        ),
+        "| 模拟器开关 | {switches} |".format(switches=_format_switches(simulator)),
+        "| 代码 | {head}{dirty} |".format(
+            head=str(settings.get("gitHead") or "—")[:12],
+            dirty="（有未提交改动）" if settings.get("gitDirty") else "",
+        ),
+    ]
+    return rows
+
+
+def _thinking_label(extra_body: object) -> str:
+    """Return whether the recorded extra body disables model thinking."""
+    text = str(extra_body or "")
+    if "reasoning_effort" in text or "disabled" in text:
+        return "关"
+    if not text:
+        return "未设置（模型默认）"
+    return "已设置"
+
+
+def _format_switches(simulator: object) -> str:
+    """Return the simulator switch set as one line."""
+    if not isinstance(simulator, Mapping) or not simulator:
+        return "未记录"
+    keys = (
+        "window_policy",
+        "rate_policy",
+        "long_outage_feasibility",
+        "pure_question",
+        "missing_items",
+        "feasibility_rate_mbps",
+    )
+    return ", ".join(f"{key}={simulator.get(key)}" for key in keys if key in simulator) or "未记录"
+
+
+def _symmetry_warning(batch: Mapping[str, Any]) -> list[str]:
+    """Return a warning when the two arms were answered from different sources.
+
+    A pure-A2A arm answered by the client's own agent and an A2A-T arm replaying the OSP Q column
+    is a comparison between a real client and a perfect answer, not between two protocols.
+    """
+    pure = batch.get("pureAnswerSource")
+    a2at = batch.get("a2atAnswerSource")
+    if not pure or not a2at or pure == a2at:
+        return []
+    return [
+        "",
+        f"> **非对称**：pureAnswerSource={pure}，a2atAnswerSource={a2at}。"
+        "两侧的答源不同，本轮差值不能作为协议结论。",
+    ]
 
 
 def _fingerprint_table(
@@ -178,8 +245,9 @@ def _cost_table(items: Sequence[Mapping[str, Any]]) -> list[str]:
     lines = [
         "## 3. 成本-效果",
         "",
-        "| 协议 | 项数 | passed | 均值时延(ms) | 均值轮次 | token 合计 | token 上报项 |",
-        "|---|---|---|---|---|---|---|",
+        "| 协议 | 项数 | passed | 均值时延(ms) | 仅通过项均值(ms) | 均值轮次 | token 合计 | "
+        "token 上报项 | 未上报原因 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for protocol in sorted({str(item.get("protocol")) for item in items}):
         rows = [item for item in items if str(item.get("protocol")) == protocol]
@@ -188,6 +256,13 @@ def _cost_table(items: Sequence[Mapping[str, Any]]) -> list[str]:
             row["durationMs"]
             for row in rows
             if isinstance(row.get("durationMs"), (int, float))
+            and not isinstance(row.get("durationMs"), bool)
+        ]
+        passed_durations = [
+            row["durationMs"]
+            for row in rows
+            if row.get("status") == "passed"
+            and isinstance(row.get("durationMs"), (int, float))
             and not isinstance(row.get("durationMs"), bool)
         ]
         rounds = [value for value in (_rounds(row) for row in rows) if value is not None]
@@ -199,17 +274,35 @@ def _cost_table(items: Sequence[Mapping[str, Any]]) -> list[str]:
             and not isinstance(row["tokens"].get("total"), bool)
         ]
         lines.append(
-            "| {protocol} | {count} | {passed} | {duration} | {rounds} | {tokens} | {reported} |".format(
+            "| {protocol} | {count} | {passed} | {duration} | {passed_duration} | {rounds} | "
+            "{tokens} | {reported} | {reason} |".format(
                 protocol=protocol,
                 count=len(rows),
                 passed=passed,
                 duration=_mean(durations),
+                passed_duration=_mean(passed_durations),
                 rounds=_mean(rounds),
                 tokens=int(sum(tokens)) if tokens else "—",
                 reported=len(tokens),
+                reason=_missing_reason(rows),
             )
         )
     return lines + [""]
+
+
+def _missing_reason(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Summarize why a row has no token count instead of leaving a bare ``None``."""
+    reasons: dict[str, int] = {}
+    for row in rows:
+        tokens = row.get("tokens")
+        if isinstance(tokens, Mapping) and isinstance(tokens.get("total"), (int, float)):
+            continue
+        reason = tokens.get("unavailableReason") if isinstance(tokens, Mapping) else None
+        key = str(reason or "未记录")
+        reasons[key] = reasons.get(key, 0) + 1
+    if not reasons:
+        return "—"
+    return ", ".join(f"{key}×{count}" for key, count in sorted(reasons.items()))
 
 
 def _failure_table(items: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -222,8 +315,14 @@ def _failure_table(items: Sequence[Mapping[str, Any]]) -> list[str]:
         # records ``item.error = None``. Judge the combined text so infra noise is not reported as
         # a protocol result. Nothing to read means an assertion mismatch, which is the protocol
         # bucket.
+        # Prefer the machine-readable code: an extraction failure records ``input_invalid`` on the
+        # stage while the cause (``llm.invocation_failed``) only exists in the run log, which is how
+        # case 7 was once reported as a protocol result.
+        code = item.get("errorCode")
         text = _failure_text(item)
-        bucket = _classify(text) if text else BUCKET_PROTOCOL
+        bucket = _classify(str(code)) if isinstance(code, str) and code else (
+            _classify(text) if text else BUCKET_PROTOCOL
+        )
         buckets.setdefault(bucket, []).append(
             f"{item.get('caseId')}/{item.get('protocol')}"
         )

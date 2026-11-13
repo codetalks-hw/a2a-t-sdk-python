@@ -167,3 +167,86 @@ def test_report_reads_stage_messages_when_the_item_has_no_error(tmp_path: Path) 
     report = build_report(batch, runs_dir=tmp_path)
 
     assert "| infra | 1 | 2/a2a-t |" in report
+
+
+def test_report_states_the_recorded_manifest(tmp_path: Path) -> None:
+    """A batch must carry the profile it ran under, not leave it to the reader's memory."""
+    batch = _batch()
+    batch["settings"] = {
+        "modelLabel": "mass/volcengine/deepseek-v4.1-flash",
+        "llmExtraBody": '{"reasoning_effort":"none"}',
+        "pureAnswerSource": "agent",
+        "a2atAnswerSource": "agent",
+        "gitHead": "5d2eac4aaaaabbbbbcccccddddd",
+        "gitDirty": False,
+        "simulator": {"rate_policy": "optional", "missing_items": True},
+    }
+
+    report = build_report(batch, runs_dir=None)
+
+    assert "mass/volcengine/deepseek-v4.1-flash" in report
+    assert "| 模型 / 思考 |" in report and "关" in report
+    assert "| 答源（pure / a2at） | agent / agent |" in report
+    assert "rate_policy=optional" in report
+    assert "5d2eac4aaaaa" in report
+
+
+def test_report_marks_a_batch_without_a_manifest(tmp_path: Path) -> None:
+    """An unrecorded profile is stated, never silently omitted."""
+    report = build_report(_batch(), runs_dir=None)
+
+    assert "未记录" in report
+    assert "不可复核" in report
+
+
+def test_report_warns_when_the_two_arms_use_different_answer_sources() -> None:
+    """A real agent against a replayed perfect answer is not a protocol comparison."""
+    batch = _batch()
+    batch["pureAnswerSource"] = "agent"
+    batch["a2atAnswerSource"] = "script"
+
+    report = build_report(batch, runs_dir=None)
+
+    assert "**非对称**" in report
+    assert "不能作为协议结论" in report
+
+
+def test_report_buckets_by_the_error_code_when_the_stage_message_is_generic() -> None:
+    """``input_invalid`` alone blames the protocol; the code behind it names the real owner."""
+    batch = _batch()
+    batch["items"] = [
+        {
+            "caseId": 7,
+            "protocol": "a2a-t",
+            "status": "failed",
+            "runId": None,
+            "error": None,
+            "errorCode": "llm.invocation_failed",
+            "stages": {"accepted": {"status": "failed", "message": "input_invalid"}},
+        }
+    ]
+    batch["pairs"] = []
+
+    report = build_report(batch, runs_dir=None)
+
+    assert "| infra | 1 | 7/a2a-t |" in report
+    assert "| protocol |" not in report
+
+
+def test_cost_table_states_why_tokens_are_missing() -> None:
+    """A mean over 20 of 28 items must say what the other 8 were."""
+    batch = _batch()
+    batch["items"] = [
+        {
+            "caseId": 1,
+            "protocol": "a2a",
+            "status": "passed",
+            "tokens": {"available": False, "total": None, "unavailableReason": "no_llm_call"},
+            "stages": {},
+        }
+    ]
+    batch["pairs"] = []
+
+    report = build_report(batch, runs_dir=None)
+
+    assert "no_llm_call×1" in report

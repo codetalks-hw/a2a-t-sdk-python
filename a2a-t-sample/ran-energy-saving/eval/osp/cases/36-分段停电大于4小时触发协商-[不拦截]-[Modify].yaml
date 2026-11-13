@@ -98,6 +98,9 @@ expect:
       negotiation:
         expected: true
         expected_rounds: 1
+        # Both outage windows must end at the agreed rate. A pass/fail count cannot see the second
+        # segment: the simulator reads only the first rate (2026-11-13, case 36).
+        accepted_target: "{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}"
         kinds:
           - feasibility
         rounds:
@@ -115,6 +118,7 @@ expect:
       negotiation:
         expected: true
         expected_rounds: 3
+        accepted_target: "{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}"
         kinds: null
         rounds:
           - |-

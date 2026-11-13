@@ -698,6 +698,9 @@ class ClientFlowResult:
         reports: Report artifact payloads in arrival order (a two-phase run has a baseline report
             and the modified report).
         error: Operator-facing reason of a terminal state that is not a task outcome.
+        error_code: Machine-readable code behind ``error`` (an SDK validation code such as
+            ``llm.invocation_failed``). Reports bucket a failure by this code instead of guessing
+            from the operator-facing text.
     """
 
     events: list[dict[str, object]] = field(default_factory=list)
@@ -708,6 +711,7 @@ class ClientFlowResult:
     report: dict[str, object] | None = None
     reports: list[dict[str, object]] = field(default_factory=list)
     error: str | None = None
+    error_code: str | None = None
 
 
 def is_terminal_event(event: Mapping[str, object]) -> bool:
@@ -1225,6 +1229,7 @@ async def run_client_flow(
         emit_validation(validation, "", task_template_uri, initial_phase)
         blocked = ClientFlowResult()
         blocked.final_state = FINAL_STATE_INPUT_INVALID
+        blocked.error_code = getattr(error, "code", None) or "slot.generation_failed"
         _fill_result(blocked, target_context_id if modify_only else None)
         return blocked
     prompt_text = _require_prompt_text(prompt_content, "the initial Task-T prompt")
@@ -1300,6 +1305,7 @@ async def run_client_flow(
                 # Nothing is sent and no negotiation starts: the operator repairs the request first.
                 blocked = ClientFlowResult()
                 blocked.final_state = FINAL_STATE_INPUT_INVALID
+                blocked.error_code = validation.reason
                 _fill_result(blocked, None)
                 return blocked
         elif required_unknown or validation.reason in {"content.param_missing", "content.value_mismatch"}:
@@ -1308,6 +1314,7 @@ async def run_client_flow(
             emit_validation(validation, prompt_text, task_template_uri, initial_phase)
             blocked = ClientFlowResult()
             blocked.final_state = FINAL_STATE_INPUT_INVALID
+            blocked.error_code = validation.reason
             _fill_result(blocked, None)
             return blocked
     if on_intent_ready is not None and not await on_intent_ready(prompt_text):

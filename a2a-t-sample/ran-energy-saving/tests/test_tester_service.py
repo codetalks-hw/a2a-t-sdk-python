@@ -15,6 +15,8 @@ import pytest
 from a2a_t.core.errors.catalog import ErrorCatalog
 from a2a_t.core.errors.exceptions import ContentValidationError
 from demo.web.tester.service import (
+    A2AT_ANSWER_SOURCE_AGENT,
+    A2AT_ANSWER_SOURCE_SCRIPT,
     ALL_STAGES,
     CASE_CANCELLED,
     CASE_ERROR,
@@ -22,6 +24,7 @@ from demo.web.tester.service import (
     CASE_PARTIAL,
     CASE_PASSED,
     DECISION_MODE_LIVE,
+    PURE_ANSWER_SOURCE_AGENT,
     STAGE_ERROR,
     STAGE_FAILED,
     STAGE_PASSED,
@@ -33,6 +36,7 @@ from demo.web.tester.service import (
     StageResult,
     _apply_assertion,
     _Batch,
+    _paired_rows,
     _pairs,
 )
 from eval.osp.catalog import PROTOCOL_A2A, PROTOCOL_A2A_T, CaseCatalog
@@ -381,6 +385,163 @@ async def test_pure_issue_mode_still_records_the_round_count(tmp_path: Path) -> 
     assert item.stages["negotiate"].status == STAGE_RECORDED
 
 
+async def test_fewer_rounds_than_the_oracle_passes(tmp_path: Path) -> None:
+    """``expected_rounds`` encodes the prose dialogue; converging earlier is better, not failed."""
+    manager = _manager(
+        tmp_path, _FakeRuns(_finish), nms_sim=True, nms_sim_pure_question="confirm"
+    )
+    run = RunState(run_id="run", scenario="night", mode=MODE_SCRIPTED, transport="sse")
+    run.status = "finished"
+    run.proposals.append(SimpleNamespace(kind="feasibility"))  # type: ignore[arg-type]
+    item = CaseItem(case_id=32, name="case", protocol=PROTOCOL_A2A)
+    batch = _Batch(
+        batch_id="batch",
+        case_ids=[32],
+        protocols=[PROTOCOL_A2A],
+        stop_after="negotiate",
+        approval=None,
+        timeout_seconds=1.0,
+        items=[item],
+    )
+
+    await manager._wait_for_stage(
+        run,
+        item,
+        batch,
+        ("negotiate",),
+        case=CASES[32],
+        timeout_seconds=1.0,
+        working_timeout_seconds=1.0,
+    )
+
+    stage = item.stages["negotiate"]
+    assert stage.status == STAGE_PASSED
+    assert stage.expected == {"rounds": 2, "minRounds": 1, "kinds": None}
+    assert stage.actual is not None
+
+
+def _target_case(expected_target: str, *, exact: bool = False) -> dict[str, Any]:
+    """Return a minimal case that asserts the target the client sent."""
+    return {
+        "id": 99,
+        "name": "synthetic",
+        "expect": {
+            "protocols": {
+                PROTOCOL_A2A_T: {
+                    "send": True,
+                    "negotiation": {
+                        "expected_rounds": 1,
+                        "kinds": ["feasibility"],
+                        "accepted_target": expected_target,
+                        **({"accepted_target_exact": True} if exact else {}),
+                    },
+                }
+            }
+        },
+    }
+
+
+async def _run_target_stage(tmp_path: Path, case: dict[str, Any], sent: str) -> StageResult:
+    """Run one negotiate stage whose last outbound message carried ``sent``."""
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+    run = RunState(run_id="run", scenario="night", mode=MODE_SCRIPTED, transport="sse")
+    run.status = "finished"
+    run.proposals.append(SimpleNamespace(kind="feasibility"))  # type: ignore[arg-type]
+    run.traces.append({"kind": "message_sent", "detail": {"summary": sent}})
+    item = CaseItem(case_id=99, name="case", protocol=PROTOCOL_A2A_T)
+    batch = _Batch(
+        batch_id="batch",
+        case_ids=[99],
+        protocols=[PROTOCOL_A2A_T],
+        stop_after="negotiate",
+        approval=None,
+        timeout_seconds=1.0,
+        items=[item],
+    )
+
+    await manager._wait_for_stage(
+        run,
+        item,
+        batch,
+        ("negotiate",),
+        case=case,
+        timeout_seconds=1.0,
+        working_timeout_seconds=1.0,
+    )
+    return item.stages["negotiate"]
+
+
+async def test_a_segmented_target_left_at_the_rejected_rate_fails(tmp_path: Path) -> None:
+    """The simulator reads the first rate only, so the assertion must read every segment."""
+    case = _target_case("{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}")
+
+    stage = await _run_target_stage(
+        tmp_path,
+        case,
+        "Rate guarantee target: {08:00-10:00,2Mbps}, {15:00-18:00,10Mbps}.",
+    )
+
+    assert stage.status == STAGE_FAILED
+    assert stage.message == "协商后被接受的目标与预期不一致。"
+    assert stage.actual is not None
+    assert stage.actual["targets"] == ["{08:00-10:00,2Mbps}", "{15:00-18:00,10Mbps}"]
+
+
+async def test_both_segments_at_the_agreed_rate_pass(tmp_path: Path) -> None:
+    case = _target_case("{08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}")
+
+    stage = await _run_target_stage(
+        tmp_path,
+        case,
+        "Rate guarantee target: {08:00-10:00,2Mbps}, {15:00-18:00,2Mbps}.",
+    )
+
+    assert stage.status == STAGE_PASSED
+
+
+async def test_an_exact_target_rejects_an_extra_segment(tmp_path: Path) -> None:
+    case = _target_case("{08:00-10:00,2Mbps}", exact=True)
+
+    stage = await _run_target_stage(
+        tmp_path,
+        case,
+        "Rate guarantee target: {08:00-10:00,2Mbps}, {15:00-18:00,10Mbps}.",
+    )
+
+    assert stage.status == STAGE_FAILED
+
+
+async def test_no_rounds_when_a_negotiation_was_expected_still_fails(tmp_path: Path) -> None:
+    """The upper bound must not turn a skipped negotiation into a pass."""
+    manager = _manager(
+        tmp_path, _FakeRuns(_finish), nms_sim=True, nms_sim_pure_question="confirm"
+    )
+    run = RunState(run_id="run", scenario="night", mode=MODE_SCRIPTED, transport="sse")
+    run.status = "finished"
+    item = CaseItem(case_id=32, name="case", protocol=PROTOCOL_A2A)
+    batch = _Batch(
+        batch_id="batch",
+        case_ids=[32],
+        protocols=[PROTOCOL_A2A],
+        stop_after="negotiate",
+        approval=None,
+        timeout_seconds=0.2,
+        items=[item],
+    )
+
+    await manager._wait_for_stage(
+        run,
+        item,
+        batch,
+        ("negotiate",),
+        case=CASES[32],
+        timeout_seconds=0.2,
+        working_timeout_seconds=0.2,
+    )
+
+    assert item.stages["negotiate"].status == STAGE_FAILED
+
+
 async def test_accepted_fails_fast_when_the_run_ended_before_sending(tmp_path: Path) -> None:
     manager = _manager(tmp_path, _FakeRuns(_finish))
     run = RunState(run_id="run", scenario="night", mode=MODE_SCRIPTED, transport="sse")
@@ -547,6 +708,80 @@ async def test_an_a2a_item_has_no_sdk_stages(tmp_path: Path) -> None:
         assert stage not in stages
     assert stages["accepted"]["status"] == STAGE_PASSED
     assert stages["working"]["status"] == STAGE_PASSED
+
+
+async def test_a_started_batch_records_the_profile_it_ran_under(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch must carry its own manifest; a number without it is not comparable."""
+    monkeypatch.setenv("A2AT_LLM_EXTRA_BODY", '{"reasoning_effort":"none"}')
+    manager = _manager(tmp_path, _FakeRuns(_finish))
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A],
+        stop_after="final",
+        approval=None,
+        timeout_seconds=2,
+        pure_answer_source="agent",
+        a2at_answer_source="agent",
+    )
+    assert created["settings"] == {}
+
+    await manager.start(str(created["batchId"]))
+    finished = await _wait_status(manager, str(created["batchId"]), "finished")
+
+    settings = finished["settings"]
+    assert isinstance(settings, Mapping)
+    assert settings["llmExtraBody"] == '{"reasoning_effort":"none"}'
+    assert settings["pureAnswerSource"] == "agent"
+    assert settings["a2atAnswerSource"] == "agent"
+    assert settings["modelMode"] == "offline"
+    assert settings["nmsSim"] is False
+    assert "gitHead" in settings
+
+
+def test_paired_rows_are_incomparable_when_the_two_arms_answered_differently() -> None:
+    """A live agent against a replayed perfect answer is not a protocol comparison."""
+    items = [
+        CaseItem(case_id=1, name="case", protocol=PROTOCOL_A2A_T),
+        CaseItem(case_id=1, name="case", protocol=PROTOCOL_A2A),
+    ]
+    batch = _Batch(
+        batch_id="batch",
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T, PROTOCOL_A2A],
+        stop_after="accepted",
+        approval=None,
+        timeout_seconds=1.0,
+        items=items,
+        pure_answer_source=PURE_ANSWER_SOURCE_AGENT,
+        a2at_answer_source=A2AT_ANSWER_SOURCE_SCRIPT,
+    )
+
+    rows = _paired_rows(batch)
+
+    assert rows and rows[0]["comparable"] is False
+    assert rows[0]["nonComparableReason"] == "answer-source"
+
+
+def test_paired_rows_stay_comparable_when_both_arms_match() -> None:
+    items = [
+        CaseItem(case_id=1, name="case", protocol=PROTOCOL_A2A_T),
+        CaseItem(case_id=1, name="case", protocol=PROTOCOL_A2A),
+    ]
+    batch = _Batch(
+        batch_id="batch",
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T, PROTOCOL_A2A],
+        stop_after="accepted",
+        approval=None,
+        timeout_seconds=1.0,
+        items=items,
+        pure_answer_source=PURE_ANSWER_SOURCE_AGENT,
+        a2at_answer_source=A2AT_ANSWER_SOURCE_AGENT,
+    )
+
+    assert _paired_rows(batch)[0]["comparable"] is True
 
 
 def test_a2a_with_an_sdk_only_stop_stage_is_rejected(tmp_path: Path) -> None:
