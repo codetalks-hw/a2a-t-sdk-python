@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from a2a.client.client import ClientCallContext
 from a2a.types import SendMessageRequest
+from demo.approval_answer import approval_answer
+from protocol.messages import metadata_to_dict
 from protocol.pure_client_flow import (
     continue_pure_client_flow,
     pure_proposal_view,
     run_pure_client_flow,
+)
+from shared.approval import (
+    APPROVAL_METADATA_KEY,
+    OUTCOME_APPROVE,
+    OUTCOME_REJECT,
+    REASON_OPERATOR_DECLINED,
+    ApprovalRequest,
+    plan_digest,
+    read_approval_decision,
 )
 from shared.run_constants import (
     FINAL_STATE_INCOMPLETE,
@@ -346,6 +357,75 @@ async def test_an_approval_input_required_is_not_answered() -> None:
 
     assert len(transport.requests) == 1
     assert result.final_state != FINAL_STATE_TASK_COMPLETED
+
+
+def _approval_request() -> ApprovalRequest:
+    return ApprovalRequest(
+        approval_id="apv-1",
+        plan_digest=plan_digest({"region": "A2ATestRegion", "rateMbps": 5.0}),
+        summary="Create A2ATestRegion at 5 Mbps.",
+        task_id="task-1",
+    )
+
+
+def _approval_event() -> dict[str, object]:
+    event = _input_required()
+    event["metadata"] = _approval_request().to_metadata()
+    return event
+
+
+async def test_an_approval_request_is_answered_with_a_decision() -> None:
+    """S6: the answer is the decision object, not a prose answer to a question."""
+    request = _approval_request()
+    event = _approval_event()
+    transport = _FakeTransport([[event], [_completed()]])
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        answer=lambda pending: "should not be used",
+        approval_answer=approval_answer(OUTCOME_APPROVE),
+    )
+
+    assert len(transport.requests) == 2
+    metadata = metadata_to_dict(transport.requests[1][0].message.metadata)
+    decision = read_approval_decision(metadata)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_APPROVE
+    assert decision.approval_id == request.approval_id
+    assert decision.plan_digest == request.plan_digest
+    assert transport.requests[1][0].message.task_id == "task-1"
+
+
+async def test_an_approval_request_without_a_policy_is_not_answered() -> None:
+    """No callback means no invented approval: the Task stays waiting."""
+    transport = _FakeTransport([[_approval_event()]])
+
+    result = await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        answer=lambda pending: "should not be sent",
+    )
+
+    assert len(transport.requests) == 1
+    assert result.final_state != FINAL_STATE_TASK_COMPLETED
+
+
+async def test_a_rejecting_policy_sends_the_reason_code() -> None:
+    transport = _FakeTransport([[_approval_event()], [_completed()]])
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        approval_answer=approval_answer(OUTCOME_REJECT),
+    )
+
+    metadata = metadata_to_dict(transport.requests[1][0].message.metadata)
+    decision = read_approval_decision(metadata)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_REJECT
+    assert decision.reason_code == REASON_OPERATOR_DECLINED
+    assert APPROVAL_METADATA_KEY in metadata
 
 
 def test_the_proposal_view_reads_the_kind_the_oss_forwarded() -> None:

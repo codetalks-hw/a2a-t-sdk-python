@@ -25,11 +25,28 @@ from a2a_t.core.metadata import (
     NEGOTIATION_T_EXTENSION_URI,
     TASK_T_EXTENSION_URI,
 )
+from shared.approval import (
+    APPROVAL_METADATA_KEY,
+    OUTCOME_REJECT,
+    REASON_EXPIRED,
+    VERIFY_EXPIRED,
+    VERIFY_UNKNOWN,
+    ApprovalDecision,
+    read_approval_decision,
+    read_approval_request,
+    verify_decision,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
 
 from demo import ran_data
+from demo.nms_sim.approval import (
+    APPROVAL_PENDING_TEXT,
+    build_request,
+    intent_from_plan,
+    plan_for,
+)
 from demo.nms_sim.config import (
     CARRIER_TASK,
     PURE_FAILURE_COMPLETED,
@@ -183,6 +200,8 @@ def build_routes(
             "feasibility_rate_mbps": config.feasibility_rate_mbps,
             "pure_question": config.pure_question,
             "missing_items": config.missing_items,
+            "approval": config.approval,
+            "approval_ttl_seconds": config.approval_ttl_seconds,
             "max_saving_rate": config.max_saving_rate,
             "window": config.window,
         }
@@ -509,9 +528,138 @@ def build_routes(
             )
         except PushConfigExistsError as exc:
             return _register_config_error(exc)
+        hold = config.hold_working and is_new
+        if config.approval:
+            return _request_approval(task, intent, stream=stream, hold=hold)
         if stream:
-            return _stream_completion(task, intent, hold=config.hold_working and is_new)
-        return _json_completion(task, intent, hold=config.hold_working and is_new, push=push)
+            return _stream_completion(task, intent, hold=hold)
+        return _json_completion(task, intent, hold=hold, push=push)
+
+    # ---------------------------------------------------------------- approval (S6)
+
+    def _request_approval(
+        task: SimTask,
+        intent: ParsedIntent,
+        *,
+        stream: bool,
+        hold: bool = False,
+    ) -> Response:
+        """Park an accepted plan in ``INPUT_REQUIRED`` until a plan-bound decision arrives."""
+        request = build_request(
+            intent, task_id=task.task_id, ttl_seconds=config.approval_ttl_seconds
+        )
+        task.approval_request = request.to_dict()
+        task.approval_plan = plan_for(intent)
+        task.approval_decision = None
+        task.pure_hold = hold
+        resolved_store.update(
+            task.task_id,
+            state=TASK_INPUT_REQUIRED,
+            message=APPROVAL_PENDING_TEXT,
+            metadata=request.to_metadata(),
+        )
+        return _approval_response(task, stream=stream)
+
+    def _approval_response(task: SimTask, *, stream: bool) -> Response:
+        """Return the current state of a Task that is waiting for (or finished) an approval."""
+        if stream:
+            return StreamingResponse(
+                status_stream(task, config=config, keep_open=False),
+                media_type=EVENT_STREAM,
+                headers={"Cache-Control": "no-cache"},
+            )
+        return JSONResponse({"task": task.to_dict(embedded=True)}, status_code=200)
+
+    def _handle_approval_decision(
+        body: Mapping[str, object],
+        decision: ApprovalDecision,
+        *,
+        stream: bool,
+        protocol: str,
+    ) -> Response:
+        """Apply one decision to the Task that asked for it.
+
+        Identity and plan are checked before the clock, and a decision that does not match leaves
+        the Task waiting: executing it would apply an approval to something nobody approved.
+        """
+        requested = _requested_task_id(body)
+        context_id = _context_id(body)
+        task = (
+            resolved_store.get(requested)
+            if requested
+            else resolved_store.find_by_context(context_id) if context_id else None
+        )
+        if task is None:
+            metrics.outcome(protocol, OUTCOME_INVALID)
+            return JSONResponse(
+                {"error": {"code": 409, "message": VERIFY_UNKNOWN}}, status_code=409
+            )
+        if task.approval_decision is not None:
+            # A repeated decision is idempotent: the Task keeps the terminal state it reached.
+            return _approval_response(task, stream=stream)
+        if not isinstance(task.approval_request, Mapping):
+            metrics.outcome(protocol, OUTCOME_INVALID)
+            return JSONResponse(
+                {"error": {"code": 409, "message": VERIFY_UNKNOWN}}, status_code=409
+            )
+        request = read_approval_request({APPROVAL_METADATA_KEY: task.approval_request})
+        if request is None:
+            metrics.outcome(protocol, OUTCOME_INVALID)
+            return JSONResponse(
+                {"error": {"code": 409, "message": VERIFY_UNKNOWN}}, status_code=409
+            )
+        failure = verify_decision(request, decision)
+        if failure is not None:
+            task.approval_decision = ApprovalDecision(
+                approval_id=request.approval_id,
+                plan_digest=request.plan_digest,
+                outcome=OUTCOME_REJECT,
+                reason_code=REASON_EXPIRED if failure == VERIFY_EXPIRED else failure,
+                reason=f"The approval could not be applied: {failure}.",
+            ).to_dict()
+            if failure == VERIFY_EXPIRED:
+                # An expired request is terminal: the plan must be re-requested, not resumed.
+                task.approval_request = None
+                resolved_store.update(
+                    task.task_id,
+                    state=TASK_REJECTED,
+                    message="The approval request expired before a decision arrived.",
+                    metadata={APPROVAL_METADATA_KEY: task.approval_decision},
+                )
+                metrics.outcome(protocol, OUTCOME_REJECTED)
+            else:
+                task.approval_decision = None
+                resolved_store.update(
+                    task.task_id,
+                    state=TASK_INPUT_REQUIRED,
+                    message=f"{APPROVAL_PENDING_TEXT} ({failure})",
+                    metadata={
+                        **request.to_metadata(),
+                        "a2at-sample/approval-error": failure,
+                    },
+                )
+                metrics.outcome(protocol, OUTCOME_INVALID)
+            return _approval_response(task, stream=stream)
+        task.approval_decision = decision.to_dict()
+        if decision.outcome == OUTCOME_REJECT:
+            task.approval_request = None
+            resolved_store.update(
+                task.task_id,
+                state=TASK_REJECTED,
+                message=decision.reason or "The plan was rejected.",
+                metadata={APPROVAL_METADATA_KEY: task.approval_decision},
+            )
+            metrics.outcome(protocol, OUTCOME_REJECTED)
+            return _approval_response(task, stream=stream)
+        plan = task.approval_plan if isinstance(task.approval_plan, Mapping) else {}
+        task.approval_request = None
+        intent = intent_from_plan(plan)
+        hold = config.hold_working and task.pure_hold
+        if stream:
+            return _stream_completion(task, intent, hold=hold)
+        return _json_completion(
+            task, intent, hold=hold, push=registry.for_task(task.task_id)
+        )
 
     def _finish_reject(
         session: NegotiationSession,
@@ -659,9 +807,12 @@ def build_routes(
                 return _register_config_error(exc)
             intent = parse_message_request(body, request.headers, config)
             metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
+            hold = config.hold_working and is_new
+            if config.approval:
+                return _request_approval(task, intent, stream=stream, hold=hold)
             if stream:
-                return _stream_completion(task, intent, hold=config.hold_working and is_new)
-            return _json_completion(task, intent, hold=config.hold_working and is_new, push=push)
+                return _stream_completion(task, intent, hold=hold)
+            return _json_completion(task, intent, hold=hold, push=push)
         task = resolved_store.get(requested_task_id) if requested_task_id else None
         if task is None and request_config is not None and config.negotiation_carrier != CARRIER_TASK:
             registry.remember_pending(context_id, request_config)
@@ -774,6 +925,8 @@ def build_routes(
             return _pure_issue(task, issue, content, stream=stream, is_answer=is_answer)
         metrics.outcome(PROTOCOL_A2A, OUTCOME_ACCEPTED)
         intent = accepted_intent(content, None, config)
+        if config.approval:
+            return _request_approval(task, intent, stream=stream, hold=task.pure_hold)
         if stream:
             # The pure stream owns the same rehearsal switch as the webhook path: a held Task must
             # publish its report and stay WORKING so the Modify picker can select it.
@@ -892,10 +1045,18 @@ def build_routes(
         body = await _json_body(request)
         if body is None:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        if _is_pure_request(body, request):
-            metrics.request(PROTOCOL_A2A)
+        pure = _is_pure_request(body, request)
+        protocol = PROTOCOL_A2A if pure else PROTOCOL_A2A_T
+        metrics.request(protocol)
+        # An approval decision is a normal message to an existing Task on both protocols; dispatch
+        # it before the negotiation/question handling so it cannot be read as another answer.
+        decision = read_approval_decision(_message_metadata(body))
+        if decision is not None:
+            return _handle_approval_decision(
+                body, decision, stream=stream, protocol=protocol
+            )
+        if pure:
             return _pure_request(body, request, stream=stream)
-        metrics.request(PROTOCOL_A2A_T)
         return _a2a_t_request(body, request, stream=stream)
 
     async def send_message(request: Request) -> Response:

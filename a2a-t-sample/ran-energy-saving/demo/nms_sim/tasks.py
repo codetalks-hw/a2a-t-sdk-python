@@ -70,6 +70,12 @@ class SimTask:
     #: Whether the current pure exchange should leave this Task WORKING after it completes.
     #: A Modify starts a new exchange and clears the flag.
     pure_hold: bool = False
+    #: S6 approval state: the request the Task is waiting for, the plan it approves (canonical
+    #: form, used to rebuild the intent on approval), and the decision that was applied. Kept as
+    #: plain documents so the store has no dependency on the approval envelope types.
+    approval_request: dict[str, object] | None = None
+    approval_plan: dict[str, object] | None = None
+    approval_decision: dict[str, object] | None = None
 
     def touch(self) -> None:
         """Refresh the millisecond timestamp."""

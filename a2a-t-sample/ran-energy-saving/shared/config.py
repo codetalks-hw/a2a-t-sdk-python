@@ -15,7 +15,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from dotenv import dotenv_values
 
@@ -148,6 +148,10 @@ PURE_AUTO_TIER_ENV_KEY = "A2AT_SAMPLE_PURE_AUTO_TIER"
 #: model turn. Off by default: the annex answer is prose and cannot yet fill every segment of a
 #: segmented plan, so it is an experiment, not the shipped decision path.
 ENVELOPE_DECISION_ENV_KEY = "A2AT_SAMPLE_ENVELOPE_DECISION"
+#: S6: how the client answers an ``a2at-sample/approval`` request. ``off`` leaves the Task waiting;
+#: ``approve``/``reject`` answer it deterministically, so a S6 run does not need a human.
+APPROVAL_ANSWER_ENV_KEY = "A2AT_SAMPLE_APPROVAL_ANSWER"
+SUPPORTED_APPROVAL_ANSWERS: Final[tuple[str, ...]] = ("off", "approve", "reject")
 HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
 LLM_MAX_ATTEMPTS_ENV_KEY = "A2AT_SAMPLE_LLM_MAX_ATTEMPTS"
@@ -566,6 +570,17 @@ def _env_bool(values: dict[str, str | None], key: str, default: bool) -> bool:
     raise ValueError(f"Invalid boolean value for {key}: {raw_value}")
 
 
+def _approval_answer(values: dict[str, str | None]) -> str:
+    """Resolve the client's approval policy; an unknown value is a configuration error."""
+    answer = _env_value(values, APPROVAL_ANSWER_ENV_KEY, "off").strip().lower()
+    if answer not in SUPPORTED_APPROVAL_ANSWERS:
+        raise ValueError(
+            f"Invalid {APPROVAL_ANSWER_ENV_KEY}: {answer!r}; "
+            f"expected one of {SUPPORTED_APPROVAL_ANSWERS}"
+        )
+    return answer
+
+
 def _optional_positive_float(values: dict[str, str | None], key: str) -> float | None:
     """Resolve an optional strictly positive number; unset means ``None``."""
     raw_value = os.environ.get(key)
@@ -809,6 +824,8 @@ class SampleConfig:
     pure_auto_tier: str = DEFAULT_PURE_AUTO_TIER
     #: Answer an A2A-T proposal from the structured annex instead of a model turn.
     envelope_decision: bool = False
+    #: How the client answers an approval request: ``off`` / ``approve`` / ``reject``.
+    approval_answer: str = "off"
     gateway_task_db_path: str | None = None
     auth_token: str = ""
     server_auth_token: str = ""
@@ -1102,6 +1119,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         pure_message_mode=_pure_message_mode(values),
         pure_auto_tier=_pure_auto_tier(values),
         envelope_decision=_env_bool(values, ENVELOPE_DECISION_ENV_KEY, False),
+        approval_answer=_approval_answer(values),
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
         auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         server_auth_token=_env_value(values, SERVER_AUTH_TOKEN_ENV_KEY, "").strip(),

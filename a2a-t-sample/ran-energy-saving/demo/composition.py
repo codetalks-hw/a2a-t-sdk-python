@@ -29,6 +29,7 @@ from shared.config import (
 from shared.models import NegotiationDecision
 from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
 
+from demo.approval_answer import approval_answer
 from demo.envelope_decision import EnvelopeDecisionProvider
 
 
@@ -190,6 +191,12 @@ async def build_demo_runtime(
         decision_provider_factory=(
             _envelope_provider_factory(policy)
             if protocol == PROTOCOL_A2A_T and config.envelope_decision
+            else None
+        ),
+        # S6: the approval outcome is policy, so it is supplied here rather than inside the flow.
+        approval_answer=(
+            approval_answer(config.approval_answer)
+            if config.approval_answer != "off"
             else None
         ),
     )

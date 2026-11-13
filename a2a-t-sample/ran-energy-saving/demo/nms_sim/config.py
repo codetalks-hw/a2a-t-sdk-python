@@ -44,6 +44,13 @@ PURE_QUESTION_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_PURE_QUESTION"
 #: prose the vendor sends. Off by default so the prose-only baseline stays reproducible.
 MISSING_ITEMS_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_MISSING_ITEMS"
 
+#: S6: park an accepted plan in ``INPUT_REQUIRED`` and wait for a plan-bound approval decision
+#: before executing it. Off by default so the accepted-then-completed baseline stays reproducible.
+APPROVAL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL"
+#: Lifetime of one approval request, in seconds. An answer after this is ``approval-expired``.
+APPROVAL_TTL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL_TTL_SECONDS"
+DEFAULT_APPROVAL_TTL_SECONDS: Final[float] = 900.0
+
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
 WINDOW_POLICY_ANY: Final[str] = "any"
@@ -143,6 +150,9 @@ class SimConfig:
         missing_items: Attach a machine-readable missing-item list to every question and to every
             Negotiation-T proposal (evolution candidate E1).
         feasibility_rate_mbps: Highest rate the cell can guarantee through a long outage.
+        approval: Park an accepted plan in ``INPUT_REQUIRED`` until a plan-bound approval decision
+            arrives (S6).
+        approval_ttl_seconds: Lifetime of one approval request.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -170,6 +180,8 @@ class SimConfig:
     pure_question: str = PURE_QUESTION_ISSUE
     missing_items: bool = False
     feasibility_rate_mbps: float = FEASIBILITY_RATE_MBPS
+    approval: bool = False
+    approval_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -272,6 +284,10 @@ class SimConfig:
             long_outage_feasibility=_truthy(os.environ.get(LONG_OUTAGE_FEASIBILITY_ENV_KEY, "")),
             pure_question=pure_question,
             missing_items=_truthy(os.environ.get(MISSING_ITEMS_ENV_KEY, "")),
+            approval=_truthy(os.environ.get(APPROVAL_ENV_KEY, "")),
+            approval_ttl_seconds=_seconds(
+                os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
+            ),
             feasibility_rate_mbps=_rate(
                 os.environ.get(FEASIBILITY_RATE_ENV_KEY, str(FEASIBILITY_RATE_MBPS))
             ),
@@ -295,6 +311,17 @@ def _rate(value: str) -> float:
     if rate < 0:
         raise ValueError(f"{FEASIBILITY_RATE_ENV_KEY} must not be negative")
     return rate
+
+
+def _seconds(value: str) -> float:
+    """Parse one non-negative duration in seconds."""
+    try:
+        seconds = float(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid {APPROVAL_TTL_ENV_KEY}: {value!r}") from exc
+    if seconds < 0:
+        raise ValueError(f"{APPROVAL_TTL_ENV_KEY} must not be negative")
+    return seconds
 
 
 def _parse_kinds(value: str) -> tuple[str, ...]:

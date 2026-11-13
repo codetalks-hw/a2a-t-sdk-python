@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from a2a.client.client import ClientCallContext
 from a2a.types import Role, SendMessageRequest
 from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from shared.approval import ApprovalDecision, ApprovalRequest, read_approval_request
 from shared.config import (
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     PURE_FOLLOWUP_BOTH,
@@ -62,6 +63,7 @@ async def run_pure_client_flow(
     message_ends_flow: bool = True,
     task_id: str | None = None,
     context_id: str | None = None,
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
 ) -> ClientFlowResult:
     """Send one pure A2A request and answer its ``INPUT_REQUIRED`` rounds.
 
@@ -82,6 +84,9 @@ async def run_pure_client_flow(
         task_id: Existing Task the message continues (a pure-A2A Modify). Standard A2A lets a
             non-terminal Task be continued; the peer forwards the text to its own downstream.
         context_id: Context paired with ``task_id``.
+        approval_answer: optional callback that answers an ``a2at-sample/approval`` request with a
+            decision. Without it an approval request is an observation, not a question: the flow
+            never invents an approval.
 
     The downstream correlation travels on the ``X-A2AT-Run-Id``/``traceparent`` headers (the
     propagation context), so the message itself carries no sample-local metadata.
@@ -120,6 +125,7 @@ async def run_pure_client_flow(
         default_task_id=task_id,
         default_context_id=context_id,
         message_ends_flow=message_ends_flow,
+        approval_answer=approval_answer,
     )
 
 
@@ -138,6 +144,7 @@ async def continue_pure_client_flow(
     followup: str = PURE_FOLLOWUP_BOTH,
     plain_questions: bool = False,
     message_ends_flow: bool = True,
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
 ) -> ClientFlowResult:
     """Answer a question the downstream asked after the original request phase ended.
 
@@ -172,6 +179,7 @@ async def continue_pure_client_flow(
         default_task_id=task_id,
         default_context_id=context_id,
         message_ends_flow=message_ends_flow,
+        approval_answer=approval_answer,
     )
 
 
@@ -219,10 +227,33 @@ async def _drive_negotiation(
     default_task_id: str | None = None,
     default_context_id: str | None = None,
     message_ends_flow: bool = True,
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
 ) -> ClientFlowResult:
     """Answer the negotiated rounds of one already-sent pure request."""
     rounds = 0
+    answered_approvals: set[str] = set()
     while rounds < max_rounds:
+        approval = _pending_approval(batch)
+        if approval is not None and approval_answer is not None:
+            event, request = approval
+            if request.approval_id in answered_approvals:
+                # The server did not apply the decision (stale, expired, unknown). Retrying the
+                # same answer would loop; report the state instead.
+                break
+            decision = approval_answer(request)
+            follow = _follow_up_request(
+                "approval decision",
+                task_id=_text(event.get("task_id")) or default_task_id,
+                context_id=_text(event.get("context_id")) or default_context_id,
+                followup=followup,
+                metadata=decision.to_metadata(),
+            )
+            _emit_message_sent(follow, "approval decision", trace_sink)
+            batch = await transport.send(follow, _call_context(call_timeout_seconds))
+            _collect(result, batch, event_sink, transport_emits_events)
+            answered_approvals.add(request.approval_id)
+            rounds += 1
+            continue
         pending = _pending_negotiation(batch, allow_plain_question=plain_questions)
         if pending is None:
             break
@@ -285,6 +316,7 @@ def _follow_up_request(
     task_id: str | None,
     context_id: str | None,
     followup: str = PURE_FOLLOWUP_BOTH,
+    metadata: Mapping[str, object] | None = None,
 ) -> SendMessageRequest:
     """Build the continuation message that resumes an ``INPUT_REQUIRED`` Task."""
     request = _message_request(text)
@@ -292,6 +324,10 @@ def _follow_up_request(
         request.message.task_id = task_id
     if context_id and followup in (PURE_FOLLOWUP_BOTH, PURE_FOLLOWUP_CONTEXT):
         request.message.context_id = context_id
+    for key, value in (metadata or {}).items():
+        if value is not None:
+            # The bundled protobuf stubs do not model the dynamic Struct mapping.
+            request.message.metadata[key] = value  # ty: ignore[invalid-assignment]
     return request
 
 
@@ -339,11 +375,34 @@ def _pending_negotiation(
             pure = pure_metadata(event)
             if pure.get("kind") == "approval":
                 continue
+            # A plan-bound approval request is a decision to make, not a question to answer in
+            # prose; the approval loop owns it.
+            metadata = event.get("metadata")
+            if isinstance(metadata, Mapping) and (
+                read_approval_request(metadata_to_dict(metadata)) is not None
+            ):
+                continue
             if pure and pure.get("kind") not in (None, "negotiation"):
                 continue
             return event
         if allow_plain_question and is_plain_question(event):
             return event
+    return None
+
+
+def _pending_approval(
+    events: list[dict[str, object]],
+) -> tuple[dict[str, object], ApprovalRequest] | None:
+    """Return the newest unanswered approval request carried by an ``INPUT_REQUIRED`` status."""
+    for event in reversed(events):
+        if event.get("kind") != "status" or event.get("state") != "TASK_STATE_INPUT_REQUIRED":
+            continue
+        metadata = event.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        request = read_approval_request(metadata_to_dict(metadata))
+        if request is not None:
+            return event, request
     return None
 
 

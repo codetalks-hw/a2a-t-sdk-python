@@ -37,6 +37,7 @@ from a2a_t.client.a2at_client import A2ATClient
 from a2a_t.core.metadata import NegotiationContext
 from dotenv import dotenv_values
 from shared.agent_card import AGENT_CARD_NAME, AGENT_CARD_ORGANIZATION
+from shared.approval import ApprovalDecision, ApprovalRequest
 from shared.config import (
     DISCOVERY_NMS,
     INTENT_MODE_PROCESSED,
@@ -453,6 +454,8 @@ class ClientRuntime:
     #: Liveness sink of this runtime (``None`` when the caller does not show wait states).
     activity_sink: ActivitySink | None = None
     pure_answer: Callable[[dict[str, object]], str | Awaitable[str]] | None = None
+    #: Answers one ``a2at-sample/approval`` request; ``None`` leaves the Task waiting.
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None
     intent_processor: IntentProcessor | None = None
     wire_log: HttpWireLog | None = None
     shared_webhook: SharedWebhook | None = None
@@ -731,6 +734,7 @@ class ClientRuntime:
                         # message must not end a Task that is still working.
                         plain_questions=direct_hop,
                         message_ends_flow=not direct_hop,
+                        approval_answer=self.approval_answer,
                     )
                 intent: ProcessedIntent | None = None
                 if processed:
@@ -907,6 +911,7 @@ async def build_client_runtime(
     decision_provider_factory: (
         Callable[[NegotiationDecisionProvider], NegotiationDecisionProvider] | None
     ) = None,
+    approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -932,6 +937,8 @@ async def build_client_runtime(
             processed mode falls back to the raw text.
         decision_provider_factory: optional last-step wrapper of the A2A-T decision provider, used
             by the composition root to answer a structured proposal before the agent is asked.
+        approval_answer: optional callback answering an ``a2at-sample/approval`` request; supplied
+            by the composition root because the outcome is business policy, not protocol.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -1155,6 +1162,7 @@ async def build_client_runtime(
             else None
         ),
         manual_structurer=manual_structurer,
+        approval_answer=approval_answer,
         _httpx_client=httpx_client,
         nms_client=nms_client,
         wire_log=wire_log if httpx_client is not None else None,

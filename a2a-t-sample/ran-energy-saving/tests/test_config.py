@@ -15,6 +15,7 @@ from shared.config import (
     ADK_OUTPUT_SCHEMA_WITH_TOOLS_FALSE,
     ADK_OUTPUT_SCHEMA_WITH_TOOLS_TRUE,
     ADK_SESSION_RETENTION_DAYS_ENV_KEY,
+    APPROVAL_ANSWER_ENV_KEY,
     APPROVAL_GATE_ENV_KEY,
     APPROVAL_TIMEOUT_ENV_KEY,
     CLIENT_DB_ENV_KEY,
@@ -1454,3 +1455,26 @@ def test_envelope_decision_reads_the_switch(tmp_path: Path) -> None:
     env_file.write_text("A2AT_SAMPLE_ENVELOPE_DECISION=1\n", encoding="utf-8")
 
     assert load_config(env_path=env_file).envelope_decision is True
+
+
+def test_approval_answer_is_off_by_default(tmp_path: Path) -> None:
+    """An approval is a human decision; the client only answers it when told to."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    assert load_config(env_path=env_file).approval_answer == "off"
+
+
+def test_approval_answer_reads_the_policy(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("A2AT_SAMPLE_APPROVAL_ANSWER=approve\n", encoding="utf-8")
+
+    assert load_config(env_path=env_file).approval_answer == "approve"
+
+
+def test_an_unknown_approval_answer_is_rejected(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("A2AT_SAMPLE_APPROVAL_ANSWER=maybe\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=APPROVAL_ANSWER_ENV_KEY):
+        load_config(env_path=env_file)
