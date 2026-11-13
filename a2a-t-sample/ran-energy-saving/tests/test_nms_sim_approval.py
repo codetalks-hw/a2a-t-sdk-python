@@ -322,6 +322,25 @@ async def test_a_repeated_decision_runs_the_plan_once() -> None:
         assert len(repeated_artifacts) == len(completed_artifacts) == 1
 
 
+async def test_a_client_that_only_echoes_the_digest_accepts_a_tampered_request() -> None:
+    """The plain-A2A failure mode: the digest is a server claim, so echoing it proves nothing."""
+    async for client in _client(_config(approval_tamper=True)):
+        token = await _token(client)
+        task, raw = await _accept_and_wait(client, token)
+
+        response = await client.post(
+            SEND_URL,
+            json=_decision_body(
+                _approve(raw), task_id=str(task["id"]), context_id=str(task["contextId"])
+            ),
+            headers=_headers(token),
+        )
+
+        assert response.status_code == 200, response.text
+        completed = await _wait_task(client, token, str(task["id"]))
+        assert _status(completed)["state"] == "TASK_STATE_COMPLETED"
+
+
 async def test_without_the_switch_an_accepted_plan_runs_immediately() -> None:
     """T6: an unaware peer keeps the old behaviour; the gate is opt-in."""
     async for client in _client(_config(approval=False)):
@@ -366,9 +385,11 @@ async def test_a_plain_a2a_plan_waits_for_the_same_object() -> None:
         assert _status(completed)["state"] == "TASK_STATE_COMPLETED"
 
 
-async def test_the_client_answers_the_request_and_the_task_completes() -> None:
-    """End to end: the pure client sees the request, answers it, and the Task finishes."""
-    config = _config(pure_question=PURE_QUESTION_ISSUE, rate_policy="optional")
+async def _run_pure_client(*, tamper: bool) -> object:
+    """Drive the pure client against the in-process simulator and return its result."""
+    config = _config(
+        pure_question=PURE_QUESTION_ISSUE, rate_policy="optional", approval_tamper=tamper
+    )
     http_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=build_sim_app(config)), base_url="http://sim"
     )
@@ -386,17 +407,36 @@ async def test_the_client_answers_the_request_and_the_task_completes() -> None:
     )
     transport = NmsSseTransport(nms, protocol="a2a")
     plain = "Implement energy saving in A2ATestRegion, guaranteed throughput 5 Mbps from 00:00 to 06:00."
+    try:
+        return await run_pure_client_flow(
+            transport=transport,
+            user_request=plain,
+            approval_answer=approval_answer(OUTCOME_APPROVE),
+            max_rounds=3,
+        )
+    finally:
+        await http_client.aclose()
 
-    result = await run_pure_client_flow(
-        transport=transport,
-        user_request=plain,
-        approval_answer=approval_answer(OUTCOME_APPROVE),
-        max_rounds=3,
-    )
+
+async def test_the_client_answers_the_request_and_the_task_completes() -> None:
+    """End to end: the pure client sees the request, answers it, and the Task finishes."""
+    result = await _run_pure_client(tamper=False)
 
     assert result.final_state == FINAL_STATE_TASK_COMPLETED
     assert any(_is_approval_event(event) for event in result.events)
-    await http_client.aclose()
+
+
+async def test_a_plain_client_executes_a_misstated_plan() -> None:
+    """The plain hop has no accepted document, so it can only echo the server's digest.
+
+    With the tamper switch the request names a plan the server will not execute; the client echoes
+    it, the server compares the decision with its own claim, and the Task completes. Nothing in the
+    exchange ever compared the approval with what was actually agreed.
+    """
+    result = await _run_pure_client(tamper=True)
+
+    assert result.final_state == FINAL_STATE_TASK_COMPLETED
+    assert any(_is_approval_event(event) for event in result.events)
 
 
 def _is_approval_event(event: Mapping[str, object]) -> bool:

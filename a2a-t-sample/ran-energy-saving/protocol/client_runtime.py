@@ -456,6 +456,9 @@ class ClientRuntime:
     pure_answer: Callable[[dict[str, object]], str | Awaitable[str]] | None = None
     #: Answers one ``a2at-sample/approval`` request; ``None`` leaves the Task waiting.
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None
+    #: Projects the accepted Task-T values to the canonical plan, so the client can verify that an
+    #: approval request refers to the plan it agreed to. ``None`` keeps the server's digest.
+    approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
     intent_processor: IntentProcessor | None = None
     wire_log: HttpWireLog | None = None
     shared_webhook: SharedWebhook | None = None
@@ -846,6 +849,7 @@ class ClientRuntime:
                     target_task_id=target_task_id,
                     target_context_id=target_context_id,
                     approval_answer=self.approval_answer,
+                    approval_plan=self.approval_plan,
                 )
         finally:
             if intent_task is not None and not intent_task.done():
@@ -913,6 +917,7 @@ async def build_client_runtime(
         Callable[[NegotiationDecisionProvider], NegotiationDecisionProvider] | None
     ) = None,
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
+    approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -940,6 +945,9 @@ async def build_client_runtime(
             by the composition root to answer a structured proposal before the agent is asked.
         approval_answer: optional callback answering an ``a2at-sample/approval`` request; supplied
             by the composition root because the outcome is business policy, not protocol.
+        approval_plan: optional projection from accepted Task-T values to the canonical plan; when
+            supplied the client verifies that an approval request refers to the plan it agreed to,
+            which only the structured A2A-T hop can do.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -1164,6 +1172,7 @@ async def build_client_runtime(
         ),
         manual_structurer=manual_structurer,
         approval_answer=approval_answer,
+        approval_plan=approval_plan,
         _httpx_client=httpx_client,
         nms_client=nms_client,
         wire_log=wire_log if httpx_client is not None else None,

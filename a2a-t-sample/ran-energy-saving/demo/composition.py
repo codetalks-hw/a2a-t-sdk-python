@@ -30,6 +30,7 @@ from shared.models import NegotiationDecision
 from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
 
 from demo.approval_answer import approval_answer
+from demo.approval_plan import plan_from_task_t
 from demo.envelope_decision import EnvelopeDecisionProvider
 
 
@@ -197,6 +198,13 @@ async def build_demo_runtime(
         approval_answer=(
             approval_answer(config.approval_answer)
             if config.approval_answer != "off"
+            else None
+        ),
+        # Only the A2A-T hop has an accepted Task-T to project; the plain hop keeps the server's
+        # digest, which is exactly the difference S6 measures.
+        approval_plan=(
+            plan_from_task_t
+            if config.approval_answer != "off" and protocol == PROTOCOL_A2A_T
             else None
         ),
     )

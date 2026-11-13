@@ -50,6 +50,10 @@ APPROVAL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL"
 #: Lifetime of one approval request, in seconds. An answer after this is ``approval-expired``.
 APPROVAL_TTL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL_TTL_SECONDS"
 DEFAULT_APPROVAL_TTL_SECONDS: Final[float] = 900.0
+#: Fault injection for the S6 comparison: ask approval for a plan whose digest does not match the
+#: plan that will be executed. A client that computes its own digest refuses it; one that can only
+#: echo the server's digest accepts it. Off by default; it is a measurement switch, not behaviour.
+APPROVAL_TAMPER_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL_TAMPER"
 
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
@@ -153,6 +157,8 @@ class SimConfig:
         approval: Park an accepted plan in ``INPUT_REQUIRED`` until a plan-bound approval decision
             arrives (S6).
         approval_ttl_seconds: Lifetime of one approval request.
+        approval_tamper: Measurement-only: the approval request names a digest that does not match
+            the plan that will be executed.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -182,6 +188,8 @@ class SimConfig:
     feasibility_rate_mbps: float = FEASIBILITY_RATE_MBPS
     approval: bool = False
     approval_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS
+    #: Measurement-only fault injection: the request's digest does not match the executed plan.
+    approval_tamper: bool = False
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -285,6 +293,7 @@ class SimConfig:
             pure_question=pure_question,
             missing_items=_truthy(os.environ.get(MISSING_ITEMS_ENV_KEY, "")),
             approval=_truthy(os.environ.get(APPROVAL_ENV_KEY, "")),
+            approval_tamper=_truthy(os.environ.get(APPROVAL_TAMPER_ENV_KEY, "")),
             approval_ttl_seconds=_seconds(
                 os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
             ),

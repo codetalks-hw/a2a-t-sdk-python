@@ -202,6 +202,7 @@ def build_routes(
             "missing_items": config.missing_items,
             "approval": config.approval,
             "approval_ttl_seconds": config.approval_ttl_seconds,
+            "approval_tamper": config.approval_tamper,
             "max_saving_rate": config.max_saving_rate,
             "window": config.window,
         }
@@ -546,7 +547,10 @@ def build_routes(
     ) -> Response:
         """Park an accepted plan in ``INPUT_REQUIRED`` until a plan-bound decision arrives."""
         request = build_request(
-            intent, task_id=task.task_id, ttl_seconds=config.approval_ttl_seconds
+            intent,
+            task_id=task.task_id,
+            ttl_seconds=config.approval_ttl_seconds,
+            tamper=config.approval_tamper,
         )
         task.approval_request = request.to_dict()
         task.approval_plan = plan_for(intent)

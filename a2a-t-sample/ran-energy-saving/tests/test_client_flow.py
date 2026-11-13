@@ -84,6 +84,8 @@ from protocol.messages import (
 )
 from shared.approval import (
     OUTCOME_APPROVE,
+    OUTCOME_REJECT,
+    REASON_PLAN_STALE,
     ApprovalRequest,
     plan_digest,
     read_approval_decision,
@@ -3722,17 +3724,76 @@ async def test_metadata_normalizations_are_recorded_in_the_trace() -> None:
     assert "decode.embedded" in detail["metadataNormalizations"]
 
 
-def _approval_status() -> tuple[dict[str, object], ApprovalRequest]:
+def _approval_status(
+    plan_digest_value: str | None = None,
+) -> tuple[dict[str, object], ApprovalRequest]:
     """Return an INPUT_REQUIRED event carrying one S6 approval request."""
     request = ApprovalRequest(
         approval_id="apv-1",
-        plan_digest=plan_digest({"region": "A2ATestRegion", "rateMbps": 5.0}),
+        plan_digest=plan_digest_value
+        or plan_digest({"region": "A2ATestRegion", "rateMbps": 5.0}),
         summary="Create A2ATestRegion at 5 Mbps.",
         task_id="task-1",
     )
     event = status_event("TASK_STATE_INPUT_REQUIRED")
     event["metadata"] = request.to_metadata()
     return event, request
+
+
+#: The plan this test client believes it agreed to (the intent fields it sent).
+_CLIENT_PLAN: dict[str, object] = {
+    "operation": "Create",
+    "region": "Region A",
+    "window": "",
+    "rateMbps": 0.0,
+}
+
+
+async def test_a_tampered_approval_request_is_refused_by_the_client() -> None:
+    """A2A-T can compute the digest itself, so a server naming another plan is caught."""
+    approval_event, request = _approval_status()
+    transport = ScriptedTransport([[approval_event], _task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        approval_answer=approval_answer(OUTCOME_APPROVE),
+        approval_plan=lambda filled: _CLIENT_PLAN,
+    )
+
+    metadata = MessageToDict(transport.requests[1].message.metadata)
+    decision = read_approval_decision(metadata)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_REJECT
+    assert decision.reason_code == REASON_PLAN_STALE
+    assert decision.plan_digest == plan_digest(_CLIENT_PLAN)
+    assert decision.plan_digest != request.plan_digest
+
+
+async def test_a_matching_approval_request_is_approved_with_the_computed_digest() -> None:
+    approval_event, request = _approval_status(plan_digest(_CLIENT_PLAN))
+    transport = ScriptedTransport([[approval_event], _task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        approval_answer=approval_answer(OUTCOME_APPROVE),
+        approval_plan=lambda filled: _CLIENT_PLAN,
+    )
+
+    metadata = MessageToDict(transport.requests[1].message.metadata)
+    decision = read_approval_decision(metadata)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_APPROVE
+    assert decision.plan_digest == request.plan_digest
 
 
 async def test_an_a2a_t_approval_request_is_answered_with_a_decision() -> None:

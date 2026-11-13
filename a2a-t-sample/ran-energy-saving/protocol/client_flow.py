@@ -31,7 +31,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Final, Protocol
 
 from a2a.client.client import ClientCallContext
@@ -73,7 +73,14 @@ from a2a_t.negotiation.content import (
     TargetEndingContent,
 )
 from google.protobuf.json_format import ParseDict
-from shared.approval import ApprovalDecision, ApprovalRequest, read_approval_request
+from shared.approval import (
+    OUTCOME_REJECT,
+    REASON_PLAN_STALE,
+    ApprovalDecision,
+    ApprovalRequest,
+    plan_digest,
+    read_approval_request,
+)
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
 from shared.missing_items import read_missing_items
@@ -956,6 +963,7 @@ async def run_client_flow(
     target_task_id: str | None = None,
     target_context_id: str | None = None,
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
+    approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -1021,6 +1029,11 @@ async def run_client_flow(
         approval_answer: optional callback answering an ``a2at-sample/approval`` request with a
             decision. Without it the request is an observation and the flow ends; it never invents
             an approval.
+        approval_plan: optional projection from the accepted Task-T values to the canonical plan.
+            When supplied, the client computes the digest of the plan it agreed to and refuses to
+            sign a different one: a server that asks approval for another plan gets its own digest
+            back and the decision is refused as stale. This is the half a plain-A2A client cannot
+            do, because it holds no accepted document to project.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -1363,6 +1376,10 @@ async def run_client_flow(
     negotiation_rounds = 0
     # Only used when a vendor frame names no context either; the reply still needs an id.
     inferred_negotiation_id = str(uuid.uuid4())
+    # The digest of the plan this client is asking for. It is recomputed from the accepted values
+    # whenever an accept changes them, so an approval request is always checked against the latest
+    # agreement rather than the original request.
+    accepted_digest = _plan_digest_for(approval_plan, initial_filled)
     emit_message_sent(
         initial_request,
         phase=PHASE_TASK_MODIFY if modify_only else PHASE_TASK_VALIDATION,
@@ -1404,6 +1421,29 @@ async def run_client_flow(
                 # same answer would loop; the Task is left waiting and the run reports that state.
                 return finish(_final_state(batch))
             decision = approval_answer(approval_request)
+            if accepted_digest is not None and accepted_digest != approval_request.plan_digest:
+                # The server is asking approval for a plan this client never agreed to. Answer with
+                # the digest this client *did* compute: the peer then refuses the decision as stale
+                # instead of executing something nobody approved.
+                emit_trace(
+                    "approval_plan_mismatch",
+                    phase=PHASE_RESOLUTION,
+                    title="Approval request does not match the accepted plan",
+                    round_number=None,
+                    context_id=context_id,
+                    detail={
+                        "requestedDigest": approval_request.plan_digest,
+                        "acceptedDigest": accepted_digest,
+                        "approvalId": approval_request.approval_id,
+                    },
+                )
+                decision = replace(
+                    decision,
+                    plan_digest=accepted_digest,
+                    outcome=OUTCOME_REJECT,
+                    reason_code=REASON_PLAN_STALE,
+                    reason="The approval request does not match the plan this client accepted.",
+                )
             follow = _build_message_request(
                 metadata=decision.to_metadata(),
                 label="approval decision",
@@ -1673,7 +1713,7 @@ async def run_client_flow(
 
         if decision.action == "accept":
             dropped_values: list[str] = []
-            request, call_context = await _build_accept_request(
+            request, call_context, accepted_digest = await _build_accept_request(
                 prompt_client=prompt_client,
                 decision=decision,
                 kind=kind,
@@ -1688,6 +1728,7 @@ async def run_client_flow(
                 single_extension_per_message=single_extension_per_message,
                 task_id=task_id,
                 dropped=dropped_values,
+                approval_plan=approval_plan,
             )
             if dropped_values:
                 # The accept carried values the flow could not send; surface them instead of
@@ -2114,7 +2155,8 @@ async def _build_accept_request(
     single_extension_per_message: bool,
     task_id: str | None = None,
     dropped: list[str] | None = None,
-) -> tuple[SendMessageRequest, ClientCallContext]:
+    approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
+) -> tuple[SendMessageRequest, ClientCallContext, str | None]:
     """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type.
 
     The accept content is built from typed data and rendered deterministically (the SDK
@@ -2197,7 +2239,7 @@ async def _build_accept_request(
     metadata = None if task_content is None else {
         task_content.extension_uri or TASK_T_EXTENSION_URI: task_text
     }
-    return _negotiation_request(
+    request, call_context = _negotiation_request(
         prompt_client=prompt_client,
         content=content,
         label=label,
@@ -2207,6 +2249,7 @@ async def _build_accept_request(
         extra_metadata=metadata,
         task_id=task_id,
     )
+    return request, call_context, _plan_digest_for(approval_plan, filled)
 
 
 async def _build_terminal_request(
@@ -2276,6 +2319,20 @@ def _require_prompt_text(content: MetadataContent, what: str) -> str:
     if not isinstance(text, str) or not text.strip():
         raise ClientFlowError(f"The SDK did not generate {what}.")
     return text
+
+
+def _plan_digest_for(
+    projection: Callable[[Mapping[str, object]], Mapping[str, object]] | None,
+    filled: Mapping[str, object] | None,
+) -> str | None:
+    """Return the digest of the plan a filled Task-T represents, ``None`` when unavailable."""
+    if projection is None or not filled:
+        return None
+    try:
+        return plan_digest(projection(filled))
+    except Exception:  # noqa: BLE001 - a projection failure must not end the run
+        _LOGGER.warning("approval plan projection failed", exc_info=True)
+        return None
 
 
 def _string_field(event: Mapping[str, object], key: str) -> str | None:

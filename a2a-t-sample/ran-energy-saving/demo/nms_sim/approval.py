@@ -30,21 +30,24 @@ APPROVAL_PENDING_TEXT: Final[str] = "Approval required before this plan is execu
 def plan_for(intent: ParsedIntent) -> dict[str, object]:
     """Return the canonical plan of one accepted intent.
 
-    Only the fields that change what would be executed belong here. The report text and the
-    original prompt do not: including them would make two approvals of the same plan differ.
+    Only the fields the request fixes belong here, so both sides can reach the same object. The
+    site list is excluded on purpose: it is server-side inventory, shown in the report text only,
+    and a client cannot know it, so binding an approval to it would make the digest unverifiable.
     """
     return {
         "operation": intent.operation,
         "region": intent.region,
         "window": intent.window,
         "rateMbps": intent.rate_mbps,
-        "sites": list(intent.sites),
     }
 
 
 def intent_from_plan(plan: Mapping[str, object]) -> ParsedIntent:
-    """Rebuild the accepted intent a parked plan came from."""
-    sites = plan.get("sites")
+    """Rebuild the accepted intent a parked plan came from.
+
+    The site list is not part of the bound plan, so the rebuilt intent leaves it empty; it only
+    shapes the report text.
+    """
     rate = plan.get("rateMbps")
     return ParsedIntent(
         operation=str(plan.get("operation") or "Create"),
@@ -55,7 +58,7 @@ def intent_from_plan(plan: Mapping[str, object]) -> ParsedIntent:
             if isinstance(rate, (int, float)) and not isinstance(rate, bool)
             else 0.0
         ),
-        sites=tuple(str(site) for site in sites) if isinstance(sites, list) else (),
+        sites=(),
         source="",
     )
 
@@ -66,9 +69,17 @@ def build_request(
     task_id: str,
     ttl_seconds: float,
     now: datetime | None = None,
+    tamper: bool = False,
 ) -> ApprovalRequest:
-    """Return the approval request for one accepted plan."""
+    """Return the approval request for one accepted plan.
+
+    ``tamper`` is the S6 measurement switch: the request carries the digest of a different plan,
+    so a client that verifies the binding refuses it while a client that echoes the given digest
+    accepts a plan nobody agreed to. The plan that would be executed is unchanged.
+    """
     plan = plan_for(intent)
+    if tamper:
+        plan = {**plan, "rateMbps": _other_rate(plan.get("rateMbps"))}
     expires = (now or datetime.now(UTC)) + timedelta(seconds=max(0.0, ttl_seconds))
     return ApprovalRequest(
         approval_id=f"apv-{uuid.uuid4().hex[:12]}",
@@ -82,6 +93,12 @@ def build_request(
         replan_on_reject=True,
         task_id=task_id,
     )
+
+
+def _other_rate(value: object) -> float:
+    """Return a rate that differs from the real plan's, for the tamper switch."""
+    rate = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    return rate + 1.0
 
 
 __all__ = [
