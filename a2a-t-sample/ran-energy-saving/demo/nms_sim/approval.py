@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from shared.approval import ApprovalRequest, plan_digest
+from shared.plan import CanonicalPlan
 
 from demo.nms_sim.intent import ParsedIntent
 
@@ -27,7 +28,7 @@ APPROVAL_SCOPE: Final[str] = "write:ran-energy-plan"
 APPROVAL_PENDING_TEXT: Final[str] = "Approval required before this plan is executed."
 
 
-def plan_for(intent: ParsedIntent) -> dict[str, object]:
+def plan_for(intent: ParsedIntent) -> CanonicalPlan:
     """Return the canonical plan of one accepted intent.
 
     Only the fields the request fixes belong here, so both sides can reach the same object. The
@@ -77,7 +78,7 @@ def build_request(
     so a client that verifies the binding refuses it while a client that echoes the given digest
     accepts a plan nobody agreed to. The plan that would be executed is unchanged.
     """
-    plan = plan_for(intent)
+    plan: Mapping[str, object] = plan_for(intent)
     if tamper:
         plan = {**plan, "rateMbps": _other_rate(plan.get("rateMbps"))}
     expires = (now or datetime.now(UTC)) + timedelta(seconds=max(0.0, ttl_seconds))

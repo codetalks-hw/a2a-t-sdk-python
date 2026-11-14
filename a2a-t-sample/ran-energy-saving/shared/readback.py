@@ -19,14 +19,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
+from a2a_t.core.plan_binding import plan_deviations
+
+from shared.plan import PLAN_FIELDS
+
 #: Sample-local key of the envelope, on the report artifact's metadata.
 READBACK_METADATA_KEY: Final[str] = "a2at-sample/readback"
 
 #: Envelope schema version.
 READBACK_VERSION: Final[int] = 1
 
-#: Fields compared between the approved plan and the executed one.
-COMPARED_FIELDS: Final[tuple[str, ...]] = ("operation", "region", "window", "rateMbps")
+#: Fields compared between the approved plan and the executed one. Same list the digest covers:
+#: a field outside the digest cannot be compared meaningfully.
+COMPARED_FIELDS: Final[tuple[str, ...]] = PLAN_FIELDS
 
 #: Verification outcomes a client can report.
 STATUS_MATCHED: Final[str] = "matched"
@@ -67,27 +72,13 @@ def compare_plans(
     """Return one entry per field whose executed value differs from the approved one.
 
     Comparison is exact on purpose: a readback that "approximately" matches is not evidence that
-    the plan was executed. Numeric fields tolerate the ``10`` vs ``10.0`` spelling.
+    the plan was executed. The SDK owns the value semantics (numbers compare numerically, ``True``
+    is never ``1``) and this function only fixes the sample's field list.
     """
-    deviations: list[dict[str, object]] = []
-    for field in COMPARED_FIELDS:
-        planned_value = planned.get(field)
-        executed_value = executed.get(field)
-        if _same(planned_value, executed_value):
-            continue
-        deviations.append(
-            {"field": field, "planned": planned_value, "actual": executed_value}
-        )
-    return tuple(deviations)
-
-
-def _same(left: object, right: object) -> bool:
-    """Return whether two plan values are the same value, numbers compared numerically."""
-    if isinstance(left, bool) or isinstance(right, bool):
-        return left is right
-    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        return float(left) == float(right)
-    return left == right
+    return tuple(
+        deviation.to_dict()
+        for deviation in plan_deviations(planned, executed, COMPARED_FIELDS)
+    )
 
 
 def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:

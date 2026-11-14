@@ -22,9 +22,10 @@ from shared.approval import (
 )
 
 PLAN = {
-    "sites": ["LNR_KPI_7745", "NES_27A_321071"],
-    "targets": ["{08:00-10:00,2Mbps}", "{15:00-18:00,2Mbps}"],
-    "savingRate": 0.3,
+    "operation": "Create",
+    "region": "A2ATestRegion",
+    "window": "08:00-10:00",
+    "rateMbps": 2.0,
 }
 
 
@@ -42,12 +43,28 @@ def _request(**overrides: object) -> ApprovalRequest:
 
 def test_the_digest_ignores_key_order_and_changes_with_the_plan() -> None:
     """The digest is the approval's identity, so formatting must not change it."""
-    reordered = {"targets": PLAN["targets"], "savingRate": 0.3, "sites": PLAN["sites"]}
-    changed = {**PLAN, "targets": ["{08:00-10:00,2Mbps}", "{15:00-18:00,10Mbps}"]}
+    reordered = {
+        "rateMbps": 2,
+        "window": "08:00-10:00",
+        "region": "A2ATestRegion",
+        "operation": "Create",
+    }
+    changed = {**PLAN, "rateMbps": 10.0}
 
     assert plan_digest(PLAN) == plan_digest(reordered)
     assert plan_digest(PLAN) != plan_digest(changed)
     assert plan_digest(PLAN).startswith("sha256:")
+
+
+def test_the_digest_ignores_values_the_client_cannot_see() -> None:
+    """A digest over server inventory is a claim, not a binding: those fields must not count."""
+    server_side = {
+        **PLAN,
+        "sites": ["LNR_KPI_7745", "NES_27A_321071"],
+        "savingRate": 0.3,
+    }
+
+    assert plan_digest(server_side) == plan_digest(PLAN)
 
 
 def test_a_request_round_trips_through_message_metadata() -> None:
@@ -97,7 +114,7 @@ def test_an_approval_for_a_changed_plan_is_stale() -> None:
     approved = _request()
     decision = ApprovalDecision(
         approval_id=approved.approval_id,
-        plan_digest=plan_digest({**PLAN, "targets": ["{08:00-10:00,5Mbps}"]}),
+        plan_digest=plan_digest({**PLAN, "rateMbps": 5.0}),
         outcome=OUTCOME_APPROVE,
     )
 

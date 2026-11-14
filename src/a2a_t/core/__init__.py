@@ -24,6 +24,15 @@ from a2a_t.core.path_segments import (
     require_simple_relative_path,
     require_simple_segment,
 )
+from a2a_t.core.plan_binding import (
+    DIGEST_PREFIX,
+    PlanDeviation,
+    canonical_digest,
+    canonical_json,
+    plan_deviations,
+    plan_digest,
+    same_plan_value,
+)
 from a2a_t.core.prompt_resource_key import PromptResourceKey
 from a2a_t.core.template_uri import DEFAULT_TEMPLATE_VERSION, TemplateUri
 from a2a_t.core.validation_pipeline import (
@@ -42,6 +51,7 @@ from a2a_t.core.validation_pipeline import (
 
 __all__ = [
     "DEFAULT_TEMPLATE_VERSION",
+    "DIGEST_PREFIX",
     "NEGOTIATION_CONTEXT_METADATA_KEY",
     "PromptResourceKey",
     "RETRYABLE_ERROR_CODES",
@@ -52,6 +62,7 @@ __all__ = [
     "MetadataContent",
     "NegotiationContext",
     "NegotiationPerformative",
+    "PlanDeviation",
     "RuleChecker",
     "SemanticValidator",
     "SlotValidationError",
@@ -59,10 +70,15 @@ __all__ = [
     "TemplateUri",
     "ValidationPipeline",
     "ValidationResult",
+    "canonical_digest",
+    "canonical_json",
     "decode_extension_value",
     "extension_value",
     "is_simple_segment",
+    "plan_deviations",
+    "plan_digest",
     "require_simple_relative_path",
     "require_simple_segment",
+    "same_plan_value",
     "with_retry",
 ]

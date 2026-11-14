@@ -18,12 +18,14 @@ difference S6 measures.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
+
+from a2a_t.core.plan_binding import plan_digest as _sdk_plan_digest
+
+from shared.plan import PLAN_FIELDS
 
 #: Sample-local metadata key of the envelope. Not a registered A2A-T extension URI.
 APPROVAL_METADATA_KEY: Final[str] = "a2at-sample/approval"
@@ -62,28 +64,11 @@ VERIFY_EXPIRED: Final[str] = "approval-expired"
 def plan_digest(plan: Mapping[str, object]) -> str:
     """Return the canonical digest of one plan.
 
-    Both sides must reach the same value from the same plan: keys sorted, no insignificant
-    whitespace, UTF-8. Anything that changes what would be executed -- sites, windows, rates,
-    saving rate -- changes the digest; formatting does not.
+    Both sides must reach the same value from the same plan. The SDK owns the canonical form; this
+    function only fixes the sample's field list, so a field a client cannot compute -- the site
+    inventory -- can never enter the digest by being present in the mapping.
     """
-    canonical = json.dumps(
-        _canonical(plan), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _canonical(value: object) -> object:
-    """Return ``value`` with mappings sorted and non-JSON leaves stringified."""
-    if isinstance(value, Mapping):
-        return {
-            str(key): _canonical(item)
-            for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))
-        }
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
+    return _sdk_plan_digest(plan, PLAN_FIELDS)
 
 
 @dataclass(frozen=True)

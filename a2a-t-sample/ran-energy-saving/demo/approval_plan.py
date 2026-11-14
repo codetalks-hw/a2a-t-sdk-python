@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from protocol.target_grammar import find_segments
+from shared.plan import CanonicalPlan
 
 #: Task-T parameter names this projection reads.
 OPERATION_FIELD = "operationType"
@@ -24,7 +25,7 @@ REGION_FIELD = "region"
 TARGET_FIELD = "guaranteedThroughputTarget"
 
 
-def plan_from_task_t(filled: Mapping[str, object]) -> dict[str, object]:
+def plan_from_task_t(filled: Mapping[str, object]) -> CanonicalPlan:
     """Return the canonical plan a filled Task-T represents."""
     target = filled.get(TARGET_FIELD)
     segments = find_segments(target)
