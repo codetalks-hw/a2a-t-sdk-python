@@ -60,5 +60,59 @@
     "操作类型",
     "任务对象",
     "任务描述"
+  ],
+  "x-a2at-checks": [
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "(?:超过|多于|至少|大约|约|大概|差不多)\\s*[\\u4e00-\\u9fa5\\d]*\\s*个?\\s*小时|(?:more than|at least|about|approximately|over|several|a few|some)\\s+[\\w-]*\\s*hours?",
+      "require": "\\d{1,2}[:：]\\d{2}\\s*(?:-|~|至|到)\\s*\\d{1,2}[:：]\\d{2}",
+      "error": "slot.not_provided",
+      "slot_label": "停电时长"
+    },
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "(?:等|等等)站点|以及其他|另有一些|若干个站点|sites?\\s+(?:such as|like)\\b|and a few others|some other sites|several sites",
+      "error": "slot.not_provided",
+      "slot_label": "站点列表"
+    },
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "(?:大约|约|大概)\\s*\\d+|approximately\\s+\\d+",
+      "error": "slot.constraint_violated",
+      "slot_label": "载波频率"
+    },
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "(?:闲时|忙时|平时|高峰时段|低谷时段|峰值时段)|\\b(?:idle|busy|regular|peak|off-peak)\\s+period",
+      "error": "slot.constraint_violated",
+      "slot_label": "时间窗"
+    },
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "(?:最大化|尽可能大)[^。]{0,20}(?:速率|吞吐)|(?:maximi[sz]e|as much as possible)[^.]{0,40}(?:rate|throughput)",
+      "require": "\\d+(?:\\.\\d+)?\\s*Mbps",
+      "error": "slot.not_provided",
+      "slot_label": "保障速率"
+    },
+    {
+      "slot": "任务上下文",
+      "source": "input",
+      "when": "\\b(?:2G|3G)\\b|\\bWiFi\\b|\\bGSM\\b|\\bWCDMA\\b|\\bCDMA\\b",
+      "error": "slot.constraint_violated",
+      "slot_label": "小区制式"
+    },
+    {
+      "slot": "任务目标",
+      "source": "slot",
+      "when": "\\S",
+      "require": "节能增益目标[:：]\\s*\\d+(?:\\.\\d+)?%",
+      "error": "slot.constraint_violated",
+      "slot_label": "节能增益目标"
+    }
   ]
 }

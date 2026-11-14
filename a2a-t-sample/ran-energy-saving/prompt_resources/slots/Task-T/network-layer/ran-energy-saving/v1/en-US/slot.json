@@ -60,5 +60,59 @@
     "operation_type",
     "task_object",
     "task_description"
+  ],
+  "x-a2at-checks": [
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "(?:more than|at least|about|approximately|over|several|a few|some)\\s+[\\w-]*\\s*hours?",
+      "require": "\\d{1,2}:\\d{2}\\s*(?:-|~|to)\\s*\\d{1,2}:\\d{2}",
+      "error": "slot.not_provided",
+      "slot_label": "Outage duration"
+    },
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "sites?\\s+(?:such as|like)\\b|and a few others|some other sites|several sites",
+      "error": "slot.not_provided",
+      "slot_label": "Site list"
+    },
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "approximately\\s+\\d+",
+      "error": "slot.constraint_violated",
+      "slot_label": "Carrier frequencies"
+    },
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "\\b(?:idle|busy|regular|peak|off-peak)\\s+period",
+      "error": "slot.constraint_violated",
+      "slot_label": "Time windows"
+    },
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "(?:maximi[sz]e|as much as possible)[^.]{0,40}(?:rate|throughput)",
+      "require": "\\d+(?:\\.\\d+)?\\s*Mbps",
+      "error": "slot.not_provided",
+      "slot_label": "Guaranteed rate"
+    },
+    {
+      "slot": "task_context",
+      "source": "input",
+      "when": "\\b(?:2G|3G)\\b|\\bWiFi\\b|\\bGSM\\b|\\bWCDMA\\b|\\bCDMA\\b",
+      "error": "slot.constraint_violated",
+      "slot_label": "Cell RAT"
+    },
+    {
+      "slot": "task_target",
+      "source": "slot",
+      "when": "\\S",
+      "require": "energy saving gain target:\\s*\\d+(?:\\.\\d+)?%",
+      "error": "slot.constraint_violated",
+      "slot_label": "Energy saving gain target"
+    }
   ]
 }
