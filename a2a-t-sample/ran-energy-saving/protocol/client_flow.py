@@ -81,6 +81,7 @@ from shared.approval import (
     plan_digest,
     read_approval_request,
 )
+from shared.change_order import baseline_metadata
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
 from shared.missing_items import read_missing_items
@@ -973,6 +974,7 @@ async def run_client_flow(
     target_context_id: str | None = None,
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
+    baseline_plan: Mapping[str, object] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -1043,6 +1045,9 @@ async def run_client_flow(
             sign a different one: a server that asks approval for another plan gets its own digest
             back and the decision is refused as stale. This is the half a plain-A2A client cannot
             do, because it holds no accepted document to project.
+        baseline_plan: the plan this Modify replaces. When supplied, the run declares its digest on
+            the change order so the server can refuse one written against a plan that has since
+            changed. A plain-A2A client has no accepted document to derive it from.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -1356,6 +1361,18 @@ async def run_client_flow(
         prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
         TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
     }
+    if modify_only and baseline_plan is not None:
+        # The change order names the plan it replaces. Only a client that holds the accepted plan
+        # can supply this at all; the plain-A2A flow has no such object.
+        initial_metadata.update(baseline_metadata(baseline_plan, task_id=target_task_id))
+        emit_trace(
+            "change_order_baseline",
+            phase=PHASE_TASK_MODIFY,
+            title="Change order names the plan it replaces",
+            round_number=None,
+            context_id=target_context_id,
+            detail={"baselineDigest": plan_digest(baseline_plan)},
+        )
     # ``samplePhase`` is sample-only bookkeeping and is not part of the A2A-T interface, so it
     # never travels on the wire. The server still derives Modify from the Task-T operation type
     # and keeps reading the marker for older external clients.

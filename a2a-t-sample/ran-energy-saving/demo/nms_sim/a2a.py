@@ -37,6 +37,12 @@ from shared.approval import (
     read_approval_request,
     verify_decision,
 )
+from shared.change_order import (
+    BASELINE_ERROR_METADATA_KEY,
+    REASON_MISSING,
+    REASON_STALE,
+    read_baseline_digest,
+)
 from shared.readback import Readback, compare_plans
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -50,6 +56,7 @@ from demo.nms_sim.approval import (
     plan_for,
 )
 from demo.nms_sim.config import (
+    BASELINE_REQUIRED,
     CARRIER_TASK,
     PURE_FAILURE_COMPLETED,
     PURE_FAILURE_REJECTED,
@@ -205,6 +212,8 @@ def build_routes(
             "approval": config.approval,
             "approval_ttl_seconds": config.approval_ttl_seconds,
             "approval_tamper": config.approval_tamper,
+            "baseline": config.baseline,
+            "baseline_stale": config.baseline_stale,
             "max_saving_rate": config.max_saving_rate,
             "window": config.window,
         }
@@ -522,6 +531,7 @@ def build_routes(
         intent = accepted_intent(content, session.baseline, config)
         context_id = _context_id(body) or session.context_id
         task, is_new = _resolve_task(body, context_id=context_id, fallback_task_id=session.task_id)
+        _remember_plan(task, intent)
         negotiations.close(session)
         try:
             push = _push_config_for(
@@ -556,7 +566,7 @@ def build_routes(
             tamper=config.approval_tamper,
         )
         task.approval_request = request.to_dict()
-        task.approval_plan = plan_for(intent)
+        task.approval_plan = dict(plan_for(intent))
         task.approval_decision = None
         task.pure_hold = hold
         resolved_store.update(
@@ -774,6 +784,69 @@ def build_routes(
             explicit_task=bool(_requested_task_id(body)),
         )
 
+    # ---------------------------------------------------------------- change order (P3)
+
+    def _remember_plan(task: SimTask, intent: ParsedIntent) -> None:
+        """Record the plan this Task now represents, so a later change order can name it."""
+        task.plan = dict(plan_for(intent))
+
+    def _baseline_rejection(
+        task: SimTask,
+        metadata: Mapping[str, object],
+        *,
+        protocol: str,
+        stream: bool,
+    ) -> Response | None:
+        """Refuse a change order that names no baseline, or names a superseded one.
+
+        ``baseline`` is the observable behaviour (``required`` turns the check on).
+        ``baseline_stale`` is a measurement switch: the Task's current plan is reported as a
+        different one, standing in for a second operator who changed it first.
+        """
+        if config.baseline != BASELINE_REQUIRED or task.plan is None:
+            return None
+        given = read_baseline_digest(metadata)
+        expected_plan: Mapping[str, object] = task.plan
+        if config.baseline_stale:
+            expected_plan = {**expected_plan, "rateMbps": _other_rate(expected_plan.get("rateMbps"))}
+        if given is None:
+            return _refuse_change_order(
+                task,
+                REASON_MISSING,
+                "A change order must name the plan it replaces.",
+                protocol=protocol,
+                stream=stream,
+            )
+        if given != plan_digest(expected_plan):
+            return _refuse_change_order(
+                task,
+                REASON_STALE,
+                "The plan this change order was written against is no longer current.",
+                protocol=protocol,
+                stream=stream,
+            )
+        return None
+
+    def _refuse_change_order(
+        task: SimTask,
+        code: str,
+        message: str,
+        *,
+        protocol: str,
+        stream: bool,
+    ) -> Response:
+        """End a Task whose change order could not be bound to the current plan."""
+        metrics.outcome(protocol, OUTCOME_REJECTED)
+        resolved_store.update(
+            task.task_id,
+            state=TASK_REJECTED,
+            message=message,
+            metadata={BASELINE_ERROR_METADATA_KEY: {"reasonCode": code}},
+        )
+        if protocol == PROTOCOL_A2A:
+            return _pure_task_response(task, stream=stream)
+        return _approval_response(task, stream=stream)
+
     # ---------------------------------------------------------------- A2A-T
 
     def _a2a_t_request(body: Mapping[str, object], request: Request, *, stream: bool) -> Response:
@@ -793,6 +866,15 @@ def build_routes(
                     "negotiationContext must carry an id, a round, maxRounds and a performative"
                 )
             return _negotiated_request(body, request, parsed_context, stream=stream)
+        # A change order against a Task that already has a plan must name the plan it replaces.
+        # Negotiation replies are dispatched above, so this only sees a fresh request.
+        baseline_task = resolved_store.get(early_task_id) if early_task_id else None
+        if baseline_task is not None:
+            refused = _baseline_rejection(
+                baseline_task, metadata, protocol=PROTOCOL_A2A_T, stream=stream
+            )
+            if refused is not None:
+                return refused
         try:
             content = read_message_request(body, request.headers)
         except SimRequestError as exc:
@@ -813,6 +895,7 @@ def build_routes(
             except PushConfigExistsError as exc:
                 return _register_config_error(exc)
             intent = parse_message_request(body, request.headers, config)
+            _remember_plan(task, intent)
             metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
             hold = config.hold_working and is_new
             if config.approval:
@@ -895,6 +978,14 @@ def build_routes(
             task.pure_hold = False
             resolved_store.update(task.task_id, state=TASK_SUBMITTED, message="Task creation succeeded")
         task.pure_max_rounds = config.max_rounds
+        # A plain-A2A change order is checked the same way. The plain client has no accepted
+        # document to derive a baseline from, so with ``baseline=required`` it cannot pass.
+        if requested_task_id and not is_answer:
+            refused = _baseline_rejection(
+                task, _message_metadata(body), protocol=PROTOCOL_A2A, stream=stream
+            )
+            if refused is not None:
+                return refused
         try:
             push = _push_config_for(
                 task,
@@ -932,6 +1023,7 @@ def build_routes(
             return _pure_issue(task, issue, content, stream=stream, is_answer=is_answer)
         metrics.outcome(PROTOCOL_A2A, OUTCOME_ACCEPTED)
         intent = accepted_intent(content, None, config)
+        _remember_plan(task, intent)
         if config.approval:
             return _request_approval(task, intent, stream=stream, hold=task.pure_hold)
         if stream:
@@ -1130,6 +1222,12 @@ def build_routes(
 async def _single_message_stream(message: Mapping[str, object]) -> AsyncIterator[str]:
     """Yield one ``message`` SSE frame and close."""
     yield f"data: {json.dumps({'message': dict(message)}, ensure_ascii=False)}\n\n"
+
+
+def _other_rate(value: object) -> float:
+    """Return a rate that differs from the plan's, for measurement switches."""
+    rate = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    return rate + 1.0
 
 
 def _readback_for(intent: ParsedIntent, config: SimConfig) -> dict[str, object]:

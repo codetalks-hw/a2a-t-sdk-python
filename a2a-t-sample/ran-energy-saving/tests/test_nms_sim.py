@@ -911,6 +911,24 @@ def test_sim_config_reads_the_hold_working_switch(monkeypatch: pytest.MonkeyPatc
     assert SimConfig.from_env().hold_working is True
 
 
+def test_sim_config_reads_the_change_order_baseline_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3 is opt-in, and an unknown policy is refused rather than silently treated as ``off``."""
+    from demo.nms_sim.config import BASELINE_ENV_KEY, FIDELITY_ENV_KEY
+
+    monkeypatch.setenv(FIDELITY_ENV_KEY, FIDELITY_FAST)
+    monkeypatch.delenv(BASELINE_ENV_KEY, raising=False)
+    assert SimConfig.from_env().baseline == "off"
+
+    monkeypatch.setenv(BASELINE_ENV_KEY, "required")
+    assert SimConfig.from_env().baseline == "required"
+
+    monkeypatch.setenv(BASELINE_ENV_KEY, "sometimes")
+    with pytest.raises(ValueError, match=BASELINE_ENV_KEY):
+        SimConfig.from_env()
+
+
 def test_sim_config_reads_the_feasibility_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """A tighter cell ceiling is how a client that assumes the default gets exposed."""
     from demo.nms_sim.config import FEASIBILITY_RATE_ENV_KEY, FIDELITY_ENV_KEY

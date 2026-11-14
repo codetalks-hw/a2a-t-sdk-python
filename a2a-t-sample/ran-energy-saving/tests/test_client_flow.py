@@ -81,6 +81,7 @@ from protocol.messages import (
     SAMPLE_NEGOTIATION_OPTIONS_METADATA_KEY,
     SAMPLE_PHASE_METADATA_KEY,
     SAMPLE_PROPOSAL_METADATA_KEY,
+    metadata_to_dict,
 )
 from shared.approval import (
     OUTCOME_APPROVE,
@@ -90,9 +91,14 @@ from shared.approval import (
     plan_digest,
     read_approval_decision,
 )
+from shared.change_order import BASELINE_METADATA_KEY
 from shared.config import SampleConfig
 from shared.models import NegotiationDecision, NegotiationProposeView
-from shared.run_constants import FINAL_STATE_INTENT_NOT_CONFIRMED, FINAL_STATE_NEGOTIATION_ABORTED
+from shared.run_constants import (
+    FINAL_STATE_INTENT_NOT_CONFIRMED,
+    FINAL_STATE_NEGOTIATION_ABORTED,
+    RUN_MODE_MODIFY,
+)
 from shared.trace import (
     PHASE_NEGOTIATION,
     PHASE_RESOLUTION,
@@ -491,6 +497,53 @@ async def test_message_sent_span_carries_the_wire_fields() -> None:
     assert detail["performative"] == "TASK_T"
     # The wire inspector shows the rendered Task-T, not the natural-language request.
     assert detail["taskT"] == f"Task-T prompt for: {prompt_client.task_prompts[-1]}"
+
+
+async def test_a_change_order_names_the_plan_it_replaces() -> None:
+    """A Modify supplies the baseline it holds; the server can then refuse a superseded one."""
+    baseline = {
+        "operation": "Create",
+        "region": "A2ATestRegion",
+        "window": "00:00-06:00",
+        "rateMbps": 30.0,
+    }
+    transport = ScriptedTransport([_task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request="Modify: lower the guaranteed throughput to 10 Mbps.",
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        run_mode=RUN_MODE_MODIFY,
+        target_task_id="task-1",
+        target_context_id="ctx-1",
+        baseline_plan=baseline,
+    )
+
+    metadata = metadata_to_dict(transport.requests[0].message.metadata)
+    entry = metadata[BASELINE_METADATA_KEY]
+    assert isinstance(entry, dict)
+    assert entry["planDigest"] == plan_digest(baseline)
+    assert entry["taskId"] == "task-1"
+
+
+async def test_a_create_sends_no_baseline() -> None:
+    """A Create replaces nothing, so it must not claim a baseline it does not have."""
+    transport = ScriptedTransport([_task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        baseline_plan={"operation": "Create", "region": "R", "window": "00:00-06:00", "rateMbps": 1.0},
+    )
+
+    metadata = metadata_to_dict(transport.requests[0].message.metadata)
+    assert BASELINE_METADATA_KEY not in metadata
 
 
 async def test_waiting_for_the_server_publishes_a_peer_activity() -> None:

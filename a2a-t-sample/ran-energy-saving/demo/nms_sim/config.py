@@ -58,6 +58,17 @@ APPROVAL_TAMPER_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_APPROVAL_TAMPER"
 #: as a network that applied something else would. The report artifact is still produced.
 READBACK_DEVIATION_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_READBACK_DEVIATION"
 
+#: P3: what the simulator does with a change order (a Modify against a Task that already has a
+#: plan). ``off`` applies it over whatever is current (the historical behaviour); ``required``
+#: refuses one that names no baseline, or names a plan that is no longer current.
+BASELINE_OFF: Final[str] = "off"
+BASELINE_REQUIRED: Final[str] = "required"
+SUPPORTED_BASELINES: Final[tuple[str, ...]] = (BASELINE_OFF, BASELINE_REQUIRED)
+BASELINE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_BASELINE"
+#: Measurement-only fault injection: the Task's current plan is reported to the change order as a
+#: different one, standing in for another operator who changed it first.
+BASELINE_STALE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_BASELINE_STALE"
+
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
 WINDOW_POLICY_ANY: Final[str] = "any"
@@ -162,6 +173,9 @@ class SimConfig:
         approval_ttl_seconds: Lifetime of one approval request.
         approval_tamper: Measurement-only: the approval request names a digest that does not match
             the plan that will be executed.
+        baseline: ``required`` refuses a change order that names no baseline plan, or one that is
+            no longer the Task's current plan (P3).
+        baseline_stale: Measurement-only: the Task's current plan is reported as a different one.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -195,6 +209,10 @@ class SimConfig:
     approval_tamper: bool = False
     #: Measurement-only fault injection: the readback reports a plan other than the approved one.
     readback_deviation: bool = False
+    #: Change-order baseline policy (P3).
+    baseline: str = BASELINE_OFF
+    #: Measurement-only fault injection: the current plan is reported as a different one.
+    baseline_stale: bool = False
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -265,6 +283,12 @@ class SimConfig:
                 f"expected one of {SUPPORTED_PURE_QUESTIONS}"
             )
         kinds = _parse_kinds(os.environ.get(NEGOTIATION_KINDS_ENV_KEY, ""))
+        baseline = os.environ.get(BASELINE_ENV_KEY, BASELINE_OFF).strip().lower()
+        if baseline not in SUPPORTED_BASELINES:
+            raise ValueError(
+                f"Unsupported {BASELINE_ENV_KEY}: {baseline}; "
+                f"expected one of {SUPPORTED_BASELINES}"
+            )
         try:
             max_rounds = int(os.environ.get(MAX_ROUNDS_ENV_KEY, str(DEFAULT_MAX_ROUNDS)).strip())
         except ValueError as exc:
@@ -300,6 +324,8 @@ class SimConfig:
             approval=_truthy(os.environ.get(APPROVAL_ENV_KEY, "")),
             approval_tamper=_truthy(os.environ.get(APPROVAL_TAMPER_ENV_KEY, "")),
             readback_deviation=_truthy(os.environ.get(READBACK_DEVIATION_ENV_KEY, "")),
+            baseline=baseline,
+            baseline_stale=_truthy(os.environ.get(BASELINE_STALE_ENV_KEY, "")),
             approval_ttl_seconds=_seconds(
                 os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
             ),

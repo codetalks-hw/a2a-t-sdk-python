@@ -76,6 +76,10 @@ class SimTask:
     approval_request: dict[str, object] | None = None
     approval_plan: dict[str, object] | None = None
     approval_decision: dict[str, object] | None = None
+    #: The plan this Task currently represents: the last accepted one. A change order names it so
+    #: the server can tell "change the plan I know" from "change a plan someone else already
+    #: replaced" (P3). ``None`` until an accept.
+    plan: dict[str, object] | None = None
 
     def touch(self) -> None:
         """Refresh the millisecond timestamp."""

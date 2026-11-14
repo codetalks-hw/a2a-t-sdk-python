@@ -275,6 +275,12 @@ def _nms_sim_settings(values: dict[str, str], port: int) -> dict[str, str]:
         "A2AT_SAMPLE_NMS_SIM_READBACK_DEVIATION": _env_str(
             values, "A2AT_SAMPLE_NMS_SIM_READBACK_DEVIATION", "0"
         ),
+        "A2AT_SAMPLE_NMS_SIM_BASELINE": _env_str(
+            values, "A2AT_SAMPLE_NMS_SIM_BASELINE", "off"
+        ),
+        "A2AT_SAMPLE_NMS_SIM_BASELINE_STALE": _env_str(
+            values, "A2AT_SAMPLE_NMS_SIM_BASELINE_STALE", "0"
+        ),
     }
 
 
