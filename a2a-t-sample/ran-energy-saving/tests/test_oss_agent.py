@@ -2316,7 +2316,14 @@ async def test_carry_forwards_the_contract_and_names_the_extension(
     assert delegation["version"] == 2
     hops = delegation["hops"]
     assert isinstance(hops, list)
-    assert hops[-1] == {"hop": "oss", "digest": expected_digest, "assurance": "echoed"}
+    # The hop names its role and both digests: a carrier that received and sent the same contract.
+    assert hops[-1] == {
+        "hop": "oss",
+        "digest": expected_digest,
+        "emitted": expected_digest,
+        "role": "carrier",
+        "assurance": "echoed",
+    }
 
     header = (call_context.service_parameters or {})["A2A-Extensions"]
     assert TASK_T_EXTENSION_URI in header

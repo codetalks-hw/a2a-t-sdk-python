@@ -52,6 +52,8 @@ class Readback:
         agreement_id: Agreement the execution belongs to, when the hop has one.
         revision: Agreement revision executed, when the hop has one.
         delegation_chain: Hops the request passed through, in order.
+        delegation: The chain as recorded -- each hop's name, role, and the digests it received
+            and sent on -- so an audit can attribute a change instead of inferring one.
         restored_from: Digest of the plan this execution undid, when it executed a reversal.
     """
 
@@ -63,6 +65,7 @@ class Readback:
     agreement_id: str = ""
     revision: int = 0
     delegation_chain: tuple[str, ...] = ()
+    delegation: tuple[Mapping[str, object], ...] = ()
     restored_from: str = ""
 
     def to_metadata(self) -> dict[str, object]:
@@ -81,6 +84,11 @@ class Readback:
                 **(
                     {"delegationChain": list(self.delegation_chain)}
                     if self.delegation_chain
+                    else {}
+                ),
+                **(
+                    {"delegation": [dict(hop) for hop in self.delegation]}
+                    if self.delegation
                     else {}
                 ),
                 **({"restoredFrom": self.restored_from} if self.restored_from else {}),
@@ -126,6 +134,7 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
     agreement_id = raw.get("agreementId")
     revision = raw.get("revision")
     chain = raw.get("delegationChain")
+    structured = raw.get("delegation")
     restored_from = raw.get("restoredFrom")
     return Readback(
         plan_digest=digest,
@@ -140,6 +149,9 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
         agreement_id=agreement_id if isinstance(agreement_id, str) else "",
         revision=revision if isinstance(revision, int) and not isinstance(revision, bool) else 0,
         delegation_chain=tuple(str(hop) for hop in chain) if isinstance(chain, list) else (),
+        delegation=tuple(dict(hop) for hop in structured if isinstance(hop, Mapping))
+        if isinstance(structured, list)
+        else (),
         restored_from=(
             restored_from if isinstance(restored_from, str) and restored_from else ""
         ),

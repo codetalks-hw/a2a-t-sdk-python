@@ -30,7 +30,7 @@ from a2a_t.core.metadata import (
 from a2a_t.core.plan_binding import canonical_digest
 from shared.agreement import AGREEMENT_METADATA_KEY, REQUEST_ID_METADATA_KEY
 from shared.approval import APPROVAL_METADATA_KEY
-from shared.assurance import ASSURANCE_DECLARED, ASSURANCE_ECHOED
+from shared.assurance import ASSURANCE_DECLARED, ASSURANCE_ECHOED, ROLE_CARRIER
 from shared.change_order import BASELINE_METADATA_KEY
 from shared.typed_payload import TYPED_TASK_T_METADATA_KEY
 
@@ -88,32 +88,53 @@ def append_hop(
     *,
     hop: str,
     assurance: str,
+    role: str = ROLE_CARRIER,
+    revision: int | None = None,
+    produces: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return a new metadata map with this hop appended to the delegation chain.
 
     The carried keys are copied verbatim. The delegation key is upgraded to the v2 form
     ``{"version": 2, "hops": [...]}``; a legacy bare-string entry is upgraded to
     ``{"hop": <name>, "digest": "", "assurance": "declared"}`` because it named a hop but made no
-    digest claim. The appended entry's digest is the digest of ``metadata`` *before* appending:
-    it states what this hop received, which is what a third party can falsify.
+    digest claim.
+
+    Each hop records both halves of its own claim: ``digest`` is what it received and ``emitted`` is
+    what it sends on. A carrier's two values are equal by construction; a reducer that changes the
+    contract must pass ``revision`` so the change is attributable, and the next hop can then check
+    that what it received is what the previous hop said it sent.
 
     Args:
         metadata: inbound metadata map, or ``None``.
         hop: name of this hop (``"oss"``, ``"nms"``, ...).
         assurance: this hop's claim about how it handled the contract (``"echoed"`` when it only
             forwarded the carrier, ``"recomputed"`` when it re-derived it).
+        role: what this hop is allowed to do with the contract: ``"carrier"`` forwards it
+            unchanged, ``"reducer"`` may change it and must name the revision it produced.
+        revision: revision this hop produced, required when a reducer changes the contract.
+        produces: contract keys this hop changed, overriding the carried values. Everything else
+            is still forwarded as received, so a reducer states exactly what it rewrote.
 
     Returns:
         a new map containing only the carried contract keys plus :data:`DELEGATION_KEY`.
     """
     received = contract_digest(metadata)
     result: dict[str, object] = carried(metadata)
+    if produces:
+        result.update(produces)
+    emitted = contract_digest(result)
+    entry: dict[str, object] = {
+        "hop": hop,
+        "digest": received or "",
+        "emitted": emitted or "",
+        "role": role,
+        "assurance": assurance,
+    }
+    if revision is not None:
+        entry["revision"] = revision
     result[DELEGATION_KEY] = {
         "version": DELEGATION_VERSION,
-        "hops": [
-            *_existing_hops(metadata),
-            {"hop": hop, "digest": received or "", "assurance": assurance},
-        ],
+        "hops": [*_existing_hops(metadata), entry],
     }
     return result
 
@@ -161,6 +182,7 @@ __all__ = [
     "CONTRACT_KEYS",
     "DELEGATION_KEY",
     "DELEGATION_VERSION",
+    "ROLE_CARRIER",
     "append_hop",
     "carried",
     "contract_digest",

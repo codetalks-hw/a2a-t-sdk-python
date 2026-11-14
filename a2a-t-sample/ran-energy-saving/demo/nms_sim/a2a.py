@@ -27,6 +27,7 @@ from a2a_t.core.metadata import (
     TASK_T_EXTENSION_URI,
 )
 from a2a_t.core.plan_binding import CanonicalFormError, canonical_digest
+from protocol.contract_carriage import contract_digest
 from shared.agreement import (
     AGREEMENT_METADATA_KEY,
     REQUEST_ID_METADATA_KEY,
@@ -58,7 +59,11 @@ from shared.approval import (
     read_approval_request,
     verify_decision,
 )
-from shared.assurance import read_hops
+from shared.assurance import (
+    ASSURANCE_RECOMPUTED,
+    check_roles,
+    read_hops,
+)
 from shared.change_order import (
     BASELINE_ERROR_METADATA_KEY,
     REASON_MISSING,
@@ -898,6 +903,25 @@ def build_routes(
         hops = _declared_hops(metadata)
         return (*hops, DELEGATION_HOP) if hops else ()
 
+    def _recorded_chain(metadata: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+        """Return the chain as this server can attest it, with its own hop appended.
+
+        Appending the receiving hop is what makes a lying hop unnecessary to catch: the server
+        states the digest of what actually arrived, and the chain check compares it with what the
+        previous hop says it sent. A request that declared no chain stays empty -- there is nothing
+        to attest.
+        """
+        hops = read_hops(metadata.get(DELEGATION_METADATA_KEY))
+        if not hops:
+            return ()
+        received = contract_digest(metadata) or ""
+        # A terminal hop forwards nothing, so it claims no role and no output: it only states what
+        # arrived. Claiming "carrier" here would say it forwarded the contract when it executed it,
+        # and any value it applies through a negotiation is recorded by the agreement revision.
+        return tuple(hop.to_dict() for hop in hops) + (
+            {"hop": DELEGATION_HOP, "digest": received, "assurance": ASSURANCE_RECOMPUTED},
+        )
+
     def _remember_plan(
         task: SimTask, intent: ParsedIntent, metadata: Mapping[str, object]
     ) -> None:
@@ -948,7 +972,7 @@ def build_routes(
             resolved.executions.setdefault(identity, task.task_id)
         if not task.execution_id:
             task.execution_id = f"exe-{uuid.uuid4().hex[:12]}"
-        task.delegation = _declared_hops(metadata)
+        task.delegation = _recorded_chain(metadata)
         task.delegation_chain = _delegation_chain(metadata)
 
     def _agreement_for(ref: object) -> tuple[dict[str, object] | None, str | None]:
@@ -1098,6 +1122,20 @@ def build_routes(
         if early_config is not None and early_task_id and registry.for_task(early_task_id) is not None:
             return _register_config_error(PushConfigExistsError(early_task_id))
         metadata = _message_metadata(body)
+        # A delegation chain is a set of claims about who did what to the contract. A chain that
+        # contradicts itself is refused before anything is executed: a carrier that changed the
+        # contract, or a hop that changed it without naming a revision, means the plan this request
+        # asks us to run is not the plan the client agreed to.
+        violations = check_roles(read_hops(metadata.get(DELEGATION_METADATA_KEY)))
+        if violations:
+            metrics.outcome(PROTOCOL_A2A_T, OUTCOME_REJECTED)
+            return JSONResponse(
+                {
+                    "reasonCode": violations[0].reason,
+                    "violations": [violation.to_dict() for violation in violations],
+                },
+                status_code=409,
+            )
         raw_context = metadata.get(NEGOTIATION_CONTEXT_METADATA_KEY)
         if raw_context is not None:
             parsed_context = NegotiationContext.from_metadata(metadata)
@@ -1653,6 +1691,7 @@ def _readback_for(
         agreement_id=agreement.agreement_id if agreement is not None else "",
         revision=agreement.revision if agreement is not None else 0,
         delegation_chain=task.delegation_chain if task is not None else (),
+        delegation=task.delegation if task is not None else (),
     ).to_metadata()
 
 

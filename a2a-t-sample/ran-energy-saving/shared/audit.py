@@ -79,6 +79,8 @@ class Artifacts:
         restored_plan: Plan the reversal execution reported as applied; ``None`` when the contract
             was not executed.
         negotiated: Whether a negotiation changed values, making request != accepted legitimate.
+        changed_by: Hops that declared a revision, i.e. that were allowed to change the contract.
+            Preferred over ``negotiated`` because it is a statement rather than an inference.
     """
 
     requested_plan: Mapping[str, object] | None = None
@@ -92,6 +94,7 @@ class Artifacts:
     reversal_plan: Mapping[str, object] | None = None
     restored_plan: Mapping[str, object] | None = None
     negotiated: bool = False
+    changed_by: tuple[str, ...] = ()
 
 
 def verify_chain(
@@ -131,6 +134,13 @@ def summarize(links: Sequence[Link], *, assurance: AssuranceReport | None = None
 
 
 def _request_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
+    if artifacts.changed_by:
+        # A named hop declared a revision, so the difference is accounted for rather than assumed.
+        return Link(
+            LINK_REQUEST,
+            LINK_NOT_APPLICABLE,
+            "changed by " + ", ".join(artifacts.changed_by),
+        )
     if artifacts.negotiated:
         return Link(
             LINK_REQUEST,

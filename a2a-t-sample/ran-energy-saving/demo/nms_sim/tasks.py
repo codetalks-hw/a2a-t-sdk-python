@@ -101,9 +101,10 @@ class SimTask:
     execution_id: str = ""
     #: Hops the request passed through, including this server. Carried into the readback.
     delegation_chain: tuple[str, ...] = ()
-    #: Hops the request declared before this server, echoed on the standalone Task document so a
-    #: client can see the chain its request travelled without reading the artifact.
-    delegation: tuple[str, ...] = ()
+    #: Hops the request declared before this server, as the chain recorded them (name, role, the
+    #: digest each received and sent on). Echoed on the standalone Task document so a client can see
+    #: the chain its request travelled without reading the artifact.
+    delegation: tuple[dict[str, object], ...] = ()
 
     def touch(self) -> None:
         """Refresh the millisecond timestamp."""
@@ -149,7 +150,7 @@ class SimTask:
         if self.delegation:
             # Only the standalone document carries this: the embedded form is parsed as an A2A
             # ``Task`` by clients, which would reject a field their schema does not know.
-            document["delegation"] = list(self.delegation)
+            document["delegation"] = [dict(hop) for hop in self.delegation]
         if self.agreement is not None:
             document["metadata"] = agreement_metadata(self.agreement)
         if self.shape == TASK_SHAPE_TOPLEVEL:

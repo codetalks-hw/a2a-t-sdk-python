@@ -182,6 +182,7 @@ def test_a_report_round_trips_through_its_dict_form() -> None:
         "hops": [{"hop": "ui", "digest": DIGEST, "assurance": ASSURANCE_RECOMPUTED}],
         "weakest": ASSURANCE_RECOMPUTED,
         "changedAt": [],
+        "violations": [],
     }
     assert read_hops(document["hops"]) == graded.hops
 

@@ -90,6 +90,7 @@ from shared.approval import (
     plan_digest,
     read_approval_request,
 )
+from shared.assurance import ROLE_REDUCER
 from shared.audit import Artifacts, summarize, verify_chain
 from shared.change_order import baseline_metadata
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
@@ -2556,6 +2557,7 @@ def _audit_of(
     receipt = readback.get("planDigest") if isinstance(readback, Mapping) else None
     restored_from = readback.get("restoredFrom") if isinstance(readback, Mapping) else None
     reversal_plan = agreement.reversal if agreement is not None else None
+    changed_by = _changed_by(readback)
     artifacts = Artifacts(
         requested_plan=requested_plan,
         accepted_plan=accepted_plan,
@@ -2570,6 +2572,7 @@ def _audit_of(
             executed if restored_from and isinstance(executed, Mapping) else None
         ),
         negotiated=negotiated,
+        changed_by=changed_by,
     )
     links = verify_chain(artifacts)
     return {
@@ -2600,6 +2603,34 @@ def _plan_for(
         _LOGGER.warning("approval plan projection failed or is not canonical", exc_info=True)
         return None
     return plan
+
+
+def _changed_by(readback: Mapping[str, object] | None) -> tuple[str, ...]:
+    """Return the hops that declared a revision, so the audit attributes the change.
+
+    Only a hop that says it produced a revision, and whose two digests differ, is credited. A hop
+    that merely claims ``reducer`` while forwarding the contract unchanged changed nothing.
+    """
+    if not isinstance(readback, Mapping):
+        return ()
+    hops = readback.get("delegation")
+    if not isinstance(hops, list):
+        return ()
+    names: list[str] = []
+    for hop in hops:
+        if not isinstance(hop, Mapping):
+            continue
+        name = hop.get("hop")
+        if (
+            hop.get("role") == ROLE_REDUCER
+            and hop.get("revision") is not None
+            and hop.get("digest") != hop.get("emitted")
+            and isinstance(name, str)
+            and name
+            and name not in names
+        ):
+            names.append(name)
+    return tuple(names)
 
 
 def _digest_or_none(plan: Mapping[str, object] | None) -> str | None:

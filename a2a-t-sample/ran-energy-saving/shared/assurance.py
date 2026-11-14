@@ -15,6 +15,16 @@ Grades, best first:
 
 A grade is never upgraded by assumption: an unknown string, a malformed entry, a missing field or a
 ``recomputed`` claim without a digest all fall to a lower grade rather than to trust.
+
+Roles answer a different question: *what did the hop do to the contract?*
+
+``carrier``  forwarded it unchanged -- its output digest must equal its input digest
+``reducer``  may change it -- but then it must name the revision it produced
+``unknown``  made no claim; a change here is attributed to nobody
+
+A hop that parses intent and rewrites the prose (the OSS proxy is one) is a reducer. Without this
+vocabulary a chain can only say *that* the contract changed, not whether anyone was allowed to
+change it, so the audit ends up inferring a reason from two digests that differ.
 """
 
 from __future__ import annotations
@@ -43,6 +53,30 @@ ASSURANCE_ORDER: Final[tuple[str, ...]] = (
     ASSURANCE_UNVERIFIED,
 )
 
+#: The hop forwarded the contract unchanged; its output digest must equal its input digest.
+ROLE_CARRIER: Final[str] = "carrier"
+
+#: The hop may change the contract, and must then name the revision it produced.
+ROLE_REDUCER: Final[str] = "reducer"
+
+#: The hop made no claim about what it did; a change it makes cannot be attributed.
+ROLE_UNKNOWN: Final[str] = "unknown"
+
+#: Every role. A role outside this tuple is read as ``unknown``.
+ROLE_ORDER: Final[tuple[str, ...]] = (ROLE_CARRIER, ROLE_REDUCER, ROLE_UNKNOWN)
+
+#: A carrier's output digest differs from its input digest.
+VIOLATION_CARRIER_CHANGED: Final[str] = "carrier-changed-contract"
+
+#: A reducer changed the contract without naming a revision.
+VIOLATION_REDUCER_UNREVISED: Final[str] = "reducer-without-revision"
+
+#: A hop with no declared role changed the contract.
+VIOLATION_UNATTRIBUTED: Final[str] = "unattributed-change"
+
+#: A hop received a contract that is not what the previous hop says it sent.
+VIOLATION_CHAIN_GAP: Final[str] = "chain-gap"
+
 
 @dataclass(frozen=True)
 class Hop:
@@ -50,19 +84,31 @@ class Hop:
 
     Attributes:
         hop: Name of the hop, e.g. ``ui`` or ``nms``.
-        digest: Digest the hop published for the contract, empty when it published none.
+        digest: Digest of the contract the hop received, empty when it published none.
         assurance: One of the module-level grades.
+        role: What the hop did with the contract; one of the module-level roles.
+        emitted: Digest of the contract the hop sent on, empty when it did not say.
+        revision: Revision the hop produced, for a reducer.
     """
 
     hop: str
     digest: str = ""
     assurance: str = ASSURANCE_UNVERIFIED
+    role: str = ROLE_UNKNOWN
+    emitted: str = ""
+    revision: int | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """Return the v2 object form; the digest key appears only when there is a digest."""
+        """Return the v2 object form; absent claims stay absent rather than defaulting to trust."""
         payload: dict[str, object] = {"hop": self.hop}
         if self.digest:
             payload["digest"] = self.digest
+        if self.role != ROLE_UNKNOWN:
+            payload["role"] = self.role
+        if self.emitted:
+            payload["emitted"] = self.emitted
+        if self.revision is not None:
+            payload["revision"] = self.revision
         payload["assurance"] = self.assurance
         return payload
 
@@ -83,13 +129,43 @@ class Hop:
             return None
         raw_digest = raw.get("digest")
         raw_assurance = raw.get("assurance")
+        raw_role = raw.get("role")
+        raw_emitted = raw.get("emitted")
+        raw_revision = raw.get("revision")
         return Hop(
             hop=raw_name.strip(),
             digest=raw_digest if isinstance(raw_digest, str) else "",
             assurance=raw_assurance
             if isinstance(raw_assurance, str) and raw_assurance in ASSURANCE_ORDER
             else ASSURANCE_UNVERIFIED,
+            role=raw_role if isinstance(raw_role, str) and raw_role in ROLE_ORDER else ROLE_UNKNOWN,
+            emitted=raw_emitted if isinstance(raw_emitted, str) else "",
+            revision=raw_revision
+            if isinstance(raw_revision, int) and not isinstance(raw_revision, bool)
+            else None,
         )
+
+
+@dataclass(frozen=True)
+class RoleViolation:
+    """One contradiction between what a hop was allowed to do and what the chain says it did.
+
+    Attributes:
+        hop: Name of the hop the contradiction is attributed to.
+        reason: One of the module-level ``VIOLATION_*`` reasons.
+        detail: Short human-readable explanation, for a refusal message.
+    """
+
+    hop: str
+    reason: str
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the wire form a refusal or a report carries."""
+        payload: dict[str, object] = {"hop": self.hop, "reasonCode": self.reason}
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
 
 
 @dataclass(frozen=True)
@@ -105,6 +181,7 @@ class AssuranceReport:
     hops: tuple[Hop, ...]
     weakest: str
     changed_at: tuple[str, ...] = ()
+    violations: tuple[RoleViolation, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return the wire form of this report."""
@@ -112,6 +189,7 @@ class AssuranceReport:
             "hops": [hop.to_dict() for hop in self.hops],
             "weakest": self.weakest,
             "changedAt": list(self.changed_at),
+            "violations": [violation.to_dict() for violation in self.violations],
         }
 
 
@@ -140,7 +218,67 @@ def report(hops: Sequence[Hop], *, expected_digest: str | None = None) -> Assura
     grade = weakest(hops)
     if changed_at and ASSURANCE_ORDER.index(grade) < ASSURANCE_ORDER.index(ASSURANCE_DECLARED):
         grade = ASSURANCE_DECLARED
-    return AssuranceReport(hops=tuple(hops), weakest=grade, changed_at=tuple(changed_at))
+    return AssuranceReport(
+        hops=tuple(hops),
+        weakest=grade,
+        changed_at=tuple(changed_at),
+        violations=check_roles(hops),
+    )
+
+
+def check_roles(hops: Sequence[Hop]) -> tuple[RoleViolation, ...]:
+    """Return every contradiction the chain states about what its hops were allowed to do.
+
+    Three per-hop rules and one chain rule, all decided from the record itself:
+
+    - a ``carrier`` whose output differs from its input changed something it said it would not;
+    - a ``reducer`` that changed the contract must name the revision it produced, otherwise the
+      change is unattributable;
+    - a hop with no role that changed the contract is the same problem without even a claim;
+    - consecutive hops must agree: what one says it sent is what the next says it received.
+
+    The last rule is what makes a lying hop unnecessary to catch: it is enough that the *next* hop
+    reports what actually arrived.
+    """
+    violations: list[RoleViolation] = []
+    for index, hop in enumerate(hops):
+        changed = bool(hop.digest and hop.emitted and hop.digest != hop.emitted)
+        if hop.role == ROLE_CARRIER and changed:
+            violations.append(
+                RoleViolation(
+                    hop.hop,
+                    VIOLATION_CARRIER_CHANGED,
+                    "a carrier hop changed the contract it promised to forward",
+                )
+            )
+        elif hop.role == ROLE_REDUCER and changed and hop.revision is None:
+            violations.append(
+                RoleViolation(
+                    hop.hop,
+                    VIOLATION_REDUCER_UNREVISED,
+                    "a reducer hop changed the contract without naming a new revision",
+                )
+            )
+        elif hop.role == ROLE_UNKNOWN and changed:
+            violations.append(
+                RoleViolation(
+                    hop.hop,
+                    VIOLATION_UNATTRIBUTED,
+                    "a hop with no declared role changed the contract",
+                )
+            )
+        if index == 0:
+            continue
+        previous = hops[index - 1]
+        if previous.emitted and hop.digest and previous.emitted != hop.digest:
+            violations.append(
+                RoleViolation(
+                    hop.hop,
+                    VIOLATION_CHAIN_GAP,
+                    "this hop received a contract other than the one the previous hop sent",
+                )
+            )
+    return tuple(violations)
 
 
 def read_hops(value: object) -> tuple[Hop, ...]:
@@ -177,8 +315,18 @@ __all__ = [
     "ASSURANCE_ORDER",
     "ASSURANCE_RECOMPUTED",
     "ASSURANCE_UNVERIFIED",
+    "ROLE_CARRIER",
+    "ROLE_ORDER",
+    "ROLE_REDUCER",
+    "ROLE_UNKNOWN",
+    "VIOLATION_CARRIER_CHANGED",
+    "VIOLATION_CHAIN_GAP",
+    "VIOLATION_REDUCER_UNREVISED",
+    "VIOLATION_UNATTRIBUTED",
     "AssuranceReport",
     "Hop",
+    "RoleViolation",
+    "check_roles",
     "read_hops",
     "report",
     "weakest",

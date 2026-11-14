@@ -15,6 +15,7 @@ from protocol.contract_carriage import (
     CONTRACT_KEYS,
     DELEGATION_KEY,
     DELEGATION_VERSION,
+    ROLE_CARRIER,
     append_hop,
     carried,
     contract_digest,
@@ -117,10 +118,19 @@ def test_append_hop_writes_the_v2_shape() -> None:
     result = append_hop(_metadata(), hop="oss", assurance=ASSURANCE_ECHOED)
 
     delegation = result[DELEGATION_KEY]
+    digest = contract_digest(_metadata())
     assert isinstance(delegation, dict)
     assert delegation["version"] == DELEGATION_VERSION
+    # A hop records both halves of its claim: what it received and what it sends on. A carrier's
+    # two values are equal by construction, which is the statement the next hop can check.
     assert delegation["hops"] == [
-        {"hop": "oss", "digest": contract_digest(_metadata()), "assurance": ASSURANCE_ECHOED}
+        {
+            "hop": "oss",
+            "digest": digest,
+            "emitted": digest,
+            "role": ROLE_CARRIER,
+            "assurance": ASSURANCE_ECHOED,
+        }
     ]
 
 
