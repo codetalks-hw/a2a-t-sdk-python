@@ -32,6 +32,7 @@ from shared.run_constants import PROTOCOL_A2A_T, PROTOCOL_PURE
 from demo.approval_answer import approval_answer
 from demo.approval_plan import plan_from_task_t
 from demo.envelope_decision import EnvelopeDecisionProvider
+from demo.typed_payload import typed_statement_from_task_t
 
 
 def offline_model_factory(run_spec: RunSpec) -> Any:
@@ -205,6 +206,12 @@ async def build_demo_runtime(
         approval_plan=(
             plan_from_task_t
             if config.approval_answer != "off" and protocol == PROTOCOL_A2A_T
+            else None
+        ),
+        # v2 prototype: only the A2A-T hop carries a typed statement; the plain hop has no schema.
+        typed_statement=(
+            typed_statement_from_task_t
+            if config.typed_payload and protocol == PROTOCOL_A2A_T
             else None
         ),
     )

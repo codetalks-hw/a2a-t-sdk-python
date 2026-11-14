@@ -16,7 +16,7 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 import httpx
@@ -24,6 +24,18 @@ from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
     TASK_T_EXTENSION_URI,
+)
+from a2a_t.core.plan_binding import canonical_digest
+from shared.agreement import (
+    AGREEMENT_METADATA_KEY,
+    next_revision,
+    read_agreement,
+)
+from shared.agreement import (
+    REASON_STALE as AGREEMENT_STALE,
+)
+from shared.agreement import (
+    REASON_UNKNOWN as AGREEMENT_UNKNOWN,
 )
 from shared.approval import (
     APPROVAL_METADATA_KEY,
@@ -41,9 +53,10 @@ from shared.change_order import (
     BASELINE_ERROR_METADATA_KEY,
     REASON_MISSING,
     REASON_STALE,
-    read_baseline_digest,
+    read_baseline,
 )
 from shared.readback import Readback, compare_plans
+from shared.typed_payload import read_statement, statement_metadata
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
@@ -119,6 +132,11 @@ from demo.nms_sim.token import TokenStore
 
 _LOGGER = logging.getLogger("ran_energy_saving.nms_sim")
 
+#: Metadata key a caller uses to declare the hops a request already passed through.
+DELEGATION_METADATA_KEY: Final[str] = "a2at-sample/delegation"
+#: Name this server appends to the chain.
+DELEGATION_HOP: Final[str] = "nms"
+
 #: SSE media type.
 EVENT_STREAM: str = "text/event-stream"
 
@@ -153,6 +171,9 @@ class SimRuntime:
     negotiations: NegotiationStore
     pushes: PushSender
     registry: PushRegistry
+    #: Request identity -> Task that already answers it. A retry returns that Task instead of
+    #: executing the plan a second time.
+    executions: dict[str, str] = field(default_factory=dict)
 
 
 def build_runtime(
@@ -281,7 +302,7 @@ def build_routes(
             _LOGGER.warning("simulator execution failed: %s", exc)
             resolved_store.update(task.task_id, state=TASK_FAILED, message=str(exc))
             return None
-        readback = _readback_for(intent, config)
+        readback = _readback_for(intent, config, task)
         return report, report_artifact(task.task_id, report, readback=readback)
 
     def _stream_completion(
@@ -532,7 +553,7 @@ def build_routes(
         intent = accepted_intent(content, session.baseline, config)
         context_id = _context_id(body) or session.context_id
         task, is_new = _resolve_task(body, context_id=context_id, fallback_task_id=session.task_id)
-        _remember_plan(task, intent)
+        _remember_plan(task, intent, _message_metadata(body))
         negotiations.close(session)
         try:
             push = _push_config_for(
@@ -764,6 +785,7 @@ def build_routes(
             content = read_message_request(body, request.headers)
         except SimRequestError as exc:
             return JSONResponse(exc.payload, status_code=exc.status_code)
+        _count_read_path(content)
         context_id = _context_id(body) or session.context_id
         if parsed_context.performative == PERFORMATIVE_REJECT:
             return _finish_reject(session, stream=stream, context_id=context_id)
@@ -793,9 +815,64 @@ def build_routes(
 
     # ---------------------------------------------------------------- change order (P3)
 
-    def _remember_plan(task: SimTask, intent: ParsedIntent) -> None:
-        """Record the plan this Task now represents, so a later change order can name it."""
-        task.plan = dict(plan_for(intent))
+    def _count_read_path(content: ExtractedContent) -> None:
+        """Record whether the business values came from data or from parsed prose."""
+        metrics.path(
+            PROTOCOL_A2A_T, "typed" if content.source.startswith("typed:") else "text"
+        )
+
+    def _request_identity(metadata: Mapping[str, object]) -> str | None:
+        """Return the identity of the request, computed from the document the peer sent.
+
+        The typed statement is the natural identity: it is data, so both sides can hash it and a
+        retry after a crash (new message id, new Task) still names the same request. A rendered
+        Task-T is hashed as a fallback; a negotiation reply has no independent identity.
+        """
+        try:
+            statement = read_statement(metadata)
+        except ValueError:
+            return None
+        if statement is not None:
+            return canonical_digest(statement_metadata(statement))
+        prompt = metadata.get(TASK_T_EXTENSION_URI)
+        if isinstance(prompt, str) and prompt.strip():
+            return canonical_digest({"taskT": prompt})
+        return None
+
+    def _delegation_chain(metadata: Mapping[str, object]) -> tuple[str, ...]:
+        """Return the hops the request declares, plus this server."""
+        raw = metadata.get(DELEGATION_METADATA_KEY)
+        hops = tuple(str(hop) for hop in raw) if isinstance(raw, list) else ()
+        return (*hops, DELEGATION_HOP) if hops else ()
+
+    def _remember_plan(
+        task: SimTask, intent: ParsedIntent, metadata: Mapping[str, object]
+    ) -> None:
+        """Record the plan and the agreement revision this Task now represents.
+
+        Re-accepting the same plan keeps the revision (an idempotent restatement); a different plan
+        bumps it. That is what makes a change order expressible as "target revision N".
+        """
+        plan = dict(plan_for(intent))
+        previous = (
+            read_agreement({AGREEMENT_METADATA_KEY: task.agreement})
+            if task.agreement is not None
+            else None
+        )
+        agreement = next_revision(
+            previous,
+            plan=plan,
+            scopes=({"window": intent.window, "rateMbps": intent.rate_mbps},),
+        )
+        task.plan = plan
+        task.agreement = agreement.to_dict()
+        identity = _request_identity(metadata)
+        if identity is not None:
+            task.request_id = identity
+            resolved.executions.setdefault(identity, task.task_id)
+        if not task.execution_id:
+            task.execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+        task.delegation_chain = _delegation_chain(metadata)
 
     def _baseline_rejection(
         task: SimTask,
@@ -812,11 +889,11 @@ def build_routes(
         """
         if config.baseline != BASELINE_REQUIRED or task.plan is None:
             return None
-        given = read_baseline_digest(metadata)
+        declared = read_baseline(metadata)
         expected_plan: Mapping[str, object] = task.plan
         if config.baseline_stale:
             expected_plan = {**expected_plan, "rateMbps": _other_rate(expected_plan.get("rateMbps"))}
-        if given is None:
+        if declared is None:
             return _refuse_change_order(
                 task,
                 REASON_MISSING,
@@ -824,7 +901,32 @@ def build_routes(
                 protocol=protocol,
                 stream=stream,
             )
-        if given != plan_digest(expected_plan):
+        current = (
+            read_agreement({AGREEMENT_METADATA_KEY: task.agreement})
+            if task.agreement is not None
+            else None
+        )
+        if declared.agreement_id is not None and (
+            current is None or current.agreement_id != declared.agreement_id
+        ):
+            return _refuse_change_order(
+                task,
+                AGREEMENT_UNKNOWN,
+                "The change order names an agreement this Task does not execute.",
+                protocol=protocol,
+                stream=stream,
+            )
+        if declared.revision is not None and (
+            current is None or current.revision != declared.revision
+        ):
+            return _refuse_change_order(
+                task,
+                AGREEMENT_STALE,
+                "The change order was written against a superseded revision.",
+                protocol=protocol,
+                stream=stream,
+            )
+        if declared.plan_digest != plan_digest(expected_plan):
             return _refuse_change_order(
                 task,
                 REASON_STALE,
@@ -886,11 +988,21 @@ def build_routes(
             content = read_message_request(body, request.headers)
         except SimRequestError as exc:
             return JSONResponse(exc.payload, status_code=exc.status_code)
+        _count_read_path(content)
         issue = select_issue(content, config)
         context_id = _context_id(body) or str(uuid.uuid4())
         requested_task_id = _requested_task_id(body)
         request_config = PushConfig.from_request(body)
         if issue is None:
+            # A retry names the same request: return the Task that already answers it instead of
+            # executing the plan a second time. A continuation names a Task and is not a retry.
+            identity = _request_identity(metadata)
+            if identity is not None and not requested_task_id:
+                known = resolved.executions.get(identity)
+                existing = resolved_store.get(known) if known else None
+                if existing is not None:
+                    metrics.duplicate(PROTOCOL_A2A_T)
+                    return _approval_response(existing, stream=stream)
             task, is_new = _resolve_task(body, context_id=context_id)
             try:
                 push = _push_config_for(
@@ -902,7 +1014,7 @@ def build_routes(
             except PushConfigExistsError as exc:
                 return _register_config_error(exc)
             intent = parse_message_request(body, request.headers, config)
-            _remember_plan(task, intent)
+            _remember_plan(task, intent, metadata)
             metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
             hold = config.hold_working and is_new
             if config.approval:
@@ -1030,7 +1142,7 @@ def build_routes(
             return _pure_issue(task, issue, content, stream=stream, is_answer=is_answer)
         metrics.outcome(PROTOCOL_A2A, OUTCOME_ACCEPTED)
         intent = accepted_intent(content, None, config)
-        _remember_plan(task, intent)
+        _remember_plan(task, intent, _message_metadata(body))
         if config.approval:
             return _request_approval(task, intent, stream=stream, hold=task.pure_hold)
         if stream:
@@ -1209,6 +1321,26 @@ def build_routes(
             resolved_store.update(task_id, state=TASK_CANCELED, message="Task canceled.")
         return JSONResponse({"task": task.to_dict()}, status_code=200)
 
+    async def list_agreements(request: Request) -> Response:
+        """Return the current revision of every agreement this simulator holds.
+
+        The agreement is the durable object; a listing makes "what did we agree to" answerable
+        without walking Tasks. One entry per agreement id, newest revision first.
+        """
+        if not authorized(request):
+            return unauthorized()
+        current: dict[str, dict[str, object]] = {}
+        for document in resolved_store.list():
+            metadata = document.get("metadata")
+            raw = (
+                metadata.get(AGREEMENT_METADATA_KEY)
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if isinstance(raw, Mapping):
+                current.setdefault(str(raw.get("agreementId")), dict(raw))
+        return JSONResponse({"agreements": list(current.values())}, status_code=200)
+
     async def list_negotiations(request: Request) -> Response:
         """Return the open negotiations, optionally filtered by ``contextId``.
 
@@ -1235,6 +1367,7 @@ def build_routes(
         Route("/a2a/json/message:send", send_message_json, methods=["POST"]),
         Route("/a2a/json/tasks", list_tasks, methods=["GET"]),
         Route("/a2a/json/negotiations", list_negotiations, methods=["GET"]),
+        Route("/a2a/json/agreements", list_agreements, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}", get_task, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}:cancel", cancel_task, methods=["POST"]),
     ]
@@ -1252,7 +1385,9 @@ def _other_rate(value: object) -> float:
     return rate + 1.0
 
 
-def _readback_for(intent: ParsedIntent, config: SimConfig) -> dict[str, object]:
+def _readback_for(
+    intent: ParsedIntent, config: SimConfig, task: SimTask | None = None
+) -> dict[str, object]:
     """Build the S8 readback envelope of one executed plan.
 
     The executed plan is the accepted one; ``readback_deviation`` is a measurement switch that
@@ -1267,10 +1402,20 @@ def _readback_for(intent: ParsedIntent, config: SimConfig) -> dict[str, object]:
             if isinstance(rate, (int, float)) and not isinstance(rate, bool)
             else 0.0
         )
+    agreement = (
+        read_agreement({AGREEMENT_METADATA_KEY: task.agreement})
+        if task is not None and task.agreement is not None
+        else None
+    )
     return Readback(
         plan_digest=plan_digest(planned),
         executed=executed,
         deviations=compare_plans(planned, executed),
+        execution_id=task.execution_id if task is not None else "",
+        request_id=task.request_id if task is not None else "",
+        agreement_id=agreement.agreement_id if agreement is not None else "",
+        revision=agreement.revision if agreement is not None else 0,
+        delegation_chain=task.delegation_chain if task is not None else (),
     ).to_metadata()
 
 

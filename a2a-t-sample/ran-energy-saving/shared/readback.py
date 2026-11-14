@@ -47,11 +47,21 @@ class Readback:
         plan_digest: Digest of the plan that was approved and executed.
         executed: The plan the network reports having applied.
         deviations: Field-level differences between the approved and the executed plan.
+        execution_id: Identity of this execution, stable for a retry of the same request.
+        request_id: Identity of the request that produced it, computed by the protocol.
+        agreement_id: Agreement the execution belongs to, when the hop has one.
+        revision: Agreement revision executed, when the hop has one.
+        delegation_chain: Hops the request passed through, in order.
     """
 
     plan_digest: str
     executed: Mapping[str, object]
     deviations: tuple[Mapping[str, object], ...]
+    execution_id: str = ""
+    request_id: str = ""
+    agreement_id: str = ""
+    revision: int = 0
+    delegation_chain: tuple[str, ...] = ()
 
     def to_metadata(self) -> dict[str, object]:
         """Return the metadata entry carrying this envelope."""
@@ -62,6 +72,15 @@ class Readback:
                 "planDigest": self.plan_digest,
                 "executed": dict(self.executed),
                 "deviations": [dict(entry) for entry in self.deviations],
+                **({"executionId": self.execution_id} if self.execution_id else {}),
+                **({"requestId": self.request_id} if self.request_id else {}),
+                **({"agreementId": self.agreement_id} if self.agreement_id else {}),
+                **({"revision": self.revision} if self.revision else {}),
+                **(
+                    {"delegationChain": list(self.delegation_chain)}
+                    if self.delegation_chain
+                    else {}
+                ),
             }
         }
 
@@ -99,6 +118,11 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
     if not isinstance(digest, str) or not digest or not isinstance(executed, Mapping):
         return None
     deviations = raw.get("deviations")
+    execution_id = raw.get("executionId")
+    request_id = raw.get("requestId")
+    agreement_id = raw.get("agreementId")
+    revision = raw.get("revision")
+    chain = raw.get("delegationChain")
     return Readback(
         plan_digest=digest,
         executed=dict(executed),
@@ -107,6 +131,11 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
         )
         if isinstance(deviations, list)
         else (),
+        execution_id=execution_id if isinstance(execution_id, str) else "",
+        request_id=request_id if isinstance(request_id, str) else "",
+        agreement_id=agreement_id if isinstance(agreement_id, str) else "",
+        revision=revision if isinstance(revision, int) and not isinstance(revision, bool) else 0,
+        delegation_chain=tuple(str(hop) for hop in chain) if isinstance(chain, list) else (),
     )
 
 

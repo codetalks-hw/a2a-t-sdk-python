@@ -38,6 +38,11 @@ class _Counters:
     #: negotiation kind is not polluted by a wire-shape experiment.
     questions_by_shape: dict[str, int] = field(default_factory=dict)
     outcomes: dict[str, int] = field(default_factory=dict)
+    #: How the business values were read: ``typed`` (data statement) or ``text`` (parsed prose).
+    #: This is the v2 prototype's central counter: the deterministic path must be taken.
+    paths: dict[str, int] = field(default_factory=dict)
+    #: Retries recognised by request identity. A duplicate must not execute again.
+    duplicates: int = 0
 
     def snapshot(self) -> dict[str, object]:
         """Return a JSON-serializable copy."""
@@ -48,6 +53,8 @@ class _Counters:
             "questionsByShape": dict(self.questions_by_shape),
             "rounds": self.rounds,
             "outcomes": dict(self.outcomes),
+            "paths": dict(self.paths),
+            "duplicates": self.duplicates,
         }
 
 
@@ -82,6 +89,15 @@ class ServerMetrics:
     def round(self, protocol: str) -> None:
         """Count one negotiation round the server advanced."""
         self._bucket(protocol).rounds += 1
+
+    def path(self, protocol: str, path: str) -> None:
+        """Count one request by how its business values were read."""
+        bucket = self._bucket(protocol)
+        bucket.paths[path] = bucket.paths.get(path, 0) + 1
+
+    def duplicate(self, protocol: str) -> None:
+        """Count one request recognised as a retry of an already-accepted request."""
+        self._bucket(protocol).duplicates += 1
 
     def outcome(self, protocol: str, outcome: str) -> None:
         """Count one terminal outcome."""

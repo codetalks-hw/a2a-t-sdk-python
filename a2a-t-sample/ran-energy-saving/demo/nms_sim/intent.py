@@ -17,6 +17,7 @@ from typing import Final
 
 from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from shared import energy_rules
+from shared.typed_payload import TypedStatement, read_statement
 
 from demo.nms_sim.config import (
     RATE_POLICY_OPTIONAL,
@@ -122,6 +123,8 @@ class ExtractedContent:
     rate_mbps: float | None
     percent: float | None
     source: str
+    #: Concrete site names stated by a typed request; empty for area-level or text requests.
+    sites: tuple[str, ...] = ()
 
     def merged_with(self, baseline: ExtractedContent | None) -> ExtractedContent:
         """Return this reply's values over the original request's values.
@@ -138,6 +141,7 @@ class ExtractedContent:
             rate_mbps=self.rate_mbps if self.rate_mbps is not None else baseline.rate_mbps,
             percent=self.percent if self.percent is not None else baseline.percent,
             source=_join_sources(baseline.source, self.source),
+            sites=self.sites or baseline.sites,
         )
 
 
@@ -198,6 +202,15 @@ def read_message_request(
         raise SimRequestError(400, {"error": {"code": 400, "message": "message is required"}})
     metadata = message.get("metadata")
     metadata_map = metadata if isinstance(metadata, Mapping) else {}
+    # The typed statement is the contract when present: it is data, so the values are read
+    # instead of inferred. The rendered prompt stays as the human view and as the v1 fallback.
+    # A statement also satisfies the extension declaration, because it *is* the Task-T payload.
+    try:
+        statement = read_statement(metadata_map)
+    except ValueError as exc:
+        raise SimRequestError(400, {"error": {"code": 400, "message": str(exc)}}) from exc
+    if statement is not None:
+        return _content_from_statement(statement)
     extension_header = extension_header_value(headers)
     declared = {item.strip() for item in extension_header.split(",") if item.strip()}
     metadata_keys = {str(key) for key in metadata_map}
@@ -213,6 +226,23 @@ def read_message_request(
     # An accept carries only Negotiation-T; its refilled values live in that metadata body.
     source = prompt_text or negotiation_text or text
     return extract_content(source)
+
+
+def _content_from_statement(statement: TypedStatement) -> ExtractedContent:
+    """Return the extracted-content view of one typed statement.
+
+    Same fields the text parser fills, so every later decision (issue selection, plan projection,
+    digest) runs unchanged -- that equality is what the dual-read regression checks.
+    """
+    return ExtractedContent(
+        operation=statement.operation,
+        region=statement.region,
+        windows=tuple(scope.window for scope in statement.scopes),
+        rate_mbps=statement.scopes[0].rate_mbps if statement.scopes else None,
+        percent=statement.saving_rate_percent,
+        source=f"typed:{statement.schema_uri}",
+        sites=statement.sites,
+    )
 
 
 def extract_content(source: str) -> ExtractedContent:
@@ -358,7 +388,7 @@ def accepted_intent(
             else config.window
         ),
         rate_mbps=merged.rate_mbps if merged.rate_mbps is not None else DEFAULT_ACCEPT_RATE_MBPS,
-        sites=config.sites,
+        sites=merged.sites or config.sites,
         source=merged.source,
     )
 
@@ -391,7 +421,7 @@ def parse_message_request(
             else config.window
         ),
         rate_mbps=content.rate_mbps if content.rate_mbps is not None else DEFAULT_ACCEPT_RATE_MBPS,
-        sites=config.sites,
+        sites=content.sites or config.sites,
         source=content.source,
     )
 

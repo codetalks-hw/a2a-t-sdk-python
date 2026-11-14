@@ -131,6 +131,7 @@ from shared.trace import (
     producer_span_id,
     trace_stage,
 )
+from shared.typed_payload import TypedStatement, statement_metadata
 
 from protocol.client_policy import ClientPolicy, agreed_target_value, apply_automated_decision
 from protocol.decision_provider import (
@@ -975,6 +976,7 @@ async def run_client_flow(
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     baseline_plan: Mapping[str, object] | None = None,
+    typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -1048,6 +1050,9 @@ async def run_client_flow(
         baseline_plan: the plan this Modify replaces. When supplied, the run declares its digest on
             the change order so the server can refuse one written against a plan that has since
             changed. A plain-A2A client has no accepted document to derive it from.
+        typed_statement: v2 prototype. Projection from the filled Task-T values to the typed
+            statement that travels next to the rendered prompt. When supplied and the values are
+            already stateable, the peer reads the data instead of parsing prose.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -1361,6 +1366,23 @@ async def run_client_flow(
         prompt_content.extension_uri or TASK_T_EXTENSION_URI: prompt_text,
         TEMPLATE_URI_METADATA_KEY: prompt_content.template_uri or task_template_uri,
     }
+    if typed_statement is not None:
+        # The typed statement is the contract; the rendered prompt above stays as the human view
+        # and as the fallback for a peer that only speaks v1.
+        statement = typed_statement(initial_filled)
+        if statement is not None:
+            initial_metadata.update(statement_metadata(statement))
+            emit_trace(
+                "typed_task_t",
+                phase=initial_phase,
+                title="Typed Task-T statement attached",
+                round_number=None,
+                context_id=target_context_id if modify_only else None,
+                detail={
+                    "schemaUri": statement.schema_uri,
+                    "scopes": len(statement.scopes),
+                },
+            )
     if modify_only and baseline_plan is not None:
         # The change order names the plan it replaces. Only a client that holds the accepted plan
         # can supply this at all; the plain-A2A flow has no such object.

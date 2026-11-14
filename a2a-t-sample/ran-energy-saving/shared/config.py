@@ -151,6 +151,9 @@ ENVELOPE_DECISION_ENV_KEY = "A2AT_SAMPLE_ENVELOPE_DECISION"
 #: S6: how the client answers an ``a2at-sample/approval`` request. ``off`` leaves the Task waiting;
 #: ``approve``/``reject`` answer it deterministically, so a S6 run does not need a human.
 APPROVAL_ANSWER_ENV_KEY = "A2AT_SAMPLE_APPROVAL_ANSWER"
+#: v2 prototype: send the typed Task-T statement next to the rendered prompt. Off by default so
+#: the rendered-only baseline stays reproducible.
+TYPED_PAYLOAD_ENV_KEY = "A2AT_SAMPLE_TYPED_PAYLOAD"
 SUPPORTED_APPROVAL_ANSWERS: Final[tuple[str, ...]] = ("off", "approve", "reject")
 HTTP_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_HTTP_TIMEOUT_SECONDS"
 LLM_TIMEOUT_ENV_KEY = "A2AT_SAMPLE_LLM_TIMEOUT_SECONDS"
@@ -826,6 +829,8 @@ class SampleConfig:
     envelope_decision: bool = False
     #: How the client answers an approval request: ``off`` / ``approve`` / ``reject``.
     approval_answer: str = "off"
+    #: Attach the typed Task-T statement (v2 prototype) to the initial request.
+    typed_payload: bool = False
     gateway_task_db_path: str | None = None
     auth_token: str = ""
     server_auth_token: str = ""
@@ -1120,6 +1125,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         pure_auto_tier=_pure_auto_tier(values),
         envelope_decision=_env_bool(values, ENVELOPE_DECISION_ENV_KEY, False),
         approval_answer=_approval_answer(values),
+        typed_payload=_env_bool(values, TYPED_PAYLOAD_ENV_KEY, False),
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
         auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         server_auth_token=_env_value(values, SERVER_AUTH_TOKEN_ENV_KEY, "").strip(),

@@ -36,6 +36,13 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def agreement_metadata(agreement: dict[str, object] | None) -> dict[str, object]:
+    """Return the metadata entry of one agreement revision, empty when the Task has none."""
+    if agreement is None:
+        return {}
+    return {"a2at-sample/agreement": dict(agreement)}
+
+
 @dataclass
 class SimTask:
     """One simulated Task.
@@ -80,6 +87,15 @@ class SimTask:
     #: the server can tell "change the plan I know" from "change a plan someone else already
     #: replaced" (P3). ``None`` until an accept.
     plan: dict[str, object] | None = None
+    #: The agreement revision this Task executes (v2 prototype). It rides on every Task document so
+    #: a client can read the committed revision without another endpoint.
+    agreement: dict[str, object] | None = None
+    #: Protocol-level identities (v2 prototype): the request this Task answers and the execution it
+    #: represents. A retry of the same request returns this Task instead of executing again.
+    request_id: str = ""
+    execution_id: str = ""
+    #: Hops the request passed through, including this server.
+    delegation_chain: tuple[str, ...] = ()
 
     def touch(self) -> None:
         """Refresh the millisecond timestamp."""
@@ -116,9 +132,14 @@ class SimTask:
         if embedded:
             # ``Task.metadata`` is a protobuf Struct, so the millisecond timestamp survives the
             # client's ParseDict while a top-level custom field would not.
-            document["metadata"] = {TIMESTAMP_METADATA_KEY: self.timestamp_ms}
+            document["metadata"] = {
+                TIMESTAMP_METADATA_KEY: self.timestamp_ms,
+                **agreement_metadata(self.agreement),
+            }
             return document
         document["timestamp"] = self.timestamp_ms
+        if self.agreement is not None:
+            document["metadata"] = agreement_metadata(self.agreement)
         if self.shape == TASK_SHAPE_TOPLEVEL:
             document["state"] = self.state
         return document
@@ -130,7 +151,10 @@ class SimTask:
                 "taskId": self.task_id,
                 "contextId": self.context_id,
                 "status": self._status_document(),
-                "metadata": {TIMESTAMP_METADATA_KEY: self.timestamp_ms},
+                "metadata": {
+                    TIMESTAMP_METADATA_KEY: self.timestamp_ms,
+                    **agreement_metadata(self.agreement),
+                },
             }
         }
 

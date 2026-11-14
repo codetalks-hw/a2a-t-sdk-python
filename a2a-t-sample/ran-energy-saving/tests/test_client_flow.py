@@ -108,6 +108,7 @@ from shared.trace import (
     PHASES,
     set_global_activity_sink,
 )
+from shared.typed_payload import TYPED_SCHEMA_URI, TYPED_TASK_T_METADATA_KEY, build_statement
 
 CONTEXT_ID = "ctx-client-flow"
 
@@ -544,6 +545,34 @@ async def test_a_create_sends_no_baseline() -> None:
 
     metadata = metadata_to_dict(transport.requests[0].message.metadata)
     assert BASELINE_METADATA_KEY not in metadata
+
+
+async def test_a_typed_statement_travels_next_to_the_rendered_prompt() -> None:
+    """v2 prototype: the data is the contract, the prompt stays as the human view."""
+    statement = build_statement(
+        operation="Create",
+        region="A2ATestRegion",
+        scopes=[{"window": "00:00-06:00", "rateMbps": 10.0}],
+    )
+    transport = ScriptedTransport([_task_completed_batch()])
+
+    await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        typed_statement=lambda _filled: statement,
+    )
+
+    metadata = metadata_to_dict(transport.requests[0].message.metadata)
+    entry = metadata[TYPED_TASK_T_METADATA_KEY]
+    assert isinstance(entry, dict)
+    assert entry["schemaUri"] == TYPED_SCHEMA_URI
+    assert entry["region"] == "A2ATestRegion"
+    # The rendered view is still sent: a peer that only speaks v1 must keep working.
+    assert TASK_T_EXTENSION_URI in metadata
 
 
 async def test_waiting_for_the_server_publishes_a_peer_activity() -> None:

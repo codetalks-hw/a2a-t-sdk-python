@@ -76,6 +76,7 @@ from shared.trace import (
 )
 from shared.trace_propagation import inject_outgoing
 from shared.traced_llm import register_traced_providers
+from shared.typed_payload import TypedStatement
 
 from protocol.client_flow import (
     ClientFlowResult,
@@ -462,6 +463,8 @@ class ClientRuntime:
     #: The plan this Modify replaces. Supplied by the caller that holds the previously accepted
     #: plan; ``None`` sends no baseline.
     baseline_plan: Mapping[str, object] | None = None
+    #: v2 prototype: projects filled Task-T values onto the typed statement sent next to the prompt.
+    typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None
     intent_processor: IntentProcessor | None = None
     wire_log: HttpWireLog | None = None
     shared_webhook: SharedWebhook | None = None
@@ -854,6 +857,7 @@ class ClientRuntime:
                     approval_answer=self.approval_answer,
                     approval_plan=self.approval_plan,
                     baseline_plan=self.baseline_plan,
+                    typed_statement=self.typed_statement,
                 )
         finally:
             if intent_task is not None and not intent_task.done():
@@ -923,6 +927,7 @@ async def build_client_runtime(
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     baseline_plan: Mapping[str, object] | None = None,
+    typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -1181,6 +1186,7 @@ async def build_client_runtime(
         approval_answer=approval_answer,
         approval_plan=approval_plan,
         baseline_plan=baseline_plan,
+        typed_statement=typed_statement,
         _httpx_client=httpx_client,
         nms_client=nms_client,
         wire_log=wire_log if httpx_client is not None else None,
