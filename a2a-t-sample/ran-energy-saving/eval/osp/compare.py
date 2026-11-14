@@ -45,6 +45,17 @@ TASK_T_SECTIONS: Final[tuple[str, ...]] = (
     "Expected Output",
 )
 
+#: Sections the tester compares, in template order. The trailing terminology and expected-output
+#: prose is fixed reference text, not a per-case value, so it is left out of the section table.
+TASK_T_COMPARE_SECTIONS: Final[tuple[str, ...]] = (
+    "Operation Type",
+    "Task Type",
+    "Task Description",
+    "Task Object",
+    "Task Target",
+    "Task Context",
+)
+
 _SECTION_RE: Final[re.Pattern[str]] = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 #: Optional seconds of a time value. It must not swallow the rate of a segment such as
 #: ``{08:00-24:00:10Mbps}``: ``:10`` there is the rate, not seconds. A following rate unit or a
@@ -431,19 +442,21 @@ def flatten_task_t(expected_text: str, actual_text: str) -> list[CompareRow]:
     """Return one comparison row per Task-T section, in template order.
 
     Both prompts are split on their ``## Heading`` sections so a difference is reported at
-    ``task_t.Task Context`` instead of as two whole prompts. ``status`` is the verbatim reading:
-    two sections are equal when their text matches after whitespace and line breaks are collapsed.
-    ``verdict`` is the semantic reading the pass/fail decision uses (notation and phrasing
-    normalization), reported in its own column so the verbatim difference is never hidden. The
-    fixed template prose is ``recorded``: shown, explained, and never part of the decision. A
-    section carried by one side only is reported as missing or added.
+    ``task_t.Task Context`` instead of as two whole prompts. Only
+    :data:`TASK_T_COMPARE_SECTIONS` is listed: the fixed terminology and expected-output prose is
+    reference text, not a per-case value. ``status`` is the verbatim reading: two sections are equal
+    when their text matches after whitespace and line breaks are collapsed. ``verdict`` is the
+    semantic reading the pass/fail decision uses (notation and phrasing normalization), reported in
+    its own column so the verbatim difference is never hidden. The fixed task-description prose is
+    ``recorded``: shown, explained, and never part of the decision. A section carried by one side
+    only is reported as missing or added.
     """
     expected = parse_sections(expected_text)
     actual = parse_sections(actual_text)
     template = set(TASK_T_SECTIONS)
     extra = sorted((set(expected) | set(actual)) - template)
     rows: list[CompareRow] = []
-    for section in (*TASK_T_SECTIONS, *extra):
+    for section in (*TASK_T_COMPARE_SECTIONS, *extra):
         path = f"task_t.{section}"
         if section not in actual:
             rows.append(
@@ -514,6 +527,8 @@ def _verbatim_equal(expected: object, actual: object) -> bool:
 def _task_t_section_verdict(section: str, expected: str, actual: str) -> tuple[str, str]:
     """Return the semantic verdict and its explanation for one section both prompts carry."""
     if section in RECORD_ONLY_TASK_T_SECTIONS:
+        if _verbatim(expected) == _verbatim(actual):
+            return INTENT_ROW_SAME, "fixed template prose, not judged"
         return INTENT_ROW_RECORDED, "fixed template prose, record only"
     if section in NORMALIZED_TASK_T_SECTIONS:
         if _contexts_match(expected, actual):

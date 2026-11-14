@@ -31,7 +31,12 @@ from typing import Any, Final
 
 import httpx
 from eval.osp.catalog import PROTOCOL_A2A, PROTOCOL_A2A_T, CaseCatalog
-from eval.osp.compare import compare_intent, flatten_intent, flatten_task_t
+from eval.osp.compare import (
+    compare_intent,
+    compare_task_t,
+    flatten_intent,
+    flatten_task_t,
+)
 from eval.osp.followup import followup_case, followup_input, has_followup, is_blocked_case
 from eval.osp.runner import (
     STAGE_ERROR,
@@ -202,6 +207,9 @@ _NO_EXPECTED_INTENT_MESSAGE: Final[str] = "用例没有期望意图，只记录�
 
 #: Message of a failed intent stage: the case asks what the server understood.
 _SERVER_INTENT_MISMATCH_MESSAGE: Final[str] = "服务端意图理解结果与期望不一致。"
+
+#: Message of a failed full-flow Task-T stage: the run rendered a different Task-T.
+_TASK_T_MISMATCH_MESSAGE: Final[str] = "Task-T 与期望不一致。"
 
 #: Scenario used to seed a Modify target task; it is a complete request that creates a task.
 BASELINE_SCENARIO: Final[str] = "night"
@@ -2090,6 +2098,7 @@ class EvalBatchManager:
             # The arbitration intent is what the downstream understood, not our own extraction.
             # ``item.intent`` keeps the SDK document as auxiliary evidence.
             self._judge_server_intent(item, run, case)
+            self._judge_run_task_t(item, run, case)
             item.intent_meta["source"] = (
                 "server"
                 if item.server_intent is not None
@@ -2177,6 +2186,47 @@ class EvalBatchManager:
         else:
             stage.status = STAGE_PASSED
             stage.message = ""
+
+    def _judge_run_task_t(
+        self,
+        item: CaseItem,
+        run: RunState,
+        case: Mapping[str, Any] | None,
+    ) -> None:
+        """Judge a full-flow run's Task-T against the case's expectation.
+
+        A full-flow item skips the SDK preflight, so its Task-T is generated inside the run. The
+        ``task_prompt_rendered`` span carries the prompt the SDK rendered and sent; comparing it
+        with the case restores the section rows an SDK-only batch gets, without a model call. A case
+        whose expectation is the post-negotiation Task-T, or that turns the assertion off, stays
+        record-only. Missing evidence creates no stage rather than a fabricated one.
+        """
+        if item.protocol != PROTOCOL_A2A_T or "task_t" in item.stages or case is None:
+            return
+        expected = item.refs.get("taskT")
+        actual = _rendered_task_t(run)
+        if not isinstance(expected, str) or not expected.strip() or actual is None:
+            return
+        diffs = [diff.to_dict() for diff in compare_task_t(expected, actual)]
+        result = StageResult(
+            "task_t",
+            STAGE_PASSED,
+            expected=expected,
+            actual=actual,
+            diffs=diffs,
+        )
+        if _negotiation_expected(case, PROTOCOL_A2A_T):
+            # The case's Task-T is the post-negotiation one; the initial run prompt would be a
+            # false failure.
+            result.status = STAGE_RECORDED
+            result.message = _NEGOTIATED_TASK_T_MESSAGE
+        elif not _assertion_enabled(case, PROTOCOL_A2A_T, "task_t"):
+            result.status = STAGE_RECORDED
+            result.message = _ASSERTION_OFF_MESSAGE
+        elif diffs:
+            result.status = STAGE_FAILED
+            result.message = _TASK_T_MISMATCH_MESSAGE
+        item.stages["task_t"] = result
 
     async def _ensure_prompt_client(self, model_mode: str | None = None) -> Any:
         """Return the SDK prompt client of one model mode (offline scripted by default)."""
@@ -2956,6 +3006,24 @@ def _task_observation(run: RunState) -> dict[str, object]:
         "contextId": run.remote_context_id,
         "state": run.latest_task_state,
     }
+
+
+def _rendered_task_t(run: RunState) -> str | None:
+    """Return the Task-T prompt a run rendered, from its ``task_prompt_rendered`` span.
+
+    The span's ``promptText`` is the wire payload the SDK produced, so a full-flow item can be
+    compared with its case without running the Task-T generation a second time. The last span wins:
+    a retried segment renders its own prompt after any earlier one.
+    """
+    for span in reversed(run.traces):
+        if span.get("kind") != "task_prompt_rendered":
+            continue
+        detail = span.get("detail")
+        if isinstance(detail, Mapping):
+            text = detail.get("promptText")
+            if isinstance(text, str) and text.strip():
+                return text
+    return None
 
 
 def _load_stages(raw: object) -> dict[str, StageResult]:

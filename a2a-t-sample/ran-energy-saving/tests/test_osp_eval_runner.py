@@ -21,7 +21,7 @@ from eval.osp.compare import (
     INTENT_ROW_MISSING,
     INTENT_ROW_RECORDED,
     INTENT_ROW_SAME,
-    TASK_T_SECTIONS,
+    TASK_T_COMPARE_SECTIONS,
     compare_intent,
     compare_task_t,
     flatten_intent,
@@ -287,7 +287,9 @@ def test_compare_task_t_accepts_a_carrier_frequency_prefix() -> None:
 def test_flatten_task_t_lists_one_row_per_section() -> None:
     expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
     rows = flatten_task_t(expected, expected)
-    assert [row.path for row in rows] == [f"task_t.{section}" for section in TASK_T_SECTIONS]
+    assert [row.path for row in rows] == [
+        f"task_t.{section}" for section in TASK_T_COMPARE_SECTIONS
+    ]
     assert {row.status for row in rows} == {INTENT_ROW_SAME}
     assert {row.verdict for row in rows} <= {INTENT_ROW_SAME, INTENT_ROW_RECORDED}
 
@@ -337,10 +339,10 @@ def test_flatten_task_t_marks_a_missing_and_an_added_section() -> None:
 
 def test_flatten_task_t_records_the_fixed_template_sections() -> None:
     expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
-    actual = expected.replace("## Expected Output", "## Expected Output\nchanged prose")
+    actual = expected.replace("## Task Description", "## Task Description\nchanged prose")
     rows = {row.path: row for row in flatten_task_t(expected, actual)}
-    assert rows["task_t.Expected Output"].status == INTENT_ROW_CHANGED
-    assert rows["task_t.Expected Output"].verdict == INTENT_ROW_RECORDED
+    assert rows["task_t.Task Description"].status == INTENT_ROW_CHANGED
+    assert rows["task_t.Task Description"].verdict == INTENT_ROW_RECORDED
     assert compare_task_t(expected, actual) == []
 
 

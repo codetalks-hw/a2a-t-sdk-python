@@ -1229,6 +1229,55 @@ async def test_a_full_run_records_the_trace_id_and_answer(tmp_path: Path) -> Non
     assert data["answer"] == item.answer
 
 
+async def test_a_full_flow_item_gets_its_task_t_comparison(tmp_path: Path) -> None:
+    task_t = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+
+    def builder(run: RunState) -> None:
+        _finish(run)
+        run.traces.append({"kind": "task_prompt_rendered", "detail": {"promptText": task_t}})
+
+    manager = _manager(tmp_path, _FakeRuns(builder))
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T],
+        stop_after="final",
+        approval=None,
+        timeout_seconds=None,
+    )
+    await manager.start(str(created["batchId"]))
+    finished = await _wait_status(manager, str(created["batchId"]), "finished")
+
+    stage = finished["items"][0]["stages"]["task_t"]
+    assert stage["status"] == STAGE_PASSED
+    assert stage["expected"] == task_t
+    assert stage["actual"] == task_t
+    assert [row["path"] for row in stage["sections"]][0] == "task_t.Operation Type"
+
+
+async def test_a_full_flow_task_t_mismatch_fails_the_task_t_stage(tmp_path: Path) -> None:
+    task_t = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    changed = task_t.replace("720p video", "1080p video")
+
+    def builder(run: RunState) -> None:
+        _finish(run)
+        run.traces.append({"kind": "task_prompt_rendered", "detail": {"promptText": changed}})
+
+    manager = _manager(tmp_path, _FakeRuns(builder))
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T],
+        stop_after="final",
+        approval=None,
+        timeout_seconds=None,
+    )
+    await manager.start(str(created["batchId"]))
+    finished = await _wait_status(manager, str(created["batchId"]), "finished")
+
+    stage = finished["items"][0]["stages"]["task_t"]
+    assert stage["status"] == STAGE_FAILED
+    assert stage["diffs"]
+
+
 async def _run_item_with_server_intent(
     tmp_path: Path,
     payload: Mapping[str, object] | None,

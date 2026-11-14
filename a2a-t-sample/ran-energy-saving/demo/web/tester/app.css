@@ -531,7 +531,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   z-index: 50;
   display: flex;
   flex-direction: column;
-  width: min(760px, 94vw);
+  width: min(1060px, 96vw);
   height: 100vh;
   background: var(--white);
   border-left: 1px solid var(--g200);
@@ -559,7 +559,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .diff-summary { padding: 10px; display: grid; gap: 6px; font-size: 12px; color: var(--g700); }
 .diff-table { width: 100%; }
 .diff-table td.mono { font-family: var(--mono); font-size: 11px; }
-.diff-table td.pre { white-space: pre-wrap; word-break: break-word; max-width: 220px; }
+.diff-table td.pre { white-space: pre-wrap; word-break: break-word; max-width: 320px; }
 .intent-diff-table tr.intent-changed td { background: var(--yellow-soft); }
 .intent-diff-table tr.intent-missing td { background: var(--red-soft); }
 .intent-diff-table tr.intent-added td { background: var(--green-soft); }
