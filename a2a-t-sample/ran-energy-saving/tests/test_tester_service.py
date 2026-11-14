@@ -58,6 +58,7 @@ from shared.run_constants import (
     PROTOCOL_PURE,
     TASK_STATE_SUBMITTED,
 )
+from shared.trace import record_span
 
 CASES: dict[int, dict[str, Any]] = {case["id"]: case for case in load_cases()}
 
@@ -1673,7 +1674,29 @@ async def test_a_blocked_case_with_a_followup_records_the_interception(tmp_path:
     assert runs.calls == []
 
 
-async def test_the_followup_request_is_what_the_full_flow_dispatches(tmp_path: Path) -> None:
+async def test_the_followup_request_is_what_the_full_flow_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    real_interception = service.run_interception_case
+
+    def recording_interception(
+        case: Mapping[str, Any], client: Any, *, stop_after: str = "validate"
+    ) -> Any:
+        calls.append(stop_after)
+        record_span(
+            kind="llm",
+            phase="task_t_client_validation",
+            title="LLM call · interception",
+            prefix="llm_interception",
+        )
+        return real_interception(case, client, stop_after=stop_after)
+
+    def forbidden_run_case(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("a full-flow blocked case runs only the interception segment")
+
+    monkeypatch.setattr(service, "run_interception_case", recording_interception)
+    monkeypatch.setattr(service, "run_case", forbidden_run_case)
     runs = _FakeRuns(_finish)
     manager = _manager(tmp_path, runs)
     _inject_followup(manager, 22)
@@ -1690,10 +1713,20 @@ async def test_the_followup_request_is_what_the_full_flow_dispatches(tmp_path: P
 
     assert len(runs.calls) == 1
     assert runs.calls[0]["userRequest"] == FOLLOWUP_INPUT
+    # The original request is judged once; the follow-up segment and the intent extraction are
+    # left to the run, so a deterministic block costs one slot extraction at most.
+    assert calls == ["validate"]
     item = _only_item(finished)
-    # A full flow does not preflight the original request, so the blocked segment is not
-    # re-judged; the run dispatches the replacement request directly.
-    assert item["interception"] is None
+    interception = item["interception"]
+    assert isinstance(interception, Mapping)
+    intercepted_stages = interception["stages"]
+    assert isinstance(intercepted_stages, Mapping)
+    assert "validate" in intercepted_stages
+    assert "intent" not in intercepted_stages
+    # The blocked attempt belongs to the run's trace, as in the presentation UI's workflow. A
+    # silenced preflight would drop this span; a replayed interception keeps it.
+    run = next(iter(runs.runs.values()))
+    assert any(span.get("title") == "LLM call · interception" for span in run.traces)
     stages = item["stages"]
     assert isinstance(stages, Mapping)
     assert stages["send"]["expected"] is True

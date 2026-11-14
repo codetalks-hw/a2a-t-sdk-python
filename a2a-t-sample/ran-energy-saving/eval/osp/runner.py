@@ -201,13 +201,41 @@ def run_case(
     )
 
 
-def _run_segment(
+def run_interception_case(
     case: Mapping[str, Any],
     client: EvalPromptClient,
     *,
     stop_after: str = "validate",
 ) -> CaseOutcome:
-    """Execute one request segment of a case up to and including ``stop_after``."""
+    """Execute only the intercepted original request of a blocked case with a follow-up.
+
+    The follow-up segment is deliberately skipped: the tester's full flow dispatches that
+    replacement request itself, so running it here would repeat its model calls. The intent
+    extraction is skipped as well — its assertions are disabled for an interception and the
+    arbitration reads the downstream payload, not this pre-send extraction — so a deterministic
+    block costs one slot extraction and nothing more.
+    """
+    if stop_after not in STAGE_ORDER:
+        raise ValueError(f"unsupported stop_after {stop_after!r}; expected one of {STAGE_ORDER}")
+    if not (is_blocked_case(case) and has_followup(case)):
+        raise ValueError("an interception-only run needs a blocked case with a follow-up request")
+    return _run_segment(
+        interception_case(case), client, stop_after=stop_after, include_intent=False
+    )
+
+
+def _run_segment(
+    case: Mapping[str, Any],
+    client: EvalPromptClient,
+    *,
+    stop_after: str = "validate",
+    include_intent: bool = True,
+) -> CaseOutcome:
+    """Execute one request segment of a case up to and including ``stop_after``.
+
+    ``include_intent`` false skips the intent extraction call; the interception segment only needs
+    the Task-T and the validation verdict.
+    """
     stages = STAGE_ORDER[: STAGE_ORDER.index(stop_after) + 1]
     case_id = int(case["id"])
     name = str(case["name"])
@@ -224,7 +252,7 @@ def _run_segment(
         return _error_outcome(case_id, name, stages, f"{type(exc).__name__}: {exc}")
 
     outcomes: list[StageOutcome] = []
-    if "intent" in stages:
+    if "intent" in stages and include_intent:
         outcomes.append(_run_intent(case, client, task_t))
     if "task_t" in stages:
         outcomes.append(_run_task_t(case, task_t))

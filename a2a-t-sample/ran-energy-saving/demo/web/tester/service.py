@@ -41,6 +41,7 @@ from eval.osp.runner import (
     CaseOutcome,
     build_client_with_env,
     run_case,
+    run_interception_case,
 )
 from eval.osp.runner import (
     STAGE_ORDER as SDK_STAGE_ORDER,
@@ -1018,6 +1019,9 @@ class EvalBatchManager:
             return
         stages = list(ALL_STAGES[: ALL_STAGES.index(batch.stop_after) + 1])
         effective_case = case
+        #: Producer spans of the blocked original request; replayed into the item's run trace so
+        #: the trace shows the interception and the corrected retry like the presentation UI.
+        interception_spans: list[dict[str, object]] = []
         if item.protocol == PROTOCOL_A2A:
             # OSP defines no SDK stages for pure A2A; only the runtime chain applies.
             stages = [stage for stage in stages if stage not in SDK_STAGE_ORDER]
@@ -1027,14 +1031,11 @@ class EvalBatchManager:
                 effective_case = followup_case(case)
             if batch.stop_after in SDK_STAGE_ORDER:
                 # SDK-only batch (``intent`` / ``task_t`` / ``validate``): no run is started, so the
-                # tester runs the three SDK stages itself and judges their columns. A full-flow
-                # batch must not preflight: the run generates the Task-T and validates it, so a
-                # second SDK pass would repeat every model call and put work into the trace that
-                # the run never performed.
+                # tester runs the three SDK stages itself and judges their columns.
                 #
                 # The SDK runner owns the two-segment split of a blocked case: it returns the
                 # follow-up request's stages as the outcome and keeps the intercepted original as
-                # ``outcome.interception``. A full flow has no interception segment.
+                # ``outcome.interception``.
                 await self._run_sdk_stages(
                     case,
                     item,
@@ -1042,6 +1043,20 @@ class EvalBatchManager:
                     batch.decision_mode,
                     outcome_case=effective_case if blocked_followup else None,
                     concurrent=batch.active_concurrency > 1,
+                )
+            elif blocked_followup:
+                # A full-flow batch preflights only the original request of a blocked case: the
+                # interception is part of the case contract and the run never exercises it. The
+                # follow-up segment is skipped because the run dispatches that request itself, and
+                # the intent extraction is skipped because the arbitration reads the downstream
+                # payload; a deterministic block therefore costs one slot extraction at most.
+                interception_spans = await self._run_sdk_stages(
+                    case,
+                    item,
+                    "validate",
+                    batch.decision_mode,
+                    concurrent=batch.active_concurrency > 1,
+                    interception_only=True,
                 )
         if item.cancel_requested:
             # The SDK call runs in a thread and cannot be interrupted; a cancel that arrived
@@ -1058,7 +1073,9 @@ class EvalBatchManager:
                 item.intent_meta["source"] = "sdk" if item.intent is not None else ""
             item.status = self._item_status(item)
             return
-        await self._run_full_flow(batch, index, item, effective_case, stages)
+        await self._run_full_flow(
+            batch, index, item, effective_case, stages, interception_spans=interception_spans
+        )
         item.status = self._item_status(item)
 
     async def _run_sdk_stages(
@@ -1070,25 +1087,36 @@ class EvalBatchManager:
         *,
         outcome_case: Mapping[str, Any] | None = None,
         concurrent: bool = False,
-    ) -> None:
+        interception_only: bool = False,
+    ) -> list[dict[str, object]]:
         """Run the SDK stages of one SDK-only case and record its interception segment, when split.
 
         ``outcome_case`` is the derived replacement case whose expectations judge the returned
         stages; the runner already judged the intercepted original, so those stages are recorded
         verbatim (the runner derived their assertion flags). ``concurrent`` selects the pooled
-        client path; the default keeps the historical single locked client.
+        client path; the default keeps the historical single locked client. ``interception_only``
+        records just the original request of a blocked case and leaves ``item.stages`` untouched.
 
-        These calls belong to no run, so their producer spans are silenced: a Langfuse trace (and
-        the Run Explorer) must only contain work the run really performed.
+        A preflight belongs to no run, so its producer spans are silenced. The interception of a
+        blocked case is different: the presentation UI shows the blocked attempt and its corrected
+        retry in one workflow, so those spans are returned for replay into the run trace.
         """
-        sink_token = set_task_sink(None)
+        interception_spans: list[dict[str, object]] = []
+        sink = interception_spans.append if interception_only else None
+        sink_token = set_task_sink(sink)
         try:
             results, interception, error = await self._sdk_stage_results(
-                case, stop_after, decision_mode, outcome_case=outcome_case, concurrent=concurrent
+                case,
+                stop_after,
+                decision_mode,
+                outcome_case=outcome_case,
+                concurrent=concurrent,
+                interception_only=interception_only,
             )
         finally:
             reset_task_sink(sink_token)
-        item.stages.update(results)
+        if not interception_only:
+            item.stages.update(results)
         if interception is not None:
             record: dict[str, object] = {
                 "input": str(case.get("user_input") or ""),
@@ -1100,6 +1128,7 @@ class EvalBatchManager:
             item.interception = record
         if error:
             item.error = error
+        return interception_spans
 
     async def _sdk_stage_results(
         self,
@@ -1109,17 +1138,40 @@ class EvalBatchManager:
         *,
         outcome_case: Mapping[str, Any] | None = None,
         concurrent: bool = False,
+        interception_only: bool = False,
     ) -> tuple[dict[str, StageResult], dict[str, StageResult] | None, str | None]:
         """Run the SDK-owned stages of one case and return stages, interception and error.
 
         A blocked case with a replacement request makes the runner execute two segments; the
         follow-up segment is the returned outcome and the original is ``outcome.interception``.
+        With ``interception_only`` only the original is executed and its stages are the
+        interception record; there is no outcome for ``item.stages``.
         """
         judge = outcome_case if outcome_case is not None else case
         model_mode = MODEL_MODE_LIVE if decision_mode == DECISION_MODE_LIVE else None
         outcome = await self._run_case_with_client(
-            case, stop_after, model_mode, concurrent=concurrent
+            case,
+            stop_after,
+            model_mode,
+            concurrent=concurrent,
+            interception_only=interception_only,
         )
+        if interception_only:
+            return (
+                {},
+                {
+                    stage.stage: StageResult(
+                        stage=stage.stage,
+                        status=stage.status,
+                        message=stage.message,
+                        expected=stage.expected,
+                        actual=stage.actual,
+                        diffs=[diff.to_dict() for diff in stage.diffs],
+                    )
+                    for stage in outcome.stages
+                },
+                outcome.error,
+            )
         negotiation_expected = _negotiation_expected(judge, PROTOCOL_A2A_T)
         results: dict[str, StageResult] = {}
         for stage in outcome.stages:
@@ -1161,6 +1213,8 @@ class EvalBatchManager:
         item: CaseItem,
         case: Mapping[str, Any],
         stages: Sequence[str],
+        *,
+        interception_spans: Sequence[Mapping[str, object]] = (),
     ) -> None:
         if item.cancel_requested:
             # Cancelled between the SDK stages and here: never seed a baseline or send a request.
@@ -1258,6 +1312,7 @@ class EvalBatchManager:
             language=resolved_language,
         )
         item.run_id = run.run_id
+        self._replay_interception_spans(run, interception_spans)
         self._persist(batch)
         if item.cancel_requested:
             # The cancel arrived while the run was being created; stop it before observing it,
@@ -1332,6 +1387,30 @@ class EvalBatchManager:
         await self._collect_metrics(item, run)
         if not batch.keep_tasks:
             await self._release_item_runs(item, run)
+
+    def _replay_interception_spans(
+        self, run: RunState, spans: Sequence[Mapping[str, object]]
+    ) -> None:
+        """Attach the blocked original request's spans to the run trace.
+
+        A blocked case with a follow-up dispatches the replacement request in the run, but the
+        interception is part of the evidence: the presentation UI shows the blocked attempt and
+        its corrected retry in one workflow, so the tester's trace must show it too. Only producer
+        work is replayed (an ``intent_processed`` row would overwrite the run's own intent).
+        Observability only: a replay failure must never change the item result.
+        """
+        for span in spans:
+            if str(span.get("kind") or "") not in {"llm", "tool"}:
+                continue
+            try:
+                payload = dict(span)
+                payload["runId"] = run.run_id
+                payload["traceId"] = run.trace_id
+                run.record_trace(payload)
+            except Exception:  # noqa: BLE001 - tracing must never break the tested flow
+                _LOGGER.warning(
+                    "tester interception span replay failed for run %s", run.run_id, exc_info=True
+                )
 
     async def _release_item_runs(self, item: CaseItem, run: RunState | None = None) -> None:
         """Cancel the runs one item created and release their remote Tasks.
@@ -2122,19 +2201,20 @@ class EvalBatchManager:
         model_mode: str | None,
         *,
         concurrent: bool,
+        interception_only: bool = False,
     ) -> CaseOutcome:
         """Run the SDK stages on a client that is not borrowed by another thread.
 
         The sequential path and any injected client keep the historical single client behind
         ``_sdk_lock``. The concurrent path checks a client out of the per-mode pool, so no two
-        ``run_case`` threads ever share one ``A2ATClient``.
+        runner threads ever share one ``A2ATClient``. ``interception_only`` runs just the original
+        request of a blocked case with a follow-up (see :func:`run_interception_case`).
         """
+        runner = run_interception_case if interception_only else run_case
         if not concurrent or self._prompt_client is not None:
             async with self._sdk_lock:
                 client = await self._ensure_prompt_client(model_mode)
-                return await asyncio.to_thread(
-                    run_case, case, client, stop_after=stop_after
-                )
+                return await asyncio.to_thread(runner, case, client, stop_after=stop_after)
         await self._sdk_slots.acquire()
         try:
             client = await self._checkout_prompt_client(model_mode)
@@ -2144,7 +2224,7 @@ class EvalBatchManager:
         # ``to_thread`` cannot stop its thread. A task plus ``shield`` lets the item unwind on
         # cancellation while the worker finishes, and keeps the slot held until it really does.
         task = asyncio.create_task(
-            asyncio.to_thread(run_case, case, client, stop_after=stop_after),
+            asyncio.to_thread(runner, case, client, stop_after=stop_after),
             name="tester-sdk-stage",
         )
 
