@@ -25,7 +25,9 @@ from a2a_t.core.path_segments import (
     require_simple_segment,
 )
 from a2a_t.core.plan_binding import (
+    CANONICAL_PROFILE,
     DIGEST_PREFIX,
+    CanonicalFormError,
     PlanDeviation,
     canonical_digest,
     canonical_json,
@@ -50,12 +52,14 @@ from a2a_t.core.validation_pipeline import (
 )
 
 __all__ = [
+    "CANONICAL_PROFILE",
     "DEFAULT_TEMPLATE_VERSION",
     "DIGEST_PREFIX",
     "NEGOTIATION_CONTEXT_METADATA_KEY",
     "PromptResourceKey",
     "RETRYABLE_ERROR_CODES",
     "TEMPLATE_URI_METADATA_KEY",
+    "CanonicalFormError",
     "ContentValidationError",
     "ContentValidator",
     "FilledParamData",

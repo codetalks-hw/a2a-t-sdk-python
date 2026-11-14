@@ -1,0 +1,554 @@
+{
+  "profile": "a2at-canonical/1",
+  "valid": [
+    {
+      "name": "null",
+      "value": null,
+      "canonical": "null",
+      "digest": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    },
+    {
+      "name": "true",
+      "value": true,
+      "canonical": "true",
+      "digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+    },
+    {
+      "name": "false",
+      "value": false,
+      "canonical": "false",
+      "digest": "sha256:fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa"
+    },
+    {
+      "name": "integer-zero",
+      "value": 0,
+      "canonical": "0",
+      "digest": "sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "name": "integer-positive",
+      "value": 42,
+      "canonical": "42",
+      "digest": "sha256:73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049"
+    },
+    {
+      "name": "integer-negative",
+      "value": -42,
+      "canonical": "-42",
+      "digest": "sha256:fec80006df0542549b4cbaafb8987eee00bb49bca396eefe9ac8be5b5928e8f6"
+    },
+    {
+      "name": "integer-max-safe",
+      "value": 9007199254740991,
+      "canonical": "9007199254740991",
+      "digest": "sha256:f40b423c2dd95ff2b2f027e22208f438cf7242862e5e746860e697308c9add26"
+    },
+    {
+      "name": "integer-min-safe",
+      "value": -9007199254740991,
+      "canonical": "-9007199254740991",
+      "digest": "sha256:4c933a456bb8f2e9894b2d0b26480439cd72d52fb8a27cbf8fd7f323f22c7815"
+    },
+    {
+      "name": "integral-float-thirty",
+      "value": 30.0,
+      "canonical": "30",
+      "digest": "sha256:624b60c58c9d8bfb6ff1886c2fd605d2adeb6ea4da576068201b6c6958ce93f4"
+    },
+    {
+      "name": "fraction-twelve-and-a-half",
+      "value": 12.5,
+      "canonical": "12.5",
+      "digest": "sha256:b902cc4550838229a710bfec4c38cbc7eb11082367a409df9135e7f007a96bda"
+    },
+    {
+      "name": "negative-zero-float",
+      "value": -0.0,
+      "canonical": "0",
+      "digest": "sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "name": "empty-object",
+      "value": {},
+      "canonical": "{}",
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "empty-array",
+      "value": [],
+      "canonical": "[]",
+      "digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "plain-string",
+      "value": "hello",
+      "canonical": "\"hello\"",
+      "digest": "sha256:5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a"
+    },
+    {
+      "name": "accented-string",
+      "value": "caf\u00e9",
+      "canonical": "\"caf\u00e9\"",
+      "digest": "sha256:28380feb8724d669bc8d4cf5b5a5bb1adbdc61b81ebd06f3fabc567b4f3b0fc5"
+    },
+    {
+      "name": "chinese-string",
+      "value": "\u8282\u80fd",
+      "canonical": "\"\u8282\u80fd\"",
+      "digest": "sha256:a407b76dac414339310b6b4b9ad3601c3efc303f47aa034fd39d18c24f806c6b"
+    },
+    {
+      "name": "emoji-string",
+      "value": "\ud83d\ude00",
+      "canonical": "\"\ud83d\ude00\"",
+      "digest": "sha256:7a0c50b92434b015545fe93ab723db2d4b2cdd14a441405624a9ce8be29f1d5a"
+    },
+    {
+      "name": "key-order",
+      "value": {
+        "b": 1,
+        "a": 2
+      },
+      "canonical": "{\"a\":2,\"b\":1}",
+      "digest": "sha256:d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
+    },
+    {
+      "name": "nested-mappings-and-arrays",
+      "value": {
+        "z": {
+          "b": 2,
+          "a": 1
+        },
+        "a": [
+          {
+            "d": 4,
+            "c": 3
+          }
+        ]
+      },
+      "canonical": "{\"a\":[{\"c\":3,\"d\":4}],\"z\":{\"a\":1,\"b\":2}}",
+      "digest": "sha256:4bc08b196ca8e8875a2e52bb91d29ba5e5a734ae5cf53c030d7f932ee245a439"
+    },
+    {
+      "name": "mixed-array",
+      "value": [
+        null,
+        true,
+        false,
+        0,
+        "x"
+      ],
+      "canonical": "[null,true,false,0,\"x\"]",
+      "digest": "sha256:ff0b8f8f615d22589508785ac5056c977d5fa1ed8ee80f16a7f7aa9b057754e6"
+    },
+    {
+      "name": "utf16-key-order-astral-before-private-use",
+      "value": {
+        "\ue000": 1,
+        "\ud83d\ude00": 2
+      },
+      "canonical": "{\"\ud83d\ude00\":2,\"\ue000\":1}",
+      "digest": "sha256:28c95d1bbb2209223307e62f489020e8f9e0cfa16adf2daf6d88127a1e8dd22a"
+    },
+    {
+      "name": "escaped-quote",
+      "value": "he said \"hi\"",
+      "canonical": "\"he said \\\"hi\\\"\"",
+      "digest": "sha256:98c5b1e92d0a6b696a78640331b0c8f4ee3734dedcf3823241242496cdfffcad"
+    },
+    {
+      "name": "escaped-backslash",
+      "value": "a\\b",
+      "canonical": "\"a\\\\b\"",
+      "digest": "sha256:d6b4439bd2d0fecbb8aeb27d4370b0354683ea72adc84cca99b5fe80aa0b62d0"
+    },
+    {
+      "name": "escaped-newline",
+      "value": "line1\nline2",
+      "canonical": "\"line1\\nline2\"",
+      "digest": "sha256:f743ae45891e890166374840ae63895ba05ac7fdc6f3344efa8b7b7b634cf360"
+    },
+    {
+      "name": "escaped-tab",
+      "value": "col1\tcol2",
+      "canonical": "\"col1\\tcol2\"",
+      "digest": "sha256:27e07ec1a6721a608f7210eb8f0af6a097d113bf144e41670745ff1436de5ad0"
+    },
+    {
+      "name": "escaped-control-0x01",
+      "value": "\u0001",
+      "canonical": "\"\\u0001\"",
+      "digest": "sha256:b81cfb0a6715e53b373345b49e8ad94eb55fd777519dc539373d0634973c186e"
+    },
+    {
+      "name": "escaped-carriage-return",
+      "value": "a\rb",
+      "canonical": "\"a\\rb\"",
+      "digest": "sha256:8ea1cebfb1209c60841a9dd0e760cc1f2000fc715d334578c24bac279768941e"
+    },
+    {
+      "name": "int-and-integral-float-normalise-together",
+      "value": [
+        10,
+        10.0
+      ],
+      "canonical": "[10,10]",
+      "digest": "sha256:b08cd50b25ebfe4859a4dbedb8aa648eec30d98d3efea3b4a6d4e77a7fd6c9b6"
+    },
+    {
+      "name": "bool-and-number-stay-distinct",
+      "value": {
+        "a": true,
+        "b": 1
+      },
+      "canonical": "{\"a\":true,\"b\":1}",
+      "digest": "sha256:a3f44886ecd0b8667b0c6a4652d41e1f9e8205fb8d35d299fd20577f5268adb6"
+    },
+    {
+      "name": "empty-string-key",
+      "value": {
+        "": 1
+      },
+      "canonical": "{\"\":1}",
+      "digest": "sha256:f3d86de1bf4b354382f91a12a4487daaeb56692b2c46f2df52f6f83a84610074"
+    },
+    {
+      "name": "accented-key",
+      "value": {
+        "\u00e9": 1
+      },
+      "canonical": "{\"\u00e9\":1}",
+      "digest": "sha256:ddcfcf4765da163969972bb20660092ca2787782d9352d1d8a38e93f70acf3bf"
+    },
+    {
+      "name": "negative-fraction",
+      "value": -1.5,
+      "canonical": "-1.5",
+      "digest": "sha256:37c2b212b94e5372b33df924ea2a91182d90c237d0bf942c1768e794ebef2376"
+    },
+    {
+      "name": "large-integral-float-normalises",
+      "value": 1000000000000000.0,
+      "canonical": "1000000000000000",
+      "digest": "sha256:6a4ef24cb01aa0e97da4186c067128b828532db703db8872fa736a0cc0b363b1"
+    },
+    {
+      "name": "small-fraction",
+      "value": 0.001,
+      "canonical": "0.001",
+      "digest": "sha256:9fca51987c96ba92d35f303353b7065f31114501c9f2afa37463ff1fdffe8f1f"
+    },
+    {
+      "name": "tenth",
+      "value": 0.1,
+      "canonical": "0.1",
+      "digest": "sha256:14be4b45f18e0d8c67b4f719b5144eee88497e413709d11d85b096d8e2346310"
+    },
+    {
+      "name": "pi-fraction",
+      "value": 3.14159,
+      "canonical": "3.14159",
+      "digest": "sha256:c0740dd25c9de39b9c8d5ab452e8b69bcc0bf86f2a60ed7e527e79d0a3035852"
+    },
+    {
+      "name": "nested-empty-structures",
+      "value": {
+        "a": {},
+        "b": []
+      },
+      "canonical": "{\"a\":{},\"b\":[]}",
+      "digest": "sha256:aeeba1e56a144077f89e26c930dad7cf933e9383cfb8e33ddff618233b29be76"
+    },
+    {
+      "name": "deep-array-nesting",
+      "value": [
+        [
+          [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              0
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ],
+      "canonical": "[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]",
+      "digest": "sha256:b91cdbf7ba9fd6940168f56586b954ee28f5f2f6b9a544a87d987ad3632ebd49"
+    },
+    {
+      "name": "deep-object-nesting",
+      "value": {
+        "k11": {
+          "k10": {
+            "k9": {
+              "k8": {
+                "k7": {
+                  "k6": {
+                    "k5": {
+                      "k4": {
+                        "k3": {
+                          "k2": {
+                            "k1": {
+                              "k0": {
+                                "leaf": true
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "canonical": "{\"k11\":{\"k10\":{\"k9\":{\"k8\":{\"k7\":{\"k6\":{\"k5\":{\"k4\":{\"k3\":{\"k2\":{\"k1\":{\"k0\":{\"leaf\":true}}}}}}}}}}}}}",
+      "digest": "sha256:9353c36b625e35de6d52b3bea584aaf02226d7f89689091327130a22afd66d8a"
+    },
+    {
+      "name": "slash-in-string",
+      "value": "a/b",
+      "canonical": "\"a/b\"",
+      "digest": "sha256:f5effa31772a3689cb116700c569f4b72d765290968f099016a899ab6c1e4ee3"
+    },
+    {
+      "name": "numeric-looking-keys-sort-lexicographically",
+      "value": {
+        "10": 1,
+        "9": 2
+      },
+      "canonical": "{\"10\":1,\"9\":2}",
+      "digest": "sha256:616552edfd5a183bdce250113b15ed494216894acf4234431e9eef6a1eb9675a"
+    },
+    {
+      "name": "uppercase-before-lowercase",
+      "value": {
+        "B": 1,
+        "a": 2
+      },
+      "canonical": "{\"B\":1,\"a\":2}",
+      "digest": "sha256:812e5e7fb7bb816dc477e91a136430192eadcf83ff303881298146e106ae0161"
+    },
+    {
+      "name": "accented-key-after-ascii",
+      "value": {
+        "\u00e9": 1,
+        "z": 2
+      },
+      "canonical": "{\"z\":2,\"\u00e9\":1}",
+      "digest": "sha256:ebf5b3ac2125f90b74510656202151eacb0fa0dcdf14105494181e8969b802d5"
+    },
+    {
+      "name": "mixed-unicode-string",
+      "value": "a\u00e9\u4e2d\ud83d\ude00",
+      "canonical": "\"a\u00e9\u4e2d\ud83d\ude00\"",
+      "digest": "sha256:046b020aa00117d6e0e9e5c293e8a079b91d5664f7970b5416d890af466d568f"
+    },
+    {
+      "name": "null-value-in-mapping",
+      "value": {
+        "a": null
+      },
+      "canonical": "{\"a\":null}",
+      "digest": "sha256:d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+    },
+    {
+      "name": "integer-array",
+      "value": [
+        1,
+        2,
+        3
+      ],
+      "canonical": "[1,2,3]",
+      "digest": "sha256:a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4"
+    },
+    {
+      "name": "false-value-in-mapping",
+      "value": {
+        "flag": false
+      },
+      "canonical": "{\"flag\":false}",
+      "digest": "sha256:162812b5029481cad8f13633c055ef8dd11002768113523749dcf83a8e597254"
+    },
+    {
+      "name": "empty-key-with-null",
+      "value": {
+        "": null
+      },
+      "canonical": "{\"\":null}",
+      "digest": "sha256:212c5e659097c7b11239deafda2dddeec70b141d9d540cc8eb7fc390982c8178"
+    },
+    {
+      "name": "unicode-key-and-value",
+      "value": {
+        "\u8282\u80fd": "\u4e2d\u6587"
+      },
+      "canonical": "{\"\u8282\u80fd\":\"\u4e2d\u6587\"}",
+      "digest": "sha256:bbd1d55489407a2c0efef6a72f82fc59d1a8b1775ab5f109c3c9216bb9a8f8d2"
+    },
+    {
+      "name": "truncated-looking-fraction",
+      "value": 0.30000000000000004,
+      "canonical": "0.30000000000000004",
+      "digest": "sha256:06bad31060c1212ae832de4c031f7b31e3b48aed57858294478cb19450cf34ca"
+    },
+    {
+      "name": "nested-array-of-objects",
+      "value": [
+        {
+          "b": 2,
+          "a": 1
+        },
+        {
+          "d": 4,
+          "c": 3
+        }
+      ],
+      "canonical": "[{\"a\":1,\"b\":2},{\"c\":3,\"d\":4}]",
+      "digest": "sha256:701f938d3d4d92413dab87b2cf2ca30bc0468f5bc12db3ab2c5c8df258e8c80c"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "nan",
+      "value": null,
+      "reason": "NaN has no JSON spelling a peer can recompute",
+      "decode": "nan"
+    },
+    {
+      "name": "positive-infinity",
+      "value": null,
+      "reason": "Infinity has no JSON spelling a peer can recompute",
+      "decode": "inf"
+    },
+    {
+      "name": "negative-infinity",
+      "value": null,
+      "reason": "Infinity has no JSON spelling a peer can recompute",
+      "decode": "-inf"
+    },
+    {
+      "name": "float-small-exponent",
+      "value": 1e-07,
+      "reason": "1e-07 is spelled three different ways across languages"
+    },
+    {
+      "name": "float-huge",
+      "value": 1e+300,
+      "reason": "1e300 normalises to an integer outside the safe range"
+    },
+    {
+      "name": "float-1e21",
+      "value": 1e+21,
+      "reason": "1e21 normalises to an integer outside the safe range"
+    },
+    {
+      "name": "integer-unsafe",
+      "value": 9007199254740992,
+      "reason": "one past the largest exactly representable integer"
+    },
+    {
+      "name": "integral-float-unsafe",
+      "value": 9007199254740992.0,
+      "reason": "integral float beyond the safe integer range"
+    },
+    {
+      "name": "float-exponent-notation",
+      "value": 2.5e-07,
+      "reason": "repr is 2.5e-07, not plain decimal notation"
+    },
+    {
+      "name": "non-string-key",
+      "value": "a",
+      "reason": "integer key 1 would collide with the string \"1\"",
+      "decode": "non-string-key"
+    },
+    {
+      "name": "set",
+      "value": [
+        1,
+        2
+      ],
+      "reason": "a set has no defined JSON array order",
+      "decode": "set"
+    },
+    {
+      "name": "decimal",
+      "value": "1.5",
+      "reason": "Decimal is not an accepted primitive",
+      "decode": "decimal"
+    },
+    {
+      "name": "lone-surrogate",
+      "value": "\ud800",
+      "reason": "a lone surrogate cannot be encoded as UTF-8"
+    },
+    {
+      "name": "custom-object",
+      "value": {
+        "x": 1
+      },
+      "reason": "an arbitrary object has no canonical spelling",
+      "decode": "opaque"
+    },
+    {
+      "name": "bytes",
+      "value": [
+        1,
+        2,
+        3
+      ],
+      "reason": "bytes is a sequence but not an accepted array",
+      "decode": "bytes"
+    },
+    {
+      "name": "nested-nan",
+      "value": {
+        "x": null
+      },
+      "reason": "the rejection must recurse into mappings",
+      "decode": "nested-nan"
+    },
+    {
+      "name": "array-with-set",
+      "value": [
+        1,
+        2
+      ],
+      "reason": "the rejection must recurse into arrays",
+      "decode": "array-with-set"
+    }
+  ]
+}
