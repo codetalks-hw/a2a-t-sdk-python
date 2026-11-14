@@ -3123,6 +3123,7 @@ def _run_validation_detail(run: RunState) -> dict[str, object] | None:
         verdict = detail.get("verdict")
         if not isinstance(verdict, str) or not verdict:
             continue
+        verdict = _normalize_validation_verdict(verdict)
         errors = detail.get("errors")
         slot_errors = [dict(error) for error in errors] if isinstance(errors, list) else []
         reason = detail.get("reason")
@@ -3136,6 +3137,19 @@ def _run_validation_detail(run: RunState) -> dict[str, object] | None:
             "slotErrors": slot_errors,
         }
     return None
+
+
+def _normalize_validation_verdict(value: str) -> str:
+    """Map the run's TaskValidation verdict to the OSP vocabulary a case expects.
+
+    The client flow reports ``passed`` for a clean validation and ``negotiable`` when the content
+    is repairable by a negotiation (the request is still sent). The cases and the SDK runner call
+    both ``pass``: the OSP column asks whether the Task-T is intercepted, not how the SDK spelled
+    the verdict.
+    """
+    if value in {"passed", "negotiable", "pass"}:
+        return "pass"
+    return value
 
 
 def _case_validation_expectation(case: Mapping[str, Any]) -> object:

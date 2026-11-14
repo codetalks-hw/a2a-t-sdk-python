@@ -1291,8 +1291,9 @@ async def test_a_full_flow_item_gets_its_validation_stage(tmp_path: Path) -> Non
             {
                 "kind": "task_validation",
                 "phase": "task_validation",
+                # The client flow spells a clean validation ``passed``; the case expects ``pass``.
                 "detail": {
-                    "verdict": "pass",
+                    "verdict": "passed",
                     "errors": [],
                     "reason": "content.param_missing",
                 },
