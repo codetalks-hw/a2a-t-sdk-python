@@ -60,6 +60,8 @@ class Artifacts:
     Attributes:
         requested_plan: Plan projected from the request the client sent.
         accepted_plan: Plan the client believes was agreed; ``None`` on a plain-A2A hop.
+        accepted_digest: Digest the client computed for the accepted plan. Preferred over the
+            projection when a negotiation changed values, because the flow already holds it.
         approved_digest: Digest carried by the approval request/decision; ``None`` without an
             approval.
         executed_plan: Plan reported as executed by the readback; ``None`` when no readback came.
@@ -71,6 +73,7 @@ class Artifacts:
 
     requested_plan: Mapping[str, object] | None = None
     accepted_plan: Mapping[str, object] | None = None
+    accepted_digest: str | None = None
     approved_digest: str | None = None
     executed_plan: Mapping[str, object] | None = None
     receipt_digest: str | None = None
@@ -120,15 +123,16 @@ def _request_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
 def _approval_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
     if artifacts.approved_digest is None:
         return Link(LINK_APPROVAL, LINK_UNVERIFIABLE, "no approval on this run")
-    if artifacts.accepted_plan is None:
+    expected = artifacts.accepted_digest
+    if expected is None and artifacts.accepted_plan is not None:
+        expected = plan_digest(artifacts.accepted_plan, fields)
+    if expected is None:
         return Link(
             LINK_APPROVAL,
             LINK_UNVERIFIABLE,
             "no accepted plan to recompute the approved digest from",
         )
-    return _digest_link(
-        LINK_APPROVAL, plan_digest(artifacts.accepted_plan, fields), artifacts.approved_digest
-    )
+    return _digest_link(LINK_APPROVAL, expected, artifacts.approved_digest)
 
 
 def _execution_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
@@ -144,12 +148,14 @@ def _execution_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
         return _compare(
             LINK_EXECUTION, artifacts.accepted_plan, artifacts.executed_plan, fields
         )
-    if artifacts.accepted_plan is None:
+    if artifacts.accepted_plan is None and artifacts.accepted_digest is None:
         return Link(
             LINK_EXECUTION,
             LINK_UNVERIFIABLE,
             "no accepted plan to compare the execution with",
         )
+    if artifacts.accepted_plan is None and artifacts.accepted_digest is not None:
+        return _digest_link(LINK_EXECUTION, artifacts.accepted_digest, artifacts.receipt_digest)
     return Link(LINK_EXECUTION, LINK_MATCHED, "")
 
 

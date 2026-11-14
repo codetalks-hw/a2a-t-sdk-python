@@ -17,6 +17,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import httpx
@@ -30,6 +31,13 @@ from shared.agreement import (
     AGREEMENT_METADATA_KEY,
     next_revision,
     read_agreement,
+    read_agreement_ref,
+)
+from shared.agreement import (
+    REASON_EXPIRED as AGREEMENT_EXPIRED,
+)
+from shared.agreement import (
+    REASON_MISMATCH as AGREEMENT_MISMATCH,
 )
 from shared.agreement import (
     REASON_STALE as AGREEMENT_STALE,
@@ -56,7 +64,11 @@ from shared.change_order import (
     read_baseline,
 )
 from shared.readback import Readback, compare_plans
-from shared.typed_payload import read_statement, statement_metadata
+from shared.typed_payload import (
+    TYPED_TASK_T_METADATA_KEY,
+    read_statement,
+    statement_metadata,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
@@ -134,6 +146,8 @@ _LOGGER = logging.getLogger("ran_energy_saving.nms_sim")
 
 #: Metadata key a caller uses to declare the hops a request already passed through.
 DELEGATION_METADATA_KEY: Final[str] = "a2at-sample/delegation"
+#: Metadata key a client may use to state its own request identity (idempotency key).
+REQUEST_ID_METADATA_KEY: Final[str] = "a2at-sample/request-id"
 #: Name this server appends to the chain.
 DELEGATION_HOP: Final[str] = "nms"
 
@@ -174,6 +188,8 @@ class SimRuntime:
     #: Request identity -> Task that already answers it. A retry returns that Task instead of
     #: executing the plan a second time.
     executions: dict[str, str] = field(default_factory=dict)
+    #: Agreement id -> latest revision. An agreement outlives the Task that first produced it.
+    agreements: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 def build_runtime(
@@ -822,12 +838,16 @@ def build_routes(
         )
 
     def _request_identity(metadata: Mapping[str, object]) -> str | None:
-        """Return the identity of the request, computed from the document the peer sent.
+        """Return the identity of the request.
 
-        The typed statement is the natural identity: it is data, so both sides can hash it and a
-        retry after a crash (new message id, new Task) still names the same request. A rendered
-        Task-T is hashed as a fallback; a negotiation reply has no independent identity.
+        A client may state it explicitly (``a2at-sample/request-id``); that is how it asks for a
+        *new* execution of the same agreement. Otherwise it is computed from the document: the
+        typed statement, or the rendered Task-T as a fallback, so a retry after a crash (new
+        message id, no Task) still names the same request.
         """
+        explicit = metadata.get(REQUEST_ID_METADATA_KEY)
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
         try:
             statement = read_statement(metadata)
         except ValueError:
@@ -838,6 +858,13 @@ def build_routes(
         if isinstance(prompt, str) and prompt.strip():
             return canonical_digest({"taskT": prompt})
         return None
+
+    def _has_task_payload(metadata: Mapping[str, object]) -> bool:
+        """Return whether the request carries its own Task-T document or statement."""
+        return (
+            TASK_T_EXTENSION_URI in metadata
+            or TYPED_TASK_T_METADATA_KEY in metadata
+        )
 
     def _delegation_chain(metadata: Mapping[str, object]) -> tuple[str, ...]:
         """Return the hops the request declares, plus this server."""
@@ -859,13 +886,22 @@ def build_routes(
             if task.agreement is not None
             else None
         )
+        expires_at = None
+        if config.agreement_ttl_seconds is not None:
+            expires_at = (
+                (datetime.now(UTC) + timedelta(seconds=config.agreement_ttl_seconds))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         agreement = next_revision(
             previous,
             plan=plan,
             scopes=({"window": intent.window, "rateMbps": intent.rate_mbps},),
+            expires_at=expires_at,
         )
         task.plan = plan
         task.agreement = agreement.to_dict()
+        resolved.agreements[agreement.agreement_id] = agreement.to_dict()
         identity = _request_identity(metadata)
         if identity is not None:
             task.request_id = identity
@@ -873,6 +909,56 @@ def build_routes(
         if not task.execution_id:
             task.execution_id = f"exe-{uuid.uuid4().hex[:12]}"
         task.delegation_chain = _delegation_chain(metadata)
+
+    def _agreement_for(ref: object) -> tuple[dict[str, object] | None, str | None]:
+        """Return the stored revision a client reference names, or the reason it cannot run."""
+        agreement_id = getattr(ref, "agreement_id", "")
+        revision = getattr(ref, "revision", None)
+        raw = resolved.agreements.get(str(agreement_id))
+        if raw is None:
+            return None, AGREEMENT_UNKNOWN
+        if revision is not None and raw.get("revision") != revision:
+            return None, AGREEMENT_STALE
+        expires = raw.get("expiresAt")
+        if isinstance(expires, str):
+            try:
+                instant = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            except ValueError:
+                instant = None
+            if instant is not None and datetime.now(UTC) >= instant:
+                return None, AGREEMENT_EXPIRED
+        return raw, None
+
+    def _agreement_error(reason: str) -> JSONResponse:
+        """Refuse a request that names an agreement revision it cannot execute."""
+        return JSONResponse(
+            {"error": {"code": 409, "status": "FAILED_PRECONDITION", "message": reason}},
+            status_code=409,
+        )
+
+    def _content_from_agreement(raw: Mapping[str, object]) -> ExtractedContent:
+        """Return the business content of an agreement revision, so it can be executed again."""
+        scopes = raw.get("scopes")
+        windows: list[str] = []
+        rate: float | None = None
+        if isinstance(scopes, list):
+            for scope in scopes:
+                if not isinstance(scope, Mapping):
+                    continue
+                window = scope.get("window")
+                if isinstance(window, str):
+                    windows.append(window)
+                value = scope.get("rateMbps")
+                if rate is None and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    rate = float(value)
+        return ExtractedContent(
+            operation=str(raw.get("operation") or "Create"),
+            region=str(raw.get("region") or ""),
+            windows=tuple(windows),
+            rate_mbps=rate,
+            percent=None,
+            source=f"agreement:{raw.get('agreementId')}@{raw.get('revision')}",
+        )
 
     def _baseline_rejection(
         task: SimTask,
@@ -975,6 +1061,14 @@ def build_routes(
                     "negotiationContext must carry an id, a round, maxRounds and a performative"
                 )
             return _negotiated_request(body, request, parsed_context, stream=stream)
+        # An agreement reference asks to execute a revision the server already holds. It is checked
+        # before the document is read: a reference may replace the document entirely.
+        agreement_ref = read_agreement_ref(metadata)
+        agreement_raw: dict[str, object] | None = None
+        if agreement_ref is not None:
+            agreement_raw, reason = _agreement_for(agreement_ref)
+            if reason is not None:
+                return _agreement_error(reason)
         # A change order against a Task that already has a plan must name the plan it replaces.
         # Negotiation replies are dispatched above, so this only sees a fresh request.
         baseline_task = resolved_store.get(early_task_id) if early_task_id else None
@@ -984,11 +1078,28 @@ def build_routes(
             )
             if refused is not None:
                 return refused
-        try:
-            content = read_message_request(body, request.headers)
-        except SimRequestError as exc:
-            return JSONResponse(exc.payload, status_code=exc.status_code)
-        _count_read_path(content)
+        from_agreement = agreement_raw is not None and not _has_task_payload(metadata)
+        if from_agreement:
+            # Executing a stored revision needs no re-render: the agreement *is* the statement.
+            content = _content_from_agreement(agreement_raw)
+            metrics.path(PROTOCOL_A2A_T, "agreement")
+        else:
+            try:
+                content = read_message_request(body, request.headers)
+            except SimRequestError as exc:
+                return JSONResponse(exc.payload, status_code=exc.status_code)
+            _count_read_path(content)
+        if agreement_raw is not None and _has_task_payload(metadata):
+            declared = plan_digest(
+                {
+                    "operation": content.operation or "",
+                    "region": content.region,
+                    "window": content.windows[0] if content.windows else "",
+                    "rateMbps": content.rate_mbps if content.rate_mbps is not None else 0.0,
+                }
+            )
+            if declared != agreement_raw.get("planDigest"):
+                return _agreement_error(AGREEMENT_MISMATCH)
         issue = select_issue(content, config)
         context_id = _context_id(body) or str(uuid.uuid4())
         requested_task_id = _requested_task_id(body)
@@ -1013,7 +1124,12 @@ def build_routes(
                 )
             except PushConfigExistsError as exc:
                 return _register_config_error(exc)
-            intent = parse_message_request(body, request.headers, config)
+            # A reference request carries no document to parse: the agreement supplied the values.
+            intent = (
+                accepted_intent(content, None, config)
+                if from_agreement
+                else parse_message_request(body, request.headers, config)
+            )
             _remember_plan(task, intent, metadata)
             metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
             hold = config.hold_working and is_new

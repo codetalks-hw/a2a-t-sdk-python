@@ -3878,6 +3878,34 @@ async def test_a_matching_approval_request_is_approved_with_the_computed_digest(
     assert decision.plan_digest == request.plan_digest
 
 
+async def test_the_run_publishes_an_audit_chain_from_its_artifacts() -> None:
+    """P5: the flow decides its own links, so a report does not need a second pass."""
+    approval_event, _request = _approval_status(plan_digest(_CLIENT_PLAN))
+    transport = ScriptedTransport([[approval_event], _task_completed_batch()])
+
+    result = await run_client_flow(
+        prompt_client=FakePromptClient(),
+        transport=transport,
+        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(()),
+        language="en-US",
+        intent_fields=_INTENT_FIELDS,
+        approval_answer=approval_answer(OUTCOME_APPROVE),
+        approval_plan=lambda filled: _CLIENT_PLAN,
+    )
+
+    audit = result.audit
+    assert isinstance(audit, dict)
+    summary = audit["summary"]
+    assert isinstance(summary, dict)
+    assert summary["decidedBy"] == "digest"
+    # Request and approval agree; this scripted batch carries no readback and no change order, so
+    # those two links are honestly unverifiable rather than guessed.
+    assert summary["matched"] == 2
+    assert summary["mismatched"] == 0
+    assert summary["unverifiable"] == 2
+
+
 async def test_an_a2a_t_approval_request_is_answered_with_a_decision() -> None:
     """S6 on the A2A-T hop: the post-accept loop answers the request, it does not end the run."""
     approval_event, request = _approval_status()

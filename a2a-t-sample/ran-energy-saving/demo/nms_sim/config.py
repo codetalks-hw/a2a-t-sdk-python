@@ -74,6 +74,8 @@ BASELINE_STALE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_BASELINE_STALE"
 #: abandoned session must expire instead of accumulating, and a late reply must get a terminal
 #: answer. A client that dies inside the window re-runs the request -- nothing has executed yet.
 NEGOTIATION_TTL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_NEGOTIATION_TTL_SECONDS"
+#: v2 prototype: lifetime of one agreement revision. Unset means it never expires.
+AGREEMENT_TTL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_AGREEMENT_TTL_SECONDS"
 DEFAULT_NEGOTIATION_TTL_SECONDS: Final[float] = 1800.0
 
 #: Window acceptance policies.
@@ -184,6 +186,7 @@ class SimConfig:
             no longer the Task's current plan (P3).
         baseline_stale: Measurement-only: the Task's current plan is reported as a different one.
         negotiation_ttl_seconds: How long an unanswered A2A-T negotiation stays open.
+        agreement_ttl_seconds: Lifetime of one agreement revision (v2 prototype).
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -223,6 +226,7 @@ class SimConfig:
     baseline_stale: bool = False
     #: How long an unanswered negotiation stays open (0 expires immediately; ``None`` never).
     negotiation_ttl_seconds: float | None = DEFAULT_NEGOTIATION_TTL_SECONDS
+    agreement_ttl_seconds: float | None = None
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -293,6 +297,10 @@ class SimConfig:
                 f"expected one of {SUPPORTED_PURE_QUESTIONS}"
             )
         kinds = _parse_kinds(os.environ.get(NEGOTIATION_KINDS_ENV_KEY, ""))
+        agreement_ttl_raw = os.environ.get(AGREEMENT_TTL_ENV_KEY, "").strip()
+        agreement_ttl = (
+            _seconds(agreement_ttl_raw, key=AGREEMENT_TTL_ENV_KEY) if agreement_ttl_raw else None
+        )
         baseline = os.environ.get(BASELINE_ENV_KEY, BASELINE_OFF).strip().lower()
         if baseline not in SUPPORTED_BASELINES:
             raise ValueError(
@@ -336,6 +344,7 @@ class SimConfig:
             readback_deviation=_truthy(os.environ.get(READBACK_DEVIATION_ENV_KEY, "")),
             baseline=baseline,
             baseline_stale=_truthy(os.environ.get(BASELINE_STALE_ENV_KEY, "")),
+            agreement_ttl_seconds=agreement_ttl,
             negotiation_ttl_seconds=_seconds(
                 os.environ.get(
                     NEGOTIATION_TTL_ENV_KEY, str(DEFAULT_NEGOTIATION_TTL_SECONDS)

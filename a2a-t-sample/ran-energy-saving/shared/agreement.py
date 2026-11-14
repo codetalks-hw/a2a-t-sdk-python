@@ -28,6 +28,8 @@ AGREEMENT_VERSION: Final[int] = 1
 
 #: Reason codes the server reports when a change order targets a superseded revision.
 REASON_UNKNOWN: Final[str] = "agreement-unknown"
+REASON_EXPIRED: Final[str] = "agreement-expired"
+REASON_MISMATCH: Final[str] = "agreement-mismatch"
 REASON_STALE: Final[str] = "agreement-stale"
 
 
@@ -39,6 +41,8 @@ class Agreement:
         agreement_id: Identity that survives revisions.
         revision: Revision number, starting at 1.
         plan_digest: Digest of the accepted plan this revision commits to.
+        operation: Operation the revision commits to.
+        region: Region the revision commits to.
         scopes: ``{window, rateMbps}`` entries of this revision.
         schema_uri: Schema the scopes conform to, when the statement was typed.
         expires_at: ISO-8601 instant after which the revision cannot be accepted or executed.
@@ -47,6 +51,8 @@ class Agreement:
     agreement_id: str
     revision: int
     plan_digest: str
+    operation: str = ""
+    region: str = ""
     scopes: tuple[Mapping[str, object], ...] = ()
     schema_uri: str = ""
     expires_at: str | None = None
@@ -58,6 +64,8 @@ class Agreement:
             "agreementId": self.agreement_id,
             "revision": self.revision,
             "planDigest": self.plan_digest,
+            "operation": self.operation,
+            "region": self.region,
             "scopes": [dict(scope) for scope in self.scopes],
         }
         if self.schema_uri:
@@ -94,10 +102,14 @@ def read_agreement(metadata: Mapping[str, object] | None) -> Agreement | None:
     scopes = raw.get("scopes")
     expires_at = raw.get("expiresAt")
     schema_uri = raw.get("schemaUri")
+    operation = raw.get("operation")
+    region = raw.get("region")
     return Agreement(
         agreement_id=agreement_id,
         revision=revision,
         plan_digest=digest,
+        operation=operation if isinstance(operation, str) else "",
+        region=region if isinstance(region, str) else "",
         scopes=tuple(dict(scope) for scope in scopes) if isinstance(scopes, list) else (),
         schema_uri=schema_uri if isinstance(schema_uri, str) else "",
         expires_at=expires_at if isinstance(expires_at, str) else None,
@@ -124,6 +136,8 @@ def next_revision(
         agreement_id=previous.agreement_id if previous is not None else f"agr-{_short_id()}",
         revision=1 if previous is None else previous.revision + 1,
         plan_digest=digest,
+        operation=str(plan.get("operation") or ""),
+        region=str(plan.get("region") or ""),
         scopes=tuple(dict(scope) for scope in scopes),
         schema_uri=schema_uri,
         expires_at=expires_at,
@@ -137,10 +151,57 @@ def _short_id() -> str:
 
 __all__ = [
     "AGREEMENT_METADATA_KEY",
+    "AgreementRef",
+    "agreement_ref_metadata",
+    "read_agreement_ref",
     "AGREEMENT_VERSION",
+    "REASON_EXPIRED",
+    "REASON_MISMATCH",
     "REASON_STALE",
     "REASON_UNKNOWN",
     "Agreement",
     "next_revision",
     "read_agreement",
 ]
+
+
+@dataclass(frozen=True)
+class AgreementRef:
+    """A client's reference to an agreement revision it wants executed.
+
+    Attributes:
+        agreement_id: Agreement to execute.
+        revision: Revision to execute; ``None`` means "the current one".
+    """
+
+    agreement_id: str
+    revision: int | None = None
+
+
+def read_agreement_ref(metadata: Mapping[str, object] | None) -> AgreementRef | None:
+    """Read a client reference, ``None`` when absent or malformed.
+
+    A reference carries no digest: the server owns the revision. That is what makes "execute the
+    agreement I already accepted" expressible without resending the whole statement.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    raw = metadata.get(AGREEMENT_METADATA_KEY)
+    if not isinstance(raw, Mapping):
+        return None
+    agreement_id = raw.get("agreementId")
+    if not isinstance(agreement_id, str) or not agreement_id:
+        return None
+    revision = raw.get("revision")
+    return AgreementRef(
+        agreement_id=agreement_id,
+        revision=revision if isinstance(revision, int) and not isinstance(revision, bool) else None,
+    )
+
+
+def agreement_ref_metadata(ref: AgreementRef) -> dict[str, object]:
+    """Return the metadata entry carrying one client reference."""
+    payload: dict[str, object] = {"agreementId": ref.agreement_id}
+    if ref.revision is not None:
+        payload["revision"] = ref.revision
+    return {AGREEMENT_METADATA_KEY: payload}

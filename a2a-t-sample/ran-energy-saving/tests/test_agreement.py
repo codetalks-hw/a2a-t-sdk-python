@@ -252,3 +252,109 @@ def test_an_agreement_from_metadata_is_read_only_when_it_is_well_formed() -> Non
     assert read_agreement({AGREEMENT_METADATA_KEY: Agreement("a", 1, "d").to_dict()}) == Agreement(
         "a", 1, "d"
     )
+
+
+def _reference_body(
+    agreement: dict[str, object], *, request_id: str, statement: dict[str, object] | None = None
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        AGREEMENT_METADATA_KEY: {
+            "agreementId": agreement["agreementId"],
+            "revision": agreement["revision"],
+        },
+        "a2at-sample/request-id": request_id,
+        **(statement or {}),
+    }
+    return {
+        "message": {
+            "messageId": request_id,
+            "role": "ROLE_USER",
+            "parts": [{"text": "execute the agreement"}],
+            "metadata": metadata,
+        }
+    }
+
+
+async def test_a_stored_agreement_can_be_executed_again_without_resending_it() -> None:
+    """The agreement is the durable object: a second execution names it instead of re-describing it."""
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(created.json())
+        again = await client.post(
+            SEND_URL,
+            json=_reference_body(agreement, request_id="run-2"),
+            headers=_headers(token),
+        )
+        metrics = await client.get("/a2a/json/metrics", headers={"Authorization": f"Bearer {token}"})
+
+    assert again.status_code == 200, again.text
+    assert again.json()["task"]["id"] != created.json()["task"]["id"]
+    assert _agreement_of(again.json())["planDigest"] == agreement["planDigest"]
+    assert metrics.json()["protocols"]["a2a-t"]["paths"].get("agreement") == 1
+    assert metrics.json()["protocols"]["a2a-t"]["duplicates"] == 0
+
+
+async def test_the_same_agreement_can_run_twice_with_explicit_request_identities() -> None:
+    """A second execution is a new request, not a retry: the client says so with its own id."""
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(created.json())
+        first = await client.post(
+            SEND_URL, json=_reference_body(agreement, request_id="run-a"), headers=_headers(token)
+        )
+        second = await client.post(
+            SEND_URL, json=_reference_body(agreement, request_id="run-b"), headers=_headers(token)
+        )
+
+    assert first.json()["task"]["id"] != second.json()["task"]["id"]
+
+
+async def test_an_expired_agreement_is_refused() -> None:
+    transport = httpx.ASGITransport(app=build_sim_app(_config(agreement_ttl_seconds=0.0)))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(created.json())
+        refused = await client.post(
+            SEND_URL, json=_reference_body(agreement, request_id="later"), headers=_headers(token)
+        )
+
+    assert refused.status_code == 409
+    assert "agreement-expired" in refused.text
+
+
+async def test_a_statement_that_disagrees_with_the_agreement_is_refused() -> None:
+    """Naming a revision and describing another plan must not silently execute the description."""
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(created.json())
+        refused = await client.post(
+            SEND_URL,
+            json=_reference_body(
+                agreement, request_id="run-3", statement={TASK_T_EXTENSION_URI: _prompt(rate="5 Mbps")}
+            ),
+            headers=_headers(token),
+        )
+
+    assert refused.status_code == 409
+    assert "agreement-mismatch" in refused.text
+
+
+async def test_an_unknown_agreement_is_refused() -> None:
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        refused = await client.post(
+            SEND_URL,
+            json=_reference_body({"agreementId": "agr-missing", "revision": 1}, request_id="run-x"),
+            headers=_headers(token),
+        )
+
+    assert refused.status_code == 409
+    assert "agreement-unknown" in refused.text

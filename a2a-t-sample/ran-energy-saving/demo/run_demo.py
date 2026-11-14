@@ -285,6 +285,9 @@ def _nms_sim_settings(values: dict[str, str], port: int) -> dict[str, str]:
             values, "A2AT_SAMPLE_NMS_SIM_NEGOTIATION_TTL_SECONDS", "1800"
         ),
         "A2AT_SAMPLE_TYPED_PAYLOAD": _env_str(values, "A2AT_SAMPLE_TYPED_PAYLOAD", "0"),
+        "A2AT_SAMPLE_NMS_SIM_AGREEMENT_TTL_SECONDS": _env_str(
+            values, "A2AT_SAMPLE_NMS_SIM_AGREEMENT_TTL_SECONDS", ""
+        ),
     }
 
 

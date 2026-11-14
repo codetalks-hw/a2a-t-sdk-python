@@ -81,6 +81,7 @@ from shared.approval import (
     plan_digest,
     read_approval_request,
 )
+from shared.audit import Artifacts, summarize, verify_chain
 from shared.change_order import baseline_metadata
 from shared.config import DEFAULT_HTTP_TIMEOUT_SECONDS, DEFAULT_WEBHOOK_IDLE_TIMEOUT
 from shared.logging_setup import log_context
@@ -728,9 +729,11 @@ class ClientFlowResult:
     reports: list[dict[str, object]] = field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
-    #: S8 execution readback: ``status`` is ``matched`` / ``deviated`` / ``unverified``, with the
+    #: S8 execution readback: ``status`` is ``matched`` / ``deviated`` / ``unverifiable``, with the
     #: executed plan and the field-level deviations the peer reported.
     readback: dict[str, object] | None = None
+    #: P5 audit chain: one verdict per link plus the counts, computed from the run's artifacts only.
+    audit: dict[str, object] | None = None
 
 
 def is_terminal_event(event: Mapping[str, object]) -> bool:
@@ -1427,7 +1430,11 @@ async def run_client_flow(
     # The digest of the plan this client is asking for. It is recomputed from the accepted values
     # whenever an accept changes them, so an approval request is always checked against the latest
     # agreement rather than the original request.
-    accepted_digest = _plan_digest_for(approval_plan, initial_filled)
+    requested_plan = _plan_for(approval_plan, initial_filled)
+    requested_digest = _plan_digest_for(approval_plan, initial_filled)
+    # Until an accept changes them, the accepted plan is the requested one.
+    accepted_plan = requested_plan
+    accepted_digest = requested_digest
     emit_message_sent(
         initial_request,
         phase=PHASE_TASK_MODIFY if modify_only else PHASE_TASK_VALIDATION,
@@ -1473,6 +1480,21 @@ async def run_client_flow(
                         "deviations": result.readback["deviations"],
                     },
                 )
+        # P5: every link is decided from artifacts this run already holds. A plain-A2A hop has no
+        # accepted plan, so its links come back ``unverifiable`` -- which is the point.
+        result.audit = _audit_of(
+            requested_plan=requested_plan,
+            accepted_plan=accepted_plan,
+            accepted_digest=accepted_digest,
+            approval_digest=approval_digest,
+            readback=result.readback,
+            baseline_plan=baseline_plan,
+            negotiated=(
+                accepted_digest is not None
+                and requested_digest is not None
+                and accepted_digest != requested_digest
+            ),
+        )
         _LOGGER.info(
             "client flow finished: state=%s task_id=%s decisions=%d",
             result.final_state,
@@ -1482,10 +1504,13 @@ async def run_client_flow(
         return result
 
     answered_approvals: set[str] = set()
+    #: Digest the peer asked approval for; the audit compares it with the accepted plan.
+    approval_digest: str | None = None
     while True:
         approval = _find_approval_request(batch)
         if approval is not None and approval_answer is not None:
             approval_event, approval_request = approval
+            approval_digest = approval_request.plan_digest
             if approval_request.approval_id in answered_approvals:
                 # The server did not apply the decision (stale / expired / unknown). Repeating the
                 # same answer would loop; the Task is left waiting and the run reports that state.
@@ -1783,7 +1808,7 @@ async def run_client_flow(
 
         if decision.action == "accept":
             dropped_values: list[str] = []
-            request, call_context, accepted_digest = await _build_accept_request(
+            request, call_context, accepted_digest, accepted_plan = await _build_accept_request(
                 prompt_client=prompt_client,
                 decision=decision,
                 kind=kind,
@@ -2226,7 +2251,7 @@ async def _build_accept_request(
     task_id: str | None = None,
     dropped: list[str] | None = None,
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
-) -> tuple[SendMessageRequest, ClientCallContext, str | None]:
+) -> tuple[SendMessageRequest, ClientCallContext, str | None, Mapping[str, object] | None]:
     """Refill the Task-T prompt and generate the Negotiation-T accept of the proposal type.
 
     The accept content is built from typed data and rendered deterministically (the SDK
@@ -2319,7 +2344,7 @@ async def _build_accept_request(
         extra_metadata=metadata,
         task_id=task_id,
     )
-    return request, call_context, _plan_digest_for(approval_plan, filled)
+    return request, call_context, _plan_digest_for(approval_plan, filled), _plan_for(approval_plan, filled)
 
 
 async def _build_terminal_request(
@@ -2405,18 +2430,61 @@ def _latest_readback(events: list[dict[str, object]]) -> Readback | None:
     return None
 
 
+def _audit_of(
+    *,
+    requested_plan: Mapping[str, object] | None,
+    accepted_plan: Mapping[str, object] | None,
+    accepted_digest: str | None,
+    approval_digest: str | None,
+    readback: Mapping[str, object] | None,
+    baseline_plan: Mapping[str, object] | None,
+    negotiated: bool,
+) -> dict[str, object]:
+    """Return the audit chain of one run as a report-ready document."""
+    executed = readback.get("executed") if isinstance(readback, Mapping) else None
+    receipt = readback.get("planDigest") if isinstance(readback, Mapping) else None
+    artifacts = Artifacts(
+        requested_plan=requested_plan,
+        accepted_plan=accepted_plan,
+        accepted_digest=accepted_digest,
+        approved_digest=approval_digest,
+        executed_plan=executed if isinstance(executed, Mapping) else None,
+        receipt_digest=receipt if isinstance(receipt, str) else None,
+        baseline_plan=baseline_plan,
+        baseline_digest=plan_digest(baseline_plan) if baseline_plan is not None else None,
+        negotiated=negotiated,
+    )
+    links = verify_chain(artifacts)
+    return {
+        "links": [
+            {"name": link.name, "status": link.status, "detail": link.detail}
+            for link in links
+        ],
+        "summary": summarize(links),
+    }
+
+
+def _plan_for(
+    projection: Callable[[Mapping[str, object]], Mapping[str, object]] | None,
+    filled: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Return the canonical plan of the accepted values, ``None`` when unavailable."""
+    if projection is None or not filled:
+        return None
+    try:
+        return projection(filled)
+    except Exception:  # noqa: BLE001 - a projection failure must not end the run
+        _LOGGER.warning("approval plan projection failed", exc_info=True)
+        return None
+
+
 def _plan_digest_for(
     projection: Callable[[Mapping[str, object]], Mapping[str, object]] | None,
     filled: Mapping[str, object] | None,
 ) -> str | None:
     """Return the digest of the plan a filled Task-T represents, ``None`` when unavailable."""
-    if projection is None or not filled:
-        return None
-    try:
-        return plan_digest(projection(filled))
-    except Exception:  # noqa: BLE001 - a projection failure must not end the run
-        _LOGGER.warning("approval plan projection failed", exc_info=True)
-        return None
+    plan = _plan_for(projection, filled)
+    return plan_digest(plan) if plan is not None else None
 
 
 def _string_field(event: Mapping[str, object], key: str) -> str | None:
