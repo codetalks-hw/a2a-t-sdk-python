@@ -285,3 +285,32 @@ def test_record_span_without_a_langfuse_trace_uses_the_run_trace_id() -> None:
 
     assert captured
     assert captured[0]["traceId"] == "b" * 32
+
+
+def test_record_span_falls_back_to_the_bound_run_id() -> None:
+    """A worker thread that lost the trace scope still names its run for the process sink."""
+    from shared.trace_propagation import propagated_trace
+
+    captured: list[dict[str, object]] = []
+    token = set_task_sink(captured.append)
+    try:
+        with propagated_trace(run_id="run-42"):
+            record_span(kind="llm", phase=PHASE_EXECUTION, title="LLM call", prefix="probe")
+    finally:
+        reset_task_sink(token)
+
+    assert captured
+    assert captured[0]["runId"] == "run-42"
+
+
+def test_record_span_without_any_run_binding_keeps_the_run_empty() -> None:
+    """No run is active (a CLI/server producer): the envelope must not invent one."""
+    captured: list[dict[str, object]] = []
+    token = set_task_sink(captured.append)
+    try:
+        record_span(kind="llm", phase=PHASE_EXECUTION, title="LLM call", prefix="probe")
+    finally:
+        reset_task_sink(token)
+
+    assert captured
+    assert captured[0]["runId"] == ""

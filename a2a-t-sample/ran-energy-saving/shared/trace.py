@@ -36,6 +36,8 @@ from typing import Final
 
 from a2a_t.core.metadata import NEGOTIATION_CONTEXT_METADATA_KEY, TASK_T_EXTENSION_URI
 
+_LOGGER = logging.getLogger("ran_energy_saving.trace")
+
 #: Version of the span envelope written by this module.
 SCHEMA_VERSION: Final[int] = 1
 
@@ -668,7 +670,12 @@ def set_global_activity_sink(sink: ActivitySink | None) -> None:
 
 
 def emit_span(span: Span | Mapping[str, object]) -> None:
-    """Forward one span to the task-local sink, else the process sink; no-op when neither is set."""
+    """Forward one span to the task-local sink, else the process sink; no-op when neither is set.
+
+    A worker thread (``asyncio.to_thread``) normally inherits the run's task sink. When it does
+    not, the span still reaches the process sink and is routed by its ``runId``; a span without
+    either is logged instead of vanishing silently.
+    """
     override = _SINK_OVERRIDE.get()
     if override is _UNSET_SINK:
         with _SINK_LOCK:
@@ -676,12 +683,35 @@ def emit_span(span: Span | Mapping[str, object]) -> None:
     else:
         sink = override if override is None or callable(override) else None
     if sink is None:
+        _log_dropped_span(span)
         return
     payload = span.to_dict() if isinstance(span, Span) else dict(span)
     try:
         sink(payload)
     except Exception:  # noqa: BLE001 - tracing must never break the observed flow
         return
+
+
+#: Seconds between two "span dropped" warnings: a broken context would otherwise flood the log.
+_DROPPED_SPAN_WARN_INTERVAL: Final[float] = 30.0
+_dropped_span_warned_at: float = 0.0
+
+
+def _log_dropped_span(span: Span | Mapping[str, object]) -> None:
+    """Warn about one span that has no sink at all; throttled to one line per interval."""
+    global _dropped_span_warned_at
+    now = time.monotonic()
+    if now - _dropped_span_warned_at < _DROPPED_SPAN_WARN_INTERVAL:
+        return
+    _dropped_span_warned_at = now
+    payload = span.to_dict() if isinstance(span, Span) else dict(span)
+    _LOGGER.warning(
+        "trace span dropped: no sink | kind=%s stage=%s runId=%s title=%s",
+        payload.get("kind"),
+        payload.get("stage"),
+        payload.get("runId") or "-",
+        payload.get("title"),
+    )
 
 
 def is_report_artifact(event: Mapping[str, object]) -> bool:
@@ -779,6 +809,16 @@ def phase_for_stage(stage: str | None, default: str = PHASE_NEGOTIATION) -> str:
 
 _PRODUCER_COUNTERS: dict[str, int] = {}
 _PRODUCER_LOCK = threading.Lock()
+
+
+def _bound_run_id() -> str:
+    """Return the run id bound by the A2A propagation layer, ``""`` when no run is active."""
+    try:
+        from shared.trace_propagation import current_run_id
+
+        return current_run_id()
+    except Exception:  # noqa: BLE001 - tracing must never break the producer
+        return ""
 
 
 def producer_span_id(prefix: str) -> str:
@@ -933,7 +973,10 @@ def record_span(
     sanitized, _ = sanitize_payload(detail)
     envelope_trace_id, envelope_span_id, envelope_parent_id = _otel_envelope_ids()
     span = Span(
-        run_id=trace.run_id or "",
+        # The A2A propagation layer binds the run for the whole run task, including the worker
+        # threads of the SDK calls. Falling back to it keeps a span attributable when only the
+        # trace scope was lost, so the process sink can still route it to its run.
+        run_id=trace.run_id or _bound_run_id(),
         seq=0,
         span_id=producer_span_id(prefix),
         parent_span_id=parent_span_id,

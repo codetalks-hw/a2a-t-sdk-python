@@ -427,6 +427,26 @@ def _waits_for_recommendation(run: RunState) -> bool:
     return False
 
 
+_UNROUTABLE_SPAN_WARN_INTERVAL_SECONDS: Final[float] = 30.0
+_unroutable_span_warned_at: float = 0.0
+
+
+def _log_unroutable_span(span: Mapping[str, object], reason: str) -> None:
+    """Warn about one global-sink span that cannot be routed; throttled per process."""
+    global _unroutable_span_warned_at
+    now = time.monotonic()
+    if now - _unroutable_span_warned_at < _UNROUTABLE_SPAN_WARN_INTERVAL_SECONDS:
+        return
+    _unroutable_span_warned_at = now
+    _LOGGER.warning(
+        "trace span not routed: %s | kind=%s stage=%s title=%s",
+        reason,
+        span.get("kind"),
+        span.get("stage"),
+        span.get("title"),
+    )
+
+
 class RunManager:
     """Owns client runs and conversations of one process.
 
@@ -600,10 +620,13 @@ class RunManager:
         """
         run_id = span.get("runId")
         if not isinstance(run_id, str) or not run_id:
+            _log_unroutable_span(span, "missing runId")
             return
         run = self._runs.get(run_id)
         if run is not None:
             run.record_trace(span)
+        else:
+            _log_unroutable_span(span, f"unknown run {run_id}")
 
     async def mark_interrupted(self) -> int:
         """Mark runs left ``running`` by a previous process as ``interrupted``."""
