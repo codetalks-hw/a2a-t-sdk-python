@@ -36,6 +36,7 @@ from a2a_t.core.errors.exceptions import ContentValidationError, PromptGeneratio
 from protocol.client_flow import _classify_validation_error
 from protocol.messages import TASK_TEMPLATE_URI
 from shared.task_schema import TASK_PARAM_SCHEMA
+from shared.trace import trace_stage
 
 from eval.osp.compare import Diff, compare_intent, compare_task_t
 from eval.osp.followup import followup_case, has_followup, interception_case, is_blocked_case
@@ -309,7 +310,10 @@ def _blocked_before_task_t(
 
 
 def _generate_task_t(case: Mapping[str, Any], client: EvalPromptClient) -> str:
-    content = client.generate_task_prompt_from_text(str(case["user_input"]), TASK_TEMPLATE_URI)
+    # Name the call for the trace even though a full-flow batch no longer runs this preflight:
+    # the stage label is what tells a slot extraction apart from a validation.
+    with trace_stage("task_t_slot_extraction"):
+        content = client.generate_task_prompt_from_text(str(case["user_input"]), TASK_TEMPLATE_URI)
     text = getattr(content, "prompt_text", None)
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError("the SDK returned no Task-T prompt text")
@@ -324,9 +328,10 @@ def _run_intent(
     expected = case["expect"]["intent"]
     note = ""
     try:
-        filled = client.validate_task_prompt_and_data_filling(
-            task_t, OSP_INTENT_SCHEMA, TASK_TEMPLATE_URI
-        )
+        with trace_stage("intent_extraction"):
+            filled = client.validate_task_prompt_and_data_filling(
+                task_t, OSP_INTENT_SCHEMA, TASK_TEMPLATE_URI
+            )
         actual = getattr(filled, "data", None)
     except ContentValidationError as exc:
         params = getattr(exc, "params", None)
@@ -462,7 +467,8 @@ def _actual_validation(
     task_t: str,
 ) -> tuple[str | None, str, str | None]:
     try:
-        client.validate_task_prompt_and_data_filling(task_t, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)
+        with trace_stage("task_t_client_validation"):
+            client.validate_task_prompt_and_data_filling(task_t, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)
     except ContentValidationError as exc:
         verdict, _kind = _classify_validation_error(exc)
         if verdict == "unavailable":

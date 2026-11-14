@@ -1018,25 +1018,27 @@ class EvalBatchManager:
             return
         stages = list(ALL_STAGES[: ALL_STAGES.index(batch.stop_after) + 1])
         effective_case = case
-        #: Producer spans of the pre-run SDK stages. They are replayed into the item's run once
-        #: ``RunManager.start`` creates it, so Langfuse sees the intent/Task-T model calls too.
-        preflight_spans: list[dict[str, object]] = []
         if item.protocol == PROTOCOL_A2A:
             # OSP defines no SDK stages for pure A2A; only the runtime chain applies.
             stages = [stage for stage in stages if stage not in SDK_STAGE_ORDER]
         else:
-            sdk_stages = [stage for stage in stages if stage in SDK_STAGE_ORDER]
-            if sdk_stages:
-                blocked_followup = is_blocked_case(case) and has_followup(case)
-                if blocked_followup:
-                    effective_case = followup_case(case)
+            blocked_followup = is_blocked_case(case) and has_followup(case)
+            if blocked_followup:
+                effective_case = followup_case(case)
+            if batch.stop_after in SDK_STAGE_ORDER:
+                # SDK-only batch (``intent`` / ``task_t`` / ``validate``): no run is started, so the
+                # tester runs the three SDK stages itself and judges their columns. A full-flow
+                # batch must not preflight: the run generates the Task-T and validates it, so a
+                # second SDK pass would repeat every model call and put work into the trace that
+                # the run never performed.
+                #
                 # The SDK runner owns the two-segment split of a blocked case: it returns the
                 # follow-up request's stages as the outcome and keeps the intercepted original as
-                # ``outcome.interception``. The full flow below dispatches the replacement request.
-                preflight_spans = await self._run_sdk_stages(
+                # ``outcome.interception``. A full flow has no interception segment.
+                await self._run_sdk_stages(
                     case,
                     item,
-                    sdk_stages[-1],
+                    batch.stop_after,
                     batch.decision_mode,
                     outcome_case=effective_case if blocked_followup else None,
                     concurrent=batch.active_concurrency > 1,
@@ -1047,11 +1049,16 @@ class EvalBatchManager:
             return
         self._collect_reference(item, effective_case)
         if batch.stop_after in SDK_STAGE_ORDER:
+            # No run will collect this evidence: freeze the request the SDK stages read so the
+            # arbitration export still names it.
+            if not item.intent_meta.get("rawRequest"):
+                item.intent_meta["rawRequest"] = str(item.refs.get("userInput") or "")
+                item.intent_meta["normalizedText"] = item.intent_meta["rawRequest"]
+            if not item.intent_meta.get("source"):
+                item.intent_meta["source"] = "sdk" if item.intent is not None else ""
             item.status = self._item_status(item)
             return
-        await self._run_full_flow(
-            batch, index, item, effective_case, stages, preflight_spans=preflight_spans
-        )
+        await self._run_full_flow(batch, index, item, effective_case, stages)
         item.status = self._item_status(item)
 
     async def _run_sdk_stages(
@@ -1063,19 +1070,18 @@ class EvalBatchManager:
         *,
         outcome_case: Mapping[str, Any] | None = None,
         concurrent: bool = False,
-    ) -> list[dict[str, object]]:
-        """Run the SDK stages of one case and record its interception segment, when split.
+    ) -> None:
+        """Run the SDK stages of one SDK-only case and record its interception segment, when split.
 
         ``outcome_case`` is the derived replacement case whose expectations judge the returned
         stages; the runner already judged the intercepted original, so those stages are recorded
         verbatim (the runner derived their assertion flags). ``concurrent`` selects the pooled
         client path; the default keeps the historical single locked client.
 
-        Returns the producer spans the SDK stages emitted. They run before the item's run exists,
-        so they have no run id; the caller replays them into the run trace once it starts.
+        These calls belong to no run, so their producer spans are silenced: a Langfuse trace (and
+        the Run Explorer) must only contain work the run really performed.
         """
-        preflight_spans: list[dict[str, object]] = []
-        sink_token = set_task_sink(preflight_spans.append)
+        sink_token = set_task_sink(None)
         try:
             results, interception, error = await self._sdk_stage_results(
                 case, stop_after, decision_mode, outcome_case=outcome_case, concurrent=concurrent
@@ -1094,7 +1100,6 @@ class EvalBatchManager:
             item.interception = record
         if error:
             item.error = error
-        return preflight_spans
 
     async def _sdk_stage_results(
         self,
@@ -1156,8 +1161,6 @@ class EvalBatchManager:
         item: CaseItem,
         case: Mapping[str, Any],
         stages: Sequence[str],
-        *,
-        preflight_spans: Sequence[Mapping[str, object]] = (),
     ) -> None:
         if item.cancel_requested:
             # Cancelled between the SDK stages and here: never seed a baseline or send a request.
@@ -1255,7 +1258,6 @@ class EvalBatchManager:
             language=resolved_language,
         )
         item.run_id = run.run_id
-        self._replay_preflight_spans(run, preflight_spans)
         self._persist(batch)
         if item.cancel_requested:
             # The cancel arrived while the run was being created; stop it before observing it,
@@ -1330,31 +1332,6 @@ class EvalBatchManager:
         await self._collect_metrics(item, run)
         if not batch.keep_tasks:
             await self._release_item_runs(item, run)
-
-    def _replay_preflight_spans(
-        self, run: RunState, spans: Sequence[Mapping[str, object]]
-    ) -> None:
-        """Attach the tester's pre-run SDK spans to the run trace.
-
-        The SDK stages run before ``RunManager.start`` creates the run, so their producer spans
-        carry no run id and the process sink drops them. Replaying them into the run keeps the
-        intent/Task-T/validation model calls visible in the run's trace and Langfuse trace.
-        Observability only: a replay failure must never change the item result.
-        """
-        for span in spans:
-            # Only producer work belongs to the run trace. An ``intent_processed`` row from the
-            # preflight stage would overwrite the run's own intent, so it stays out.
-            if str(span.get("kind") or "") not in {"llm", "tool"}:
-                continue
-            try:
-                payload = dict(span)
-                payload["runId"] = run.run_id
-                payload["traceId"] = run.trace_id
-                run.record_trace(payload)
-            except Exception:  # noqa: BLE001 - tracing must never break the tested flow
-                _LOGGER.warning(
-                    "tester preflight span replay failed for run %s", run.run_id, exc_info=True
-                )
 
     async def _release_item_runs(self, item: CaseItem, run: RunState | None = None) -> None:
         """Cancel the runs one item created and release their remote Tasks.
@@ -1994,11 +1971,6 @@ class EvalBatchManager:
             and isinstance(stage.actual, Mapping)
         ):
             item.intent = {str(key): value for key, value in stage.actual.items()}
-        if not item.intent_meta.get("rawRequest"):
-            item.intent_meta["rawRequest"] = str(item.refs.get("userInput") or "")
-            item.intent_meta["normalizedText"] = item.intent_meta["rawRequest"]
-        if not item.intent_meta.get("source"):
-            item.intent_meta["source"] = "sdk" if item.intent is not None else ""
 
     def _collect_run_evidence(
         self,
@@ -2049,22 +2021,24 @@ class EvalBatchManager:
     ) -> None:
         """Re-judge the ``intent`` stage against the downstream's own reading.
 
-        The case asks what the server understood, not what our SDK extracted from the Task-T. The
-        stage keeps the SDK extraction until the run starts; once the downstream accepts the Task
-        and returns its payload with ``TASK_STATE_SUBMITTED``, that payload becomes the actual and
-        the stage is compared with ``expect.intent``. ``item.intent`` is left untouched so the
-        auxiliary SDK column still exports the pre-send extraction.
+        The case asks what the server understood, not what our SDK extracted from the Task-T. A
+        full-flow item has no SDK preflight stage any more, so the stage is created here and its
+        actual is the downstream's own payload (``TASK_STATE_SUBMITTED``); an SDK-only batch keeps
+        the SDK extraction it already recorded. ``item.intent`` is only filled from an SDK stage,
+        so the auxiliary SDK column never duplicates the server payload.
         """
         payload = run.server_intent
         item.server_intent = dict(payload) if isinstance(payload, Mapping) else None
         stage = item.stages.get("intent")
-        if (
-            stage is None
-            and item.protocol == PROTOCOL_A2A
-            and item.server_intent is not None
-        ):
+        if stage is None and item.protocol == PROTOCOL_A2A and item.server_intent is not None:
             # Pure A2A runs no SDK stages, but a direct vendor payload is still the downstream's
             # own reading. Give that payload a comparison stage; no payload keeps the old shape.
+            stage = StageResult(stage="intent", status=STAGE_RECORDED)
+            item.stages["intent"] = stage
+        if stage is None and item.protocol == PROTOCOL_A2A_T:
+            # A full-flow A2A-T item has no SDK preflight any more: the run generates the Task-T
+            # itself and the downstream's payload is the only reading an arbitration can judge.
+            # No payload keeps the stage record-only, never red.
             stage = StageResult(stage="intent", status=STAGE_RECORDED)
             item.stages["intent"] = stage
         if stage is None or case is None:

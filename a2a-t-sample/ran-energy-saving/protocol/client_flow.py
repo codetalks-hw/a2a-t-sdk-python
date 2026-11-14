@@ -476,12 +476,16 @@ async def _validate_task_prompt(
     total_attempts = _SEMANTIC_VALIDATION_RETRIES + 1
     for attempt in range(1, total_attempts + 1):
         try:
-            filled = await asyncio.to_thread(
-                prompt_client.validate_task_prompt_and_data_filling,
-                prompt,
-                schema,
-                template_uri,
-            )
+            # Name the call for the trace: without a stage every validation shows up in Langfuse
+            # as the generic "LLM call · structured" and cannot be told apart from the Task-T
+            # extraction or the negotiation steps.
+            with trace_stage("task_t_client_validation"):
+                filled = await asyncio.to_thread(
+                    prompt_client.validate_task_prompt_and_data_filling,
+                    prompt,
+                    schema,
+                    template_uri,
+                )
         except ContentValidationError as error:
             if error.code_str == "llm.response_invalid" and attempt < total_attempts:
                 _LOGGER.warning(

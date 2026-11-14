@@ -58,7 +58,6 @@ from shared.run_constants import (
     PROTOCOL_PURE,
     TASK_STATE_SUBMITTED,
 )
-from shared.trace import emit_span, record_span
 
 CASES: dict[int, dict[str, Any]] = {case["id"]: case for case in load_cases()}
 
@@ -1263,8 +1262,8 @@ async def test_the_intent_stage_judges_the_downstream_payload_not_the_sdk_extrac
     assert stage.status == STAGE_FAILED
     assert stage.actual == {"Operation type": "Modify", "Energy saving region": "OtherRegion"}
     assert any(diff["path"] == "intent.Energy saving region" for diff in stage.diffs)
-    # The SDK extraction stays available for the auxiliary export column.
-    assert item.intent == CASES[1]["expect"]["intent"]
+    # A full flow no longer runs the SDK preflight, so there is no auxiliary SDK extraction.
+    assert item.intent is None
     assert item.server_intent == {"Operation type": "Modify", "Energy saving region": "OtherRegion"}
     assert item.intent_meta["source"] == "server"
     assert item.status == "failed"
@@ -1577,7 +1576,9 @@ async def test_a_rerun_clears_the_previous_arbitration_evidence(tmp_path: Path) 
         assert item.trace_id == ""
         assert item.intent is None
         assert item.intent_meta == {}
-        assert item.refs == {}
+        # The new attempt re-reads the case metadata immediately (a full flow has no preflight
+        # await any more); the previous attempt's values must be gone, not the field left empty.
+        assert item.refs.get("caseName") != "old"
         assert item.answer is None
     finally:
         await manager.cancel(batch_id)
@@ -1690,7 +1691,9 @@ async def test_the_followup_request_is_what_the_full_flow_dispatches(tmp_path: P
     assert len(runs.calls) == 1
     assert runs.calls[0]["userRequest"] == FOLLOWUP_INPUT
     item = _only_item(finished)
-    assert isinstance(item["interception"], Mapping)
+    # A full flow does not preflight the original request, so the blocked segment is not
+    # re-judged; the run dispatches the replacement request directly.
+    assert item["interception"] is None
     stages = item["stages"]
     assert isinstance(stages, Mapping)
     assert stages["send"]["expected"] is True
@@ -2679,34 +2682,17 @@ def test_a_persisted_multi_round_batch_round_trips(tmp_path: Path) -> None:
     assert [entry["round"] for entry in snapshot["roundSummaries"]] == [1, 2]
 
 
-async def test_preflight_sdk_spans_are_replayed_into_the_run_trace(
+async def test_a_full_flow_item_does_not_run_the_sdk_preflight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The intent/Task-T model calls happen before the run exists; replay keeps them visible."""
-    real_run_case = service.run_case
+    """A full-flow batch lets the run generate and validate the Task-T; no second SDK pass."""
+    calls: list[str] = []
 
-    def run_case_with_span(
-        case: Mapping[str, Any], client: Any, *, stop_after: str = "validate"
-    ) -> Any:
-        record_span(
-            kind="llm",
-            phase="task_prompt",
-            title="LLM call · preflight",
-            prefix="llm_preflight",
-        )
-        # A preflight intent row must not overwrite the run's own intent.
-        emit_span(
-            {
-                "kind": "intent_processed",
-                "phase": "task_prompt",
-                "title": "preflight intent",
-                "status": "ok",
-                "detail": {"region": "preflight-region"},
-            }
-        )
-        return real_run_case(case, client, stop_after=stop_after)
+    def forbidden_run_case(*args: object, **kwargs: object) -> Any:
+        calls.append("run_case")
+        raise AssertionError("a full-flow item must not run the SDK preflight")
 
-    monkeypatch.setattr(service, "run_case", run_case_with_span)
+    monkeypatch.setattr(service, "run_case", forbidden_run_case)
     runs = _FakeRuns(_finish)
     manager = _manager(tmp_path, runs)
     created = _wide(
@@ -2714,12 +2700,43 @@ async def test_preflight_sdk_spans_are_replayed_into_the_run_trace(
     )
     batch_id = str(created["batchId"])
     await manager.start(batch_id)
-    await _wait_status(manager, batch_id, "finished")
+    snapshot = await _wait_status(manager, batch_id, "finished")
 
-    run = next(iter(runs.runs.values()))
-    titles = [span.get("title") for span in run.traces]
-    assert "LLM call · preflight" in titles
-    assert "preflight intent" not in titles
+    assert calls == []
+    assert runs.calls, "the full flow must still start the run"
+    # The intent stage is judged from the downstream payload, not from a preflight extraction;
+    # the SDK-only task_t/validate stages never exist for a full-flow item.
+    items = cast(list[dict[str, Any]], snapshot["items"])
+    assert set(items[0]["stages"]) == {"intent", "send"}
+
+
+async def test_a_validate_only_item_still_runs_the_sdk_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An SDK-only batch starts no run, so the tester must run the three SDK stages itself."""
+    calls: list[str] = []
+    real_run_case = service.run_case
+
+    def recording_run_case(
+        case: Mapping[str, Any], client: Any, *, stop_after: str = "validate"
+    ) -> Any:
+        calls.append(stop_after)
+        return real_run_case(case, client, stop_after=stop_after)
+
+    monkeypatch.setattr(service, "run_case", recording_run_case)
+    runs = _FakeRuns(_finish)
+    manager = _manager(tmp_path, runs)
+    created = _wide(
+        manager.create(case_ids=[1], protocols=[PROTOCOL_A2A_T], stop_after="validate")
+    )
+    batch_id = str(created["batchId"])
+    await manager.start(batch_id)
+    snapshot = await _wait_status(manager, batch_id, "finished")
+
+    assert calls == ["validate"]
+    assert runs.calls == []
+    items = cast(list[dict[str, Any]], snapshot["items"])
+    assert {"intent", "task_t", "validate"} <= set(items[0]["stages"])
 
 
 async def test_the_item_snapshot_exposes_the_langfuse_warning(tmp_path: Path) -> None:

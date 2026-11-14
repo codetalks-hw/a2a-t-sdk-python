@@ -474,6 +474,9 @@ function stageChips(item, stopAfter) {
     if (pure && SDK_STAGES.has(stage)) continue;
     if (limit >= 0 && STAGE_ORDER.indexOf(stage) > limit) continue;
     const result = item.stages?.[stage];
+    // A full flow never runs the SDK-only stages: the run generates and validates the Task-T
+    // itself. An empty chip would suggest the preflight was expected and silently skipped.
+    if (SDK_STAGES.has(stage) && !result) continue;
     const status = result?.status || (item.status === "pending" ? "pending" : "skipped");
     const chip = el("span", `stage-chip ${status}`, `${STAGE_LABELS[stage] || stage}`);
     chip.title = `${stage}: ${statusLabel(status)}${result?.message ? ` · ${result.message}` : ""}`;
