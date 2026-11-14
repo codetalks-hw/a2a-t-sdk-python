@@ -240,6 +240,27 @@ class NegotiationStore:
         """Forget one finished negotiation."""
         self._sessions.pop(session.id, None)
 
+    def snapshot(self, *, context_id: str | None = None) -> list[dict[str, object]]:
+        """Return the open negotiations, optionally only those of one context.
+
+        A negotiation before Task creation has no other handle than its id. Without a way to list
+        them, a client that lost the id leaves a session nobody can answer or reclaim (S7). The
+        snapshot deliberately omits the extracted baseline: finding the handle must not turn into
+        reading the other side's business request again.
+        """
+        return [
+            {
+                "id": session.id,
+                "round": session.round,
+                "maxRounds": session.max_rounds,
+                "kind": session.kind,
+                "contextId": session.context_id,
+                "taskId": session.task_id,
+            }
+            for session in self._sessions.values()
+            if context_id is None or session.context_id == context_id
+        ]
+
 
 def propose_metadata(
     issue: NegotiationIssue,

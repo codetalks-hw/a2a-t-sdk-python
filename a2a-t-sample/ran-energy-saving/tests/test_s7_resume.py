@@ -84,6 +84,19 @@ def _task_t_body(prompt: str, *, metadata: dict[str, object] | None = None) -> d
     return {"message": message}
 
 
+def _response_context_id(response: httpx.Response) -> str | None:
+    """Return the A2A context id of a proposal, ``None`` when the carrier does not state one."""
+    document = response.json()
+    if isinstance(document.get("message"), dict):
+        value = document["message"].get("contextId")
+        return value if isinstance(value, str) else None
+    task = document.get("task")
+    if isinstance(task, dict):
+        value = task.get("contextId")
+        return value if isinstance(value, str) else None
+    return None
+
+
 def _negotiation_context(response: httpx.Response) -> dict[str, object]:
     """Return the proposal's negotiationContext from either carrier."""
     document = response.json()
@@ -144,6 +157,93 @@ async def test_the_negotiation_id_does_resume_the_exchange() -> None:
 
     assert accepted.status_code == 200, accepted.text
     assert isinstance(accepted.json().get("task"), dict)
+
+
+async def test_a_lost_negotiation_id_can_be_found_again() -> None:
+    """The handle is recoverable from the server, so losing the id no longer orphans the exchange.
+
+    This is the mitigation for the one A2A-T disadvantage S7 measured: before Task creation a
+    negotiation has no enumerable state. The protocol does not define such a query, so this is a
+    property of *this* server implementation -- but it is the difference between "unrecoverable" and
+    "recoverable if the peer exposes it".
+    """
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        proposal = await client.post(
+            SEND_URL, json=_task_t_body(_prompt(region="UnknownRegion")), headers=_headers(token)
+        )
+        context = _negotiation_context(proposal)
+        context_id = _response_context_id(proposal)
+
+    # A restarted client knows only the context id; the negotiation id was in the process that died.
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as restarted:
+        token = await _token(restarted)
+        params = {"contextId": context_id} if context_id else {}
+        listing = await restarted.get(
+            "/a2a/json/negotiations", params=params, headers={"Authorization": f"Bearer {token}"}
+        )
+        recovered = [
+            item for item in listing.json()["negotiations"] if item["id"] == context["id"]
+        ]
+
+        assert listing.status_code == 200, listing.text
+        assert recovered, listing.json()
+        assert recovered[0]["round"] == 1
+        assert recovered[0]["maxRounds"] == 5
+        assert "baseline" not in recovered[0]
+
+        accepted = await restarted.post(
+            SEND_URL,
+            json=_task_t_body(
+                _prompt(),
+                metadata={
+                    NEGOTIATION_T_EXTENSION_URI: "Accept.",
+                    NEGOTIATION_CONTEXT_METADATA_KEY: {
+                        "id": recovered[0]["id"],
+                        "round": 1,
+                        "maxRounds": 5,
+                        "performative": "ACCEPT",
+                    },
+                },
+            ),
+            headers=_headers(token),
+        )
+
+    assert accepted.status_code == 200, accepted.text
+    assert isinstance(accepted.json().get("task"), dict)
+
+
+async def test_a_closed_negotiation_leaves_the_listing() -> None:
+    """The listing is "open engagements", not a history: a finished exchange must not linger."""
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        proposal = await client.post(
+            SEND_URL, json=_task_t_body(_prompt(region="UnknownRegion")), headers=_headers(token)
+        )
+        context = _negotiation_context(proposal)
+        await client.post(
+            SEND_URL,
+            json=_task_t_body(
+                _prompt(),
+                metadata={
+                    NEGOTIATION_T_EXTENSION_URI: "Accept.",
+                    NEGOTIATION_CONTEXT_METADATA_KEY: {
+                        "id": context["id"],
+                        "round": 1,
+                        "maxRounds": 5,
+                        "performative": "ACCEPT",
+                    },
+                },
+            ),
+            headers=_headers(token),
+        )
+        listing = await client.get(
+            "/a2a/json/negotiations", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert listing.json()["negotiations"] == []
 
 
 async def test_a_fresh_plain_client_resumes_from_the_task_id_alone() -> None:

@@ -1202,6 +1202,20 @@ def build_routes(
             resolved_store.update(task_id, state=TASK_CANCELED, message="Task canceled.")
         return JSONResponse({"task": task.to_dict()}, status_code=200)
 
+    async def list_negotiations(request: Request) -> Response:
+        """Return the open negotiations, optionally filtered by ``contextId``.
+
+        A negotiation that has not created a Task yet is the one state a client cannot recover from
+        the Task list. Exposing it makes a lost ``negotiationContext.id`` findable instead of
+        orphaned (S7).
+        """
+        if not authorized(request):
+            return unauthorized()
+        context_id = request.query_params.get("contextId")
+        return JSONResponse(
+            {"negotiations": negotiations.snapshot(context_id=context_id)}, status_code=200
+        )
+
     async def server_metrics(request: Request) -> Response:
         """Return the server-side work counters of this simulator process."""
         del request
@@ -1213,6 +1227,7 @@ def build_routes(
         Route("/a2a/json/message:stream", send_message, methods=["POST"]),
         Route("/a2a/json/message:send", send_message_json, methods=["POST"]),
         Route("/a2a/json/tasks", list_tasks, methods=["GET"]),
+        Route("/a2a/json/negotiations", list_negotiations, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}", get_task, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}:cancel", cancel_task, methods=["POST"]),
     ]
