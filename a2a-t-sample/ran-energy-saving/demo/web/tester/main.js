@@ -4,7 +4,9 @@ const STAGE_ORDER = ["intent", "task_t", "validate", "send", "negotiate", "accep
 const STAGE_LABELS = {
   intent: "意图",
   task_t: "Task-T",
-  validate: "校验",
+  // The validate stage asks whether the Task-T is intercepted before sending, not whether the
+  // task succeeded: the OSP column it judges is "拦截".
+  validate: "拦截",
   send: "发送",
   negotiate: "协商",
   accepted: "受理",
@@ -466,21 +468,24 @@ function stageChips(item, stopAfter) {
   if (interception?.stages) {
     const validate = interception.stages.validate;
     const status = validate?.status || "recorded";
-    const chip = el("span", `stage-chip ${status}`, "拦截");
+    // "拦截预检" is the blocked original request, which is separate from the "拦截" stage of the
+    // request the run dispatches.
+    const chip = el("span", `stage-chip ${status}`, "拦截预检");
     const slotText = slotErrorText(slotErrorsOf(validate));
     chip.title = `A2A-T 拦截：${statusLabel(status)}${validate?.message ? ` · ${validate.message}` : ""}${
       slotText ? ` · ${slotText}` : ""
     }`;
     wrap.append(chip);
   }
+  const settled = !["pending", "running", "draft"].includes(String(item.status || ""));
   for (const stage of STAGE_ORDER) {
     if (pure && SDK_STAGES.has(stage)) continue;
     if (limit >= 0 && STAGE_ORDER.indexOf(stage) > limit) continue;
     const result = item.stages?.[stage];
-    // A full flow never runs the SDK-only stages: the run generates and validates the Task-T
-    // itself. An empty chip would suggest the preflight was expected and silently skipped.
-    if (SDK_STAGES.has(stage) && !result) continue;
-    const status = result?.status || (item.status === "pending" ? "pending" : "skipped");
+    // Every A2A-T item runs the Task-T and its pre-send interception check, whether from the SDK
+    // preflight or inside the run, so the chip is visible from the start and filled when the
+    // evidence exists. A finished item without a stage really skipped it.
+    const status = result?.status || (settled ? "skipped" : "pending");
     const chip = el("span", `stage-chip ${status}`, `${STAGE_LABELS[stage] || stage}`);
     chip.title = `${stage}: ${statusLabel(status)}${result?.message ? ` · ${result.message}` : ""}`;
     wrap.append(chip);
@@ -513,7 +518,10 @@ function acceptedNote(item) {
 
 function resultText(item) {
   if (item.error) return item.error;
-  const blocked = Object.entries(item.interception?.stages || {}).map(([stage, value]) => [`拦截/${stage}`, value]);
+  const blocked = Object.entries(item.interception?.stages || {}).map(([stage, value]) => [
+    `拦截/${STAGE_LABELS[stage] || stage}`,
+    value,
+  ]);
   const all = [...Object.entries(item.stages || {}), ...blocked];
   const failed = all.filter(([, stage]) => stage.status === "failed");
   if (failed.length) {
@@ -1017,7 +1025,9 @@ function renderResultTab(item, body) {
       if (stage === "intent") continue;
       const result = interception.stages[stage];
       if (!result) continue;
-      appendStageWithComparison(body, `拦截/${STAGE_LABELS[stage] || stage}`, stage, result, []);
+      const label =
+        stage === "validate" ? "拦截判定" : `拦截/${STAGE_LABELS[stage] || stage}`;
+      appendStageWithComparison(body, label, stage, result, []);
     }
   }
   const intentRows = Array.isArray(item.intentCompare) ? item.intentCompare : [];

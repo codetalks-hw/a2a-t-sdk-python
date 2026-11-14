@@ -211,6 +211,12 @@ _SERVER_INTENT_MISMATCH_MESSAGE: Final[str] = "服务端意图理解结果与期
 #: Message of a failed full-flow Task-T stage: the run rendered a different Task-T.
 _TASK_T_MISMATCH_MESSAGE: Final[str] = "Task-T 与期望不一致。"
 
+#: Message of a failed validation stage: the run blocked or sent a different verdict.
+_VALIDATION_MISMATCH_MESSAGE: Final[str] = "拦截结论与期望不一致。"
+
+#: Message of a validation stage whose case carries no expectation.
+_NO_EXPECTED_VALIDATION_MESSAGE: Final[str] = "用例没有期望拦截结论，只记录。"
+
 #: Scenario used to seed a Modify target task; it is a complete request that creates a task.
 BASELINE_SCENARIO: Final[str] = "night"
 
@@ -2115,6 +2121,7 @@ class EvalBatchManager:
             # ``item.intent`` keeps the SDK document as auxiliary evidence.
             self._judge_server_intent(item, run, case)
             self._judge_run_task_t(item, run, case)
+            self._judge_run_validation(item, run, case)
             item.intent_meta["source"] = (
                 "server"
                 if item.server_intent is not None
@@ -2243,6 +2250,44 @@ class EvalBatchManager:
             result.status = STAGE_FAILED
             result.message = _TASK_T_MISMATCH_MESSAGE
         item.stages["task_t"] = result
+
+    def _judge_run_validation(
+        self,
+        item: CaseItem,
+        run: RunState,
+        case: Mapping[str, Any] | None,
+    ) -> None:
+        """Judge the run's pre-send Task-T validation, the "拦截" stage of a full-flow item.
+
+        A full-flow item skips the SDK preflight; the run validates the Task-T itself before
+        sending and emits a ``task_validation`` span with the verdict and slot errors. The stage
+        shows that verdict against the case's expectation. No validation evidence creates no stage,
+        and a case without an expectation stays record-only.
+        """
+        if item.protocol != PROTOCOL_A2A_T or "validate" in item.stages or case is None:
+            return
+        detail = _run_validation_detail(run)
+        if detail is None:
+            return
+        verdict = str(detail.get("verdict") or "")
+        expected = _case_validation_expectation(case)
+        result = StageResult(
+            "validate",
+            STAGE_PASSED,
+            expected=expected,
+            actual=verdict,
+            detail=detail,
+        )
+        if expected is None:
+            result.status = STAGE_RECORDED
+            result.message = _NO_EXPECTED_VALIDATION_MESSAGE
+        elif not _assertion_enabled(case, PROTOCOL_A2A_T, "validate"):
+            result.status = STAGE_RECORDED
+            result.message = _ASSERTION_OFF_MESSAGE
+        elif not _validation_matches(expected, verdict):
+            result.status = STAGE_FAILED
+            result.message = _VALIDATION_MISMATCH_MESSAGE
+        item.stages["validate"] = result
 
     async def _ensure_prompt_client(self, model_mode: str | None = None) -> Any:
         """Return the SDK prompt client of one model mode (offline scripted by default)."""
@@ -3047,6 +3092,8 @@ def _interception_validation_span(
         detail.setdefault("reason", validate.message)
     if user_request:
         detail.setdefault("userRequest", user_request)
+    # Distinguishes this blocked-original evidence from the validation the run itself performed.
+    detail["source"] = "interception"
     task_t = stages.get("task_t")
     if task_t is not None and isinstance(task_t.actual, str) and task_t.actual:
         detail.setdefault("promptText", task_t.actual[:4000])
@@ -3058,6 +3105,52 @@ def _interception_validation_span(
         "status": "ok",
         "detail": detail,
     }
+
+
+def _run_validation_detail(run: RunState) -> dict[str, object] | None:
+    """Return the verdict and slot errors of the run's own pre-send validation.
+
+    The run emits one ``task_validation`` span when it validates the Task-T it is about to send.
+    An interception span replayed from the tester's preflight describes the blocked original, not
+    what this run dispatched, so it is skipped.
+    """
+    for span in reversed(run.traces):
+        if span.get("kind") != "task_validation":
+            continue
+        detail = span.get("detail")
+        if not isinstance(detail, Mapping) or detail.get("source") == "interception":
+            continue
+        verdict = detail.get("verdict")
+        if not isinstance(verdict, str) or not verdict:
+            continue
+        errors = detail.get("errors")
+        slot_errors = [dict(error) for error in errors] if isinstance(errors, list) else []
+        reason = detail.get("reason")
+        code = reason if isinstance(reason, str) and reason else ""
+        if not code and slot_errors:
+            code = str(slot_errors[0].get("code") or "")
+        return {
+            "verdict": verdict,
+            "negotiationKind": detail.get("negotiationKind"),
+            "code": code,
+            "slotErrors": slot_errors,
+        }
+    return None
+
+
+def _case_validation_expectation(case: Mapping[str, Any]) -> object:
+    """Return the case's expected validation verdict (``blocked`` / ``pass`` / ...)."""
+    expect = case.get("expect")
+    protocols = expect.get("protocols") if isinstance(expect, Mapping) else None
+    block = protocols.get(PROTOCOL_A2A_T) if isinstance(protocols, Mapping) else None
+    return block.get("validate") if isinstance(block, Mapping) else None
+
+
+def _validation_matches(expected: object, actual: str) -> bool:
+    """Return whether one observed verdict satisfies the case's expectation."""
+    if expected == "pass_with_terminology":
+        return actual in {"pass", "pass_with_terminology"}
+    return expected == actual
 
 
 def _rendered_task_t(run: RunState) -> str | None:

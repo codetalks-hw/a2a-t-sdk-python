@@ -1284,6 +1284,38 @@ async def test_a_full_flow_item_gets_its_task_t_comparison(tmp_path: Path) -> No
     assert [row["path"] for row in stage["sections"]][0] == "task_t.Operation Type"
 
 
+async def test_a_full_flow_item_gets_its_validation_stage(tmp_path: Path) -> None:
+    def builder(run: RunState) -> None:
+        _finish(run)
+        run.traces.append(
+            {
+                "kind": "task_validation",
+                "phase": "task_validation",
+                "detail": {
+                    "verdict": "pass",
+                    "errors": [],
+                    "reason": "content.param_missing",
+                },
+            }
+        )
+
+    manager = _manager(tmp_path, _FakeRuns(builder))
+    created = manager.create(
+        case_ids=[1],
+        protocols=[PROTOCOL_A2A_T],
+        stop_after="final",
+        approval=None,
+        timeout_seconds=None,
+    )
+    await manager.start(str(created["batchId"]))
+    finished = await _wait_status(manager, str(created["batchId"]), "finished")
+
+    stage = finished["items"][0]["stages"]["validate"]
+    assert stage["status"] == STAGE_PASSED
+    assert stage["expected"] == "pass"
+    assert stage["actual"] == "pass"
+
+
 async def test_a_full_flow_task_t_mismatch_fails_the_task_t_stage(tmp_path: Path) -> None:
     task_t = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
     changed = task_t.replace("720p video", "1080p video")
