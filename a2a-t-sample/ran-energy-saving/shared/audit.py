@@ -200,6 +200,10 @@ def _execution_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
 
 def _baseline_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
     if artifacts.baseline_digest is None and artifacts.baseline_plan is None:
+        if not _is_change_order(artifacts):
+            # A Create has no plan to replace, so the question does not exist rather than going
+            # unanswered. Calling it unverifiable would make every Create look like an audit gap.
+            return Link(LINK_BASELINE, LINK_NOT_APPLICABLE, "this run is not a change order")
         return Link(LINK_BASELINE, LINK_UNVERIFIABLE, "no change order on this run")
     if artifacts.baseline_plan is None:
         return Link(
@@ -231,6 +235,19 @@ def _restored_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
         # Only reachable when called directly; verify_chain appends this link only with a contract.
         return Link(LINK_RESTORED, LINK_UNVERIFIABLE, "no reversal plan to compare with")
     return _compare(LINK_RESTORED, reversal_plan, restored_plan, fields)
+
+
+#: The one operation a change order carries. Compared case-sensitively on purpose: it is a wire
+#: value, and a client that spells it differently has a different problem.
+CHANGE_ORDER_OPERATION: Final[str] = "Modify"
+
+
+def _is_change_order(artifacts: Artifacts) -> bool:
+    """Return whether this run asked to replace an existing plan."""
+    plan = artifacts.requested_plan
+    if plan is None:
+        return False
+    return str(plan.get("operation") or "") == CHANGE_ORDER_OPERATION
 
 
 def _compare(

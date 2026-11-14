@@ -74,15 +74,16 @@ def test_a_complete_a2a_t_chain_is_decided_on_every_link() -> None:
         LINK_REQUEST: LINK_MATCHED,
         LINK_APPROVAL: LINK_MATCHED,
         LINK_EXECUTION: LINK_MATCHED,
-        LINK_BASELINE: LINK_UNVERIFIABLE,
+        # A Create replaces nothing, so the baseline question does not exist for this run.
+        LINK_BASELINE: LINK_NOT_APPLICABLE,
     }
     assert summarize(links) == {
         "links": 4,
-        "applicable": 4,
+        "applicable": 3,
         "matched": 3,
         "mismatched": 0,
-        "unverifiable": 1,
-        "notApplicable": 0,
+        "unverifiable": 0,
+        "notApplicable": 1,
         "decidedBy": "digest",
     }
 
@@ -95,11 +96,11 @@ def test_a_plain_run_is_unverifiable_after_the_request_link() -> None:
         LINK_REQUEST: LINK_UNVERIFIABLE,
         LINK_APPROVAL: LINK_UNVERIFIABLE,
         LINK_EXECUTION: LINK_UNVERIFIABLE,
-        LINK_BASELINE: LINK_UNVERIFIABLE,
+        LINK_BASELINE: LINK_NOT_APPLICABLE,
     }
     summary = summarize(links)
     assert summary["matched"] == 0
-    assert summary["unverifiable"] == 4
+    assert summary["unverifiable"] == 3
 
 
 def test_a_negotiated_acceptance_is_not_a_mismatch() -> None:
@@ -117,7 +118,7 @@ def test_a_negotiated_acceptance_is_not_a_mismatch() -> None:
     )
 
     assert _statuses(links)[LINK_REQUEST] == LINK_NOT_APPLICABLE
-    assert summarize(links)["notApplicable"] == 1
+    assert summarize(links)["notApplicable"] == 2
 
 
 def test_an_approval_of_another_plan_is_a_mismatch() -> None:
@@ -290,3 +291,24 @@ def test_the_summary_gains_the_assurance_report_only_when_asked() -> None:
     assert "assurance" not in plain
     assert with_assurance["assurance"] == graded.to_dict()
     assert {key: value for key, value in with_assurance.items() if key != "assurance"} == plain
+
+
+def test_a_create_has_no_baseline_question_to_answer() -> None:
+    """A Create replaces nothing, so the link does not exist rather than going unanswered."""
+    links = verify_chain(_full_chain(baseline_plan=None, baseline_digest=None))
+
+    baseline = next(link for link in links if link.name == LINK_BASELINE)
+    assert baseline.status == LINK_NOT_APPLICABLE
+    assert "not a change order" in baseline.detail
+
+
+def test_a_change_order_without_a_baseline_is_unverifiable() -> None:
+    changed = {**PLAN, "operation": "Modify"}
+
+    links = verify_chain(
+        _full_chain(requested_plan=changed, accepted_plan=changed, baseline_plan=None)
+    )
+
+    baseline = next(link for link in links if link.name == LINK_BASELINE)
+    assert baseline.status == LINK_UNVERIFIABLE
+    assert "no change order on this run" in baseline.detail

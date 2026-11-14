@@ -3899,11 +3899,12 @@ async def test_the_run_publishes_an_audit_chain_from_its_artifacts() -> None:
     summary = audit["summary"]
     assert isinstance(summary, dict)
     assert summary["decidedBy"] == "digest"
-    # Request and approval agree; this scripted batch carries no readback and no change order, so
-    # those two links are honestly unverifiable rather than guessed.
+    # Request and approval agree; this scripted batch carries no readback, so that link is honestly
+    # unverifiable rather than guessed. The run is a Create, so the baseline question does not exist.
     assert summary["matched"] == 2
     assert summary["mismatched"] == 0
-    assert summary["unverifiable"] == 2
+    assert summary["unverifiable"] == 1
+    assert summary["notApplicable"] == 1
 
 
 async def test_an_a2a_t_approval_request_is_answered_with_a_decision() -> None:
