@@ -564,6 +564,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .intent-diff-table tr.intent-missing td { background: var(--red-soft); }
 .intent-diff-table tr.intent-added td { background: var(--green-soft); }
 .intent-diff-table tr.intent-same td { color: var(--g700); }
+.intent-diff-table tr.intent-recorded td { color: var(--g500); }
 
 .drawer-tools { display: flex; align-items: center; gap: 6px; }
 .drawer-langfuse { white-space: nowrap; font-size: 12px; }

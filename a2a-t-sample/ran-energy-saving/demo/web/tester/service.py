@@ -31,7 +31,7 @@ from typing import Any, Final
 
 import httpx
 from eval.osp.catalog import PROTOCOL_A2A, PROTOCOL_A2A_T, CaseCatalog
-from eval.osp.compare import compare_intent, flatten_intent
+from eval.osp.compare import compare_intent, flatten_intent, flatten_task_t
 from eval.osp.followup import followup_case, followup_input, has_followup, is_blocked_case
 from eval.osp.runner import (
     STAGE_ERROR,
@@ -271,8 +271,12 @@ class StageResult:
     duration_ms: int = 0
 
     def to_dict(self) -> dict[str, object]:
-        """Return the JSON-friendly representation."""
-        return {
+        """Return the JSON-friendly representation.
+
+        A ``task_t`` stage also carries its two prompts split into ``## Heading`` sections, so the
+        tester can show one comparison row per section instead of two whole prompts.
+        """
+        data: dict[str, object] = {
             "stage": self.stage,
             "status": self.status,
             "message": self.message,
@@ -281,6 +285,15 @@ class StageResult:
             "diffs": self.diffs,
             "durationMs": self.duration_ms,
         }
+        if (
+            self.stage == "task_t"
+            and isinstance(self.expected, str)
+            and isinstance(self.actual, str)
+        ):
+            data["sections"] = [
+                row.to_dict() for row in flatten_task_t(self.expected, self.actual)
+            ]
+        return data
 
 
 @dataclass

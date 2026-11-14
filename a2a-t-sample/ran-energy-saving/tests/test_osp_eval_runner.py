@@ -19,10 +19,13 @@ from eval.osp.compare import (
     INTENT_ROW_ADDED,
     INTENT_ROW_CHANGED,
     INTENT_ROW_MISSING,
+    INTENT_ROW_RECORDED,
     INTENT_ROW_SAME,
+    TASK_T_SECTIONS,
     compare_intent,
     compare_task_t,
     flatten_intent,
+    flatten_task_t,
 )
 from eval.osp.followup import followup_input
 from eval.osp.intent_schema import OSP_INTENT_SCHEMA
@@ -281,6 +284,66 @@ def test_compare_task_t_accepts_a_carrier_frequency_prefix() -> None:
     assert compare_task_t(expected, actual) == []
 
 
+def test_flatten_task_t_lists_one_row_per_section() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    rows = flatten_task_t(expected, expected)
+    assert [row.path for row in rows] == [f"task_t.{section}" for section in TASK_T_SECTIONS]
+    assert {row.status for row in rows} == {INTENT_ROW_SAME}
+    assert {row.verdict for row in rows} <= {INTENT_ROW_SAME, INTENT_ROW_RECORDED}
+
+
+def test_flatten_task_t_ignores_whitespace_and_line_breaks() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    # Extra blank lines and trailing spaces per line: the section text is unchanged as written.
+    actual = expected.replace("\n", "  \n\n")
+    assert {row.status for row in flatten_task_t(expected, actual)} == {INTENT_ROW_SAME}
+
+
+def test_flatten_task_t_marks_the_changed_section() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    actual = expected.replace("720p video", "1080p video")
+    rows = {row.path: row for row in flatten_task_t(expected, actual)}
+    assert rows["task_t.Task Context"].status == INTENT_ROW_CHANGED
+    assert rows["task_t.Task Context"].verdict == INTENT_ROW_CHANGED
+    changed = [path for path, row in rows.items() if row.status == INTENT_ROW_CHANGED]
+    assert changed == ["task_t.Task Context"]
+
+
+def test_flatten_task_t_keeps_a_rephrasing_verbatim_but_semantically_equal() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    actual = expected.replace(
+        "Ensuring user experience for 720p video",
+        "Rate guarantee goal: ensuring user experience for 720p video (full period).",
+    )
+    rows = {row.path: row for row in flatten_task_t(expected, actual)}
+    context = rows["task_t.Task Context"]
+    assert context.status == INTENT_ROW_CHANGED
+    assert context.verdict == INTENT_ROW_SAME
+    assert context.reason == "semantically equal after normalization"
+    assert compare_task_t(expected, actual) == []
+
+
+def test_flatten_task_t_marks_a_missing_and_an_added_section() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    actual = expected.replace("## Task Object", "## Task Object (renamed)")
+    rows = {row.path: row for row in flatten_task_t(expected, actual)}
+    assert rows["task_t.Task Object"].status == INTENT_ROW_MISSING
+    assert rows["task_t.Task Object"].verdict == INTENT_ROW_MISSING
+    assert rows["task_t.Task Object"].actual is None
+    assert rows["task_t.Task Object (renamed)"].status == INTENT_ROW_ADDED
+    # An extra section is inspection evidence only; it must not turn the case red.
+    assert [diff.path for diff in compare_task_t(expected, actual)] == ["task_t.Task Object"]
+
+
+def test_flatten_task_t_records_the_fixed_template_sections() -> None:
+    expected = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    actual = expected.replace("## Expected Output", "## Expected Output\nchanged prose")
+    rows = {row.path: row for row in flatten_task_t(expected, actual)}
+    assert rows["task_t.Expected Output"].status == INTENT_ROW_CHANGED
+    assert rows["task_t.Expected Output"].verdict == INTENT_ROW_RECORDED
+    assert compare_task_t(expected, actual) == []
+
+
 def test_compare_intent_treats_null_and_empty_lists_as_equal() -> None:
     expected = {
         "Frequencies of carriers that can be shut down": [],
@@ -333,9 +396,13 @@ def test_flatten_intent_marks_normalized_equality_with_a_reason() -> None:
 
     rows = {row.path: row for row in flatten_intent(expected, actual)}
 
-    assert rows["intent.Energy saving time"].status == INTENT_ROW_SAME
+    # The verbatim text differs; the normalized verdict is what the pass/fail decision uses.
+    assert rows["intent.Energy saving time"].status == INTENT_ROW_CHANGED
+    assert rows["intent.Energy saving time"].verdict == INTENT_ROW_SAME
     assert rows["intent.Energy saving time"].reason == "归一化后一致"
-    assert rows["intent.Gain target"].status == INTENT_ROW_SAME
+    assert rows["intent.Gain target"].status == INTENT_ROW_CHANGED
+    assert rows["intent.Gain target"].verdict == INTENT_ROW_SAME
+    assert compare_intent(expected, actual) == []
 
 
 def test_flatten_intent_pairs_scenario_entries_by_site_list() -> None:

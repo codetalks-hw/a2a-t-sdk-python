@@ -93,11 +93,13 @@ _SCENARIO_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-#: Status of one flattened intent leaf.
+#: Status of one comparison row (a flattened intent leaf or one Task-T section).
 INTENT_ROW_SAME: Final[str] = "same"
 INTENT_ROW_CHANGED: Final[str] = "changed"
 INTENT_ROW_MISSING: Final[str] = "missing"
 INTENT_ROW_ADDED: Final[str] = "added"
+#: Fixed template prose: shown for inspection and never part of a pass/fail decision.
+INTENT_ROW_RECORDED: Final[str] = "recorded"
 
 
 @dataclass(frozen=True)
@@ -120,14 +122,21 @@ class Diff:
 
 
 @dataclass(frozen=True)
-class IntentRow:
-    """One flattened leaf of the 11-key intent and its comparison status."""
+class CompareRow:
+    """One comparison row: a flattened intent leaf or one Task-T section.
+
+    ``status`` is the verbatim comparison (whitespace and line breaks ignored). ``verdict`` is the
+    optional semantic comparison: the Task-T comparators normalize notation and phrasing before
+    deciding a pass/fail, and that reading is reported next to the verbatim one instead of
+    replacing it. Intent rows keep ``verdict`` empty and their ``status`` is already semantic.
+    """
 
     path: str
     expected: object
     actual: object
     status: str
     reason: str = ""
+    verdict: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-friendly representation used by the tester table."""
@@ -137,6 +146,7 @@ class IntentRow:
             "actual": self.actual,
             "status": self.status,
             "reason": self.reason,
+            "verdict": self.verdict,
         }
 
 
@@ -154,7 +164,7 @@ def parse_sections(text: str) -> dict[str, str]:
 def flatten_intent(
     expected: Mapping[str, object],
     actual: Mapping[str, object],
-) -> list[IntentRow]:
+) -> list[CompareRow]:
     """Return every leaf of the 11-key intent as one comparison row.
 
     Scalar keys stay one row. The two nested arrays (area-level zone targets and site-level
@@ -163,7 +173,7 @@ def flatten_intent(
     array. Entries are paired after sorting by their business identity (effective period, site
     list), which keeps the comparison insensitive to array order.
     """
-    rows: list[IntentRow] = []
+    rows: list[CompareRow] = []
     for key in OSP_INTENT_KEYS:
         rows.extend(_intent_key_rows(key, expected.get(key), actual.get(key)))
     return rows
@@ -182,11 +192,11 @@ def compare_intent(
             reason=row.reason,
         )
         for row in flatten_intent(expected, actual)
-        if row.status != INTENT_ROW_SAME
+        if row.verdict != INTENT_ROW_SAME
     ]
 
 
-def _intent_key_rows(key: str, expected: object, actual: object) -> list[IntentRow]:
+def _intent_key_rows(key: str, expected: object, actual: object) -> list[CompareRow]:
     """Flatten one top-level intent key."""
     path = f"intent.{key}"
     if key == "Guaranteed throughput target by zone":
@@ -203,27 +213,36 @@ def _intent_row(
     normalizer: Callable[[object], object],
     *,
     forced: str | None = None,
-) -> IntentRow:
-    """Build one row, deciding its status from normalized values unless ``forced`` states it."""
+) -> CompareRow:
+    """Build one row: the verdict comes from normalized values, the status from the raw ones.
+
+    ``forced`` states a missing or added row, where both readings agree. Otherwise the verbatim
+    status only ignores whitespace and line breaks, so a value the normalizer accepts (``10 Mbps``
+    vs ``10Mbps``) still shows as a verbatim difference explained in the ``verdict`` column.
+    """
     expected_normalized = normalizer(expected)
     actual_normalized = normalizer(actual)
     if forced == INTENT_ROW_MISSING:
-        status, reason = INTENT_ROW_MISSING, "实际缺失"
+        verdict, reason = INTENT_ROW_MISSING, "实际缺失"
     elif forced == INTENT_ROW_ADDED:
-        status, reason = INTENT_ROW_ADDED, "实际新增"
+        verdict, reason = INTENT_ROW_ADDED, "实际新增"
     elif expected_normalized == actual_normalized:
-        status = INTENT_ROW_SAME
-        reason = "归一化后一致" if expected != actual else ""
+        verdict = INTENT_ROW_SAME
+        reason = "" if _verbatim_equal(expected, actual) else "归一化后一致"
     elif actual is None:
-        status, reason = INTENT_ROW_MISSING, "实际缺失"
+        verdict, reason = INTENT_ROW_MISSING, "实际缺失"
     elif expected is None:
-        status, reason = INTENT_ROW_ADDED, "实际新增"
+        verdict, reason = INTENT_ROW_ADDED, "实际新增"
     else:
-        status, reason = INTENT_ROW_CHANGED, "归一化后不同"
-    return IntentRow(path, expected, actual, status, reason)
+        verdict, reason = INTENT_ROW_CHANGED, "归一化后不同"
+    if verdict in (INTENT_ROW_MISSING, INTENT_ROW_ADDED):
+        status = verdict
+    else:
+        status = INTENT_ROW_SAME if _verbatim_equal(expected, actual) else INTENT_ROW_CHANGED
+    return CompareRow(path, expected, actual, status, reason, verdict)
 
 
-def _zone_list_rows(path: str, expected: object, actual: object) -> list[IntentRow]:
+def _zone_list_rows(path: str, expected: object, actual: object) -> list[CompareRow]:
     """Flatten the area-level zone target array (each entry has a rate and a period)."""
     expected_entries = _sorted_entries(expected, _zone_sort_key)
     actual_entries = _sorted_entries(actual, _zone_sort_key)
@@ -236,7 +255,7 @@ def _zone_list_rows(path: str, expected: object, actual: object) -> list[IntentR
                 _normalize_zone_targets,
             )
         ]
-    rows: list[IntentRow] = []
+    rows: list[CompareRow] = []
     for index in range(max(len(expected_entries), len(actual_entries))):
         expected_entry = expected_entries[index] if index < len(expected_entries) else None
         actual_entry = actual_entries[index] if index < len(actual_entries) else None
@@ -258,7 +277,7 @@ def _zone_entry_rows(
     actual: object,
     *,
     forced: str | None = None,
-) -> list[IntentRow]:
+) -> list[CompareRow]:
     """Flatten one zone entry (or one non-mapping item)."""
     if not isinstance(expected, Mapping) and not isinstance(actual, Mapping):
         return [_intent_row(path, expected, actual, _normalize_generic, forced=forced)]
@@ -279,7 +298,7 @@ def _zone_entry_rows(
     ]
 
 
-def _scenario_list_rows(path: str, expected: object, actual: object) -> list[IntentRow]:
+def _scenario_list_rows(path: str, expected: object, actual: object) -> list[CompareRow]:
     """Flatten the site-level scenario array, including its nested per-site targets."""
     expected_entries = _sorted_entries(expected, _scenario_sort_key)
     actual_entries = _sorted_entries(actual, _scenario_sort_key)
@@ -292,7 +311,7 @@ def _scenario_list_rows(path: str, expected: object, actual: object) -> list[Int
                 _normalize_scenario_based,
             )
         ]
-    rows: list[IntentRow] = []
+    rows: list[CompareRow] = []
     for index in range(max(len(expected_entries), len(actual_entries))):
         expected_entry = expected_entries[index] if index < len(expected_entries) else None
         actual_entry = actual_entries[index] if index < len(actual_entries) else None
@@ -316,7 +335,7 @@ def _scenario_entry_rows(
     actual: object,
     *,
     forced: str | None = None,
-) -> list[IntentRow]:
+) -> list[CompareRow]:
     """Flatten one scenario entry (or one non-mapping item)."""
     if not isinstance(expected, Mapping) and not isinstance(actual, Mapping):
         return [_intent_row(path, expected, actual, _normalize_generic, forced=forced)]
@@ -325,7 +344,7 @@ def _scenario_entry_rows(
     fields = _ordered_fields(
         expected_map, actual_map, _SCENARIO_FIELDS, include_empty=forced is None
     )
-    rows: list[IntentRow] = []
+    rows: list[CompareRow] = []
     for field in fields:
         expected_value = expected_map.get(field)
         actual_value = actual_map.get(field)
@@ -408,43 +427,115 @@ def _scenario_field_normalizer(field: str) -> Callable[[object], object]:
     return _normalize_generic
 
 
-def compare_task_t(expected_text: str, actual_text: str) -> list[Diff]:
-    """Compare the expected and actual Task-T prompts section by section."""
+def flatten_task_t(expected_text: str, actual_text: str) -> list[CompareRow]:
+    """Return one comparison row per Task-T section, in template order.
+
+    Both prompts are split on their ``## Heading`` sections so a difference is reported at
+    ``task_t.Task Context`` instead of as two whole prompts. ``status`` is the verbatim reading:
+    two sections are equal when their text matches after whitespace and line breaks are collapsed.
+    ``verdict`` is the semantic reading the pass/fail decision uses (notation and phrasing
+    normalization), reported in its own column so the verbatim difference is never hidden. The
+    fixed template prose is ``recorded``: shown, explained, and never part of the decision. A
+    section carried by one side only is reported as missing or added.
+    """
     expected = parse_sections(expected_text)
     actual = parse_sections(actual_text)
-    diffs: list[Diff] = []
-    for section in TASK_T_SECTIONS:
+    template = set(TASK_T_SECTIONS)
+    extra = sorted((set(expected) | set(actual)) - template)
+    rows: list[CompareRow] = []
+    for section in (*TASK_T_SECTIONS, *extra):
+        path = f"task_t.{section}"
         if section not in actual:
-            diffs.append(
-                Diff(
-                    path=f"task_t.{section}",
-                    expected=expected.get(section, ""),
-                    actual="<missing>",
-                    reason="section missing from the generated Task-T",
+            rows.append(
+                CompareRow(
+                    path,
+                    expected.get(section, ""),
+                    None,
+                    INTENT_ROW_MISSING,
+                    "section missing from the generated Task-T",
+                    INTENT_ROW_MISSING,
                 )
             )
-    for section in EXACT_TASK_T_SECTIONS:
-        if _normalize_section(section, expected.get(section, "")) != _normalize_section(
-            section, actual.get(section, "")
-        ):
-            diffs.append(
-                Diff(
-                    path=f"task_t.{section}",
-                    expected=expected.get(section, ""),
-                    actual=actual.get(section, ""),
+            continue
+        if section not in expected:
+            rows.append(
+                CompareRow(
+                    path,
+                    None,
+                    actual[section],
+                    INTENT_ROW_ADDED,
+                    "section not in the expected Task-T",
+                    INTENT_ROW_ADDED,
                 )
             )
-    for section in NORMALIZED_TASK_T_SECTIONS:
-        if not _contexts_match(expected.get(section, ""), actual.get(section, "")):
-            diffs.append(
-                Diff(
-                    path=f"task_t.{section}",
-                    expected=expected.get(section, ""),
-                    actual=actual.get(section, ""),
-                    reason="normalized text differs",
-                )
+            continue
+        expected_text_section = expected[section]
+        actual_text_section = actual[section]
+        status = (
+            INTENT_ROW_SAME
+            if _verbatim(expected_text_section) == _verbatim(actual_text_section)
+            else INTENT_ROW_CHANGED
+        )
+        verdict, reason = _task_t_section_verdict(
+            section, expected_text_section, actual_text_section
+        )
+        if status == INTENT_ROW_SAME and section not in RECORD_ONLY_TASK_T_SECTIONS:
+            # The verbatim text already matches: no normalization note is needed.
+            reason = ""
+        rows.append(
+            CompareRow(
+                path,
+                expected_text_section,
+                actual_text_section,
+                status,
+                reason,
+                verdict,
             )
-    return diffs
+        )
+    return rows
+
+
+def _verbatim(value: str) -> str:
+    """Return the section text as written, with only whitespace and line breaks collapsed."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _verbatim_equal(expected: object, actual: object) -> bool:
+    """Compare two intent values as written: only whitespace and line breaks are tolerated.
+
+    Non-string values keep strict equality, so a normalized ``10`` vs ``"10"`` difference is still
+    reported as a verbatim one.
+    """
+    if isinstance(expected, str) and isinstance(actual, str):
+        return _verbatim(expected) == _verbatim(actual)
+    return expected == actual
+
+
+def _task_t_section_verdict(section: str, expected: str, actual: str) -> tuple[str, str]:
+    """Return the semantic verdict and its explanation for one section both prompts carry."""
+    if section in RECORD_ONLY_TASK_T_SECTIONS:
+        return INTENT_ROW_RECORDED, "fixed template prose, record only"
+    if section in NORMALIZED_TASK_T_SECTIONS:
+        if _contexts_match(expected, actual):
+            return INTENT_ROW_SAME, "semantically equal after normalization"
+        return INTENT_ROW_CHANGED, "semantic text differs"
+    if _normalize_section(section, expected) == _normalize_section(section, actual):
+        return INTENT_ROW_SAME, "equal after normalization"
+    return INTENT_ROW_CHANGED, ""
+
+
+def compare_task_t(expected_text: str, actual_text: str) -> list[Diff]:
+    """Compare the expected and actual Task-T prompts section by section."""
+    return [
+        Diff(
+            path=row.path,
+            expected=row.expected,
+            actual="<missing>" if row.actual is None else row.actual,
+            reason=row.reason,
+        )
+        for row in flatten_task_t(expected_text, actual_text)
+        if row.verdict in (INTENT_ROW_CHANGED, INTENT_ROW_MISSING)
+    ]
 
 
 def time_period_hours(value: object) -> frozenset[int]:

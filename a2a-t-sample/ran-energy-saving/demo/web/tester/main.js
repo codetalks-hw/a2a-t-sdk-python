@@ -869,21 +869,37 @@ const INTENT_ROW_LABELS = {
   changed: "不同",
   missing: "缺失",
   added: "新增",
+  recorded: "只记录",
 };
 
-function appendIntentCompareTable(body, rows) {
+//: Statuses that count as a difference in a comparison summary. ``recorded`` rows are fixed
+//: template prose (or evidence only), so they are shown but never counted.
+const COMPARE_ROW_DIFFERENCES = new Set(["changed", "missing", "added"]);
+
+function appendCompareTable(body, title, unit, rows) {
+  // Rows carrying a verdict are compared twice: the status is the verbatim reading (whitespace and
+  // line breaks ignored) and the verdict is the semantic one the pass/fail decision uses. They get
+  // their own columns so a normalized-away difference is still visible.
+  const hasVerdict = rows.some((row) => row.verdict);
+  const differs = (value) => COMPARE_ROW_DIFFERENCES.has(String(value || "same"));
+  const literalDiff = rows.filter((row) => differs(row.status)).length;
+  const semanticDiff = rows.filter((row) => differs(hasVerdict ? row.verdict : row.status)).length;
+  const summary = hasVerdict
+    ? `原文 ${literalDiff} 处不同 · 语义 ${semanticDiff} 处不同`
+    : literalDiff
+      ? `${literalDiff} 个${unit}有差异`
+      : `全部${unit}一致`;
   const block = el("section", "diff-block");
   const head = el("div", "diff-head");
-  const differing = rows.filter((row) => row.status && row.status !== "same").length;
-  head.append(
-    el("strong", "", "意图逐字段对比"),
-    el("span", "summary", differing ? `${differing} 个字段有差异` : "全部字段一致"),
-  );
+  head.append(el("strong", "", title), el("span", "summary", summary));
   block.append(head);
   const table = el("table", "grid diff-table intent-diff-table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const title of ["字段", "期望", "实际", "状态", "说明"]) headRow.append(el("th", "", title));
+  const columns = [unit, "期望", "实际", hasVerdict ? "原文" : "状态"];
+  if (hasVerdict) columns.push("语义");
+  columns.push("说明");
+  for (const column of columns) headRow.append(el("th", "", column));
   thead.append(headRow);
   const tbody = document.createElement("tbody");
   for (const row of rows) {
@@ -894,13 +910,34 @@ function appendIntentCompareTable(body, rows) {
       el("td", "mono pre", textBlock(row.expected)),
       el("td", "mono pre", textBlock(row.actual)),
       el("td", "", INTENT_ROW_LABELS[status] || status),
-      el("td", "", row.reason || ""),
     );
+    if (hasVerdict) {
+      const verdict = String(row.verdict || status);
+      tr.append(el("td", "", INTENT_ROW_LABELS[verdict] || verdict));
+    }
+    tr.append(el("td", "", row.reason || ""));
     tbody.append(tr);
   }
   table.append(thead, tbody);
   block.append(table);
   body.append(block);
+}
+
+//: Sections of a ``task_t`` stage, empty for any other stage: the server payload only carries
+//: them when both the expected and the generated Task-T are present.
+function stageSections(stage, result) {
+  return stage === "task_t" && Array.isArray(result?.sections) ? result.sections : [];
+}
+
+//: Append one stage, replacing the whole-prompt expect/actual blobs with the per-section table
+//: when the stage carries sections.
+function appendStageWithComparison(body, label, stage, result, intentRows) {
+  const hasIntentTable = stage === "intent" && Array.isArray(intentRows) && intentRows.length > 0;
+  const sections = stageSections(stage, result);
+  appendStageBlock(body, label, result, hasIntentTable || sections.length > 0);
+  if (hasIntentTable) appendCompareTable(body, "意图逐字段对比", "字段", intentRows);
+  if (sections.length) appendCompareTable(body, "Task-T 逐段落对比", "段落", sections);
+  return hasIntentTable;
 }
 
 function renderResultTab(item, body) {
@@ -926,7 +963,9 @@ function renderResultTab(item, body) {
     body.append(block);
     for (const stage of STAGE_ORDER) {
       const result = interception.stages[stage];
-      if (result) appendStageBlock(body, `拦截/${STAGE_LABELS[stage] || stage}`, result);
+      if (result) {
+        appendStageWithComparison(body, `拦截/${STAGE_LABELS[stage] || stage}`, stage, result, []);
+      }
     }
   }
   const intentRows = Array.isArray(item.intentCompare) ? item.intentCompare : [];
@@ -934,15 +973,12 @@ function renderResultTab(item, body) {
   for (const stage of STAGE_ORDER) {
     const result = stages[stage];
     if (!result) continue;
-    const hasIntentTable = stage === "intent" && intentRows.length > 0;
-    appendStageBlock(body, STAGE_LABELS[stage] || stage, result, hasIntentTable);
-    if (hasIntentTable) {
-      appendIntentCompareTable(body, intentRows);
+    if (appendStageWithComparison(body, STAGE_LABELS[stage] || stage, stage, result, intentRows)) {
       intentTableRendered = true;
     }
   }
   if (!intentTableRendered && intentRows.length) {
-    appendIntentCompareTable(body, intentRows);
+    appendCompareTable(body, "意图逐字段对比", "字段", intentRows);
   }
   if (!intentRows.length) {
     // No comparable server payload (proxy hop, simulator, or a run that stopped early): keep the

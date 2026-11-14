@@ -518,6 +518,18 @@ async def test_working_is_waiting_while_input_required(tmp_path: Path) -> None:
     assert "INPUT_REQUIRED" in result.message
 
 
+def test_a_task_t_stage_serializes_its_section_rows() -> None:
+    task_t = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
+    result = StageResult("task_t", STAGE_PASSED, expected=task_t, actual=task_t)
+
+    data = result.to_dict()
+
+    sections = data["sections"]
+    assert isinstance(sections, list)
+    assert [row["path"] for row in sections][0] == "task_t.Operation Type"
+    assert "sections" not in StageResult("intent", STAGE_PASSED).to_dict()
+
+
 def test_a_disabled_assertion_is_recorded_but_keeps_the_evidence() -> None:
     case = {"assert": {"a2a-t": {"task_t": False}}}
     result = StageResult(
