@@ -467,7 +467,10 @@ function stageChips(item, stopAfter) {
     const validate = interception.stages.validate;
     const status = validate?.status || "recorded";
     const chip = el("span", `stage-chip ${status}`, "拦截");
-    chip.title = `A2A-T 拦截：${statusLabel(status)}${validate?.message ? ` · ${validate.message}` : ""}`;
+    const slotText = slotErrorText(slotErrorsOf(validate));
+    chip.title = `A2A-T 拦截：${statusLabel(status)}${validate?.message ? ` · ${validate.message}` : ""}${
+      slotText ? ` · ${slotText}` : ""
+    }`;
     wrap.append(chip);
   }
   for (const stage of STAGE_ORDER) {
@@ -768,6 +771,9 @@ function appendContextBlock(body, item) {
     contextTable([
       { label: "runId", value: context.runId, runId: context.runId },
       { label: "traceId", value: context.traceId },
+      // What this run actually dispatched: for an intercepted case that is the follow-up text,
+      // not the original request the interception recorded.
+      { label: "userRequest", value: item.refs?.userInput || "" },
       { label: item.protocol === "a2a" ? "taskId（外层 Task）" : "taskId", value: context.taskId },
       { label: "contextId", value: context.contextId },
     ]),
@@ -827,6 +833,42 @@ function appendBaselineBlock(body, item) {
   body.append(block);
 }
 
+//: Per-slot validation errors the SDK returned for a blocked Task-T. They are evidence, not a
+//: comparison: the case only asks whether the request was blocked.
+function slotErrorsOf(result) {
+  const detail = result && typeof result.detail === "object" ? result.detail : null;
+  return detail && Array.isArray(detail.slotErrors) ? detail.slotErrors : [];
+}
+
+function slotErrorText(errors) {
+  return errors
+    .map((error) => `${error.slotName || "?"}: ${error.code || ""}`.trim())
+    .join(" · ");
+}
+
+function appendSlotErrorTable(block, errors) {
+  const head = el("div", "diff-head");
+  head.append(el("strong", "", "slot_error"), el("span", "summary", `${errors.length} 处`));
+  block.append(head);
+  const table = el("table", "grid diff-table intent-diff-table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const title of ["槽位", "错误码", "说明"]) headRow.append(el("th", "", title));
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  for (const error of errors) {
+    const row = document.createElement("tr");
+    row.append(
+      el("td", "mono", error.slotName || ""),
+      el("td", "mono", error.code || ""),
+      el("td", "", error.message || ""),
+    );
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  block.append(table);
+}
+
 function appendStageBlock(body, label, result, skipDetails = false) {
   const block = el("section", "diff-block");
   const head = el("div", "diff-head");
@@ -860,6 +902,14 @@ function appendStageBlock(body, label, result, skipDetails = false) {
     }
     table.append(thead, tbody);
     block.append(table);
+  }
+  const slotErrors = slotErrorsOf(result);
+  if (slotErrors.length) {
+    appendSlotErrorTable(block, slotErrors);
+  } else if (result.detail?.verdict === "blocked") {
+    // No per-slot detail came back; the verdict still has to read as an intentional block.
+    const code = result.detail.code ? `（${result.detail.code}）` : "";
+    block.append(el("p", "summary", `已拦截${code}：SDK 未返回逐槽位错误明细。`));
   }
   body.append(block);
 }
@@ -962,10 +1012,12 @@ function renderResultTab(item, body) {
     block.append(el("pre", "mono pre", interception.input || "—"));
     body.append(block);
     for (const stage of STAGE_ORDER) {
+      // An intercepted request is judged only on whether the block happened: the raw intent of a
+      // request that must never be sent is not meaningful, so its block is not rendered.
+      if (stage === "intent") continue;
       const result = interception.stages[stage];
-      if (result) {
-        appendStageWithComparison(body, `拦截/${STAGE_LABELS[stage] || stage}`, stage, result, []);
-      }
+      if (!result) continue;
+      appendStageWithComparison(body, `拦截/${STAGE_LABELS[stage] || stage}`, stage, result, []);
     }
   }
   const intentRows = Array.isArray(item.intentCompare) ? item.intentCompare : [];

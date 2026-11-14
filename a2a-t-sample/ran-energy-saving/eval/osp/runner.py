@@ -25,16 +25,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 import yaml
-from a2a_t.core.errors.exceptions import ContentValidationError, PromptGenerationError
+from a2a_t.core.errors.exceptions import (
+    ContentValidationError,
+    PromptGenerationError,
+    SlotValidationError,
+)
 from protocol.client_flow import _classify_validation_error
 from protocol.messages import TASK_TEMPLATE_URI
+from protocol.negotiation_policy import NegotiationKind
 from shared.task_schema import TASK_PARAM_SCHEMA
 from shared.trace import trace_stage
 
@@ -90,10 +95,12 @@ class StageOutcome:
     expected: object = None
     actual: object = None
     diffs: tuple[Diff, ...] = ()
+    #: Structured evidence the status does not carry (for a validation, the SDK slot errors).
+    detail: Mapping[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-friendly representation used by the report."""
-        return {
+        data: dict[str, object] = {
             "stage": self.stage,
             "status": self.status,
             "message": self.message,
@@ -101,6 +108,9 @@ class StageOutcome:
             "actual": self.actual,
             "diffs": [diff.to_dict() for diff in self.diffs],
         }
+        if self.detail:
+            data["detail"] = dict(self.detail)
+        return data
 
 
 @dataclass(frozen=True)
@@ -310,6 +320,12 @@ def _blocked_before_task_t(
                     message=message,
                     expected=expected_validate,
                     actual="blocked",
+                    detail={
+                        "verdict": "blocked",
+                        "negotiationKind": None,
+                        "code": str(getattr(error, "code_str", "")),
+                        "slotErrors": _slot_error_documents(error.failed_parameters),
+                    },
                 )
             )
             continue
@@ -461,7 +477,7 @@ def _run_validate(
     protocol = case["expect"]["protocols"]["a2a-t"]
     expected = protocol["validate"]
     recorded = not _assert_flag(case, "a2a-t", "validate")
-    actual, note, error = _actual_validation(client, task_t)
+    actual, note, error, detail = _actual_validation(client, task_t)
     if error is not None:
         return StageOutcome(
             stage="validate",
@@ -469,6 +485,7 @@ def _run_validate(
             message=error,
             expected=expected,
             actual=actual,
+            detail=detail,
         )
     if recorded:
         return StageOutcome(
@@ -477,6 +494,7 @@ def _run_validate(
             message=_append_note(note, "record-only"),
             expected=expected,
             actual=actual,
+            detail=detail,
         )
     passed = _validation_matches(expected, actual)
     if expected == "pass_with_terminology" and actual == "pass":
@@ -487,26 +505,61 @@ def _run_validate(
         message=note,
         expected=expected,
         actual=actual,
+        detail=detail,
     )
 
 
 def _actual_validation(
     client: EvalPromptClient,
     task_t: str,
-) -> tuple[str | None, str, str | None]:
+) -> tuple[str | None, str, str | None, dict[str, object] | None]:
+    """Return the validation verdict, a note, a stage error and the structured evidence.
+
+    The evidence keeps what the status string drops: the failing code and, when the SDK emitted
+    them, the per-slot errors the operator can act on. It is display evidence only; the verdict
+    still drives the stage status.
+    """
     try:
         with trace_stage("task_t_client_validation"):
             client.validate_task_prompt_and_data_filling(task_t, TASK_PARAM_SCHEMA, TASK_TEMPLATE_URI)
     except ContentValidationError as exc:
-        verdict, _kind = _classify_validation_error(exc)
+        verdict, kind = _classify_validation_error(exc)
+        detail = _validation_detail(exc, verdict, kind)
         if verdict == "unavailable":
-            return "unavailable", f"validation unavailable: {exc.code_str}", None
+            return "unavailable", f"validation unavailable: {exc.code_str}", None, detail
         if verdict == "blocked":
-            return "blocked", f"blocked by {exc.code_str}", None
-        return "pass", f"negotiable ({exc.code_str}); the request is still sent", None
+            return "blocked", f"blocked by {exc.code_str}", None, detail
+        return "pass", f"negotiable ({exc.code_str}); the request is still sent", None, detail
     except Exception as exc:  # noqa: BLE001 - reported as a stage error
-        return None, "", f"{type(exc).__name__}: {exc}"
-    return "pass", "", None
+        return None, "", f"{type(exc).__name__}: {exc}", None
+    return "pass", "", None, None
+
+
+def _validation_detail(
+    error: ContentValidationError,
+    verdict: str,
+    kind: NegotiationKind | None,
+) -> dict[str, object]:
+    """Render one validation failure as JSON-ready evidence for the tester table."""
+    return {
+        "verdict": verdict,
+        "negotiationKind": kind.value if kind is not None else None,
+        "code": error.code_str,
+        "slotErrors": _slot_error_documents(error.errors),
+    }
+
+
+def _slot_error_documents(errors: Iterable[SlotValidationError] | None) -> list[dict[str, object]]:
+    """Render one SDK slot-error iterable as JSON-ready documents."""
+    return [
+        {
+            "slotName": item.slot_name,
+            "code": str(item.code),
+            "message": item.message,
+            "facts": dict(item.facts or {}),
+        }
+        for item in errors or ()
+    ]
 
 
 def _validation_matches(expected: object, actual: object) -> bool:

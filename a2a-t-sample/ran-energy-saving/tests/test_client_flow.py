@@ -2209,6 +2209,8 @@ async def test_decision_hook_fires_before_the_response_is_sent() -> None:
     ]
     assert spans[1]["direction"] == "client->server"
     assert spans[2]["round"] == 1
+    # The rendered Task-T names the request it came from, so a follow-up dispatch is traceable.
+    assert spans[0]["detail"]["userRequest"] == "request"
 
 
 async def test_decision_span_is_emitted_only_without_a_consumer_callback() -> None:

@@ -68,7 +68,7 @@ from shared.run_constants import (
 from shared.run_constants import (
     PROTOCOL_A2A_T as RUNTIME_A2A_T,
 )
-from shared.trace import reset_task_sink, set_task_sink
+from shared.trace import PHASE_TASK_VALIDATION, reset_task_sink, set_task_sink
 
 from demo.web.tester.decisions import a2at_decisions, pure_answers
 from demo.web.tester.export_view import build_answer, read_traceparent
@@ -277,6 +277,8 @@ class StageResult:
     actual: object = None
     diffs: list[dict[str, object]] = field(default_factory=list)
     duration_ms: int = 0
+    #: Structured evidence of the stage (for a validation, the SDK code and per-slot errors).
+    detail: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-friendly representation.
@@ -293,6 +295,8 @@ class StageResult:
             "diffs": self.diffs,
             "durationMs": self.duration_ms,
         }
+        if self.detail:
+            data["detail"] = self.detail
         if (
             self.stage == "task_t"
             and isinstance(self.expected, str)
@@ -1147,6 +1151,14 @@ class EvalBatchManager:
             if error:
                 record["error"] = error
             item.interception = record
+            if interception_only:
+                # The interception runs before the item's run exists, so its validation only reaches
+                # Langfuse when it is replayed with the rest of the preflight evidence.
+                validation_span = _interception_validation_span(
+                    interception, str(case.get("user_input") or "")
+                )
+                if validation_span is not None:
+                    interception_spans.append(validation_span)
         if error:
             item.error = error
         return interception_spans
@@ -1188,6 +1200,7 @@ class EvalBatchManager:
                         expected=stage.expected,
                         actual=stage.actual,
                         diffs=[diff.to_dict() for diff in stage.diffs],
+                        detail=dict(stage.detail) if stage.detail else None,
                     )
                     for stage in outcome.stages
                 },
@@ -1203,6 +1216,7 @@ class EvalBatchManager:
                 expected=stage.expected,
                 actual=stage.actual,
                 diffs=[diff.to_dict() for diff in stage.diffs],
+                detail=dict(stage.detail) if stage.detail else None,
             )
             protocol = "" if stage.stage == "intent" else PROTOCOL_A2A_T
             result = _apply_assertion(judge, protocol, stage.stage, result)
@@ -1222,6 +1236,7 @@ class EvalBatchManager:
                     expected=stage.expected,
                     actual=stage.actual,
                     diffs=[diff.to_dict() for diff in stage.diffs],
+                    detail=dict(stage.detail) if stage.detail else None,
                 )
                 for stage in outcome.interception
             }
@@ -1417,11 +1432,12 @@ class EvalBatchManager:
         A blocked case with a follow-up dispatches the replacement request in the run, but the
         interception is part of the evidence: the presentation UI shows the blocked attempt and
         its corrected retry in one workflow, so the tester's trace must show it too. Only producer
-        work is replayed (an ``intent_processed`` row would overwrite the run's own intent).
+        work is replayed (an ``intent_processed`` row would overwrite the run's own intent); the
+        validation span the tester synthesizes for the block is part of that evidence.
         Observability only: a replay failure must never change the item result.
         """
         for span in spans:
-            if str(span.get("kind") or "") not in {"llm", "tool"}:
+            if str(span.get("kind") or "") not in {"llm", "tool", "task_validation"}:
                 continue
             try:
                 payload = dict(span)
@@ -3008,6 +3024,42 @@ def _task_observation(run: RunState) -> dict[str, object]:
     }
 
 
+def _interception_validation_span(
+    stages: Mapping[str, StageResult],
+    user_request: str = "",
+) -> dict[str, object] | None:
+    """Build the ``task_validation`` span of one intercepted request.
+
+    The tester's interception preflight runs outside a run, so its validation verdict and slot
+    errors never reach the trace. Replaying this span next to the preflight model calls makes the
+    blocked attempt visible in Langfuse and in the run trace view. ``user_request`` names the
+    request that was blocked, which is the original text, not the follow-up the run dispatches.
+    """
+    validate = stages.get("validate")
+    if validate is None:
+        return None
+    detail = dict(validate.detail) if isinstance(validate.detail, Mapping) else {}
+    verdict = str(detail.get("verdict") or validate.actual or "")
+    if verdict:
+        detail.setdefault("verdict", verdict)
+    detail.setdefault("blocking", verdict == "blocked")
+    if validate.message:
+        detail.setdefault("reason", validate.message)
+    if user_request:
+        detail.setdefault("userRequest", user_request)
+    task_t = stages.get("task_t")
+    if task_t is not None and isinstance(task_t.actual, str) and task_t.actual:
+        detail.setdefault("promptText", task_t.actual[:4000])
+    return {
+        "kind": "task_validation",
+        "phase": PHASE_TASK_VALIDATION,
+        "title": f"Task-T validation {verdict or 'unknown'}",
+        "side": "client",
+        "status": "ok",
+        "detail": detail,
+    }
+
+
 def _rendered_task_t(run: RunState) -> str | None:
     """Return the Task-T prompt a run rendered, from its ``task_prompt_rendered`` span.
 
@@ -3035,6 +3087,7 @@ def _load_stages(raw: object) -> dict[str, StageResult]:
         if not isinstance(value, Mapping):
             continue
         raw_diffs = value.get("diffs")
+        raw_detail = value.get("detail")
         stages[str(name)] = StageResult(
             stage=str(value.get("stage") or name),
             status=str(value.get("status") or STAGE_ERROR),
@@ -3047,6 +3100,7 @@ def _load_stages(raw: object) -> dict[str, StageResult]:
             if isinstance(raw_diffs, list)
             else [],
             duration_ms=int(value.get("durationMs") or 0),
+            detail=dict(raw_detail) if isinstance(raw_detail, Mapping) else None,
         )
     return stages
 

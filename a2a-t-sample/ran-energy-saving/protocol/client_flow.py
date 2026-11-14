@@ -1252,6 +1252,9 @@ async def run_client_flow(
             "promptText": prompt_text,
             "templateUri": prompt_content.template_uri or task_template_uri,
             "length": len(prompt_text),
+            # The request this prompt was generated from. A blocked-then-retried case dispatches
+            # the follow-up text, so the trace must name that text next to the Task-T it produced.
+            "userRequest": user_request,
             **({"samplePhase": SAMPLE_PHASE_MODIFY} if modify_only else {}),
         },
     )

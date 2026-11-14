@@ -514,6 +514,22 @@ def test_runner_records_the_conflict_fields() -> None:
     }
 
 
+def test_the_validate_stage_carries_the_slot_errors() -> None:
+    client = FakePromptClient(validate_outcomes={1: "negotiable"})
+    outcome = run_case(CASES[1], client, stop_after="validate")
+    validate_stage = next(stage for stage in outcome.stages if stage.stage == "validate")
+    assert validate_stage.actual == "pass"
+    assert validate_stage.detail is not None
+    assert validate_stage.detail["slotErrors"] == [
+        {
+            "slotName": "region",
+            "code": "content.param_missing",
+            "message": "missing area",
+            "facts": {"section_label": "Area"},
+        }
+    ]
+
+
 def test_runner_records_an_unfilled_validation_result() -> None:
     # No corpus case is unfilled any more, but the contract still has to hold for generated
     # cases whose source validation column is empty.

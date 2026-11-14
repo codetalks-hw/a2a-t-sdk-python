@@ -518,6 +518,36 @@ async def test_working_is_waiting_while_input_required(tmp_path: Path) -> None:
     assert "INPUT_REQUIRED" in result.message
 
 
+def test_an_intercepted_validation_is_replayed_as_a_task_validation_span() -> None:
+    stages = {
+        "task_t": StageResult(
+            "task_t",
+            STAGE_RECORDED,
+            actual="## Operation Type\nCreate",
+        ),
+        "validate": StageResult(
+            "validate",
+            STAGE_PASSED,
+            message="blocked by content.param_missing",
+            actual="blocked",
+            detail={
+                "verdict": "blocked",
+                "slotErrors": [{"slotName": "region", "code": "content.param_missing"}],
+            },
+        ),
+    }
+
+    span = service._interception_validation_span(stages, "the blocked original request")
+
+    assert span is not None
+    assert span["kind"] == "task_validation"
+    detail = span["detail"]
+    assert detail["verdict"] == "blocked"
+    assert detail["slotErrors"] == [{"slotName": "region", "code": "content.param_missing"}]
+    assert detail["promptText"].startswith("## Operation Type")
+    assert detail["userRequest"] == "the blocked original request"
+
+
 def test_a_task_t_stage_serializes_its_section_rows() -> None:
     task_t = CASES[1]["expect"]["protocols"]["a2a-t"]["task_t"]
     result = StageResult("task_t", STAGE_PASSED, expected=task_t, actual=task_t)
