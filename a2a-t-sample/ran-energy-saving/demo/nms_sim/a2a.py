@@ -26,9 +26,10 @@ from a2a_t.core.metadata import (
     NEGOTIATION_T_EXTENSION_URI,
     TASK_T_EXTENSION_URI,
 )
-from a2a_t.core.plan_binding import canonical_digest
+from a2a_t.core.plan_binding import CanonicalFormError, canonical_digest
 from shared.agreement import (
     AGREEMENT_METADATA_KEY,
+    REQUEST_ID_METADATA_KEY,
     next_revision,
     read_agreement,
     read_agreement_ref,
@@ -57,6 +58,7 @@ from shared.approval import (
     read_approval_request,
     verify_decision,
 )
+from shared.assurance import read_hops
 from shared.change_order import (
     BASELINE_ERROR_METADATA_KEY,
     REASON_MISSING,
@@ -64,6 +66,13 @@ from shared.change_order import (
     read_baseline,
 )
 from shared.readback import Readback, compare_plans
+from shared.reversal import (
+    OPERATION_RESTORE,
+    REVERSAL_METADATA_KEY,
+    Reversal,
+    read_reversal,
+    restoration_for,
+)
 from shared.typed_payload import (
     TYPED_TASK_T_METADATA_KEY,
     read_statement,
@@ -146,13 +155,15 @@ _LOGGER = logging.getLogger("ran_energy_saving.nms_sim")
 
 #: Metadata key a caller uses to declare the hops a request already passed through.
 DELEGATION_METADATA_KEY: Final[str] = "a2at-sample/delegation"
-#: Metadata key a client may use to state its own request identity (idempotency key).
-REQUEST_ID_METADATA_KEY: Final[str] = "a2at-sample/request-id"
 #: Name this server appends to the chain.
 DELEGATION_HOP: Final[str] = "nms"
 
 #: SSE media type.
 EVENT_STREAM: str = "text/event-stream"
+
+#: Cancel reason that asks the peer to execute the reversal the agreement carries. It is the
+#: default when a cancel request has no body: an abort with no stated reason is still an abort.
+CANCEL_REASON_ABORT: Final[str] = "abort"
 
 #: The fixed plain-A2A question the real vendor asks on every negotiation round. Its A2A front
 #: end does not render the business issue: the operator answers in free text and the vendor merges
@@ -178,6 +189,9 @@ class SimRuntime:
         negotiations: Negotiation state machine keyed by negotiation id.
         pushes: Background webhook sender.
         registry: Per-Task push configs.
+        executions: Request identity -> Task that already answers it.
+        agreements: Agreement id -> current revision.
+        revisions: Agreement id -> revision -> document, every revision this server kept.
     """
 
     store: TaskStore
@@ -188,8 +202,12 @@ class SimRuntime:
     #: Request identity -> Task that already answers it. A retry returns that Task instead of
     #: executing the plan a second time.
     executions: dict[str, str] = field(default_factory=dict)
-    #: Agreement id -> latest revision. An agreement outlives the Task that first produced it.
+    #: Agreement id -> latest revision. An agreement outlives the Task that first produced it, so
+    #: this table -- not the Task list -- decides what remains executable.
     agreements: dict[str, dict[str, object]] = field(default_factory=dict)
+    #: Agreement id -> revision -> document. Every revision is kept: a change order names one, and
+    #: a client must be able to see why a superseded reference was refused.
+    revisions: dict[str, dict[int, dict[str, object]]] = field(default_factory=dict)
 
 
 def build_runtime(
@@ -866,10 +884,18 @@ def build_routes(
             or TYPED_TASK_T_METADATA_KEY in metadata
         )
 
+    def _declared_hops(metadata: Mapping[str, object]) -> tuple[str, ...]:
+        """Return the hop names the request declares, in either wire form.
+
+        A carrying hop writes the v2 envelope; a hand-written request still uses a bare list. Both
+        are read through :func:`shared.assurance.read_hops`, so the server never has to know which
+        producer it is talking to.
+        """
+        return tuple(hop.hop for hop in read_hops(metadata.get(DELEGATION_METADATA_KEY)))
+
     def _delegation_chain(metadata: Mapping[str, object]) -> tuple[str, ...]:
         """Return the hops the request declares, plus this server."""
-        raw = metadata.get(DELEGATION_METADATA_KEY)
-        hops = tuple(str(hop) for hop in raw) if isinstance(raw, list) else ()
+        hops = _declared_hops(metadata)
         return (*hops, DELEGATION_HOP) if hops else ()
 
     def _remember_plan(
@@ -879,7 +905,12 @@ def build_routes(
 
         Re-accepting the same plan keeps the revision (an idempotent restatement); a different plan
         bumps it. That is what makes a change order expressible as "target revision N".
+
+        The state this revision replaces is captured here, before it is overwritten: a fresh Create
+        has none, so its reversal is the baseline. A restatement keeps the original revision and,
+        with it, the original reversal -- a restatement is not a new promise.
         """
+        previous_plan = dict(task.plan) if task.plan is not None else None
         plan = dict(plan_for(intent))
         previous = (
             read_agreement({AGREEMENT_METADATA_KEY: task.agreement})
@@ -893,21 +924,31 @@ def build_routes(
                 .isoformat()
                 .replace("+00:00", "Z")
             )
+        reversal = restoration_for(
+            plan, previous_plan, baseline_rate=config.restore_rate_mbps
+        )
         agreement = next_revision(
             previous,
             plan=plan,
             scopes=({"window": intent.window, "rateMbps": intent.rate_mbps},),
             expires_at=expires_at,
+            reversal=reversal.to_dict(),
         )
+        document = agreement.to_dict()
         task.plan = plan
-        task.agreement = agreement.to_dict()
-        resolved.agreements[agreement.agreement_id] = agreement.to_dict()
+        task.agreement = document
+        # Read the reversal back off the stored revision: on a restatement that is the original
+        # one, not the freshly computed value, so the Task executes what the agreement promises.
+        task.reversal = dict(agreement.reversal) if agreement.reversal is not None else None
+        resolved.agreements[agreement.agreement_id] = document
+        resolved.revisions.setdefault(agreement.agreement_id, {})[agreement.revision] = document
         identity = _request_identity(metadata)
         if identity is not None:
             task.request_id = identity
             resolved.executions.setdefault(identity, task.task_id)
         if not task.execution_id:
             task.execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+        task.delegation = _declared_hops(metadata)
         task.delegation_chain = _delegation_chain(metadata)
 
     def _agreement_for(ref: object) -> tuple[dict[str, object] | None, str | None]:
@@ -924,8 +965,12 @@ def build_routes(
             try:
                 instant = datetime.fromisoformat(expires.replace("Z", "+00:00"))
             except ValueError:
-                instant = None
-            if instant is not None and datetime.now(UTC) >= instant:
+                # An unreadable lifetime cannot be honoured; authority fails closed.
+                return None, AGREEMENT_EXPIRED
+            if instant.tzinfo is None:
+                # A stored instant without an offset can only mean this host's clock.
+                instant = instant.astimezone()
+            if datetime.now(UTC) >= instant:
                 return None, AGREEMENT_EXPIRED
         return raw, None
 
@@ -1130,6 +1175,11 @@ def build_routes(
                 if from_agreement
                 else parse_message_request(body, request.headers, config)
             )
+            if agreement_raw is not None and from_agreement:
+                # Executing a revision is a continuation of that revision, not a new promise: seed
+                # the agreement so the Task is bound to the id/revision the client named. Without
+                # this, the response mints a fresh agreement and the reference means nothing.
+                task.agreement = dict(agreement_raw)
             _remember_plan(task, intent, metadata)
             metrics.outcome(PROTOCOL_A2A_T, OUTCOME_ACCEPTED)
             hold = config.hold_working and is_new
@@ -1389,9 +1439,16 @@ def build_routes(
             return _handle_approval_decision(
                 body, decision, stream=stream, protocol=protocol
             )
-        if pure:
-            return _pure_request(body, request, stream=stream)
-        return _a2a_t_request(body, request, stream=stream)
+        try:
+            if pure:
+                return _pure_request(body, request, stream=stream)
+            return _a2a_t_request(body, request, stream=stream)
+        except CanonicalFormError as exc:
+            # A value the canonical profile cannot represent is a malformed contract, not a server
+            # fault: reject it as a client error so the peer learns why instead of seeing a 500.
+            return JSONResponse(
+                {"error": "canonical.invalid", "detail": str(exc)}, status_code=400
+            )
 
     async def send_message(request: Request) -> Response:
         """Accept one A2A message and stream the Task or negotiation message."""
@@ -1417,10 +1474,15 @@ def build_routes(
         return JSONResponse({"task": task.to_dict()}, status_code=200)
 
     async def cancel_task(request: Request) -> Response:
-        """Cancel one non-terminal Task.
+        """Cancel one non-terminal Task, executing its reversal when it is aborted.
 
         ``cancel_supported=False`` reproduces the vendor's older HTTP 503 answer; otherwise a
         terminal Task is returned unchanged so a repeated cancel stays idempotent.
+
+        An abort (the default reason) also restores the state the agreement was accepted over.
+        That restoration is published as an artifact instead of being left to the client: only
+        then can a third party compare it with the reversal the agreement carried. A Task whose
+        agreement has no reversal, or a cancel with another reason, keeps the old behaviour.
         """
         if not authorized(request):
             return unauthorized()
@@ -1429,33 +1491,75 @@ def build_routes(
                 {"error": {"code": 503, "message": "Task cancellation is unavailable"}},
                 status_code=503,
             )
+        reason = await _cancel_reason(request)
         task_id = str(request.path_params["task_id"])
         task = resolved_store.get(task_id)
         if task is None:
             return JSONResponse({"error": "Task not found"}, status_code=404)
         if task.state not in TERMINAL_STATES:
             resolved_store.update(task_id, state=TASK_CANCELED, message="Task canceled.")
+        if reason == CANCEL_REASON_ABORT:
+            _restore_task(task)
         return JSONResponse({"task": task.to_dict()}, status_code=200)
+
+    def _restore_task(task: SimTask) -> None:
+        """Execute the reversal the Task's agreement carries, at most once."""
+        if task.reversal is None:
+            return
+        artifact_id = _restoration_artifact_id(task.task_id)
+        if any(artifact.get("artifactId") == artifact_id for artifact in task.artifacts):
+            # A second cancel is the same abort; it must not restore twice.
+            return
+        reversal = read_reversal({REVERSAL_METADATA_KEY: task.reversal})
+        if reversal is None:
+            return
+        resolved_store.add_artifact(task.task_id, _restoration_artifact(task, reversal))
 
     async def list_agreements(request: Request) -> Response:
         """Return the current revision of every agreement this simulator holds.
 
         The agreement is the durable object; a listing makes "what did we agree to" answerable
-        without walking Tasks. One entry per agreement id, newest revision first.
+        without walking Tasks. It reads the runtime's own table rather than the Task list: Tasks
+        are evicted (``task_limit``), and an agreement that is still executable must not vanish
+        from the listing because the Task that produced it aged out. One entry per agreement id.
         """
         if not authorized(request):
             return unauthorized()
-        current: dict[str, dict[str, object]] = {}
-        for document in resolved_store.list():
-            metadata = document.get("metadata")
-            raw = (
-                metadata.get(AGREEMENT_METADATA_KEY)
-                if isinstance(metadata, Mapping)
-                else None
-            )
-            if isinstance(raw, Mapping):
-                current.setdefault(str(raw.get("agreementId")), dict(raw))
-        return JSONResponse({"agreements": list(current.values())}, status_code=200)
+        entries = [
+            _agreement_listing(document)
+            for _, document in sorted(resolved.agreements.items())
+        ]
+        return JSONResponse({"agreements": entries}, status_code=200)
+
+    async def get_agreement(request: Request) -> Response:
+        """Return every revision of one agreement, newest first.
+
+        A superseded revision is still evidence: the client that signed it needs to see what it
+        was, and why a reference to it can no longer run.
+        """
+        if not authorized(request):
+            return unauthorized()
+        agreement_id = str(request.path_params["agreement_id"])
+        current = resolved.agreements.get(agreement_id)
+        if current is None:
+            return JSONResponse({"reasonCode": AGREEMENT_UNKNOWN}, status_code=404)
+        revisions = resolved.revisions.get(agreement_id, {})
+        documents = [
+            dict(revisions[revision]) for revision in sorted(revisions, reverse=True)
+        ] or [dict(current)]
+        revision = current.get("revision")
+        return JSONResponse(
+            {
+                "agreementId": agreement_id,
+                "currentRevision": (
+                    revision
+                    if isinstance(revision, int) and not isinstance(revision, bool)
+                    else 0
+                ),
+                "revisions": documents,
+            },
+            status_code=200,
+        )
 
     async def list_negotiations(request: Request) -> Response:
         """Return the open negotiations, optionally filtered by ``contextId``.
@@ -1484,6 +1588,7 @@ def build_routes(
         Route("/a2a/json/tasks", list_tasks, methods=["GET"]),
         Route("/a2a/json/negotiations", list_negotiations, methods=["GET"]),
         Route("/a2a/json/agreements", list_agreements, methods=["GET"]),
+        Route("/a2a/json/agreements/{agreement_id}", get_agreement, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}", get_task, methods=["GET"]),
         Route("/a2a/json/tasks/{task_id}:cancel", cancel_task, methods=["POST"]),
     ]
@@ -1493,6 +1598,22 @@ def build_routes(
 async def _single_message_stream(message: Mapping[str, object]) -> AsyncIterator[str]:
     """Yield one ``message`` SSE frame and close."""
     yield f"data: {json.dumps({'message': dict(message)}, ensure_ascii=False)}\n\n"
+
+
+def _agreement_listing(document: Mapping[str, object]) -> dict[str, object]:
+    """Project one stored revision onto the listing shape."""
+    revision = document.get("revision")
+    entry: dict[str, object] = {
+        "agreementId": str(document.get("agreementId") or ""),
+        "revision": revision if isinstance(revision, int) and not isinstance(revision, bool) else 0,
+        "planDigest": str(document.get("planDigest") or ""),
+        "operation": str(document.get("operation") or ""),
+        "region": str(document.get("region") or ""),
+    }
+    expires = document.get("expiresAt")
+    if isinstance(expires, str):
+        entry["expiresAt"] = expires
+    return entry
 
 
 def _other_rate(value: object) -> float:
@@ -1533,6 +1654,59 @@ def _readback_for(
         revision=agreement.revision if agreement is not None else 0,
         delegation_chain=task.delegation_chain if task is not None else (),
     ).to_metadata()
+
+
+def _restoration_artifact_id(task_id: str) -> str:
+    """Return the artifact id of one Task's reversal execution."""
+    return f"{task_id}-restoration"
+
+
+def _restoration_artifact(task: SimTask, reversal: Reversal) -> dict[str, object]:
+    """Build the artifact proving one reversal was executed.
+
+    It reuses the S8 readback envelope (and its metadata key), so a client that already reads the
+    report artifact needs no second reader: ``restoredFrom`` names the plan that was undone, and
+    ``planDigest``/``executed`` name the one that replaced it.
+    """
+    aborted = dict(task.plan or {})
+    restored = dict(reversal.plan)
+    readback = Readback(
+        plan_digest=plan_digest(restored),
+        executed=restored,
+        deviations=compare_plans(aborted, restored),
+        restored_from=plan_digest(aborted),
+    )
+    return {
+        "artifactId": _restoration_artifact_id(task.task_id),
+        "name": "energy saving reversal report",
+        "parts": [
+            {"data": restored},
+            {
+                "text": (
+                    f"Executed {OPERATION_RESTORE}: the plan in force before the abort "
+                    f"({restored.get('window') or 'the window'} at "
+                    f"{restored.get('rateMbps') or 0} Mbps) is back."
+                )
+            },
+        ],
+        "metadata": {"taskId": task.task_id, **readback.to_metadata()},
+    }
+
+
+async def _cancel_reason(request: Request) -> str:
+    """Return the cancel reason, ``abort`` when the request states none.
+
+    A cancel request historically carried no body, so an empty or unreadable body must keep
+    meaning "abort" instead of silently turning the cancel into one that restores nothing.
+    """
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return CANCEL_REASON_ABORT
+    if not isinstance(body, Mapping):
+        return CANCEL_REASON_ABORT
+    reason = body.get("reason")
+    return reason.strip() if isinstance(reason, str) and reason.strip() else CANCEL_REASON_ABORT
 
 
 def _pure_failure_text(issue: NegotiationIssue, content: ExtractedContent) -> str:

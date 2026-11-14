@@ -66,6 +66,12 @@ PURE_FOLLOWUP_TASK = "task"
 PURE_FOLLOWUP_CONTEXT = "context"
 SUPPORTED_PURE_FOLLOWUPS = (PURE_FOLLOWUP_BOTH, PURE_FOLLOWUP_TASK, PURE_FOLLOWUP_CONTEXT)
 
+#: Contract carriage of the standard-A2A OSS hop. ``off`` drops an A2A-T carrier it cannot serve;
+#: ``carry`` forwards it byte-identically and records the hop in ``a2at-sample/delegation``.
+OSS_CONTRACT_OFF = "off"
+OSS_CONTRACT_CARRY = "carry"
+SUPPORTED_OSS_CONTRACTS = (OSS_CONTRACT_OFF, OSS_CONTRACT_CARRY)
+
 #: Hop a standard A2A (``pure``) client takes. ``direct`` calls the local RAN Agent; ``nms``
 #: calls the vendor directly so a plain Create/Modify/answer sequence addresses the vendor's own
 #: Task; ``oss`` keeps the deprecated proxy topology (UI -> OSS Agent -> downstream) as an
@@ -193,6 +199,9 @@ PROTOCOL_MODE_ENV_KEY = "A2AT_SAMPLE_PROTOCOL_MODE"
 #: OSS Agent bind/advertised address.
 OSS_HOST_ENV_KEY = "A2AT_SAMPLE_OSS_HOST"
 OSS_PORT_ENV_KEY = "A2AT_SAMPLE_OSS_PORT"
+#: Whether the standard-A2A OSS hop forwards an A2A-T contract it does not serve. ``off`` keeps
+#: the legacy warn-and-drop behaviour; ``carry`` forwards the carrier and logs its hop.
+OSS_CONTRACT_ENV_KEY = "A2AT_SAMPLE_OSS_CONTRACT"
 #: Cross-process trace emitter of the server/OSS hops. The launcher owns these values per run.
 TRACE_URL_ENV_KEY = "A2AT_SAMPLE_TRACE_URL"
 TRACE_TOKEN_ENV_KEY = "A2AT_SAMPLE_TRACE_TOKEN"
@@ -584,6 +593,17 @@ def _approval_answer(values: dict[str, str | None]) -> str:
     return answer
 
 
+def _oss_contract(values: dict[str, str | None]) -> str:
+    """Resolve the OSS hop's contract policy; an unknown value is a configuration error."""
+    contract = _env_value(values, OSS_CONTRACT_ENV_KEY, OSS_CONTRACT_OFF).strip().lower()
+    if contract not in SUPPORTED_OSS_CONTRACTS:
+        raise ValueError(
+            f"Invalid {OSS_CONTRACT_ENV_KEY}: {contract!r}; "
+            f"expected one of {SUPPORTED_OSS_CONTRACTS}"
+        )
+    return contract
+
+
 def _optional_positive_float(values: dict[str, str | None], key: str) -> float | None:
     """Resolve an optional strictly positive number; unset means ``None``."""
     raw_value = os.environ.get(key)
@@ -837,6 +857,8 @@ class SampleConfig:
     protocol_mode: str = PROTOCOL_A2A_T
     oss_host: str = DEFAULT_HOST
     oss_port: int = DEFAULT_OSS_PORT
+    #: How the standard-A2A OSS hop handles an A2A-T carrier: ``off`` / ``carry``.
+    oss_contract: str = OSS_CONTRACT_OFF
     trace_url: str = ""
     trace_token: str = ""
     trace_dir: str = ""
@@ -1132,6 +1154,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         protocol_mode=protocol_mode,
         oss_host=_env_value(values, OSS_HOST_ENV_KEY, DEFAULT_HOST),
         oss_port=_env_int(values, OSS_PORT_ENV_KEY, DEFAULT_OSS_PORT),
+        oss_contract=_oss_contract(values),
         trace_url=_env_value(values, TRACE_URL_ENV_KEY, "").strip(),
         trace_token=_env_value(values, TRACE_TOKEN_ENV_KEY, "").strip(),
         trace_dir=_env_value(values, TRACE_DIR_ENV_KEY, "").strip(),

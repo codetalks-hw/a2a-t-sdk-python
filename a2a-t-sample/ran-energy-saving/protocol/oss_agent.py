@@ -71,6 +71,7 @@ from shared.config import (
     LONG_TASK_MODE_OFF,
     LONG_TASK_MODE_ON,
     NMS_SIM_PURE_QUESTION_CONFIRM,
+    OSS_CONTRACT_CARRY,
     PURE_FOLLOWUP_BOTH,
     TRANSPORT_WEBHOOK,
     SampleConfig,
@@ -100,6 +101,12 @@ from protocol.client_flow import (
     SseClientTransport,
 )
 from protocol.client_policy import ClientPolicy
+from protocol.contract_carriage import (
+    ASSURANCE_ECHOED,
+    DELEGATION_KEY,
+    append_hop,
+    carried,
+)
 from protocol.discovery import DISCOVERY_DIRECT, discover_agent
 from protocol.downstream_binding_store import DownstreamBinding, DownstreamBindingStore
 from protocol.downstream_pump import DownstreamPump, DownstreamPumpContext
@@ -655,7 +662,27 @@ class OSSPureExecutor(AgentExecutor):
         consumer = asyncio.create_task(self._consume(events, updater), name=f"oss-ran-consumer-{task.id}")
         run_id = _run_id_of(message)
         raw_text = _message_text(message)
-        if _carries_extension_metadata(message):
+        inbound_metadata = metadata_to_dict(message.metadata)
+        extra_metadata: Mapping[str, object] | None = None
+        if (
+            self._config is not None
+            and self._config.oss_contract == OSS_CONTRACT_CARRY
+            and carried(inbound_metadata)
+        ):
+            # This hop does not implement the contract, but it can still carry it honestly: the
+            # carrier goes downstream unchanged and the delegation entry states the digest of
+            # what arrived, so a third party can check that nothing was rewritten.
+            extra_metadata = append_hop(
+                inbound_metadata,
+                hop="oss",
+                assurance=ASSURANCE_ECHOED,
+            )
+            _LOGGER.info(
+                "OSS Agent carried the A2A-T contract opaquely (%d key(s)); hop recorded in %s.",
+                len(carried(inbound_metadata)),
+                DELEGATION_KEY,
+            )
+        elif _carries_extension_metadata(message):
             # This process only speaks standard A2A. An A2A-T request reaching it means the hop
             # was misconfigured; say so loudly instead of silently degrading into plain text.
             _LOGGER.warning(
@@ -680,6 +707,7 @@ class OSSPureExecutor(AgentExecutor):
                     updater,
                     context.call_context,
                     attached,
+                    extra_metadata=extra_metadata,
                 )
         except _QuestionPendingError as question:
             events.put_nowait(None)
@@ -952,6 +980,8 @@ class OSSPureExecutor(AgentExecutor):
         updater: TaskUpdater,
         call_context: ServerCallContext,
         attached: asyncio.Event | None = None,
+        *,
+        extra_metadata: Mapping[str, object] | None = None,
     ) -> ClientFlowResult:
         """Run one inbound request against the NMS over its shared callback port.
 
@@ -1015,6 +1045,7 @@ class OSSPureExecutor(AgentExecutor):
                 trace_sink=self._trace_sink,
                 followup=self._followup,
                 plain_questions=True,
+                extra_metadata=extra_metadata,
             )
             if attached is not None and not attached.is_set():
                 # Still attached: if the phase ended with a vendor question (a plain-message
@@ -1128,13 +1159,21 @@ class OSSPureExecutor(AgentExecutor):
         updater: TaskUpdater,
         call_context: ServerCallContext,
         attached: asyncio.Event | None = None,
+        *,
+        extra_metadata: Mapping[str, object] | None = None,
     ) -> ClientFlowResult:
         """Run the standard A2A client flow against the configured downstream agent."""
         self._set_decision_request(user_request)
         self._bind_wire_log(run_id)
         if self._webhook_router is not None:
             return await self._run_ran_webhook(
-                user_request, run_id, event_sink, updater, call_context, attached
+                user_request,
+                run_id,
+                event_sink,
+                updater,
+                call_context,
+                attached,
+                extra_metadata=extra_metadata,
             )
         config = self._config
         if self._nms_client is not None and config is not None:
@@ -1156,6 +1195,7 @@ class OSSPureExecutor(AgentExecutor):
                 trace_sink=self._trace_sink,
                 followup=self._followup,
                 plain_questions=True,
+                extra_metadata=extra_metadata,
             )
             # The round budget can end the phase with the vendor's next question still trailing;
             # the SSE hop has no handoff, so relay it here like the webhook hop does.
@@ -1196,6 +1236,7 @@ class OSSPureExecutor(AgentExecutor):
                     event_sink=event_sink,
                     trace_sink=self._trace_sink,
                     followup=self._followup,
+                    extra_metadata=extra_metadata,
                 )
             finally:
                 close = getattr(client, "close", None)

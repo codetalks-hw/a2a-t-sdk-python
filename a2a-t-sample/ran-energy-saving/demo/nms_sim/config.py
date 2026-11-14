@@ -99,6 +99,10 @@ LONG_OUTAGE_FEASIBILITY_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_LONG_OUTAGE_F
 #: the protocol documents; a different value exposes clients that assume that default instead of
 #: reading the ceiling the server states.
 FEASIBILITY_RATE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_FEASIBILITY_RATE_MBPS"
+#: Reversal contract: the rate one ``Restore`` applies when the aborted plan had no predecessor.
+#: There was no prior plan to re-state, so the window simply returns to full capacity.
+RESTORE_RATE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_RESTORE_RATE_MBPS"
+DEFAULT_RESTORE_RATE_MBPS: Final[float] = 100.0
 
 #: Environment keys read by the standalone simulator entry point.
 FIDELITY_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_FIDELITY"
@@ -187,6 +191,7 @@ class SimConfig:
         baseline_stale: Measurement-only: the Task's current plan is reported as a different one.
         negotiation_ttl_seconds: How long an unanswered A2A-T negotiation stays open.
         agreement_ttl_seconds: Lifetime of one agreement revision (v2 prototype).
+        restore_rate_mbps: Rate a ``Restore`` applies when the aborted plan had no predecessor.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -227,6 +232,8 @@ class SimConfig:
     #: How long an unanswered negotiation stays open (0 expires immediately; ``None`` never).
     negotiation_ttl_seconds: float | None = DEFAULT_NEGOTIATION_TTL_SECONDS
     agreement_ttl_seconds: float | None = None
+    #: Reversal contract: the rate a ``Restore`` applies when there was no prior plan.
+    restore_rate_mbps: float = DEFAULT_RESTORE_RATE_MBPS
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -355,7 +362,12 @@ class SimConfig:
                 os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
             ),
             feasibility_rate_mbps=_rate(
-                os.environ.get(FEASIBILITY_RATE_ENV_KEY, str(FEASIBILITY_RATE_MBPS))
+                os.environ.get(FEASIBILITY_RATE_ENV_KEY, str(FEASIBILITY_RATE_MBPS)),
+                key=FEASIBILITY_RATE_ENV_KEY,
+            ),
+            restore_rate_mbps=_rate(
+                os.environ.get(RESTORE_RATE_ENV_KEY, str(DEFAULT_RESTORE_RATE_MBPS)),
+                key=RESTORE_RATE_ENV_KEY,
             ),
         )
         # The fast profile keeps the wire contract but removes the wall-clock delays; the dataclass
@@ -368,14 +380,14 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _rate(value: str) -> float:
-    """Parse one non-negative Mbps ceiling."""
+def _rate(value: str, *, key: str = FEASIBILITY_RATE_ENV_KEY) -> float:
+    """Parse one non-negative Mbps value."""
     try:
         rate = float(value.strip())
     except ValueError as exc:
-        raise ValueError(f"Invalid {FEASIBILITY_RATE_ENV_KEY}: {value!r}") from exc
+        raise ValueError(f"Invalid {key}: {value!r}") from exc
     if rate < 0:
-        raise ValueError(f"{FEASIBILITY_RATE_ENV_KEY} must not be negative")
+        raise ValueError(f"{key} must not be negative")
     return rate
 
 

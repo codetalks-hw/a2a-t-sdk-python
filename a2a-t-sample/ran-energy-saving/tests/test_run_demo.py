@@ -754,6 +754,7 @@ def _resolved_config() -> SimpleNamespace:
         nms_region="A2ATestRegion",
         nms_sites=["site-a"],
         nms_a2a_base="https://nms.example/a2a/json",
+        oss_contract="off",
     )
 
 

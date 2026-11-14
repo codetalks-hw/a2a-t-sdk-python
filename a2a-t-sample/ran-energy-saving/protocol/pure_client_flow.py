@@ -15,7 +15,12 @@ from collections.abc import Awaitable, Callable, Mapping
 
 from a2a.client.client import ClientCallContext
 from a2a.types import Role, SendMessageRequest
-from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
+from a2a_t.core.metadata import (
+    NEGOTIATION_T_EXTENSION_URI,
+    TASK_T_EXTENSION_URI,
+    NegotiationContext,
+    NegotiationPerformative,
+)
 from shared.approval import ApprovalDecision, ApprovalRequest, read_approval_request
 from shared.config import (
     DEFAULT_HTTP_TIMEOUT_SECONDS,
@@ -49,6 +54,10 @@ _NEGOTIATION_KINDS: frozenset[str] = frozenset({"information", "target", "feasib
 #: ``pure.phase`` values that describe the OSS hop rather than the negotiation itself.
 _RELAY_PHASES: frozenset[str] = frozenset({"question", "answer"})
 
+#: Extension URIs whose presence in metadata must also be declared in the ``A2A-Extensions``
+#: header. A peer that reads the header but not the metadata needs both to agree.
+_EXTENSION_URI_KEYS: tuple[str, ...] = (TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI)
+
 
 async def run_pure_client_flow(
     *,
@@ -66,6 +75,7 @@ async def run_pure_client_flow(
     task_id: str | None = None,
     context_id: str | None = None,
     approval_answer: Callable[[ApprovalRequest], ApprovalDecision] | None = None,
+    extra_metadata: Mapping[str, object] | None = None,
 ) -> ClientFlowResult:
     """Send one pure A2A request and answer its ``INPUT_REQUIRED`` rounds.
 
@@ -89,9 +99,13 @@ async def run_pure_client_flow(
         approval_answer: optional callback that answers an ``a2at-sample/approval`` request with a
             decision. Without it an approval request is an observation, not a question: the flow
             never invents an approval.
+        extra_metadata: metadata a hop must forward but does not own. It is merged into the first
+            outbound message, and the extension URIs it carries are declared in the
+            ``A2A-Extensions`` header. ``None`` keeps the standard-A2A request unchanged.
 
     The downstream correlation travels on the ``X-A2AT-Run-Id``/``traceparent`` headers (the
-    propagation context), so the message itself carries no sample-local metadata.
+    propagation context), so the message itself carries no sample-local metadata unless a caller
+    explicitly hands one over.
 
     Returns:
         The collected events, task id and report.
@@ -104,12 +118,16 @@ async def run_pure_client_flow(
             task_id=task_id,
             context_id=context_id,
             followup=PURE_FOLLOWUP_BOTH,
+            metadata=extra_metadata,
         )
         if task_id or context_id
-        else _pure_request(user_request)
+        else _pure_request(user_request, metadata=extra_metadata)
     )
     _emit_message_sent(request, user_request, trace_sink)
-    batch = await transport.send(request, _call_context(call_timeout_seconds))
+    batch = await transport.send(
+        request,
+        _call_context(call_timeout_seconds, extension_uris=_extension_uris(extra_metadata)),
+    )
     _collect(result, batch, event_sink, transport_emits_events)
     return await _drive_negotiation(
         transport=transport,
@@ -302,9 +320,13 @@ async def _drive_negotiation(
     return result
 
 
-def _pure_request(text: str) -> SendMessageRequest:
-    """Build one user-role A2A message with no metadata."""
-    return _message_request(text)
+def _pure_request(
+    text: str,
+    *,
+    metadata: Mapping[str, object] | None = None,
+) -> SendMessageRequest:
+    """Build one user-role A2A message carrying only the metadata a hop handed over."""
+    return _message_request(text, metadata=metadata)
 
 
 def build_follow_up_request(
@@ -331,11 +353,29 @@ def _follow_up_request(
     metadata: Mapping[str, object] | None = None,
 ) -> SendMessageRequest:
     """Build the continuation message that resumes an ``INPUT_REQUIRED`` Task."""
-    request = _message_request(text)
+    request = _message_request(text, metadata=metadata)
     if task_id and followup in (PURE_FOLLOWUP_BOTH, PURE_FOLLOWUP_TASK):
         request.message.task_id = task_id
     if context_id and followup in (PURE_FOLLOWUP_BOTH, PURE_FOLLOWUP_CONTEXT):
         request.message.context_id = context_id
+    return request
+
+
+def _message_request(
+    text: str,
+    *,
+    metadata: Mapping[str, object] | None = None,
+) -> SendMessageRequest:
+    """Build one user-role A2A message.
+
+    The run correlation travels on ``X-A2AT-Run-Id``/``traceparent`` headers, so a standard A2A
+    message stays exactly that: no sample-local key and no A2A-T extension. ``metadata`` is the
+    carrier a hop was handed, not a value this client invents.
+    """
+    request = SendMessageRequest()
+    request.message.message_id = str(uuid.uuid4())
+    request.message.role = Role.ROLE_USER
+    request.message.parts.add().text = text
     for key, value in (metadata or {}).items():
         if value is not None:
             # The bundled protobuf stubs do not model the dynamic Struct mapping.
@@ -343,24 +383,33 @@ def _follow_up_request(
     return request
 
 
-def _message_request(text: str) -> SendMessageRequest:
-    """Build one user-role A2A message with no metadata.
+def _extension_uris(metadata: Mapping[str, object] | None) -> tuple[str, ...]:
+    """Return the extension URIs whose payload is present in ``metadata``.
 
-    The run correlation travels on ``X-A2AT-Run-Id``/``traceparent`` headers, so a standard A2A
-    message stays exactly that: no sample-local key and no A2A-T extension.
+    The header follows the payload rather than the inbound header: declaring an extension whose
+    document we did not carry would ask the next hop for something we know is missing, and the
+    next hop rejects a declared-but-absent Task-T. An A2A-T hop that carried no contract travels
+    as a plain-A2A hop, which is what it is.
     """
-    request = SendMessageRequest()
-    request.message.message_id = str(uuid.uuid4())
-    request.message.role = Role.ROLE_USER
-    request.message.parts.add().text = text
-    return request
+    if not metadata:
+        return ()
+    return tuple(uri for uri in _EXTENSION_URI_KEYS if uri in metadata)
 
 
-def _call_context(timeout: float) -> ClientCallContext:
-    """Return the no-extension call context of one pure send."""
+def _call_context(
+    timeout: float,
+    *,
+    extension_uris: tuple[str, ...] = (),
+) -> ClientCallContext:
+    """Return the call context of one pure send.
+
+    Without a carried extension this is the empty ``A2A-Extensions`` header a standard-A2A
+    request always sent. With one, the header names exactly the extensions present in the
+    message metadata.
+    """
     return ClientCallContext(
         timeout=timeout,
-        service_parameters={"A2A-Extensions": ""},
+        service_parameters={"A2A-Extensions": ",".join(sorted(set(extension_uris)))},
     )
 
 

@@ -14,8 +14,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import httpx
+import protocol.oss_agent as oss_agent_module
 import pytest
 import uvicorn
+from a2a.client.client import ClientCallContext
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.context import ServerCallContext, UnauthenticatedUser
 from a2a.server.events import Event as A2AEvent
@@ -30,13 +32,15 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
-from a2a_t.core.metadata import TASK_T_EXTENSION_URI
+from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from demo.composition import build_demo_runtime
 from demo.pure_policy import build_demo_pure_policy, pure_answer_from_event
 from google.protobuf.json_format import MessageToDict
 from protocol.client_flow import ClientFlowResult
+from protocol.contract_carriage import CONTRACT_KEYS, DELEGATION_KEY, contract_digest
 from protocol.downstream_binding_store import DownstreamBinding, DownstreamBindingStore
 from protocol.intent import ProcessedIntent
+from protocol.messages import metadata_to_dict
 from protocol.mie_agent import build_mie_app
 from protocol.nms_client import NmsProtocolError
 from protocol.oss_agent import (
@@ -59,6 +63,7 @@ from shared.config import (
     DISCOVERY_NMS,
     LONG_TASK_MODE_OFF,
     LONG_TASK_MODE_ON,
+    OSS_CONTRACT_CARRY,
     TRANSPORT_SSE,
     TRANSPORT_WEBHOOK,
     SampleConfig,
@@ -254,8 +259,10 @@ def _fake_downstream(
         updater: object,
         call_context: object,
         attached: object = None,
+        *,
+        extra_metadata: object = None,
     ) -> ClientFlowResult:
-        del user_request, run_id, event_sink, updater, call_context, attached
+        del user_request, run_id, event_sink, updater, call_context, attached, extra_metadata
         return ClientFlowResult(final_state=final_state, task_id="nms-task-1")
 
     monkeypatch.setattr(executor, "_run_ran", run)
@@ -785,8 +792,10 @@ async def test_oss_failure_message_carries_the_downstream_refusal(
         updater: object,
         call_context: object,
         attached: object = None,
+        *,
+        extra_metadata: object = None,
     ) -> ClientFlowResult:
-        del user_request, run_id, event_sink, updater, call_context, attached
+        del user_request, run_id, event_sink, updater, call_context, attached, extra_metadata
         return ClientFlowResult(
             final_state=FINAL_STATE_TASK_FAILED,
             task_id="nms-task-1",
@@ -2195,3 +2204,140 @@ async def test_only_the_trailing_question_is_relayed_at_the_round_budget(
 
     assert result.final_state == FINAL_STATE_INCOMPLETE
     assert executor._pending_questions == {}
+
+
+class _NoopNmsClient:
+    """Stand-in for the shared NMS client; the transport itself is replaced by the test."""
+
+    def __init__(self) -> None:
+        self.wire_path: object = None
+
+    def set_wire_path(self, path: object) -> None:
+        """Record the wire path the hop binds (unused by the assertions)."""
+        self.wire_path = path
+
+
+def _carrying_context(text: str = "Start energy saving in Region A.") -> RequestContext:
+    """Build one inbound A2A-T request that reached the standard-A2A OSS hop."""
+    message = Message(message_id="message-1", role=Role.ROLE_USER, context_id="ctx-oss")
+    message.parts.add(text=text)
+    message.metadata[TASK_T_EXTENSION_URI] = "## Task Object\nThe area is Region A."
+    message.metadata[NEGOTIATION_T_EXTENSION_URI] = "Propose a solution."
+    message.metadata["negotiationContext"] = {
+        "id": "n-1",
+        "round": 1,
+        "maxRounds": 5,
+        "performative": "PROPOSE",
+    }
+    message.metadata["templateUri"] = "Negotiation-T/target-negotiation/propose/v1"
+    # Every contract key, so forwarding is exercised as a whole rather than on the two extension
+    # documents a warning-and-drop regression would keep by accident.
+    message.metadata["a2at-sample/task-t-v2"] = {"schemaUri": "urn:example:v2", "operation": "Create"}
+    message.metadata["a2at-sample/agreement"] = {"agreementId": "agr-1", "revision": 1}
+    message.metadata["a2at-sample/request-id"] = "sha256:req"
+    message.metadata["a2at-sample/baseline"] = {"version": 1, "planDigest": "sha256:base"}
+    message.metadata["a2at-sample/approval"] = {"version": 1, "approvalId": "apr-1"}
+    return RequestContext(
+        call_context=ServerCallContext(state={}, user=UnauthenticatedUser(), requested_extensions=set()),
+        request=SendMessageRequest(message=message),
+    )
+
+
+def _record_nms_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: list[tuple[SendMessageRequest, ClientCallContext]],
+) -> None:
+    """Replace the NMS SSE transport with one that records the downstream request."""
+
+    class _RecordingTransport:
+        def __init__(
+            self,
+            client: object,
+            *,
+            protocol: str = PROTOCOL_PURE,
+            request_timeout: float | None = None,
+            read_after_send: bool | None = None,
+        ) -> None:
+            del client, protocol, request_timeout, read_after_send
+
+        def set_event_sink(self, sink: object) -> None:
+            del sink
+
+        async def send(
+            self,
+            request: SendMessageRequest,
+            call_context: ClientCallContext,
+        ) -> list[dict[str, object]]:
+            recorded.append((request, call_context))
+            return []
+
+    monkeypatch.setattr(oss_agent_module, "NmsSseTransport", _RecordingTransport)
+
+
+def _carrying_executor(contract: str) -> OSSPureExecutor:
+    """Build one OSS executor whose NMS hop is replaced by a recording transport."""
+    config = replace(
+        offline_direct_config(8000),
+        discovery=DISCOVERY_NMS,
+        oss_contract=contract,
+    )
+    executor = OSSPureExecutor(config=config, answer=lambda event: "")
+    executor._nms_client = _NoopNmsClient()  # ty: ignore[invalid-assignment]
+    return executor
+
+
+async def test_carry_forwards_the_contract_and_names_the_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`carry` forwards the A2A-T carrier byte-identically and accounts for its hop."""
+    recorded: list[tuple[SendMessageRequest, ClientCallContext]] = []
+    _record_nms_transport(monkeypatch, recorded)
+    executor = _carrying_executor(OSS_CONTRACT_CARRY)
+    context = _carrying_context()
+    message = context.message
+    assert message is not None
+    inbound = metadata_to_dict(message.metadata)
+    expected_digest = contract_digest(inbound)
+
+    with caplog.at_level(logging.INFO, logger="ran_energy_saving.oss_agent"):
+        await executor.execute(context, _RecordingQueue())
+
+    request, call_context = recorded[0]
+    forwarded = metadata_to_dict(request.message.metadata)
+    assert forwarded[TASK_T_EXTENSION_URI] == inbound[TASK_T_EXTENSION_URI]
+    assert forwarded[NEGOTIATION_T_EXTENSION_URI] == inbound[NEGOTIATION_T_EXTENSION_URI]
+    for key in CONTRACT_KEYS:
+        assert key in forwarded, key
+        assert forwarded[key] == inbound[key], key
+
+    delegation = forwarded[DELEGATION_KEY]
+    assert isinstance(delegation, dict)
+    assert delegation["version"] == 2
+    hops = delegation["hops"]
+    assert isinstance(hops, list)
+    assert hops[-1] == {"hop": "oss", "digest": expected_digest, "assurance": "echoed"}
+
+    header = (call_context.service_parameters or {})["A2A-Extensions"]
+    assert TASK_T_EXTENSION_URI in header
+    assert NEGOTIATION_T_EXTENSION_URI in header
+    assert "carried the A2A-T contract opaquely" in caplog.text
+    assert "not served on this hop" not in caplog.text
+
+
+async def test_off_keeps_dropping_the_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default switch keeps the legacy warn-and-drop behaviour byte-identically."""
+    recorded: list[tuple[SendMessageRequest, ClientCallContext]] = []
+    _record_nms_transport(monkeypatch, recorded)
+    executor = _carrying_executor("off")
+
+    with caplog.at_level(logging.WARNING, logger="ran_energy_saving.oss_agent"):
+        await executor.execute(_carrying_context(), _RecordingQueue())
+
+    request, call_context = recorded[0]
+    assert metadata_to_dict(request.message.metadata) == {}
+    assert call_context.service_parameters == {"A2A-Extensions": ""}
+    assert "not served on this hop" in caplog.text

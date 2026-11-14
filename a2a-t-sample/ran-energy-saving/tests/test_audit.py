@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from shared.approval import plan_digest
+from shared.assurance import ASSURANCE_RECOMPUTED, Hop, report
 from shared.audit import (
     LINK_APPROVAL,
     LINK_BASELINE,
@@ -19,6 +20,7 @@ from shared.audit import (
     LINK_MISMATCHED,
     LINK_NOT_APPLICABLE,
     LINK_REQUEST,
+    LINK_RESTORED,
     LINK_UNVERIFIABLE,
     Artifacts,
     summarize,
@@ -46,6 +48,8 @@ def _full_chain(
     receipt_digest: str | None = None,
     baseline_plan: Mapping[str, object] | None = None,
     baseline_digest: str | None = None,
+    reversal_plan: Mapping[str, object] | None = None,
+    restored_plan: Mapping[str, object] | None = None,
     negotiated: bool = False,
 ) -> Artifacts:
     """Build one chain whose links agree unless the caller overrides that side."""
@@ -57,6 +61,8 @@ def _full_chain(
         receipt_digest=receipt_digest or plan_digest(PLAN),
         baseline_plan=baseline_plan,
         baseline_digest=baseline_digest,
+        reversal_plan=reversal_plan,
+        restored_plan=restored_plan,
         negotiated=negotiated,
     )
 
@@ -145,6 +151,19 @@ def test_a_receipt_for_another_plan_is_a_mismatch_even_without_the_executed_plan
     assert _statuses(links)[LINK_EXECUTION] == LINK_MISMATCHED
 
 
+def test_a_receipt_that_agrees_with_the_approval_but_carries_no_plan_is_unverifiable() -> None:
+    """Reaching the missing-plan branch needs the approval and receipt to agree first.
+
+    With a differing receipt the earlier approval-vs-receipt check answers, so a test that only
+    varies the receipt never exercises the branch this one is named after.
+    """
+    links = verify_chain(_full_chain(executed_plan=None, receipt_digest=plan_digest(PLAN)))
+
+    execution = next(link for link in links if link.name == LINK_EXECUTION)
+    assert execution.status == LINK_UNVERIFIABLE
+    assert execution.detail
+
+
 def test_a_change_order_is_checked_against_the_baseline_it_declared() -> None:
     previous = {**PLAN, "rateMbps": 30.0}
     changed = {**PLAN, "rateMbps": 10.0}
@@ -186,3 +205,88 @@ def test_an_unrelated_server_side_value_does_not_break_the_chain() -> None:
     links = verify_chain(_full_chain(requested_plan=noisy, accepted_plan=noisy))
 
     assert _statuses(links)[LINK_REQUEST] == LINK_MATCHED
+
+
+def test_a_readback_without_the_executed_plan_is_unverifiable_not_agreement() -> None:
+    """A matching digest only ties the readback to the approval; the values were never compared."""
+    links = verify_chain(_full_chain(executed_plan=None, receipt_digest=plan_digest(PLAN)))
+
+    execution = next(link for link in links if link.name == LINK_EXECUTION)
+    assert execution.status == LINK_UNVERIFIABLE
+    assert "no executed plan" in execution.detail
+
+
+def test_a_declared_baseline_without_its_plan_is_not_reported_as_absent() -> None:
+    """A baseline WAS carried; the report must say we cannot recompute it, not that it is missing."""
+    links = verify_chain(_full_chain(baseline_plan=None, baseline_digest=plan_digest(PLAN)))
+    baseline = next(link for link in links if link.name == LINK_BASELINE)
+
+    assert baseline.status == LINK_UNVERIFIABLE
+    assert "no baseline plan was carried" in baseline.detail
+    assert baseline.detail != "no change order on this run"
+
+
+def test_a_baseline_plan_without_a_declared_digest_is_unverifiable() -> None:
+    links = verify_chain(_full_chain(baseline_plan=PLAN, baseline_digest=None))
+    baseline = next(link for link in links if link.name == LINK_BASELINE)
+
+    assert baseline.status == LINK_UNVERIFIABLE
+    assert "no digest was declared" in baseline.detail
+
+
+def test_a_link_serialises_itself() -> None:
+    link = verify_chain(_full_chain())[0]
+
+    assert link.to_dict() == {
+        "name": LINK_REQUEST,
+        "status": LINK_MATCHED,
+        "detail": "",
+    }
+
+
+def test_a_run_without_a_reversal_contract_keeps_exactly_four_links() -> None:
+    links = verify_chain(_full_chain())
+
+    assert len(links) == 4
+    assert LINK_RESTORED not in _statuses(links)
+
+
+def test_a_reversal_contract_that_was_not_executed_is_not_applicable() -> None:
+    reversal = {**PLAN, "operation": "Restore", "rateMbps": 100.0}
+
+    links = verify_chain(_full_chain(reversal_plan=reversal))
+    restored = next(link for link in links if link.name == LINK_RESTORED)
+
+    assert restored.status == LINK_NOT_APPLICABLE
+    assert restored.detail == "the reversal contract was not executed"
+    assert len(links) == 5
+
+
+def test_an_executed_reversal_is_compared_with_the_contract() -> None:
+    reversal = {**PLAN, "operation": "Restore", "rateMbps": 100.0}
+
+    links = verify_chain(_full_chain(reversal_plan=reversal, restored_plan=dict(reversal)))
+
+    assert _statuses(links)[LINK_RESTORED] == LINK_MATCHED
+    assert summarize(links)["matched"] == 4
+
+
+def test_a_restoration_that_differs_from_the_contract_is_a_mismatch() -> None:
+    reversal = {**PLAN, "operation": "Restore", "rateMbps": 100.0}
+    restored = {**reversal, "rateMbps": 77.0}
+
+    links = verify_chain(_full_chain(reversal_plan=reversal, restored_plan=restored))
+
+    assert _statuses(links)[LINK_RESTORED] == LINK_MISMATCHED
+
+
+def test_the_summary_gains_the_assurance_report_only_when_asked() -> None:
+    links = verify_chain(_full_chain())
+    graded = report([Hop("ui", plan_digest(PLAN), ASSURANCE_RECOMPUTED)])
+
+    plain = summarize(links)
+    with_assurance = summarize(links, assurance=graded)
+
+    assert "assurance" not in plain
+    assert with_assurance["assurance"] == graded.to_dict()
+    assert {key: value for key, value in with_assurance.items() if key != "assurance"} == plain

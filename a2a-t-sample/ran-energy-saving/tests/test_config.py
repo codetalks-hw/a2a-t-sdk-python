@@ -72,6 +72,9 @@ from shared.config import (
     NMS_TOKEN_VALUE_ENV_KEY,
     NMS_VERIFY_TLS_ENV_KEY,
     NMS_WIRE_LOG_ENV_KEY,
+    OSS_CONTRACT_CARRY,
+    OSS_CONTRACT_ENV_KEY,
+    OSS_CONTRACT_OFF,
     OSS_HOST_ENV_KEY,
     OSS_PORT_ENV_KEY,
     OSS_TASK_DB_ENV_KEY,
@@ -132,6 +135,7 @@ _ENV_KEYS = (
     GATEWAY_TASK_DB_ENV_KEY,
     SERVER_AUTH_TOKEN_ENV_KEY,
     PROTOCOL_MODE_ENV_KEY,
+    OSS_CONTRACT_ENV_KEY,
     OSS_HOST_ENV_KEY,
     OSS_PORT_ENV_KEY,
     TRACE_URL_ENV_KEY,
@@ -1493,4 +1497,28 @@ def test_an_unknown_approval_answer_is_rejected(tmp_path: Path) -> None:
     env_file.write_text("A2AT_SAMPLE_APPROVAL_ANSWER=maybe\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=APPROVAL_ANSWER_ENV_KEY):
+        load_config(env_path=env_file)
+
+
+def test_the_oss_contract_switch_defaults_to_off(tmp_path: Path) -> None:
+    """A standard-A2A proxy must not start carrying a contract by accident."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    assert load_config(env_path=env_file).oss_contract == OSS_CONTRACT_OFF
+
+
+def test_the_oss_contract_switch_accepts_each_mode(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+
+    for value in (OSS_CONTRACT_OFF, OSS_CONTRACT_CARRY):
+        env_file.write_text(f"{OSS_CONTRACT_ENV_KEY}={value}\n", encoding="utf-8")
+        assert load_config(env_path=env_file).oss_contract == value
+
+
+def test_an_unknown_oss_contract_mode_is_rejected(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{OSS_CONTRACT_ENV_KEY}=understand\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=OSS_CONTRACT_ENV_KEY):
         load_config(env_path=env_file)

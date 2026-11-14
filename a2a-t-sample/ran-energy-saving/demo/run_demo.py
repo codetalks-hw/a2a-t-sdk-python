@@ -265,6 +265,9 @@ def _nms_sim_settings(values: dict[str, str], port: int) -> dict[str, str]:
         "A2AT_SAMPLE_NMS_SIM_FEASIBILITY_RATE_MBPS": _env_str(
             values, "A2AT_SAMPLE_NMS_SIM_FEASIBILITY_RATE_MBPS", "2"
         ),
+        "A2AT_SAMPLE_NMS_SIM_RESTORE_RATE_MBPS": _env_str(
+            values, "A2AT_SAMPLE_NMS_SIM_RESTORE_RATE_MBPS", "100"
+        ),
         "A2AT_SAMPLE_NMS_SIM_APPROVAL": _env_str(values, "A2AT_SAMPLE_NMS_SIM_APPROVAL", "0"),
         "A2AT_SAMPLE_NMS_SIM_APPROVAL_TTL_SECONDS": _env_str(
             values, "A2AT_SAMPLE_NMS_SIM_APPROVAL_TTL_SECONDS", "900"
@@ -1995,6 +1998,7 @@ def main() -> int:
                     "A2AT_SAMPLE_RAN_URL": f"http://{server_host}:{server_port}",
                     "A2AT_SAMPLE_OSS_HOST": server_host,
                     "A2AT_SAMPLE_OSS_PORT": str(args.oss_port),
+                    "A2AT_SAMPLE_OSS_CONTRACT": resolved_config.oss_contract,
                     "A2AT_SAMPLE_MODEL_MODE": args.model_mode,
                     **(
                         {"A2AT_SAMPLE_INTENT_MODE": args.intent_mode}
@@ -2041,6 +2045,7 @@ def main() -> int:
                 "A2AT_SAMPLE_RAN_URL": f"http://{server_host}:{server_port}",
                 "A2AT_SAMPLE_OSS_HOST": server_host,
                 "A2AT_SAMPLE_OSS_PORT": str(args.oss_port),
+                "A2AT_SAMPLE_OSS_CONTRACT": resolved_config.oss_contract,
                 "A2AT_SAMPLE_MODEL_MODE": args.model_mode,
                 **(
                     {"A2AT_SAMPLE_INTENT_MODE": args.intent_mode}

@@ -465,6 +465,9 @@ class ClientRuntime:
     baseline_plan: Mapping[str, object] | None = None
     #: v2 prototype: projects filled Task-T values onto the typed statement sent next to the prompt.
     typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None
+    #: v2 prototype: a stored agreement revision this run executes instead of sending a Task-T.
+    #: ``None`` keeps the ordinary generate-and-send flow.
+    agreement_ref: Mapping[str, object] | None = None
     intent_processor: IntentProcessor | None = None
     wire_log: HttpWireLog | None = None
     shared_webhook: SharedWebhook | None = None
@@ -858,6 +861,7 @@ class ClientRuntime:
                     approval_plan=self.approval_plan,
                     baseline_plan=self.baseline_plan,
                     typed_statement=self.typed_statement,
+                    agreement_ref=self.agreement_ref,
                 )
         finally:
             if intent_task is not None and not intent_task.done():
@@ -928,6 +932,7 @@ async def build_client_runtime(
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     baseline_plan: Mapping[str, object] | None = None,
     typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None,
+    agreement_ref: Mapping[str, object] | None = None,
 ) -> ClientRuntime:
     """Assemble the client runtime of one run.
 
@@ -960,6 +965,9 @@ async def build_client_runtime(
             which only the structured A2A-T hop can do.
         baseline_plan: the plan a Modify replaces; supplied by the caller that still holds the
             previously accepted one. Without it the change order declares no baseline.
+        typed_statement: v2 prototype projection of filled Task-T values onto the typed statement.
+        agreement_ref: v2 prototype reference to a stored agreement revision this run executes
+            instead of generating and sending a Task-T. ``None`` keeps the ordinary flow.
 
     Returns:
         The assembled runtime; the caller owns it and must call :meth:`ClientRuntime.aclose`.
@@ -1187,6 +1195,7 @@ async def build_client_runtime(
         approval_plan=approval_plan,
         baseline_plan=baseline_plan,
         typed_statement=typed_statement,
+        agreement_ref=agreement_ref,
         _httpx_client=httpx_client,
         nms_client=nms_client,
         wire_log=wire_log if httpx_client is not None else None,

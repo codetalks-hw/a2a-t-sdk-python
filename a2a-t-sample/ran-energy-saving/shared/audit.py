@@ -22,6 +22,7 @@ from typing import Final
 
 from a2a_t.core.plan_binding import plan_digest
 
+from shared.assurance import AssuranceReport
 from shared.plan import PLAN_FIELDS
 from shared.readback import STATUS_DEVIATED, STATUS_MATCHED, STATUS_UNVERIFIED
 
@@ -36,6 +37,7 @@ LINK_REQUEST: Final[str] = "request->accepted"
 LINK_APPROVAL: Final[str] = "accepted->approval"
 LINK_EXECUTION: Final[str] = "approval->execution"
 LINK_BASELINE: Final[str] = "change->baseline"
+LINK_RESTORED: Final[str] = "execution->restored"
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,10 @@ class Link:
     name: str
     status: str
     detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the report form of this verdict."""
+        return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,10 @@ class Artifacts:
         receipt_digest: Digest carried by the execution readback.
         baseline_plan: For a change order, the plan it declared as its baseline.
         baseline_digest: For a change order, the digest it declared.
+        reversal_plan: Plan the accepted agreement promised as the state to return to; ``None``
+            when the run has no reversal contract.
+        restored_plan: Plan the reversal execution reported as applied; ``None`` when the contract
+            was not executed.
         negotiated: Whether a negotiation changed values, making request != accepted legitimate.
     """
 
@@ -79,25 +89,34 @@ class Artifacts:
     receipt_digest: str | None = None
     baseline_plan: Mapping[str, object] | None = None
     baseline_digest: str | None = None
+    reversal_plan: Mapping[str, object] | None = None
+    restored_plan: Mapping[str, object] | None = None
     negotiated: bool = False
 
 
 def verify_chain(
     artifacts: Artifacts, fields: Sequence[str] = PLAN_FIELDS
 ) -> tuple[Link, ...]:
-    """Return one verdict per link of the chain, in a stable order."""
-    return (
+    """Return one verdict per link of the chain, in a stable order.
+
+    The restored link is appended only when the run carried a reversal contract. A run without one
+    has no such question to ask, so its chain keeps the original four links exactly.
+    """
+    links = [
         _request_link(artifacts, fields),
         _approval_link(artifacts, fields),
         _execution_link(artifacts, fields),
         _baseline_link(artifacts, fields),
-    )
+    ]
+    if artifacts.reversal_plan is not None:
+        links.append(_restored_link(artifacts, fields))
+    return tuple(links)
 
 
-def summarize(links: Sequence[Link]) -> dict[str, object]:
+def summarize(links: Sequence[Link], *, assurance: AssuranceReport | None = None) -> dict[str, object]:
     """Return the counts a report shows: how many links are decidable and how many agree."""
     applicable = [link for link in links if link.status != LINK_NOT_APPLICABLE]
-    return {
+    summary: dict[str, object] = {
         "links": len(links),
         "applicable": len(applicable),
         "matched": sum(1 for link in applicable if link.status == LINK_MATCHED),
@@ -106,6 +125,9 @@ def summarize(links: Sequence[Link]) -> dict[str, object]:
         "notApplicable": len(links) - len(applicable),
         "decidedBy": "digest",
     }
+    if assurance is not None:
+        summary["assurance"] = assurance.to_dict()
+    return summary
 
 
 def _request_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
@@ -148,23 +170,57 @@ def _execution_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
         return _compare(
             LINK_EXECUTION, artifacts.accepted_plan, artifacts.executed_plan, fields
         )
-    if artifacts.accepted_plan is None and artifacts.accepted_digest is None:
-        return Link(
-            LINK_EXECUTION,
-            LINK_UNVERIFIABLE,
-            "no accepted plan to compare the execution with",
-        )
-    if artifacts.accepted_plan is None and artifacts.accepted_digest is not None:
+    if artifacts.accepted_plan is None:
+        if artifacts.accepted_digest is None:
+            return Link(
+                LINK_EXECUTION,
+                LINK_UNVERIFIABLE,
+                "no accepted plan to compare the execution with",
+            )
         return _digest_link(LINK_EXECUTION, artifacts.accepted_digest, artifacts.receipt_digest)
-    return Link(LINK_EXECUTION, LINK_MATCHED, "")
+    # An accepted plan is held but the readback reported no executed plan. The receipt digest may
+    # already have matched the approval, but that compares the readback with the approval, not with
+    # the values any hop applied -- so this link cannot be called agreement.
+    return Link(
+        LINK_EXECUTION,
+        LINK_UNVERIFIABLE,
+        "the readback reports no executed plan to compare with the accepted one",
+    )
 
 
 def _baseline_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
-    if artifacts.baseline_digest is None or artifacts.baseline_plan is None:
+    if artifacts.baseline_digest is None and artifacts.baseline_plan is None:
         return Link(LINK_BASELINE, LINK_UNVERIFIABLE, "no change order on this run")
+    if artifacts.baseline_plan is None:
+        return Link(
+            LINK_BASELINE,
+            LINK_UNVERIFIABLE,
+            "a baseline was declared but no baseline plan was carried to recompute it from",
+        )
+    if artifacts.baseline_digest is None:
+        return Link(
+            LINK_BASELINE,
+            LINK_UNVERIFIABLE,
+            "a baseline plan was carried but no digest was declared to check it against",
+        )
     return _digest_link(
         LINK_BASELINE, plan_digest(artifacts.baseline_plan, fields), artifacts.baseline_digest
     )
+
+
+def _restored_link(artifacts: Artifacts, fields: Sequence[str]) -> Link:
+    restored_plan = artifacts.restored_plan
+    if restored_plan is None:
+        return Link(
+            LINK_RESTORED,
+            LINK_NOT_APPLICABLE,
+            "the reversal contract was not executed",
+        )
+    reversal_plan = artifacts.reversal_plan
+    if reversal_plan is None:
+        # Only reachable when called directly; verify_chain appends this link only with a contract.
+        return Link(LINK_RESTORED, LINK_UNVERIFIABLE, "no reversal plan to compare with")
+    return _compare(LINK_RESTORED, reversal_plan, restored_plan, fields)
 
 
 def _compare(
@@ -194,6 +250,7 @@ __all__ = [
     "LINK_MISMATCHED",
     "LINK_NOT_APPLICABLE",
     "LINK_REQUEST",
+    "LINK_RESTORED",
     "LINK_UNVERIFIABLE",
     "Artifacts",
     "Link",

@@ -5,7 +5,7 @@ Only this module (and the entry points that import it) may combine ``protocol`` 
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -95,6 +95,7 @@ async def build_demo_runtime(
     trace_sink: Callable[[dict[str, object]], None] | None = None,
     scripted_decisions: Sequence[NegotiationDecision] | None = None,
     pure_answers: Sequence[str] | None = None,
+    agreement_ref: Mapping[str, object] | None = None,
 ) -> Any:
     """Build one client runtime with the demo catalog and offline assets."""
     from protocol.client_policy import ClientPolicy
@@ -214,6 +215,8 @@ async def build_demo_runtime(
             if config.typed_payload and protocol == PROTOCOL_A2A_T
             else None
         ),
+        # v2 prototype: a run that names a stored agreement revision sends no Task-T at all.
+        agreement_ref=agreement_ref,
     )
 
 

@@ -149,6 +149,37 @@ async def test_the_delegation_chain_is_echoed_with_this_hop_appended() -> None:
     assert readback.delegation_chain == ("ui", "oss", "nms")
 
 
+async def test_a_chain_written_by_a_carrying_hop_is_understood() -> None:
+    """The v2 envelope a carrying hop writes must be readable by the next server, not ignored.
+
+    This is the seam between protocol/contract_carriage.append_hop and the server: if they disagree
+    about the wire shape, the chain silently disappears and the hop's accountability with it.
+    """
+    chain = {
+        "version": 2,
+        "hops": [
+            {"hop": "ui", "digest": "", "assurance": "declared"},
+            {"hop": "oss", "digest": "sha256:abc", "assurance": "echoed"},
+        ],
+    }
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        sent = await client.post(
+            SEND_URL,
+            json=_body(message_id="m-2", extra={DELEGATION_KEY: chain}),
+            headers=_headers(token),
+        )
+        document = await _wait(client, token, str(sent.json()["task"]["id"]))
+
+    artifacts = document["artifacts"]
+    assert isinstance(artifacts, list) and artifacts
+    readback = read_readback(artifacts[-1]["metadata"])
+
+    assert readback is not None
+    assert readback.delegation_chain == ("ui", "oss", "nms")
+
+
 async def test_a_retry_after_completion_returns_the_completed_task() -> None:
     """The returned Task is the one that already ran, so the client can read its receipt."""
     transport = httpx.ASGITransport(app=build_sim_app(_config()))

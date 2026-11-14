@@ -54,6 +54,7 @@ from a2a_t.core.metadata import (
     NegotiationPerformative,
     decode_extension_value,
 )
+from a2a_t.core.plan_binding import CanonicalFormError, canonical_json
 from a2a_t.core.standard_templates import (
     FEASIBILITY_NEGOTIATION_ACCEPT_REJECT_URI,
     FEASIBILITY_NEGOTIATION_PROPOSE_URI,
@@ -73,6 +74,14 @@ from a2a_t.negotiation.content import (
     TargetEndingContent,
 )
 from google.protobuf.json_format import ParseDict
+from shared.agreement import (
+    AGREEMENT_METADATA_KEY,
+    REQUEST_ID_METADATA_KEY,
+    Agreement,
+    agreement_ref_metadata,
+    read_agreement,
+    read_agreement_ref,
+)
 from shared.approval import (
     OUTCOME_REJECT,
     REASON_PLAN_STALE,
@@ -734,6 +743,11 @@ class ClientFlowResult:
     readback: dict[str, object] | None = None
     #: P5 audit chain: one verdict per link plus the counts, computed from the run's artifacts only.
     audit: dict[str, object] | None = None
+    #: Agreement revision this run executed, when it named one instead of sending a Task-T. Filled
+    #: from the agreement metadata the peer echoes back, so the client reports what the server
+    #: actually bound rather than what it asked for.
+    agreement_id: str = ""
+    revision: int = 0
 
 
 def is_terminal_event(event: Mapping[str, object]) -> bool:
@@ -980,6 +994,7 @@ async def run_client_flow(
     approval_plan: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     baseline_plan: Mapping[str, object] | None = None,
     typed_statement: Callable[[Mapping[str, object]], TypedStatement | None] | None = None,
+    agreement_ref: Mapping[str, object] | None = None,
 ) -> ClientFlowResult:
     """Run one complete client flow: initial Task-T, multi-round negotiation, task or end.
 
@@ -1056,6 +1071,10 @@ async def run_client_flow(
         typed_statement: v2 prototype. Projection from the filled Task-T values to the typed
             statement that travels next to the rendered prompt. When supplied and the values are
             already stateable, the peer reads the data instead of parsing prose.
+        agreement_ref: v2 prototype. ``{"agreementId": ..., "revision": ...}`` asking the peer to
+            execute a revision it already holds. The run then sends no Task-T and no typed
+            statement at all: the reference is the request. The extension header still declares
+            Task-T, which is what makes the peer classify the hop as A2A-T.
 
     Returns:
         The collected events, provider decisions and terminal state.
@@ -1244,6 +1263,69 @@ async def run_client_flow(
         raise ClientFlowError("A target Task can only be used by a Modify-only run.")
     resolved_label = TASK_MODIFY_LABEL if modify_only else label
     initial_phase = PHASE_TASK_MODIFY if modify_only else PHASE_TASK_PROMPT
+    reference = (
+        read_agreement_ref({AGREEMENT_METADATA_KEY: dict(agreement_ref)})
+        if agreement_ref is not None
+        else None
+    )
+    if agreement_ref is not None and reference is None:
+        raise ClientFlowError("An agreement reference must carry an agreementId.")
+    if reference is not None:
+        # Executing a stored revision needs no Task-T and no typed statement: the reference *is*
+        # the request. Generate none, validate none, negotiate none. The extension header still
+        # declares Task-T so the peer classifies the hop as A2A-T; the simulator checks the
+        # agreement before it reads any document, so a header without Task-T metadata is valid.
+        if modify_only:
+            raise ClientFlowError(
+                "An agreement reference executes a stored revision; it is not a Modify."
+            )
+        reference_request = _build_message_request(
+            metadata={
+                **agreement_ref_metadata(reference),
+                REQUEST_ID_METADATA_KEY: str(current_trace().run_id or "") or str(uuid.uuid4()),
+            },
+            label=resolved_label,
+        )
+        emit_message_sent(
+            reference_request,
+            phase=initial_phase,
+            title="Agreement reference sent",
+            performative="AGREEMENT_REFERENCE",
+            round_number=None,
+            context_id=None,
+        )
+        result = ClientFlowResult()
+        batch = await send_with_wait_activity(
+            reference_request,
+            _call_context((TASK_T_EXTENSION_URI,), call_timeout_seconds),
+            stage="agreement_reference_send",
+        )
+        collect(batch)
+        result.final_state = _final_state(batch)
+        _fill_result(result, _context_id_of(batch))
+        agreement = _agreement_of_events(result.events)
+        if agreement is not None:
+            result.agreement_id = agreement.agreement_id
+            result.revision = agreement.revision
+        # A reference run has no request document, so the revision digest is the accepted plan and
+        # the request link is not applicable by construction.
+        result.audit = _audit_of(
+            requested_plan=None,
+            accepted_plan=None,
+            accepted_digest=agreement.plan_digest if agreement is not None else None,
+            approval_digest=None,
+            readback=result.readback,
+            baseline_plan=None,
+            negotiated=True,
+            agreement=agreement,
+        )
+        _LOGGER.info(
+            "agreement reference finished: state=%s agreement=%s revision=%s",
+            result.final_state,
+            result.agreement_id or "-",
+            result.revision,
+        )
+        return result
     validation_schema: Mapping[str, object] = TASK_PARAM_SCHEMA
     # OSP `AL`: the moment OSS calls the A2A-T SDK. The span is written after the Task-T exists,
     # so the SDK call's own start/end is carried on it (the LLM spans inside are separate).
@@ -1494,6 +1576,7 @@ async def run_client_flow(
                 and requested_digest is not None
                 and accepted_digest != requested_digest
             ),
+            agreement=_agreement_of_events(result.events),
         )
         _LOGGER.info(
             "client flow finished: state=%s task_id=%s decisions=%d",
@@ -2416,6 +2499,28 @@ def _require_prompt_text(content: MetadataContent, what: str) -> str:
     return text
 
 
+def _agreement_of_events(events: list[dict[str, object]]) -> Agreement | None:
+    """Return the newest agreement revision echoed by a batch of normalized events.
+
+    A Task document carries it under ``metadata`` and a status frame carries it on the frame's own
+    metadata; both are read, and the last one seen wins because a revision can be bumped within
+    one batch.
+    """
+    found: Agreement | None = None
+    for event in events:
+        metadata = event.get("metadata")
+        agreement = read_agreement(metadata if isinstance(metadata, Mapping) else None)
+        if agreement is None:
+            task = event.get("task")
+            task_metadata = task.get("metadata") if isinstance(task, Mapping) else None
+            agreement = read_agreement(
+                task_metadata if isinstance(task_metadata, Mapping) else None
+            )
+        if agreement is not None:
+            found = agreement
+    return found
+
+
 def _latest_readback(events: list[dict[str, object]]) -> Readback | None:
     """Return the newest S8 readback carried by an artifact event, ``None`` when absent."""
     for event in reversed(events):
@@ -2439,10 +2544,18 @@ def _audit_of(
     readback: Mapping[str, object] | None,
     baseline_plan: Mapping[str, object] | None,
     negotiated: bool,
+    agreement: Agreement | None = None,
 ) -> dict[str, object]:
-    """Return the audit chain of one run as a report-ready document."""
+    """Return the audit chain of one run as a report-ready document.
+
+    The reversal link is asked only when this run holds a reversal contract, so a run that never
+    had one keeps the four links it always had. ``restoredFrom`` marks a readback produced by a
+    restoration: its ``executed`` plan is what the abort put back, not what the run applied.
+    """
     executed = readback.get("executed") if isinstance(readback, Mapping) else None
     receipt = readback.get("planDigest") if isinstance(readback, Mapping) else None
+    restored_from = readback.get("restoredFrom") if isinstance(readback, Mapping) else None
+    reversal_plan = agreement.reversal if agreement is not None else None
     artifacts = Artifacts(
         requested_plan=requested_plan,
         accepted_plan=accepted_plan,
@@ -2451,7 +2564,11 @@ def _audit_of(
         executed_plan=executed if isinstance(executed, Mapping) else None,
         receipt_digest=receipt if isinstance(receipt, str) else None,
         baseline_plan=baseline_plan,
-        baseline_digest=plan_digest(baseline_plan) if baseline_plan is not None else None,
+        baseline_digest=_digest_or_none(baseline_plan),
+        reversal_plan=reversal_plan,
+        restored_plan=(
+            executed if restored_from and isinstance(executed, Mapping) else None
+        ),
         negotiated=negotiated,
     )
     links = verify_chain(artifacts)
@@ -2468,13 +2585,31 @@ def _plan_for(
     projection: Callable[[Mapping[str, object]], Mapping[str, object]] | None,
     filled: Mapping[str, object] | None,
 ) -> Mapping[str, object] | None:
-    """Return the canonical plan of the accepted values, ``None`` when unavailable."""
+    """Return the canonical plan of the accepted values, ``None`` when unavailable.
+
+    A plan is only evidence if a peer can recompute it: a projection that lands outside the
+    canonical profile is reported as unavailable rather than handed to every digest caller, where
+    it would abort a run that could otherwise finish with honest ``unverifiable`` links.
+    """
     if projection is None or not filled:
         return None
     try:
-        return projection(filled)
-    except Exception:  # noqa: BLE001 - a projection failure must not end the run
-        _LOGGER.warning("approval plan projection failed", exc_info=True)
+        plan = projection(filled)
+        canonical_json(plan)
+    except Exception:  # noqa: BLE001 - evidence must never end the run
+        _LOGGER.warning("approval plan projection failed or is not canonical", exc_info=True)
+        return None
+    return plan
+
+
+def _digest_or_none(plan: Mapping[str, object] | None) -> str | None:
+    """Return a plan's digest, or ``None`` when the value is not contract-representable."""
+    if plan is None:
+        return None
+    try:
+        return plan_digest(plan)
+    except CanonicalFormError:
+        _LOGGER.warning("a reported plan is outside the canonical profile: %r", dict(plan))
         return None
 
 
@@ -2482,9 +2617,20 @@ def _plan_digest_for(
     projection: Callable[[Mapping[str, object]], Mapping[str, object]] | None,
     filled: Mapping[str, object] | None,
 ) -> str | None:
-    """Return the digest of the plan a filled Task-T represents, ``None`` when unavailable."""
+    """Return the digest of the plan a filled Task-T represents, ``None`` when unavailable.
+
+    A projection that yields a value outside the canonical profile is treated the same way as no
+    plan at all: this helper feeds evidence, and evidence must never abort a run that is otherwise
+    able to proceed.
+    """
     plan = _plan_for(projection, filled)
-    return plan_digest(plan) if plan is not None else None
+    if plan is None:
+        return None
+    try:
+        return plan_digest(plan)
+    except CanonicalFormError:
+        _LOGGER.warning("plan projection is outside the canonical profile: %r", dict(plan))
+        return None
 
 
 def _string_field(event: Mapping[str, object], key: str) -> str | None:

@@ -52,6 +52,7 @@ class Readback:
         agreement_id: Agreement the execution belongs to, when the hop has one.
         revision: Agreement revision executed, when the hop has one.
         delegation_chain: Hops the request passed through, in order.
+        restored_from: Digest of the plan this execution undid, when it executed a reversal.
     """
 
     plan_digest: str
@@ -62,6 +63,7 @@ class Readback:
     agreement_id: str = ""
     revision: int = 0
     delegation_chain: tuple[str, ...] = ()
+    restored_from: str = ""
 
     def to_metadata(self) -> dict[str, object]:
         """Return the metadata entry carrying this envelope."""
@@ -81,6 +83,7 @@ class Readback:
                     if self.delegation_chain
                     else {}
                 ),
+                **({"restoredFrom": self.restored_from} if self.restored_from else {}),
             }
         }
 
@@ -123,6 +126,7 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
     agreement_id = raw.get("agreementId")
     revision = raw.get("revision")
     chain = raw.get("delegationChain")
+    restored_from = raw.get("restoredFrom")
     return Readback(
         plan_digest=digest,
         executed=dict(executed),
@@ -136,6 +140,9 @@ def read_readback(metadata: Mapping[str, object] | None) -> Readback | None:
         agreement_id=agreement_id if isinstance(agreement_id, str) else "",
         revision=revision if isinstance(revision, int) and not isinstance(revision, bool) else 0,
         delegation_chain=tuple(str(hop) for hop in chain) if isinstance(chain, list) else (),
+        restored_from=(
+            restored_from if isinstance(restored_from, str) and restored_from else ""
+        ),
     )
 
 

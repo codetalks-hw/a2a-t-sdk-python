@@ -7,6 +7,8 @@ a revision counter, so a change order can say "target revision 1" and the server
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
 from a2a_t.core.metadata import TASK_T_EXTENSION_URI
@@ -358,3 +360,149 @@ async def test_an_unknown_agreement_is_refused() -> None:
 
     assert refused.status_code == 409
     assert "agreement-unknown" in refused.text
+
+
+# ---------------------------------------------------------------- reading malformed data
+
+
+def test_a_scopes_field_that_is_not_a_list_is_malformed() -> None:
+    raw = Agreement("a", 1, "d").to_dict()
+    raw["scopes"] = "not-a-list"
+
+    assert read_agreement({AGREEMENT_METADATA_KEY: raw}) is None
+
+
+def test_a_non_mapping_scope_entry_is_skipped_instead_of_raising() -> None:
+    raw = Agreement("a", 1, "d").to_dict()
+    raw["scopes"] = [{"window": "00:00-06:00", "rateMbps": 30}, "garbage", None]
+
+    agreement = read_agreement({AGREEMENT_METADATA_KEY: raw})
+
+    assert agreement is not None
+    assert agreement.scopes == ({"window": "00:00-06:00", "rateMbps": 30},)
+
+
+# ---------------------------------------------------------------- expiry predicate
+
+
+def test_an_agreement_without_an_expiry_never_expires() -> None:
+    assert Agreement("a", 1, "d").is_expired() is False
+
+
+def test_an_agreement_past_its_expiry_expires() -> None:
+    past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+    assert Agreement("a", 1, "d", expires_at=past).is_expired() is True
+
+
+def test_an_agreement_before_its_expiry_does_not_expire() -> None:
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+
+    assert Agreement("a", 1, "d", expires_at=future).is_expired() is False
+
+
+def test_a_naive_expiry_is_read_as_this_hosts_clock() -> None:
+    """A naive instant means the writer's clock, so both directions must follow this host.
+
+    The past case is the one that decides it: read as UTC instead of host-local, a fresh-looking
+    value still lands in the future on any positive-offset host, so only the expired side can tell
+    the two readings apart.
+    """
+    moment = datetime.now(UTC)
+    future = (moment.astimezone() + timedelta(hours=1)).replace(tzinfo=None)
+    past = (moment.astimezone() - timedelta(hours=1)).replace(tzinfo=None)
+
+    assert Agreement("a", 1, "d", expires_at=future.isoformat()).is_expired(moment) is False
+    assert Agreement("a", 1, "d", expires_at=past.isoformat()).is_expired(moment) is True
+
+
+def test_an_unparsable_expiry_is_not_expired_and_never_raises() -> None:
+    assert Agreement("a", 1, "d", expires_at="not-a-time").is_expired() is False
+
+
+def test_expiry_is_measured_against_the_supplied_instant() -> None:
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    agreement = Agreement("a", 1, "d", expires_at=moment.isoformat())
+
+    assert agreement.is_expired(moment - timedelta(seconds=1)) is False
+    assert agreement.is_expired(moment) is True
+
+
+# ---------------------------------------------------------------- agreement as a resource
+
+
+async def test_every_revision_is_readable_newest_first() -> None:
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(created.json())
+        task_id = str(created.json()["task"]["id"])
+        await client.post(
+            SEND_URL,
+            json=_body(
+                _prompt(operation="Modify", rate="10 Mbps"),
+                task_id=task_id,
+                metadata={
+                    BASELINE_METADATA_KEY: {
+                        "version": 1,
+                        "planDigest": agreement["planDigest"],
+                        "agreementId": agreement["agreementId"],
+                        "revision": 1,
+                    }
+                },
+            ),
+            headers=_headers(token),
+        )
+        fetched = await client.get(
+            f"/a2a/json/agreements/{agreement['agreementId']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    document = fetched.json()
+    assert fetched.status_code == 200
+    assert document["agreementId"] == agreement["agreementId"]
+    assert document["currentRevision"] == 2
+    assert [item["revision"] for item in document["revisions"]] == [2, 1]
+    assert document["revisions"][0]["planDigest"] != document["revisions"][1]["planDigest"]
+
+
+async def test_an_unknown_agreement_document_is_a_typed_404() -> None:
+    transport = httpx.ASGITransport(app=build_sim_app(_config()))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        fetched = await client.get(
+            "/a2a/json/agreements/agr-missing",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert fetched.status_code == 404
+    assert fetched.json() == {"reasonCode": REASON_UNKNOWN}
+
+
+async def test_the_listing_survives_eviction_of_the_task_that_produced_the_agreement() -> None:
+    """The agreement decides executability, so it must not be read through the Task list."""
+    transport = httpx.ASGITransport(app=build_sim_app(_config(task_limit=1)))
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        first = await client.post(SEND_URL, json=_body(_prompt()), headers=_headers(token))
+        agreement = _agreement_of(first.json())
+        evicting = await client.post(
+            SEND_URL, json=_body(_prompt(rate="10 Mbps")), headers=_headers(token)
+        )
+        tasks = await client.get(
+            "/a2a/json/tasks", headers={"Authorization": f"Bearer {token}"}
+        )
+        listed = await client.get(
+            "/a2a/json/agreements", headers={"Authorization": f"Bearer {token}"}
+        )
+        fetched = await client.get(
+            f"/a2a/json/agreements/{agreement['agreementId']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert [task["id"] for task in tasks.json()["tasks"]] == [evicting.json()["task"]["id"]]
+    ids = [entry["agreementId"] for entry in listed.json()["agreements"]]
+    assert agreement["agreementId"] in ids
+    assert fetched.status_code == 200
+    assert fetched.json()["currentRevision"] == 1

@@ -174,3 +174,23 @@ async def test_the_simulator_takes_the_deterministic_path_and_counts_it() -> Non
     assert sent.json()["task"]["status"]["state"] != "TASK_STATE_REJECTED"
     assert metrics.json()["protocols"]["a2a-t"]["paths"] == {"typed": 1}
     assert text_metrics.json()["protocols"]["a2a-t"]["paths"] == {"text": 1}
+
+
+async def test_a_value_outside_the_canonical_profile_is_a_client_error_not_a_crash() -> None:
+    """A statement schema-valid but not contract-representable must be rejected, not answered 500.
+
+    ``savingRatePercent`` only has to be non-negative to pass the statement reader, but the request
+    identity digests the whole statement -- and ``1e-7`` has no canonical decimal spelling. The server must
+    turn that into a refusal a peer can act on.
+    """
+    app = build_sim_app(SimConfig(fidelity=FIDELITY_FAST, window_policy=WINDOW_POLICY_ANY))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://sim") as client:
+        token = await _token(client)
+        response = await client.post(
+            "/a2a/json/message:send",
+            json=_body(statement=_statement(savingRatePercent=1e-7)),
+            headers={"Authorization": f"Bearer {token}", **HEADERS},
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == "canonical.invalid"

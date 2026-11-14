@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from a2a.client.client import ClientCallContext
 from a2a.types import SendMessageRequest
+from a2a_t.core.metadata import NEGOTIATION_T_EXTENSION_URI, TASK_T_EXTENSION_URI
 from demo.approval_answer import approval_answer
 from protocol.messages import metadata_to_dict
 from protocol.pure_client_flow import (
@@ -188,6 +189,61 @@ async def test_the_messages_carry_no_sample_or_extension_metadata() -> None:
     follow_up, _ = transport.requests[1]
     assert set(first_request.message.metadata) == set()
     assert set(follow_up.message.metadata) == set()
+
+
+async def test_extra_metadata_is_merged_and_declares_its_extensions() -> None:
+    """A hop hands over the carrier; the pure flow forwards it and names it in the header."""
+    transport = _FakeTransport([[_completed()]])
+    metadata = {
+        TASK_T_EXTENSION_URI: "## Task Object\nThe area is Region A.",
+        NEGOTIATION_T_EXTENSION_URI: "Propose a solution.",
+        "a2at-sample/delegation": {"version": 2, "hops": []},
+    }
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        extra_metadata=metadata,
+    )
+
+    request, context = transport.requests[0]
+    forwarded = metadata_to_dict(request.message.metadata)
+    assert forwarded == metadata
+    assert (context.service_parameters or {})["A2A-Extensions"] == ",".join(
+        sorted({TASK_T_EXTENSION_URI, NEGOTIATION_T_EXTENSION_URI})
+    )
+
+
+async def test_only_the_carried_extensions_are_declared() -> None:
+    """The header names what the message holds, not every extension the sample knows."""
+    transport = _FakeTransport([[_completed()]])
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Create a RAN energy saving task.",
+        extra_metadata={TASK_T_EXTENSION_URI: "## Task Object"},
+    )
+
+    _, context = transport.requests[0]
+    assert (context.service_parameters or {})["A2A-Extensions"] == TASK_T_EXTENSION_URI
+
+
+async def test_extra_metadata_survives_a_modify_request() -> None:
+    """A continuation is still the hop's request: the carrier must not fall off it."""
+    transport = _FakeTransport([[_completed()]])
+
+    await run_pure_client_flow(
+        transport=transport,  # type: ignore[arg-type]
+        user_request="Modify the existing task.",
+        task_id="task-1",
+        context_id="ctx-1",
+        extra_metadata={TASK_T_EXTENSION_URI: "## Task Object"},
+    )
+
+    request, context = transport.requests[0]
+    assert request.message.task_id == "task-1"
+    assert metadata_to_dict(request.message.metadata)[TASK_T_EXTENSION_URI] == "## Task Object"
+    assert (context.service_parameters or {})["A2A-Extensions"] == TASK_T_EXTENSION_URI
 
 
 async def test_the_default_answer_uses_the_server_proposal() -> None:

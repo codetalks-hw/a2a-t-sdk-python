@@ -57,6 +57,7 @@ class SimTask:
         history: Task history entries.
         timestamp_ms: Millisecond timestamp of the last update.
         shape: Task document shape (``standard`` or ``toplevel``).
+        delegation: Hops the request declared before this server.
     """
 
     task_id: str
@@ -90,12 +91,19 @@ class SimTask:
     #: The agreement revision this Task executes (v2 prototype). It rides on every Task document so
     #: a client can read the committed revision without another endpoint.
     agreement: dict[str, object] | None = None
+    #: The reversal contract of that revision: the state an abort must return to. Also embedded in
+    #: ``agreement`` (under the agreement metadata); kept here so the cancel route can execute it
+    #: without re-reading the document it just wrote.
+    reversal: dict[str, object] | None = None
     #: Protocol-level identities (v2 prototype): the request this Task answers and the execution it
     #: represents. A retry of the same request returns this Task instead of executing again.
     request_id: str = ""
     execution_id: str = ""
-    #: Hops the request passed through, including this server.
+    #: Hops the request passed through, including this server. Carried into the readback.
     delegation_chain: tuple[str, ...] = ()
+    #: Hops the request declared before this server, echoed on the standalone Task document so a
+    #: client can see the chain its request travelled without reading the artifact.
+    delegation: tuple[str, ...] = ()
 
     def touch(self) -> None:
         """Refresh the millisecond timestamp."""
@@ -138,6 +146,10 @@ class SimTask:
             }
             return document
         document["timestamp"] = self.timestamp_ms
+        if self.delegation:
+            # Only the standalone document carries this: the embedded form is parsed as an A2A
+            # ``Task`` by clients, which would reject a field their schema does not know.
+            document["delegation"] = list(self.delegation)
         if self.agreement is not None:
             document["metadata"] = agreement_metadata(self.agreement)
         if self.shape == TASK_SHAPE_TOPLEVEL:
