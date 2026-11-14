@@ -164,7 +164,7 @@ def build_runtime(
     return SimRuntime(
         store=TaskStore(limit=config.task_limit, shape=config.task_shape),
         tokens=TokenStore(config),
-        negotiations=NegotiationStore(),
+        negotiations=NegotiationStore(ttl_seconds=config.negotiation_ttl_seconds),
         pushes=PushSender(transport=push_transport),
         registry=PushRegistry(),
     )
@@ -214,6 +214,7 @@ def build_routes(
             "approval_tamper": config.approval_tamper,
             "baseline": config.baseline,
             "baseline_stale": config.baseline_stale,
+            "negotiation_ttl_seconds": config.negotiation_ttl_seconds,
             "max_saving_rate": config.max_saving_rate,
             "window": config.window,
         }
@@ -745,7 +746,13 @@ def build_routes(
         stream: bool,
     ) -> Response:
         """Handle a message that answers an open negotiation."""
-        session = negotiations.get(parsed_context.id)
+        session, expired = negotiations.lookup(parsed_context.id)
+        if session is None and expired:
+            # The exchange was open and is now out of budget. Answering "unknown id" would make a
+            # late client retry forever; the exchange is over, so the client must start again.
+            return negotiation_error(
+                f"negotiationContext.id '{parsed_context.id}' has expired; start a new request"
+            )
         if session is None:
             # The real NMS rejects a negotiation id it does not own; using the A2A context id as
             # the negotiation id is the concrete mistake this reproduces.

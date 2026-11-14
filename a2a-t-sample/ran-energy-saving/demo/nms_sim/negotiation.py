@@ -9,6 +9,7 @@ negotiation id, never by the A2A context id; the real NMS rejects that confusion
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -186,14 +187,24 @@ class NegotiationSession:
     context_id: str
     task_id: str | None = None
     baseline: "ExtractedContent | None" = None
+    #: ``time.monotonic`` instant after which the exchange is abandoned; ``None`` never expires.
+    expires_at: float | None = None
 
 
 class NegotiationStore:
     """In-memory negotiations keyed by their negotiated id."""
 
-    def __init__(self) -> None:
-        """Create one empty store."""
+    def __init__(self, *, ttl_seconds: float | None = None) -> None:
+        """Create one empty store.
+
+        Args:
+            ttl_seconds: How long an unanswered negotiation stays open. A client that dies inside
+                the negotiation window normally just re-runs the request, so the state that matters
+                is the server's: an abandoned session must not accumulate, and a late reply must get
+                a clear answer instead of silently starting a new exchange.
+        """
         self._sessions: dict[str, NegotiationSession] = {}
+        self._ttl_seconds = ttl_seconds
 
     def create(
         self,
@@ -205,6 +216,10 @@ class NegotiationStore:
         baseline: "ExtractedContent | None" = None,
     ) -> NegotiationSession:
         """Start one negotiation at round 1."""
+        # Opportunistic reaping: expired sessions are kept only long enough for a late reply to be
+        # told "expired" instead of "unknown", and a new exchange is the natural moment to sweep.
+        # The sweep runs before the insertion so a zero-length window can still be answered.
+        self._prune_expired()
         session = NegotiationSession(
             id=str(uuid.uuid4()),
             round=1,
@@ -213,13 +228,42 @@ class NegotiationStore:
             context_id=context_id,
             task_id=task_id,
             baseline=baseline,
+            expires_at=(
+                time.monotonic() + self._ttl_seconds
+                if self._ttl_seconds is not None
+                else None
+            ),
         )
         self._sessions[session.id] = session
         return session
 
+    def _prune_expired(self) -> None:
+        """Drop sessions whose window is over."""
+        now = time.monotonic()
+        for negotiation_id in [
+            key
+            for key, session in self._sessions.items()
+            if session.expires_at is not None and now >= session.expires_at
+        ]:
+            self._sessions.pop(negotiation_id, None)
+
+    def lookup(self, negotiation_id: str) -> tuple[NegotiationSession | None, bool]:
+        """Return one negotiation and whether it existed but has expired.
+
+        The second value is what lets the server answer "this exchange is over" instead of the
+        generic "unknown id": a client that retries after the window gets a terminal answer.
+        """
+        session = self._sessions.get(negotiation_id)
+        if session is None:
+            return None, False
+        if session.expires_at is not None and time.monotonic() >= session.expires_at:
+            self._sessions.pop(negotiation_id, None)
+            return None, True
+        return session, False
+
     def get(self, negotiation_id: str) -> NegotiationSession | None:
-        """Return one negotiation by id."""
-        return self._sessions.get(negotiation_id)
+        """Return one live negotiation by id, ``None`` when unknown or expired."""
+        return self.lookup(negotiation_id)[0]
 
     def context(self, session: NegotiationSession, *, performative: str = PERFORMATIVE_PROPOSE) -> NegotiationContext:
         """Return the context of the current round."""
@@ -248,6 +292,7 @@ class NegotiationStore:
         snapshot deliberately omits the extracted baseline: finding the handle must not turn into
         reading the other side's business request again.
         """
+        now = time.monotonic()
         return [
             {
                 "id": session.id,
@@ -258,7 +303,8 @@ class NegotiationStore:
                 "taskId": session.task_id,
             }
             for session in self._sessions.values()
-            if context_id is None or session.context_id == context_id
+            if (session.expires_at is None or now < session.expires_at)
+            and (context_id is None or session.context_id == context_id)
         ]
 
 

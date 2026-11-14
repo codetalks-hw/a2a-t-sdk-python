@@ -929,6 +929,22 @@ def test_sim_config_reads_the_change_order_baseline_switch(
         SimConfig.from_env()
 
 
+def test_sim_config_reads_the_negotiation_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The abandoned-negotiation window is configurable and defaults to half an hour."""
+    from demo.nms_sim.config import DEFAULT_NEGOTIATION_TTL_SECONDS, NEGOTIATION_TTL_ENV_KEY
+
+    monkeypatch.setenv("A2AT_SAMPLE_NMS_SIM_FIDELITY", FIDELITY_FAST)
+    monkeypatch.delenv(NEGOTIATION_TTL_ENV_KEY, raising=False)
+    assert SimConfig.from_env().negotiation_ttl_seconds == DEFAULT_NEGOTIATION_TTL_SECONDS
+
+    monkeypatch.setenv(NEGOTIATION_TTL_ENV_KEY, "30")
+    assert SimConfig.from_env().negotiation_ttl_seconds == 30.0
+
+    monkeypatch.setenv(NEGOTIATION_TTL_ENV_KEY, "-1")
+    with pytest.raises(ValueError, match=NEGOTIATION_TTL_ENV_KEY):
+        SimConfig.from_env()
+
+
 def test_sim_config_reads_the_feasibility_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """A tighter cell ceiling is how a client that assumes the default gets exposed."""
     from demo.nms_sim.config import FEASIBILITY_RATE_ENV_KEY, FIDELITY_ENV_KEY

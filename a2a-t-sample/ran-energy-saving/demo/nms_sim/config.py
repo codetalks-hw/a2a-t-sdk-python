@@ -69,6 +69,13 @@ BASELINE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_BASELINE"
 #: different one, standing in for another operator who changed it first.
 BASELINE_STALE_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_BASELINE_STALE"
 
+#: How long an unanswered A2A-T negotiation stays open, in seconds. The window is short by nature
+#: (one or two rounds), so the state that needs bounding is the server's, not the client's: an
+#: abandoned session must expire instead of accumulating, and a late reply must get a terminal
+#: answer. A client that dies inside the window re-runs the request -- nothing has executed yet.
+NEGOTIATION_TTL_ENV_KEY: Final[str] = "A2AT_SAMPLE_NMS_SIM_NEGOTIATION_TTL_SECONDS"
+DEFAULT_NEGOTIATION_TTL_SECONDS: Final[float] = 1800.0
+
 #: Window acceptance policies.
 WINDOW_POLICY_EXACT: Final[str] = "exact"
 WINDOW_POLICY_ANY: Final[str] = "any"
@@ -176,6 +183,7 @@ class SimConfig:
         baseline: ``required`` refuses a change order that names no baseline plan, or one that is
             no longer the Task's current plan (P3).
         baseline_stale: Measurement-only: the Task's current plan is reported as a different one.
+        negotiation_ttl_seconds: How long an unanswered A2A-T negotiation stays open.
     """
 
     fidelity: str = FIDELITY_STRICT
@@ -213,6 +221,8 @@ class SimConfig:
     baseline: str = BASELINE_OFF
     #: Measurement-only fault injection: the current plan is reported as a different one.
     baseline_stale: bool = False
+    #: How long an unanswered negotiation stays open (0 expires immediately; ``None`` never).
+    negotiation_ttl_seconds: float | None = DEFAULT_NEGOTIATION_TTL_SECONDS
 
     def __post_init__(self) -> None:
         """Apply the fast profile to settings built directly, not only through ``from_env``.
@@ -326,6 +336,12 @@ class SimConfig:
             readback_deviation=_truthy(os.environ.get(READBACK_DEVIATION_ENV_KEY, "")),
             baseline=baseline,
             baseline_stale=_truthy(os.environ.get(BASELINE_STALE_ENV_KEY, "")),
+            negotiation_ttl_seconds=_seconds(
+                os.environ.get(
+                    NEGOTIATION_TTL_ENV_KEY, str(DEFAULT_NEGOTIATION_TTL_SECONDS)
+                ),
+                key=NEGOTIATION_TTL_ENV_KEY,
+            ),
             approval_ttl_seconds=_seconds(
                 os.environ.get(APPROVAL_TTL_ENV_KEY, str(DEFAULT_APPROVAL_TTL_SECONDS))
             ),
@@ -354,14 +370,14 @@ def _rate(value: str) -> float:
     return rate
 
 
-def _seconds(value: str) -> float:
+def _seconds(value: str, *, key: str = APPROVAL_TTL_ENV_KEY) -> float:
     """Parse one non-negative duration in seconds."""
     try:
         seconds = float(value.strip())
     except ValueError as exc:
-        raise ValueError(f"Invalid {APPROVAL_TTL_ENV_KEY}: {value!r}") from exc
+        raise ValueError(f"Invalid {key}: {value!r}") from exc
     if seconds < 0:
-        raise ValueError(f"{APPROVAL_TTL_ENV_KEY} must not be negative")
+        raise ValueError(f"{key} must not be negative")
     return seconds
 
 

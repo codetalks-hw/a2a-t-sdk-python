@@ -246,6 +246,47 @@ async def test_a_closed_negotiation_leaves_the_listing() -> None:
     assert listing.json()["negotiations"] == []
 
 
+async def test_an_abandoned_negotiation_expires_instead_of_lingering() -> None:
+    """The state worth bounding is the server's: a short window, then a terminal answer.
+
+    A client that dies inside the negotiation window re-runs the request -- nothing has executed
+    yet -- so the server must drop the session rather than accumulate it, and a late reply must not
+    be mistaken for a new exchange or an unknown id.
+    """
+    transport = httpx.ASGITransport(
+        app=build_sim_app(_config(negotiation_ttl_seconds=0.0))
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        proposal = await client.post(
+            SEND_URL, json=_task_t_body(_prompt(region="UnknownRegion")), headers=_headers(token)
+        )
+        context = _negotiation_context(proposal)
+        listing = await client.get(
+            "/a2a/json/negotiations", headers={"Authorization": f"Bearer {token}"}
+        )
+        reply = await client.post(
+            SEND_URL,
+            json=_task_t_body(
+                _prompt(),
+                metadata={
+                    NEGOTIATION_T_EXTENSION_URI: "Accept.",
+                    NEGOTIATION_CONTEXT_METADATA_KEY: {
+                        "id": context["id"],
+                        "round": 1,
+                        "maxRounds": 5,
+                        "performative": "ACCEPT",
+                    },
+                },
+            ),
+            headers=_headers(token),
+        )
+
+    assert listing.json()["negotiations"] == []
+    assert reply.status_code == 422
+    assert "expired" in reply.text
+
+
 async def test_a_fresh_plain_client_resumes_from_the_task_id_alone() -> None:
     """Plain A2A has a server-side handle from the first message."""
     transport = httpx.ASGITransport(app=build_sim_app(_config()))
