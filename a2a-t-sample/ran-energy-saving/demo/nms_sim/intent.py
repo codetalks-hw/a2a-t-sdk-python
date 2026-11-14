@@ -156,6 +156,8 @@ class ParsedIntent:
         rate_mbps: First guaranteed throughput value, in Mbps.
         sites: Site names shown in the report text only.
         source: The Task-T prompt or the message text the values came from.
+        unstated: Contract fields this intent took from a served default rather than from the
+            request. The plan records them as absent instead of echoing the default.
     """
 
     operation: str
@@ -164,6 +166,7 @@ class ParsedIntent:
     rate_mbps: float
     sites: tuple[str, ...]
     source: str
+    unstated: tuple[str, ...] = ()
 
 
 class SimRequestError(Exception):
@@ -365,6 +368,16 @@ def select_issue(
     return NegotiationIssue(KIND_INFORMATION, issue.items, issue.detail)
 
 
+def _unstated_fields(content: ExtractedContent) -> tuple[str, ...]:
+    """Return the contract fields this request left to the server's defaults."""
+    unstated: list[str] = []
+    if not content.windows:
+        unstated.append("window")
+    if content.rate_mbps is None:
+        unstated.append("rateMbps")
+    return tuple(unstated)
+
+
 def accepted_intent(
     content: ExtractedContent,
     baseline: ExtractedContent | None,
@@ -376,6 +389,7 @@ def accepted_intent(
     untouched fields come from the original request and, failing that, from the served defaults.
     """
     merged = content.merged_with(baseline)
+    unstated = _unstated_fields(merged)
     return ParsedIntent(
         operation=merged.operation or "Create",
         # Echo what the request asked for; the report must not claim a different region or window.
@@ -390,6 +404,7 @@ def accepted_intent(
         rate_mbps=merged.rate_mbps if merged.rate_mbps is not None else DEFAULT_ACCEPT_RATE_MBPS,
         sites=merged.sites or config.sites,
         source=merged.source,
+        unstated=unstated,
     )
 
 
@@ -423,6 +438,7 @@ def parse_message_request(
         rate_mbps=content.rate_mbps if content.rate_mbps is not None else DEFAULT_ACCEPT_RATE_MBPS,
         sites=content.sites or config.sites,
         source=content.source,
+        unstated=_unstated_fields(content),
     )
 
 

@@ -20,14 +20,17 @@ class CanonicalPlan(TypedDict):
     Attributes:
         operation: Business operation, e.g. ``Create`` or ``Modify``.
         region: Area the operation applies to.
-        window: One ``HH:MM-HH:MM`` energy-saving window.
-        rateMbps: Guaranteed throughput of that window, in Mbps.
+        window: One ``HH:MM-HH:MM`` energy-saving window, or ``None`` when the request did not
+            state one. Absence is recorded as absence: a value the server filled in on the
+            client's behalf is a value the client cannot recompute, and the digest exists to make
+            exactly that difference visible.
+        rateMbps: Guaranteed throughput of that window in Mbps, or ``None`` for the same reason.
     """
 
     operation: str
     region: str
-    window: str
-    rateMbps: float
+    window: str | None
+    rateMbps: float | None
 
 
 #: Fields covered by the plan digest and by the readback comparison.

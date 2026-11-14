@@ -19,7 +19,7 @@ from typing import Final
 from shared.approval import ApprovalRequest, plan_digest
 from shared.plan import CanonicalPlan
 
-from demo.nms_sim.intent import ParsedIntent
+from demo.nms_sim.intent import DEFAULT_ACCEPT_RATE_MBPS, FULL_DAY_WINDOW, ParsedIntent
 
 #: Permission the approval grants. Kept as a name, not an enforced ACL.
 APPROVAL_SCOPE: Final[str] = "write:ran-energy-plan"
@@ -34,12 +34,17 @@ def plan_for(intent: ParsedIntent) -> CanonicalPlan:
     Only the fields the request fixes belong here, so both sides can reach the same object. The
     site list is excluded on purpose: it is server-side inventory, shown in the report text only,
     and a client cannot know it, so binding an approval to it would make the digest unverifiable.
+
+    A field the request did not state becomes ``None`` rather than the default the execution path
+    goes on to use. Echoing the default would put a number in the contract that the client never
+    sent and cannot reproduce, which is the one thing a digest must not do.
     """
+    unstated = set(intent.unstated)
     return {
         "operation": intent.operation,
         "region": intent.region,
-        "window": intent.window,
-        "rateMbps": intent.rate_mbps,
+        "window": None if "window" in unstated else intent.window,
+        "rateMbps": None if "rateMbps" in unstated else intent.rate_mbps,
     }
 
 
@@ -47,20 +52,32 @@ def intent_from_plan(plan: Mapping[str, object]) -> ParsedIntent:
     """Rebuild the accepted intent a parked plan came from.
 
     The site list is not part of the bound plan, so the rebuilt intent leaves it empty; it only
-    shapes the report text.
+    shapes the report text. A field the plan recorded as absent is filled here -- execution needs a
+    number -- and marked unstated, so :func:`plan_for` reproduces the same plan it came from.
     """
-    rate = plan.get("rateMbps")
+    raw_rate = plan.get("rateMbps")
+    rate = (
+        float(raw_rate)
+        if isinstance(raw_rate, (int, float)) and not isinstance(raw_rate, bool)
+        else None
+    )
+    raw_window = plan.get("window")
+    window = raw_window if isinstance(raw_window, str) and raw_window else ""
+    unstated: list[str] = []
+    if not window:
+        window = FULL_DAY_WINDOW
+        unstated.append("window")
+    if rate is None:
+        rate = DEFAULT_ACCEPT_RATE_MBPS
+        unstated.append("rateMbps")
     return ParsedIntent(
         operation=str(plan.get("operation") or "Create"),
         region=str(plan.get("region") or ""),
-        window=str(plan.get("window") or ""),
-        rate_mbps=(
-            float(rate)
-            if isinstance(rate, (int, float)) and not isinstance(rate, bool)
-            else 0.0
-        ),
+        window=window,
+        rate_mbps=rate,
         sites=(),
         source="",
+        unstated=tuple(unstated),
     )
 
 

@@ -26,15 +26,20 @@ TARGET_FIELD = "guaranteedThroughputTarget"
 
 
 def plan_from_task_t(filled: Mapping[str, object]) -> CanonicalPlan:
-    """Return the canonical plan a filled Task-T represents."""
+    """Return the canonical plan a filled Task-T represents.
+
+    A Task-T that states no target yields ``None`` for the window and the rate, not an empty string
+    and a zero. The server records the same absence the same way, so "nothing was stated" is one
+    value both sides can compute instead of two defaults that happen to differ.
+    """
     target = filled.get(TARGET_FIELD)
     segments = find_segments(target)
     segment = segments[0] if segments else None
     return {
         "operation": str(filled.get(OPERATION_FIELD) or ""),
         "region": str(filled.get(REGION_FIELD) or ""),
-        "window": f"{segment.start}-{segment.end}" if segment is not None else "",
-        "rateMbps": segment.rate_mbps if segment is not None else 0.0,
+        "window": f"{segment.start}-{segment.end}" if segment is not None else None,
+        "rateMbps": segment.rate_mbps if segment is not None else None,
     }
 
 

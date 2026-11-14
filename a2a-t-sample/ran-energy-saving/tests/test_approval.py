@@ -147,3 +147,59 @@ def test_matching_identity_and_plan_is_accepted() -> None:
     )
 
     assert verify_decision(request, decision) is None
+
+
+# ---------------------------------------------------------------- absence is a value
+
+
+def test_the_plan_records_an_unstated_rate_as_absent() -> None:
+    """Execution still needs 30 Mbps; the contract must record that nobody stated it.
+
+    A number the server filled in is a number the client cannot recompute, so echoing it would
+    make the approval impossible to sign -- which is exactly what happened before this rule.
+    """
+    from demo.nms_sim.approval import plan_for
+    from demo.nms_sim.intent import ParsedIntent
+
+    intent = ParsedIntent(
+        operation="Create",
+        region="A2ATestRegion",
+        window="00:00-06:00",
+        rate_mbps=30.0,
+        sites=(),
+        source="",
+        unstated=("rateMbps",),
+    )
+
+    plan = plan_for(intent)
+
+    assert plan["window"] == "00:00-06:00"
+    assert plan["rateMbps"] is None
+
+
+def test_a_plan_of_one_absent_field_round_trips_through_the_intent() -> None:
+    """Rebuilding the execution intent must not change the plan it came from."""
+    from demo.nms_sim.approval import intent_from_plan, plan_for
+
+    plan = {
+        "operation": "Create",
+        "region": "A2ATestRegion",
+        "window": None,
+        "rateMbps": None,
+    }
+
+    rebuilt = plan_for(intent_from_plan(plan))
+
+    assert rebuilt == plan
+
+
+def test_a_client_that_states_no_target_computes_the_same_absence() -> None:
+    """The client side must produce the same None the server records, or the digests differ."""
+    from demo.approval_plan import plan_from_task_t
+
+    plan = plan_from_task_t(
+        {"operationType": "Create", "region": "A2ATestRegion"}
+    )
+
+    assert plan["window"] is None
+    assert plan["rateMbps"] is None
