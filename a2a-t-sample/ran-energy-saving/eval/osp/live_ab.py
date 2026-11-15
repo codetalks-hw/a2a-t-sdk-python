@@ -170,9 +170,8 @@ async def _run_case(
     carrier: str,
     task_id: str | None,
     context_id: str | None,
+    baseline_plan: Mapping[str, object] | None = None,
 ) -> LiveRow:
-    from eval.osp.audit_batch import _create_baseline
-
     spans: list[dict[str, object]] = []
     token = set_global_sink(spans.append)
     try:
@@ -205,10 +204,11 @@ async def _run_case(
             run_mode=RUN_MODE_MODIFY if task_id else RUN_MODE_CREATE,
             target_task_id=task_id,
             target_context_id=context_id,
+            baseline_plan=baseline_plan,
         )
     finally:
         set_global_sink(None)
-        del token, _create_baseline
+        del token
     return _row(case, carrier, result, spans)
 
 
@@ -229,17 +229,21 @@ async def run_batch(carriers: Sequence[str]) -> list[LiveRow]:
             transport=httpx.ASGITransport(app=app), base_url="http://sim"
         ) as http:
             token = await _token(http)
-            task_id: str | None = None
-            context_id: str | None = None
-            baseline = (case.get("baseline") or {}).get("request")
-            if case.get("operation") == "Modify" and isinstance(baseline, str):
-                from eval.osp.audit_batch import _create_baseline
-
-                try:
-                    task_id, context_id = await _create_baseline(http, token, baseline)
-                except Exception:  # noqa: BLE001 - a case that cannot be prepared is a row
-                    task_id = context_id = None
             for carrier in carriers:
+                # One baseline Task per carrier: the previous arm's Modify changes the Task's plan.
+                task_id: str | None = None
+                context_id: str | None = None
+                baseline_plan: Mapping[str, object] | None = None
+                baseline = (case.get("baseline") or {}).get("request")
+                if case.get("operation") == "Modify" and isinstance(baseline, str):
+                    from eval.osp.audit_batch import _create_baseline
+
+                    try:
+                        task_id, context_id, baseline_plan = await _create_baseline(
+                            http, token, baseline
+                        )
+                    except Exception:  # noqa: BLE001 - a case that cannot be prepared is a row
+                        task_id = context_id = baseline_plan = None
                 try:
                     rows.append(
                         await _run_case(
@@ -249,6 +253,7 @@ async def run_batch(carriers: Sequence[str]) -> list[LiveRow]:
                             carrier=carrier,
                             task_id=task_id,
                             context_id=context_id,
+                            baseline_plan=baseline_plan,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - one case must not end the batch

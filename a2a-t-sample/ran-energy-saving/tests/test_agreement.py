@@ -19,6 +19,7 @@ from demo.nms_sim.config import (
     CARRIER_MESSAGE,
     FIDELITY_FAST,
     PURE_QUESTION_ISSUE,
+    RATE_POLICY_OPTIONAL,
     WINDOW_POLICY_ANY,
     SimConfig,
 )
@@ -506,3 +507,37 @@ async def test_the_listing_survives_eviction_of_the_task_that_produced_the_agree
     assert agreement["agreementId"] in ids
     assert fetched.status_code == 200
     assert fetched.json()["currentRevision"] == 1
+
+
+async def test_an_unstated_rate_is_recorded_as_absent_in_the_scope() -> None:
+    """The agreement's scopes describe the agreed plan, so an unstated value stays unstated.
+
+    Recording the execution default here would put a number in the agreement that no client sent;
+    the digest would then bind the client to something it cannot reproduce.
+    """
+    transport = httpx.ASGITransport(
+        app=build_sim_app(_config(rate_policy=RATE_POLICY_OPTIONAL))
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://sim") as client:
+        token = await _token(client)
+        created = await client.post(
+            SEND_URL,
+            json=_body(
+                "\n".join(
+                    [
+                        "## Operation Type",
+                        "",
+                        "Create",
+                        "",
+                        "## Task Object",
+                        "",
+                        "The area is A2ATestRegion.",
+                    ]
+                )
+            ),
+            headers=_headers(token),
+        )
+
+    assert created.status_code == 200, created.text
+    agreement = _agreement_of(created.json())
+    assert agreement["scopes"] == [{"window": None, "rateMbps": None}]

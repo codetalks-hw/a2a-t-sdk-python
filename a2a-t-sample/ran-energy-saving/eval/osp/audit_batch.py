@@ -37,12 +37,19 @@ from demo import ran_data
 from demo.approval_answer import approval_answer
 from demo.approval_plan import plan_from_task_t
 from demo.nms_sim.app import build_sim_app
-from demo.nms_sim.config import FIDELITY_FAST, RATE_POLICY_OPTIONAL, WINDOW_POLICY_ANY, SimConfig
+from demo.nms_sim.config import (
+    BASELINE_REQUIRED,
+    FIDELITY_FAST,
+    RATE_POLICY_OPTIONAL,
+    WINDOW_POLICY_ANY,
+    SimConfig,
+)
 from demo.typed_payload import typed_statement_from_task_t
 from protocol.client_flow import ClientFlowResult, run_client_flow
 from protocol.decision_provider import ScriptedDecisionProvider
 from protocol.nms_client import NmsClient, NmsConfig, NmsSseTransport
 from protocol.pure_client_flow import run_pure_client_flow
+from shared.approval import plan_digest
 from shared.models import NegotiationDecision
 from shared.run_constants import (
     FINAL_STATE_TASK_COMPLETED,
@@ -198,8 +205,13 @@ def _sim_config() -> SimConfig:
     return SimConfig(
         fidelity=FIDELITY_FAST,
         window_policy=WINDOW_POLICY_ANY,
+        # A missing rate is a legitimate mode, and the plan now records it as absent instead of
+        # echoing a default, so accepting it no longer produces an un-signable contract.
         rate_policy=RATE_POLICY_OPTIONAL,
         approval=True,
+        # A change order must name the plan it replaces; the server refuses one that does not,
+        # which is what makes the baseline link a check instead of a tautology.
+        baseline=BASELINE_REQUIRED,
     )
 
 
@@ -318,9 +330,32 @@ async def _token(http: httpx.AsyncClient) -> str:
     return str(response.json()["accessSession"])
 
 
+def _baseline_plan(document: Mapping[str, object]) -> dict[str, object]:
+    """Return the plan the paired baseline Task holds, read from what the server recorded.
+
+    Reading it from the agreement keeps the harness honest: it can only declare a baseline the
+    server actually has, which is what makes the later change-order check meaningful.
+    """
+    agreement = (document.get("metadata") or {}).get("a2at-sample/agreement") or {}
+    scopes = agreement.get("scopes") or [{}]
+    scope = scopes[0] if isinstance(scopes, list) and scopes else {}
+    return {
+        "operation": str(agreement.get("operation") or "Create"),
+        "region": str(agreement.get("region") or ""),
+        "window": scope.get("window") if isinstance(scope, Mapping) else None,
+        "rateMbps": scope.get("rateMbps") if isinstance(scope, Mapping) else None,
+    }
+
+
 async def _create_baseline(
     http: httpx.AsyncClient, token: str, text: str
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, object]]:
+    """Create the Task a Modify targets, and return its id, context and plan.
+
+    The plan is checked against the digest the server recorded: a harness that hands the client a
+    baseline the server does not hold would make the later change-order link meaningless.
+    """
+    task_t = _baseline_task_t(text)
     response = await http.post(
         "/a2a/json/message:send",
         json={
@@ -328,17 +363,23 @@ async def _create_baseline(
                 "messageId": "baseline-1",
                 "role": "ROLE_USER",
                 "parts": [{"text": "run"}],
-                "metadata": {TASK_T_EXTENSION_URI: _baseline_task_t(text)},
+                "metadata": {TASK_T_EXTENSION_URI: task_t},
             }
         },
         headers={"Authorization": f"Bearer {token}", "A2A-Extensions": TASK_T_EXTENSION_URI},
     )
     response.raise_for_status()
     document = response.json()
-    if "task" in document:
-        task = document["task"]
-        return str(task["id"]), str(task.get("contextId") or "")
-    raise RuntimeError(f"the baseline did not create a task: {str(document)[:200]}")
+    if "task" not in document:
+        raise RuntimeError(f"the baseline did not create a task: {str(document)[:200]}")
+    task = document["task"]
+    plan = _baseline_plan(task)
+    agreement = (task.get("metadata") or {}).get("a2at-sample/agreement") or {}
+    if agreement.get("planDigest") != plan_digest(plan):
+        raise RuntimeError(
+            "the harness baseline plan does not match the digest the server recorded"
+        )
+    return str(task["id"]), str(task.get("contextId") or ""), plan
 
 
 def _audit_row(
@@ -383,6 +424,7 @@ async def _run_a2a_t(
     *,
     task_id: str | None,
     context_id: str | None,
+    baseline_plan: Mapping[str, object] | None = None,
     typed: bool = False,
 ) -> CaseResult:
     nms = NmsClient(
@@ -426,6 +468,7 @@ async def _run_a2a_t(
         run_mode=RUN_MODE_MODIFY if task_id else RUN_MODE_CREATE,
         target_task_id=task_id,
         target_context_id=context_id,
+        baseline_plan=baseline_plan,
     )
     return _audit_row(case, PROTOCOL_A2A_T_TYPED if typed else PROTOCOL_A2A_T, result)
 
@@ -470,16 +513,20 @@ async def run_batch(protocols: Sequence[str]) -> list[CaseResult]:
             transport=httpx.ASGITransport(app=app), base_url="http://sim"
         ) as http:
             token = await _token(http)
-            task_id: str | None = None
-            context_id: str | None = None
-            baseline = (case.get("baseline") or {}).get("request")
-            if case.get("operation") == "Modify" and isinstance(baseline, str):
-                try:
-                    task_id, context_id = await _create_baseline(http, token, baseline)
-                except Exception as exc:  # noqa: BLE001 - a case that cannot be prepared is a row
-                    task_id = None
-                    _ = exc
             for protocol in protocols:
+                # One baseline Task per arm: the first arm's Modify changes the Task's plan, and a
+                # shared baseline would make the second arm declare a plan that is already stale.
+                task_id: str | None = None
+                context_id: str | None = None
+                baseline_plan: Mapping[str, object] | None = None
+                baseline = (case.get("baseline") or {}).get("request")
+                if case.get("operation") == "Modify" and isinstance(baseline, str):
+                    try:
+                        task_id, context_id, baseline_plan = await _create_baseline(
+                            http, token, baseline
+                        )
+                    except Exception:  # noqa: BLE001 - a case that cannot be prepared is a row
+                        task_id = context_id = baseline_plan = None
                 if protocol in (PROTOCOL_A2A_T, PROTOCOL_A2A_T_TYPED):
                     try:
                         rows.append(
@@ -488,6 +535,7 @@ async def run_batch(protocols: Sequence[str]) -> list[CaseResult]:
                                 http,
                                 task_id=task_id,
                                 context_id=context_id,
+                                baseline_plan=baseline_plan,
                                 typed=protocol == PROTOCOL_A2A_T_TYPED,
                             )
                         )
@@ -575,8 +623,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "settings": {
                         "fidelity": FIDELITY_FAST,
                         "windowPolicy": WINDOW_POLICY_ANY,
-                        "ratePolicy": RATE_POLICY_OPTIONAL,
                         "approval": True,
+                        "baseline": BASELINE_REQUIRED,
                         "taskT": "scripted from the case file",
                     },
                     "summary": summary,

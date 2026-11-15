@@ -954,7 +954,10 @@ def build_routes(
         agreement = next_revision(
             previous,
             plan=plan,
-            scopes=({"window": intent.window, "rateMbps": intent.rate_mbps},),
+            # Scopes describe the agreed plan, so they mirror the plan's own values -- including a
+            # field the request left unstated, which the plan records as absent rather than as the
+            # execution default.
+            scopes=({"window": plan.get("window"), "rateMbps": plan.get("rateMbps")},),
             expires_at=expires_at,
             reversal=reversal.to_dict(),
         )
