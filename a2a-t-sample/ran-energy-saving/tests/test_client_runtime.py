@@ -1007,3 +1007,49 @@ async def test_a_peer_that_does_not_number_its_rounds_get_a_sequence() -> None:
     await answer(event)
 
     assert rounds == [1, 2]
+
+
+async def test_the_typed_statement_rides_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_config: SampleConfig
+) -> None:
+    """The statement is the default carrier, because the rendered document alone cannot bind.
+
+    Measured on the OSP corpus: without it the client and the server hold different plans in 22 of
+    28 cases. The switch remains so the rendered-only wire stays available as the comparison arm.
+    """
+    import protocol.client_runtime as client_runtime
+    from dataclasses import replace
+
+    from demo.typed_payload import typed_statement_from_task_t
+
+    async def fake_discover(**kwargs: object) -> DiscoveredAgent:
+        del kwargs
+        return _card()
+
+    async def fake_create(agent: object, client_config: ClientConfig | None = None) -> _FakeA2AClient:
+        del agent, client_config
+        return _FakeA2AClient()
+
+    monkeypatch.setattr(client_runtime, "discover_agent", fake_discover)
+    monkeypatch.setattr(client_runtime, "create_client", fake_create)
+    monkeypatch.setenv("A2AT_LANGUAGE", offline_config.language)
+
+    default_runtime = await build_demo_runtime(
+        replace(offline_config, typed_payload=True),
+        "information",
+        "manual",
+        "sse",
+        offline_config.discovery,
+        env_path=tmp_path / "missing.env",
+    )
+    off_runtime = await build_demo_runtime(
+        replace(offline_config, typed_payload=False),
+        "information",
+        "manual",
+        "sse",
+        offline_config.discovery,
+        env_path=tmp_path / "missing.env",
+    )
+
+    assert default_runtime.typed_statement is typed_statement_from_task_t
+    assert off_runtime.typed_statement is None

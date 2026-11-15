@@ -849,8 +849,13 @@ class SampleConfig:
     envelope_decision: bool = False
     #: How the client answers an approval request: ``off`` / ``approve`` / ``reject``.
     approval_answer: str = "off"
-    #: Attach the typed Task-T statement (v2 prototype) to the initial request.
-    typed_payload: bool = False
+    #: Attach the typed Task-T statement to the initial request.
+    #:
+    #: On by default. Measured on the OSP corpus, the rendered document alone leaves the client and
+    #: the server holding different plans in 22 of 28 cases, so an approval cannot be signed; with
+    #: the statement both sides read the same data. A peer that only speaks v1 still receives the
+    #: rendered prompt and ignores the extra metadata.
+    typed_payload: bool = True
     gateway_task_db_path: str | None = None
     auth_token: str = ""
     server_auth_token: str = ""
@@ -1147,7 +1152,7 @@ def load_config(*, env_path: Path | None = None) -> SampleConfig:
         pure_auto_tier=_pure_auto_tier(values),
         envelope_decision=_env_bool(values, ENVELOPE_DECISION_ENV_KEY, False),
         approval_answer=_approval_answer(values),
-        typed_payload=_env_bool(values, TYPED_PAYLOAD_ENV_KEY, False),
+        typed_payload=_env_bool(values, TYPED_PAYLOAD_ENV_KEY, True),
         gateway_task_db_path=_optional_absolute_path(values, GATEWAY_TASK_DB_ENV_KEY),
         auth_token=_env_value(values, AUTH_TOKEN_ENV_KEY, "").strip(),
         server_auth_token=_env_value(values, SERVER_AUTH_TOKEN_ENV_KEY, "").strip(),

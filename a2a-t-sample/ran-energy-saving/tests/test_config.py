@@ -1477,19 +1477,20 @@ def test_approval_answer_reads_the_policy(tmp_path: Path) -> None:
     assert load_config(env_path=env_file).approval_answer == "approve"
 
 
-def test_the_typed_payload_switch_is_off_by_default(tmp_path: Path) -> None:
-    """The v2 prototype changes the wire; the rendered-only baseline stays reproducible."""
+def test_the_typed_payload_is_on_by_default(tmp_path: Path) -> None:
+    """The statement is what lets both sides hold the same plan; the rendered view still travels."""
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
 
-    assert load_config(env_path=env_file).typed_payload is False
-
-
-def test_the_typed_payload_switch_reads_the_environment(tmp_path: Path) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_text(TYPED_PAYLOAD_ENV_KEY + "=1" + chr(10), encoding="utf-8")
-
     assert load_config(env_path=env_file).typed_payload is True
+
+
+def test_the_typed_payload_can_be_turned_off(tmp_path: Path) -> None:
+    """The rendered-only wire stays reachable: it is the baseline the measurements compare against."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(TYPED_PAYLOAD_ENV_KEY + "=0" + chr(10), encoding="utf-8")
+
+    assert load_config(env_path=env_file).typed_payload is False
 
 
 def test_an_unknown_approval_answer_is_rejected(tmp_path: Path) -> None:

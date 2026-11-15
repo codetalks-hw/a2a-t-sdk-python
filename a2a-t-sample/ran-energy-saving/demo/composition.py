@@ -209,7 +209,7 @@ async def build_demo_runtime(
             if config.approval_answer != "off" and protocol == PROTOCOL_A2A_T
             else None
         ),
-        # v2 prototype: only the A2A-T hop carries a typed statement; the plain hop has no schema.
+        # Only the A2A-T hop carries a typed statement; the plain hop has no schema.
         typed_statement=(
             typed_statement_from_task_t
             if config.typed_payload and protocol == PROTOCOL_A2A_T
