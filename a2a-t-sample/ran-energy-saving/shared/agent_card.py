@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from a2a_t.core.plan_binding import CANONICAL_PROFILE
+
+from shared.assurance import ASSURANCE_RECOMPUTED
+from shared.typed_payload import TYPED_SCHEMA_URI
+
 #: AgentCard name registered in the registry.
 AGENT_CARD_NAME: Final[str] = "RAN NMS Agent"
 
@@ -33,3 +38,17 @@ AGENT_CARD_EXAMPLE: Final[str] = (
     "time-segment-based guaranteed throughput target is {00:00-07:00,2Mbps}, "
     "{07:00-17:30,10Mbps}, {17:30-23:00,20Mbps}, {23:00-24:00,2Mbps}."
 )
+
+#: What this agent can promise about the contract, published before the first message.
+#:
+#: The values are answers a client needs *before* it decides how much proof it will get: which
+#: statement schema the peer reads, which canonical form its digests use, the best assurance grade
+#: it can earn, and whether it publishes an agreement resource and a reversal. Discovering any of
+#: that from the result means the run already happened, which is the wrong time to learn it.
+TASK_T_CAPABILITY_PARAMS: Final[dict[str, object]] = {
+    "schemaUri": TYPED_SCHEMA_URI,
+    "canonicalForm": CANONICAL_PROFILE,
+    "assurance": ASSURANCE_RECOMPUTED,
+    "agreementResource": True,
+    "reversal": True,
+}

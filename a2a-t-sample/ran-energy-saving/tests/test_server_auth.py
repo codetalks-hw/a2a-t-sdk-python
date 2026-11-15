@@ -74,3 +74,29 @@ def test_the_client_header_follows_the_configured_token(
 
     secured = replace(offline_config, server_auth_token="server-secret")
     assert _server_auth_headers(secured) == {"Authorization": "Bearer server-secret"}
+
+
+def test_the_card_declares_what_a_client_can_rely_on_before_sending() -> None:
+    """Assurance is something a client should read, not something it discovers after the run.
+
+    The values are the peer's own claim, so they are the first thing the client can check against
+    what the run later earns.
+    """
+    from a2a_t.core.plan_binding import CANONICAL_PROFILE
+
+    from shared.agent_card import TASK_T_CAPABILITY_PARAMS
+    from shared.assurance import ASSURANCE_RECOMPUTED
+    from shared.typed_payload import TYPED_SCHEMA_URI
+
+    card = build_agent_card(host="127.0.0.1", port=8000)
+    task_t = next(
+        extension for extension in card.capabilities.extensions if "Task-T" in extension.uri
+    )
+    declared = dict(task_t.params)
+
+    assert declared["schemaUri"] == TYPED_SCHEMA_URI
+    assert declared["canonicalForm"] == CANONICAL_PROFILE
+    assert declared["assurance"] == ASSURANCE_RECOMPUTED
+    assert declared["agreementResource"] is True
+    assert declared["reversal"] is True
+    assert TASK_T_CAPABILITY_PARAMS["schemaUri"] == TYPED_SCHEMA_URI

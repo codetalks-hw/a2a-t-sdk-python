@@ -78,6 +78,7 @@ class LiveRow:
     unverifiable: int = 0
     full_chain: bool = False
     error: str = ""
+    error_code: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """Return the JSON-friendly row."""
@@ -96,6 +97,7 @@ class LiveRow:
             "unverifiable": self.unverifiable,
             "fullChain": self.full_chain,
             "error": self.error,
+            "errorCode": self.error_code,
         }
 
 
@@ -157,6 +159,7 @@ def _row(
         mismatched=int(summary.get("mismatched", 0)),
         unverifiable=int(summary.get("unverifiable", 0)),
         error=result.error or "",
+        error_code=result.error_code or "",
     )
     row.full_chain = row.completed and row.unverifiable == 0 and row.matched > 0
     return row
@@ -212,7 +215,9 @@ async def _run_case(
     return _row(case, carrier, result, spans)
 
 
-async def run_batch(carriers: Sequence[str]) -> list[LiveRow]:
+async def run_batch(
+    carriers: Sequence[str], cases: Sequence[int] | None = None
+) -> list[LiveRow]:
     """Run every runnable case for each carrier against the live model."""
     from a2a_t.client.a2at_client import A2ATClient
 
@@ -222,7 +227,10 @@ async def run_batch(carriers: Sequence[str]) -> list[LiveRow]:
     client = A2ATClient(env_path=sdk_env.path, logger=None)
 
     rows: list[LiveRow] = []
-    for case in _runnable_cases():
+    selected = _runnable_cases()
+    if cases:
+        selected = [case for case in selected if int(case["id"]) in set(cases)]
+    for case in selected:
         ran_data.reset()
         app = build_sim_app(_sim_config())
         async with httpx.AsyncClient(
@@ -296,9 +304,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--carriers", default=f"{PROTOCOL_A2A_T},{PROTOCOL_A2A_T_TYPED}")
+    parser.add_argument("--cases", default="", help="comma-separated case ids")
     args = parser.parse_args(argv)
     carriers = tuple(part.strip() for part in str(args.carriers).split(",") if part.strip())
-    rows = asyncio.run(run_batch(carriers))
+    selected = tuple(int(part) for part in str(args.cases).split(",") if part.strip())
+    rows = asyncio.run(run_batch(carriers, selected or None))
     summary = summarize(rows)
     for carrier, counts in summary.items():
         if isinstance(counts, dict):

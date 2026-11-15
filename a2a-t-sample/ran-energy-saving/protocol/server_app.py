@@ -57,6 +57,7 @@ from shared.agent_card import (
     AGENT_CARD_ORGANIZATION,
     AGENT_CARD_PROVIDER_URL,
     AGENT_CARD_SKILL_ID,
+    TASK_T_CAPABILITY_PARAMS,
 )
 from shared.config import SERVER_AUTH_TOKEN_ENV_KEY, SampleConfig, load_config
 from shared.http_security import (
@@ -181,6 +182,9 @@ def build_agent_card(*, host: str, port: int, secured: bool = False) -> AgentCar
                     uri=TASK_T_EXTENSION_URI,
                     description="Extension of structured prompt TASK-T requests.",
                     required=False,
+                    # What the client can rely on before it sends anything: schema, canonical form,
+                    # best assurance grade, and the two resources that make a run auditable.
+                    params=dict(TASK_T_CAPABILITY_PARAMS),
                 ),
                 AgentExtension(
                     uri=NEGOTIATION_T_EXTENSION_URI,
