@@ -97,6 +97,8 @@ class CaseResult:
     not_applicable: int = 0
     weakest: str = ""
     violations: int = 0
+    requests: int = 0
+    rounds: int = 0
     error: str = ""
 
     @property
@@ -127,6 +129,8 @@ class CaseResult:
             "fullChain": self.full_chain,
             "weakest": self.weakest,
             "violations": self.violations,
+            "requests": self.requests,
+            "rounds": self.rounds,
             "error": self.error,
         }
 
@@ -418,6 +422,13 @@ def _audit_row(
     return row
 
 
+async def _server_counters(http: httpx.AsyncClient, protocol: str) -> tuple[int, int]:
+    """Return the request and round counters the simulator holds for one protocol."""
+    metrics = await http.get("/a2a/json/metrics")
+    counters = metrics.json()["protocols"][protocol]
+    return int(counters.get("requests") or 0), int(counters.get("rounds") or 0)
+
+
 async def _run_a2a_t(
     case: Mapping[str, Any],
     http: httpx.AsyncClient,
@@ -529,21 +540,23 @@ async def run_batch(protocols: Sequence[str]) -> list[CaseResult]:
                         task_id = context_id = baseline_plan = None
                 if protocol in (PROTOCOL_A2A_T, PROTOCOL_A2A_T_TYPED):
                     try:
-                        rows.append(
-                            await _run_a2a_t(
-                                case,
-                                http,
-                                task_id=task_id,
-                                context_id=context_id,
-                                baseline_plan=baseline_plan,
-                                typed=protocol == PROTOCOL_A2A_T_TYPED,
-                            )
+                        row = await _run_a2a_t(
+                            case,
+                            http,
+                            task_id=task_id,
+                            context_id=context_id,
+                            baseline_plan=baseline_plan,
+                            typed=protocol == PROTOCOL_A2A_T_TYPED,
                         )
+                        row.requests, row.rounds = await _server_counters(http, PROTOCOL_A2A_T)
+                        rows.append(row)
                     except Exception as exc:  # noqa: BLE001 - one case must not end the batch
                         rows.append(_failed(case, protocol, exc))
                 else:
                     try:
-                        rows.append(await _run_pure(case, http))
+                        row = await _run_pure(case, http)
+                        row.requests, row.rounds = await _server_counters(http, PROTOCOL_A2A)
+                        rows.append(row)
                     except Exception as exc:  # noqa: BLE001
                         rows.append(_failed(case, protocol, exc))
     return rows
@@ -577,6 +590,8 @@ def summarize(rows: Sequence[CaseResult]) -> dict[str, object]:
             "unverifiableLinks": sum(row.unverifiable for row in subset),
             "mismatchedLinks": sum(row.mismatched for row in subset),
             "violations": sum(row.violations for row in subset),
+            "requests": sum(row.requests for row in subset),
+            "rounds": sum(row.rounds for row in subset),
             "errors": sum(1 for row in subset if row.error),
             "weakest": _count(row.weakest for row in subset if row.weakest),
         }
