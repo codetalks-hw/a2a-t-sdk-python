@@ -597,6 +597,7 @@ flowchart TB
 | D24 | 模型把字符串字段写成对象时怎么处理 | 直接失败 / 解析层窄归一 / 放宽共享模型 | 解析层窄归一：`confirmed_intent` / `feasibility_summary` 只有一个字符串值时取出该字符串；`filled_params` 同名键值不同则不归一，按错误报出 | 已对齐（2026-11-26） |
 | D25 | pure A2A 是否复用 A2A-T 的拦截后补充请求 | 复用 / 不复用 / 新增 pure 本地拦截门 | 不复用：`blocked_followup` 是 A2A-T 发送前门禁的补充请求；pure A2A 发原始请求，由网管的重叠反问和用例记录的 3 轮答复完成协商 | 已对齐（2026-11-26） |
 | D26 | NMS 500 `Agent SSE lock already held` 是否重试 | 有界重试 / 只记录 / 固定等待 | 只记录：客户端在 `INPUT_REQUIRED` 后已关闭自己的 SSE 响应，剩余串行化在网管侧；错误文案明确标注不重试 | 已对齐（2026-11-26） |
+| D27 | 导出表的交互过程报文放哪里 | 只给 wire 链接 / R 列逐帧原文 / 规范化 exchanges | R 列（原 origin_answer）整列改为逐帧原始报文，导出时读 `wire.jsonl` / `wire-oss.jsonl` / `wire-error.jsonl`（含 webhook 推送与重复丢弃帧）；answer 仍在 Q 列；超过 Excel 单元格上限时 R 截断并指向「交互报文」工作表 | 已对齐（2026-11-26） |
 
 **D5/D19 撤销说明（2026-11-24）**：决策依据（通用原则 + 用例 `client_conditions`）本来就会完整写入
 决策 prompt，grounding 也直接使用同一份依据；条件检查器是用第二个模型回答同一份依据里的问题，
@@ -612,6 +613,15 @@ flowchart TB
 观察：run `finished`、无 error，远端 Task 仍释放。意图比较先把同速率、相邻/重叠时段合并，避免
 `08:00-11:59 + 12:00-17:59` 与 `08:00-17:59` 被逐项索引配对成“缺失 + 值变更”；未判定残余、
 轮次偏差、未观察到的预期终态都落 `partial`，并在导出「判定原因」里写明具体阶段或 run 错误。
+
+**D27 说明（2026-11-26）**：仲裁格式表的 R 列原来是 `origin_answer`，与 Q 列「被测模型生成答案」
+是同一个 answer 对象的紧凑/缩进两种形式，信息重复。现在 R 列直接放该用例主 run 的逐帧交互报文：
+请求行、请求头、请求体、每个 SSE `data` 帧、webhook 推送（含 `dropped: duplicate`）以及
+`wire-error.jsonl` 里 SDK 拒收的帧，按时间顺序编号，正文保持原样，便于测试人员把整列贴给 AI
+排查。报文在导出时按 `runId` 从 run 目录读取，不写入 batch 快照：UI 每秒轮询整个 snapshot，
+逐帧报文进快照会让轮询和 `runs/tester/<batchId>.json` 成倍膨胀。Excel 单格上限 32767 字符，
+超限时 R 单元格截断并指向自动新增的「交互报文」工作表；该表按帧一行、单帧超长时分段续行，
+完整保留每一个字符。基线 run 与重跑 attempts 不展开，仍用结果表的 Run ID 定位。
 
 **D24–D26 说明（2026-11-26）**：run `cf17307c` 的 pure A2A 决策在 `confirmed_intent` 上返回了对象，
 pydantic 校验失败但解析器只报“no parseable JSON”。现在 `ValidationError` 的字段/类型会进入日志、
