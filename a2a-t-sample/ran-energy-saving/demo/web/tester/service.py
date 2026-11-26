@@ -102,7 +102,8 @@ from demo.web.tester.langfuse_columns import build_trace_columns
 _LOGGER = logging.getLogger("ran_energy_saving.tester")
 
 #: Delay after a run finishes before its Langfuse columns are prefetched (OTel ingestion lag).
-TRACE_PREFETCH_DELAY_SECONDS: Final[float] = 5.0
+#: Longer than ``TRACE_SETTLE_SECONDS``, so the first prefetch is normally already settled.
+TRACE_PREFETCH_DELAY_SECONDS: Final[float] = 20.0
 #: A fetch taken earlier than this after the run finished may miss late spans: it is cached but
 #: marked unsettled, so the next export refetches it.
 TRACE_SETTLE_SECONDS: Final[float] = 15.0
