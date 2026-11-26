@@ -189,14 +189,12 @@ NEGOTIATION_SOURCES: Final[tuple[str, ...]] = (
 def default_negotiation_source(model_mode: str) -> str:
     """Return the default reply source of a tester process in one model mode.
 
-    An offline process has no model, so it can only replay the case script; an online process
-    exercises the client agent by default.
+    The recorded case script is the default even with a live model: the OSP Q column is the
+    expected dialogue, so replaying it keeps the negotiation path deterministic. Exercising the
+    client agent stays an explicit per-batch choice.
     """
-    return (
-        NEGOTIATION_SOURCE_SCRIPT
-        if model_mode == MODEL_MODE_OFFLINE
-        else NEGOTIATION_SOURCE_AGENT
-    )
+    del model_mode  # The default no longer depends on the model mode.
+    return NEGOTIATION_SOURCE_SCRIPT
 
 #: Persisted batch schema; v1-v4 batches are still readable and load as the script source.
 SCHEMA: Final[str] = "osp-tester/v5"

@@ -964,8 +964,8 @@ def test_an_offline_batch_rejects_the_agent_negotiation_source(tmp_path: Path) -
         )
 
 
-def test_the_default_negotiation_source_follows_the_model_mode(tmp_path: Path) -> None:
-    """Offline defaults to the recorded script; an online model defaults to the client agent."""
+def test_the_default_negotiation_source_is_the_recorded_script(tmp_path: Path) -> None:
+    """Both model modes default to the case script; the client agent is an explicit choice."""
     offline = _manager(tmp_path / "offline", _FakeRuns(_finish), model_mode="offline").create(
         case_ids=[1],
         protocols=[PROTOCOL_A2A_T],
@@ -978,7 +978,7 @@ def test_the_default_negotiation_source_follows_the_model_mode(tmp_path: Path) -
     )
 
     assert offline["negotiationSource"] == "script"
-    assert live["negotiationSource"] == "agent"
+    assert live["negotiationSource"] == "script"
 
 
 def test_an_unknown_negotiation_source_is_rejected(tmp_path: Path) -> None:
