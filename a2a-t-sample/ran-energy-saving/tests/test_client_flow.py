@@ -23,6 +23,8 @@ from a2a.types import (
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from a2a_t.core.errors.catalog import ErrorCatalog
+from a2a_t.core.errors.exceptions import PromptGenerationError, SlotValidationError
 from a2a_t.core.metadata import (
     NEGOTIATION_CONTEXT_METADATA_KEY,
     NEGOTIATION_T_EXTENSION_URI,
@@ -130,6 +132,26 @@ _PROPOSE_URIS: dict[str, str] = {
     "target": TARGET_NEGOTIATION_PROPOSE_URI,
     "feasibility": FEASIBILITY_NEGOTIATION_PROPOSE_URI,
 }
+
+
+class _SlotBlockingPromptClient:
+    """Prompt client that simulates a slot block (the information scenario's local outcome)."""
+
+    def generate_task_prompt_from_text(self, text: str, template_uri: str) -> MetadataContent:
+        del text, template_uri
+        raise PromptGenerationError(
+            ErrorCatalog.SLOT_NOT_PROVIDED,
+            {"slot_label": "Area"},
+            message="'Area' is not provided in the input.",
+            failed_parameters=[
+                SlotValidationError(
+                    slot_name="task_object",
+                    code="slot.not_provided",
+                    message="'Area' is not provided in the input.",
+                    facts={"slot_label": "Area"},
+                )
+            ],
+        )
 
 
 @dataclass(frozen=True)
@@ -488,7 +510,6 @@ async def test_a_prepared_task_t_is_sent_without_regenerating_or_revalidating_it
         user_request="the original request the caller already extracted",
         provider=ScriptedDecisionProvider(()),
         language="en-US",
-        validate_before_send=True,
         prepared_task_t=prepared,
         prepared_filled={"Energy saving region": "A2ATestRegion"},
     )
@@ -2265,7 +2286,7 @@ async def test_real_sdk_client_runs_the_information_flow_offline(
     prompt_client = A2ATClient(env_path=env_path)
     transport = ScriptedTransport(
         [
-            [propose_event("information", 1)],
+            [propose_event("target", 1)],
             _task_completed_batch(),
         ]
     )
@@ -2273,8 +2294,8 @@ async def test_real_sdk_client_runs_the_information_flow_offline(
     result = await run_client_flow(
         prompt_client=prompt_client,
         transport=transport,
-        user_request=INFORMATION_NEGOTIATION_SPEC.user_request["en-US"],
-        provider=ScriptedDecisionProvider(INFORMATION_NEGOTIATION_SPEC.scripted_client_decisions),
+        user_request=SCENARIO_TARGET_SPEC.user_request["en-US"],
+        provider=ScriptedDecisionProvider(SCENARIO_TARGET_SPEC.scripted_client_decisions),
         language="en-US",
     )
 
@@ -2379,18 +2400,20 @@ async def test_decision_hook_fires_before_the_response_is_sent() -> None:
     # The callback owns the decision row, so the flow must not emit an adjacent duplicate span.
     assert [span["kind"] for span in spans] == [
         "task_prompt_rendered",
+        "task_validation",
         "message_sent",
         "decision_requested",
         "message_sent",
     ]
     assert [span["phase"] for span in spans] == [
         "task_prompt",
+        "task_prompt",
         "task_validation",
         "negotiation",
         "resolution",
     ]
-    assert spans[1]["direction"] == "client->server"
-    assert spans[2]["round"] == 1
+    assert spans[2]["direction"] == "client->server"
+    assert spans[3]["round"] == 1
     # The rendered Task-T names the request it came from, so a follow-up dispatch is traceable.
     assert spans[0]["detail"]["userRequest"] == "request"
 
@@ -2462,14 +2485,18 @@ async def test_trace_phases_and_steps_for_every_scenario(scenario_name: str) -> 
     """Every scenario exposes ordered phases with contiguous per-phase steps and unique ids."""
     scenario = get_scenario(scenario_name)
     spans: list[dict[str, object]] = []
+    prompt_client = (
+        _SlotBlockingPromptClient()
+        if scenario.expected_final_state == "input_invalid"
+        else FakePromptClient()
+    )
 
     result = await run_client_flow(
-        prompt_client=FakePromptClient(),
+        prompt_client=prompt_client,
         transport=ScriptedTransport(_scenario_batches(scenario_name)),
         user_request=scenario.user_request["en-US"],
         provider=ScriptedDecisionProvider(scenario.scripted_client_decisions),
         language="en-US",
-        enforce_required_fields=(scenario_name == "information"),
         trace_sink=spans.append,
     )
 

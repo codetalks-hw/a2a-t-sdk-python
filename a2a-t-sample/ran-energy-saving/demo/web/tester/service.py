@@ -1757,7 +1757,6 @@ class EvalBatchManager:
             target_server_context_id=target_server_context_id,
             scripted_decisions=decisions or None,
             pure_answers=answers or None,
-            validate_before_send=_pre_send_validation(runner),
             language=resolved_language,
             correction=correction,
             negotiation_source=batch.negotiation_source,
@@ -1885,7 +1884,6 @@ class EvalBatchManager:
             idempotency_key=idempotency_key,
             source={"kind": "tester", "channel": "tester-scratch", "batchId": batch.batch_id},
             scripted_decisions=(),
-            validate_before_send=True,
             negotiation_source=batch.negotiation_source,
             negotiation_principles=batch.principles_text,
             principles_version=batch.principles_version,
@@ -2031,8 +2029,6 @@ class EvalBatchManager:
                 if protocol == PROTOCOL_PURE and self._replays_pure_dialogue()
                 else None
             ),
-            # Only the A2A-T flow has a Task-T pre-send gate; the pure hop sends raw text.
-            validate_before_send=protocol == RUNTIME_A2A_T,
             # The paired Create follows the same reply source and frozen principles as the batch.
             negotiation_source=batch.negotiation_source,
             negotiation_principles=batch.principles_text,
@@ -4252,16 +4248,6 @@ def _case_runner(case: Mapping[str, Any] | None) -> Mapping[str, Any]:
         return {}
     runner = case.get("runner")
     return runner if isinstance(runner, Mapping) else {}
-
-
-def _pre_send_validation(runner: Mapping[str, Any]) -> bool | None:
-    """Map ``runner.pre_send_validation`` to the run override (``None`` keeps the process rule)."""
-    value = runner.get("pre_send_validation")
-    if value == "always":
-        return True
-    if value == "off":
-        return False
-    return None
 
 
 def _assertion_enabled(case: Mapping[str, Any], protocol: str, key: str) -> bool:

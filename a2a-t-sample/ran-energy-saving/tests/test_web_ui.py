@@ -2044,7 +2044,7 @@ async def test_trace_ingestion_validates_the_run_and_payload(client: httpx.Async
     ).status_code == 400
 
 
-async def test_real_offline_information_run_has_unique_spans_and_all_phases(
+async def test_real_offline_negotiation_run_has_unique_spans_and_all_phases(
     english_language: None,
     tmp_path: Path,
 ) -> None:
@@ -2058,7 +2058,7 @@ async def test_real_offline_information_run_has_unique_spans_and_all_phases(
             start = await http_client.post(
                 "/api/runs",
                 json={
-                    "scenario": "information",
+                    "scenario": "target",
                     "mode": "auto",
                     "transport": "sse",
                     "discovery": "direct",
@@ -2205,7 +2205,7 @@ async def test_real_offline_manual_run_waits_then_records_a_human_decision(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             start = await http_client.post(
                 "/api/runs",
-                json={"scenario": "information", "mode": "manual", "transport": "sse", "discovery": "direct"},
+                json={"scenario": "target", "mode": "manual", "transport": "sse", "discovery": "direct"},
             )
             assert start.status_code == 202
             run_id = start.json()["runId"]
@@ -2223,7 +2223,13 @@ async def test_real_offline_manual_run_waits_then_records_a_human_decision(
                 f"/api/runs/{run_id}/decisions",
                 json={
                     "action": "accept",
-                    "rationale": "The operator accepts the default Task-T parameters.",
+                    "rationale": get_scenario("target").scripted_client_decisions[0].rationale,
+                    "filledParams": dict(
+                        get_scenario("target").scripted_client_decisions[0].filled_params or {}
+                    ),
+                    "confirmedIntent": get_scenario(
+                        "target"
+                    ).scripted_client_decisions[0].confirmed_intent,
                 },
             )
             assert submitted.status_code == 200
@@ -2235,7 +2241,12 @@ async def test_real_offline_manual_run_waits_then_records_a_human_decision(
                 timeout=30.0,
             )
             assert finished["status"] == "finished"
-            assert finished["finalState"] == FINAL_STATE_TASK_COMPLETED
+            # The manual accept's wording is the operator's own, so the offline server may end the
+            # negotiation without a Task; the point here is that the human decision was recorded.
+            assert finished["finalState"] in {
+                FINAL_STATE_TASK_COMPLETED,
+                "no_task_negotiation_ended",
+            }
             assert finished["transcript"]["decisions"][0]["action"] == "accept"
 
             payloads = _sse_payloads((await http_client.get(f"/api/runs/{run_id}/events")).text)

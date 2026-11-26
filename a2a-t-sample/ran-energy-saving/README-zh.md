@@ -249,32 +249,22 @@ HTTP 503 取消应答。
   `--intent-mode processed` 或 `POST /api/runs {"intentMode":"processed"}`；发送的始终是原文。
   Gateway 入站文本一律按 raw 处理。
 
-### 发送前 Task-T 校验
+### 发送前 Task-T 检查
 
-A2A-T 模式下，演示页在发送前用 SDK 内容校验检查渲染后的 Task-T。校验位于渲染之后、审批 1 之前，
-被阻断的请求不会发送，也不会开启协商。
+客户端不再调用 SDK 的内容校验接口（`validate_task_prompt_and_data_filling`）。Task-T 发送前只做
+一次本地检查，数据来自刚刚渲染出的 Task-T 本身：
 
-- `A2ATClient.validate_task_prompt_and_data_filling` 是服务端同名方法的客户端入口，共用
-  `DefaultContentValidator` 和语义校验提示词。
-- 能映射到服务端协商类型（`INFORMATION` / `TARGET` / `FEASIBILITY`）的错误是可协商的，仍然发送，
-  协商演示不受影响。条目内缺字段（`content.entry_field_missing`，例如缺 Rate）属于信息协商，
-  不再硬阻断。
-- **OSS agent 会拦截自己的必填项。** SDK 抽取完调用方 schema 的参数后，必填值缺失（例如保障速率）
-  会在 OSS 层停住：不发送请求，校验卡提示操作员补充。这是 `TASK_PARAM_SCHEMA.required` 的业务门，
-  与网管侧的 Task-T 协商是两回事；调用方 schema 未要求的字段仍会发给服务端，由网管协商。
-  内置的信息 / 拒绝 / 中止场景刻意省略必填值来演示服务端协商，会跳过这道门；操作员输入或编辑的
-  请求始终执行检查。
-- 映射不到的错误会阻断发送：run 以 `finished` + `final_state=input_invalid` 结束，记录
-  `task_validation` trace，页面内联展示问题。
-- 业务 slot 抽取失败（`slot.constraint_violated` 等）发生在 Task-T 存在之前，也按同样方式呈现：
-  一条 blocked 的 `task_validation` 记录，带结构化 slot 错误，并复用编辑重试卡片；
-  基础设施失败仍然抛出。
-- LLM/基础设施失败降级为 warning 并放行；模型故障不会中断演示。
-- 选中任务的 Modify Task-T 走同一道门；被阻断时不发送任何内容。
+- **唯一的本地拦截是业务 slot 抽取失败**（`slot.constraint_violated` / `slot.not_provided` 等）。
+  它发生在 Task-T 存在之前，run 以 `finished` + `final_state=input_invalid` 结束，不发送任何内容；
+  `task_validation` trace 记录结构化 slot 错误，演示页复用编辑重试卡片。基础设施失败仍然抛出。
+- **Task-T 生成成功后不再有第二次模型调用。** 客户端从渲染后的 Task-T 回读业务字段
+  （操作类型、区域、节能目标、速率保障目标；站点列表和背景事件按标签还原），用于 accept 补全和
+  decision grounding。为了保持证据形状，run 仍记录一条 `verdict=passed` 的本地 `task_validation` trace。
+- 选中任务的 Modify Task-T 走同一道检查；被阻断时不发送任何内容。
 - 在校验卡中修改原始请求会**新建一次 run**；失败的 run 保留在历史中，并通过
   `parentRunId` 关联。重试沿用同一个 `chainId`，但新建 run、会话和 trace，因此被拦截的原文
   不会进入下一轮 Task-T 的会话上下文。
-- `A2AT_SAMPLE_PRE_SEND_VALIDATION=on|always|off` 控制范围；默认 `on`，只覆盖演示页。
+- 旧的 `A2AT_SAMPLE_PRE_SEND_VALIDATION` 已移除；已有的 `.env` 里残留该键会被忽略，不会报错。
 
 ### Langfuse 可观测
 

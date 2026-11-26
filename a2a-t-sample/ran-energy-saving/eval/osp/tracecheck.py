@@ -210,7 +210,6 @@ class TraceContext:
     followup: bool = False
     rounds: int = 0
     accepted: bool = True
-    validation_on: bool = True
     run_id: str | None = None
 
 
@@ -428,14 +427,6 @@ def expected_client_points(context: TraceContext) -> tuple[TracePoint, ...]:
         TracePoint("task_prompt_rendered", "Task-T 渲染", kind="task_prompt_rendered"),
         TracePoint("task_validation", "Task-T 校验", kind="task_validation", interception=False),
     ]
-    if context.validation_on:
-        points.append(
-            TracePoint(
-                "gen:task_t_client_validation",
-                "LLM 客户端校验",
-                stage="task_t_client_validation",
-            )
-        )
     if context.blocked and context.followup:
         # A blocked case is one run with two gate attempts; the hand-off between them is the
         # evidence that the replacement is a correction, not the run's own request.

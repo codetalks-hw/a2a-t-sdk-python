@@ -24,6 +24,29 @@ below were replayed during that rebase.
 - **0.5.1** — `metrics.xlsx` gains a `协议` column at index 1, immediately after
   `trace ID`; every later column shifts by one. Version/docs updated.
 
+## Semantic backport from 0.12.1 (2026-11-26)
+
+The package keeps `__version__ == "0.5.1"` and its file layout, but `metrics.py` now
+carries the metric semantics of upstream `b190cc9` (0.12.1, 26 commits after
+`69bd7e6`). This is a per-function backport, **not** a directory upgrade; `backend*`,
+`client`, `cli`, `table`, `timeline`, `rewrite_trace` and the newer output files were
+not adopted.
+
+| Change | Effect |
+|---|---|
+| Gross token model | `input` includes cached tokens (`inputUsage` wins, else `usageDetails.input + input_cached`); `cachedInput` is a subset; `total = input + output`. OTel `input_tokens` is already gross. |
+| Issue #15 dedupe | A server `SendMessage` already aggregates its nested `SendMessage-pushNotification`; the child is skipped. Identical sibling usage under one parent still counts once. |
+| `excludedClient` | Client-side ADK agent stages (`*agent*`) are not client tokens; they are accumulated under `tokens.excludedClient`. |
+| S1/S3/S4/S7/S8 | `metrics._s_timings`: `negotiation.latencyMs = Σ(S3 + S4 + S8 + S7)` for completed rounds; `s1Ms`, `inputRequiredRounds`, `latencySource` and `sendMessageDurationsMs` are emitted. `roundsDetail[]` is merged with the legacy/decision detail, keeping `negotiationType`/`hop`. |
+| Negotiation trigger | Server `SendMessage` responses carrying `TASK_STATE_INPUT_REQUIRED`, else client negotiation events, else run metadata. |
+| Pure A2A latency | `pure:sum(SendMessage durations)` over server `SendMessage` blocks. |
+| E2E fallback | `task_created`, else the `Task creation/modification succeeded` status row. |
+| `clientInterception` | Issue #14: one entry per blocked `task_validation`; `blockedRuns`, `runIds`, `reasons`, `corrected`. Also `counts.clientInterceptions`. |
+
+Local patches P6, P7, P9a and P9b are re-applied on top of the backport. P5 is retired:
+the S timings now own `negotiation.latencyMs`, so the `client:propose` fallback would
+create a second, conflicting definition.
+
 ## Sync procedure: per-file replay
 
 Do **not** replace the whole directory. A directory replace drops vendored-only
@@ -54,7 +77,7 @@ then re-apply the four vendored-only adaptations above. Keep the `test_metrics.p
 | P2 | `client.LangfuseClient` / `cli.run_export` | Add `close()` for the authenticated `requests.Session`; `run_export` closes its client in a `finally`, including when `_collect` raises. `_close_client` is defensive for fake clients without `close`. |
 | P3 | `cli.export_metrics` / `cli.export_full` | Output-free functions for the web observer: `export_metrics(config, trace_id, *, run_id=None, round_mode="legacy")` returns `{"metrics": ..., "warnings": [...]}` without disk writes or prints; `export_full(config, trace_id, out_root, *, zip_file=True, run_id=None, round_mode="legacy")` builds the argparse Namespace (`[trace_id, "--out", out_root, "--metrics", "--no-media"]` plus `--run-id` when supplied, `--round-mode` when not `legacy`, and the zip flag) and calls `run_export(..., config=config, emit=False)`. |
 | P4 | `cli._collect` | Extract the shared fetch/derive steps from `run_export` into an internal `_collect(...)` used by both `run_export` and `export_metrics`, so the same trace yields identical `metrics`, `endToEndMs`, `notFound` behaviour and warnings on both paths. |
-| P5 | `metrics._negotiation` | After scanning rows and before the server fallback: for every round with no `negotiationStartedAt` but a `proposeAt`, set `negotiationStartedAt = proposeAt`, `negotiationStartedAtSource = "client:propose"`, `clock = "client"`. A real client `negotiation_started` still wins; the a2a-t-server fallback only fills rounds that are still unset. Pure A2A rounds (propose + Decision, no `negotiation_started`) therefore get a non-null `latencyMs` from propose→decision and are not marked `clock=server`. |
+| P5 | `metrics._negotiation` | **Retired in the 0.12.1 backport.** The upstream S timings (`_s_timings`) own `negotiation.latencyMs`; keeping the `client:propose` fallback would produce two conflicting latency definitions. |
 | P6 | `metrics._negotiation` | Each `roundsDetail[]` entry gains `negotiationType` and `hop`, read from the propose row's flattened Langfuse metadata `detail.negotiationType` / `detail.hop` (a nested `metadata["detail"]` dict is also accepted for unit fixtures; both default to `None`). A2A-T propose rows may carry `negotiationType`; `hop` is usually `None` there. |
 | P7 | `metrics` / `cli` | Run-attempt selection for shared correction traces: `--run-id`, `select_run_id`, `_distinct_run_ids`, `_merged_run_meta`; `run_rows` (timeline, tokens, metadata) vs `audit_rows` (token/negotiation audit; a shared trace must not mix the other attempt's rows); `metrics.attemptCount` / `metrics.attemptRunIds`. Without an explicit id, `select_run_id` picks the attempt that actually sent Task-T (`message_sent` / `task_created`, newest wins) and warns when the trace has several runs. |
 | P8 | vendored files | Ruff formatting churn (line wrapping, quote style) with no behaviour change. Re-run the formatter after replay instead of hand-merging. |
@@ -68,12 +91,16 @@ The vendored tests keep the upstream layout with one rename: `test_metrics.py` b
 `test_export_metrics.py` because the sample already has a top-level `tests/test_metrics.py`
 and pytest imports these modules without packages. Replay the rename during a sync.
 
+The test file is upstream `tests/test_metrics.py` plus the sample-only cases below.
+Upstream's own tests (S timings, Gross tokens, Issue #14/#15, pure fallback, e2e status
+fallback, decision round mode) are kept verbatim.
+
 Sample-only additions that upstream does not have:
 
-- the three upstream `test_decision_round_mode_*` tests (PROPOSE-DECISION pairing, two
-  decision rounds, client `negotiation_started` attachment);
-- two sample-only decision tests: P9a carries `negotiationType`/`hop`, P9b tolerates a
-  row without `startTime`, plus a flattened-`detail.*` variant of the P9a assertion;
+- P7: `test_a_shared_correction_trace_selects_the_sent_retry` and the `_retry_row`
+  helper; `run_id` selection, `attemptCount`/`attemptRunIds`;
+- P9a/P9b: `negotiationType`/`hop` in decision mode, a row without `startTime`, and the
+  flattened-`detail.*` variants for both legacy and decision modes;
 - the legacy `roundMode` assertion (the default path must report `"legacy"`);
 - the `__version__ == "0.5.1"` assertion;
 - the CLI `--round-mode` forwarding test (`run_export` passes the parsed mode through to

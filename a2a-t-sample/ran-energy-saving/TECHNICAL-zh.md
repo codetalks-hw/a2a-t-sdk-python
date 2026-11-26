@@ -547,22 +547,17 @@ OperatorRequest → IntentProcessor → ProcessedIntent → 规范化文本 / �
   内置请求的会话记忆使用规范化文本。
 - 本期不实现第三方网管路由；业务意图层就是真实部署向其他下游系统分发的扩展点。
 
-### 3.8 客户端发送前 Task-T 校验
+### 3.8 客户端发送前 Task-T 检查
 
-A2A-T 模式下，客户端可以在发送前用 SDK 的内容校验检查渲染后的 Task-T。校验位于渲染之后、审批 1 之前，被阻断的请求不会到达服务端，也不会开启协商。
+客户端**不再**调用 SDK 的内容校验接口（`validate_task_prompt_and_data_filling`）。服务端仍用它做任务前协商（见 4.2），客户端只在本地做一次检查，数据来自刚渲染出的 Task-T。
 
-- `A2ATClient.validate_task_prompt_and_data_filling(prompt, schema, template_uri)` 是服务端同名方法的客户端对应入口，两者共用 `DefaultContentValidator` 和同一套语义校验提示词。样例通过 `asyncio.to_thread` 调用。
-- 结果使用与服务端相同的 `negotiation_kind_for_errors` 分类：
-  - 能映射到 `INFORMATION` / `TARGET` / `FEASIBILITY` 的错误是**可协商**的，仍然发送，保留协商演示。条目内缺字段（`content.entry_field_missing`，如缺 Rate）映射为 `INFORMATION`；
-  - 映射不到的错误是**阻断**：flow 返回 `finished` + `final_state=input_invalid`，不发送消息，并记录 `task_validation` trace；
-  - `input.text_too_long` 和 `template.not_found` 是确定性错误，直接阻断；
-  - `llm.*` / `infra.*` 失败降级为 **unavailable**：记录 warning 后继续发送，模型故障不会中断演示。
-- 业务 slot 抽取失败（`slot.constraint_violated`、`slot.not_provided` 等）发生在 Task-T 存在之前。`run_client_flow` 把 `PromptGenerationError.failed_parameters` 转成同样的 blocked `task_validation` 记录并返回 `input_invalid`，操作员可修改请求后重试。没有 failed slot 参数的生成失败（LLM 故障、模板缺失）仍然抛出，不会误报成输入问题。
-- OSS agent 在请求离开前执行自己的调用方 schema：内容校验成功后再用 `_missing_required_fields` 检查 `TASK_PARAM_SCHEMA.required` 对应的 `FilledParamData`。缺失值（如 `guaranteedThroughputTarget`）会变成 blocked 的 `content.param_missing` 校验，带业务 `section_label`（“速率保障目标”），请求不会发送。这是业务门，不是网管侧的 Task-T 协商：调用方 schema 未要求的 `entry_field_missing` 仍会发出，由服务端协商。`ClientRuntime` 对操作员输入/编辑的请求启用该门，对刻意省略必填值的信息 / 拒绝 / 中止演示场景关闭该门。
+- **唯一的本地拦截是业务 slot 抽取失败**（`slot.constraint_violated`、`slot.not_provided` 等）。它发生在 Task-T 存在之前：`run_client_flow` 把 `PromptGenerationError.failed_parameters` 转成 blocked 的 `task_validation` 记录并返回 `finished` + `final_state=input_invalid`，不发送消息；操作员可修改请求后重试。没有 failed slot 参数的生成失败（LLM 故障、模板缺失）仍然抛出，不会误报成输入问题。
+- **Task-T 生成成功后不再有第二次模型调用。** 客户端用 [`protocol/task_t_readback.py`](protocol/task_t_readback.py) 从渲染后的提示词回读业务字段（操作类型、区域、节能目标、速率保障目标；站点列表与背景事件按标签还原），作为 accept 补全与 decision grounding 的基线。真实网管的 accept 不带 Task-T，只有本地参考服务端会用到这些值。
+- 为了保持证据形状，run 仍记录一条 `verdict=passed` 的本地 `task_validation` trace（无 LLM，`source=local`）；演示页对 passed 不显示卡片，对 slot 阻断显示编辑重试卡片。
+- 旧的 `A2AT_SAMPLE_PRE_SEND_VALIDATION` 配置已删除；已有 `.env` 中的残留键会被忽略。
 - SDK slot 抽取提示词要求一个片段只落一个 slot、缺失值保持 null；同一个 `actual` 的重复 `slot.constraint_violated` 在到达调用方前会折叠到最具体的 slot。
 - 两阶段 Modify 的 Task-T 走同一道门；Modify 被阻断时先取消基线 Task，再结束 run。
-- `A2AT_SAMPLE_PRE_SEND_VALIDATION` 控制范围：`on`（默认）只在 run 来源为演示页时启用，`always` 覆盖所有入口，`off` 关闭。
-- 演示页内联展示错误：可协商项显示在意图卡下；阻断项变成校验卡，预填原始请求，工程师修改后**新建一次 run** 重试。失败的 run 保留在历史中，并通过 `parentRunId` 关联。重试沿用被拦截 run 的 `chainId` 和 `traceId`，但**新建** `runId` 和 `conversationId`：首个 attempt 创建一条中立的 workflow root，各 attempt 的 run root 都挂在它下面，Langfuse 按 `session.id = chainId` 把整条修正链归组；同时新会话保证被拦截的原文不会进入下一轮 Task-T 的会话上下文。只有"未发出 Task-T"的 attempt 才延续链路；已经发出、正常完成或被取消的 run 会结束这条链。`chainId` 在页面 sessionStorage 中保留，刷新后仍可续链；服务端解析 `parentRunId` 与 `task_t_sent` 判定属于下一阶段。
+- 演示页内联展示错误：slot 阻断项变成校验卡，预填原始请求，工程师修改后**新建一次 run** 重试。失败的 run 保留在历史中，并通过 `parentRunId` 关联。重试沿用被拦截 run 的 `chainId` 和 `traceId`，但**新建** `runId` 和 `conversationId`：首个 attempt 创建一条中立的 workflow root，各 attempt 的 run root 都挂在它下面，Langfuse 按 `session.id = chainId` 把整条修正链归组；同时新会话保证被拦截的原文不会进入下一轮 Task-T 的会话上下文。只有"未发出 Task-T"的 attempt 才延续链路；已经发出、正常完成或被取消的 run 会结束这条链。`chainId` 在页面 sessionStorage 中保留，刷新后仍可续链；服务端解析 `parentRunId` 与 `task_t_sent` 判定属于下一阶段。
 
 ## 4. 网管侧开发指南（操作）
 
@@ -912,7 +907,6 @@ per-run `.env`，因此 SDK facade 与所有子进程看到同一份生效配置
 | `A2AT_SAMPLE_TRANSPORT` | `sse`（默认）、`webhook` | 客户端事件传输。真实 `--nms` 默认 webhook（`message:send` + 推送）；`--nms-sim` 保持 sse。 |
 | `A2AT_SAMPLE_WEBHOOK_HOST` / `A2AT_SAMPLE_WEBHOOK_PORT` | 默认 `127.0.0.1` / `9000` | webhook 接收地址；真实网管必须能访问该主机和端口。 |
 | `A2AT_SAMPLE_INTENT_MODE` | `raw`（默认）、`processed` | `raw` 直接发送操作员原文：A2A-T 的 Task-T 由 SDK 生成，ADK 意图层只用于展示，默认关闭。`processed` 先执行 ADK 业务意图层。pure A2A 的 OSS Agent 始终执行自己的意图层。`--intent-mode` 与 `POST /api/runs.intentMode` 可按 run 覆盖。 |
-| `A2AT_SAMPLE_PRE_SEND_VALIDATION` | `on`（默认）、`always`、`off` | 发送前用 SDK 内容校验检查渲染后的 Task-T。`on` 仅覆盖演示页；`always` 覆盖所有入口；`off` 关闭。 |
 | `A2AT_SAMPLE_RUN_DIR` | 未设置；`%TEMP%/a2at-ran-energy-saving-adk` | 启动器状态目录：`pids.json`、子进程日志和每次运行的 `.env`。第二个实例设置不同值，`--stop` 只停自己的进程。 |
 | `A2AT_SAMPLE_RUNS_DIR` | 默认 `<sample>/runs` | 数据目录：transcript、client/task/gateway SQLite、每次 run 的 `wire.jsonl` 和 Web UI 历史。相对路径按 sample 根目录解析。 |
 | `A2AT_SAMPLE_ENV_FILE` | 未设置 | 未传 `--env-file` 时 `run_demo.py` 读取的配置文件。每个启动脚本可以指向自己的配置，不再依赖候选路径猜测。 |

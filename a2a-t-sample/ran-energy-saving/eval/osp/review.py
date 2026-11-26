@@ -836,14 +836,7 @@ def _trace_context(
     evidence: Mapping[str, Any],
     run_id: str,
 ) -> TraceContext:
-    """Return the run facts the pure trace judge needs.
-
-    ``validation_on`` is deliberately conservative: the tester only runs the client validation
-    gate when the case forces ``always`` (the process setting defaults to presentation-only), and
-    expecting a point that was never emitted would fail a correct run. Under-expecting is safe;
-    over-expecting is not.
-    """
-    runner = _mapping(case.get("runner"))
+    """Return the run facts the pure trace judge needs."""
     stages = _mapping(evidence.get("stages"))
     rounds, _source = _trace_rounds(effective, protocol, evidence)
     return TraceContext(
@@ -853,7 +846,6 @@ def _trace_context(
         followup=has_followup(case),
         rounds=rounds,
         accepted=_run_accepted(stages),
-        validation_on=runner.get("pre_send_validation") == "always",
         run_id=run_id,
     )
 

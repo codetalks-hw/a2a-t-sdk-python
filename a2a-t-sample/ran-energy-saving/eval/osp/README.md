@@ -97,7 +97,6 @@ runner:
   language: en-US
   approval: approve
   timeout_seconds: 300
-  pre_send_validation: always
 source:
   file: OSP-Unified Evaluation Set_v.01.xlsx
   sheet: A2A-T_原始数据
@@ -497,11 +496,9 @@ PYTHONPATH=. ../../.venv/Scripts/python.exe -m eval.osp.runner --ids 1 --stop-af
 
 - **A2A 最终状态不判定**：原表只给意图与协商答复。
 - **术语上下文是软断言**：没有独立可观测点。
-- **SDK 校验与样例业务门分开**：样例 OSS 还有一层必填字段 gate（`_missing_required_fields`）。
-  要判定"预期SDK校验结果"，`intent` / `task_t` / `validate` 三个阶段应只跑 SDK 管线，
-  不要把样例 gate 的 `blocked` 当成 SDK 的 `blocked`。
-- **控制台显式开启校验**：`/tester` 启动运行项时传 `validate_before_send=True`，不依赖
-  `A2AT_SAMPLE_PRE_SEND_VALIDATION=on` 的 `presentation` 限定。
+- **客户端校验已移除**：`/tester` 和全流程 run 不再调用 SDK 内容校验；本地 `validate` 阶段
+  只反映业务 slot 抽取（`slot.*` 阻断 / 生成成功）。SDK-only 批次的 `intent` 列改为只记录，
+  全流程的 `intent` 列仍判下游 `TASK_STATE_SUBMITTED` 载荷。
 - **`scenario: night` 只是运行时配置**：它不提供任何预期值，预期全部来自本文件。
 
 ## 11. 实时模型评测（Task-T / 拦截）

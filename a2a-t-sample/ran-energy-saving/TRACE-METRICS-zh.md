@@ -93,7 +93,7 @@ OSS 进程里有两条 LLM 链路，观测名就能区分：
 | `LLM call · adk_agent` | ADK 模型轮次没有显式 stage；OSS 侧主要是**业务意图理解**（`AdkIntentExtractor`，审批 1 的意图卡） | 把 operator 原文读成 `BusinessIntent`（operationType / region / sites / windows / goal / backgroundEvent …），**只用于展示与审批，不生成 Task-T** | 请求=operator 原文；响应=结构化意图 JSON | `execution`（ADK 默认） | token 计入 AX/AZ；`run_metrics` 归到 `byComponent["client:execution"]` |
 | `LLM call · task_t_slot_extraction` | `client_flow` 在 `trace_stage("task_t_slot_extraction")` 下调用 SDK `generate_task_prompt_from_text` | 初次 **Create** 的 Task-T 生成：从 operator 原文抽取 slot 并渲染 Task-T 模板；SDK 内部可能多次调用模型，每次一条 generation，全部同名 | 请求=原文+会话上下文；响应=Task-T Markdown（含 Task Context / Terminology / Expected Output） | `task_prompt` | 决定 X 列；token 是 A2A-T 的主要固定开销；`client:task_t_slot_extraction` |
 | `LLM call · task_t_modify_extraction` | 同上，但 `run_mode=modify`（`client_flow` 的 modify 分支） | **Modify** run 的 Task-T 生成：把修改要求渲染成续传目标 Task 的新 Task-T；不新建 Task | 请求=修改原文+上下文；响应=新 Task-T | `task_modify` | 同 X 列；`client:task_t_modify_extraction` |
-| `LLM call · structured` | 没有 stage 的 SDK 结构化调用兜底；OSS 侧当前主要是**发送前内容校验** `validate_task_prompt_and_data_filling`（`_validate_task_prompt`，未包 `trace_stage`） | 对已生成的 Task-T 做语义校验，返回拦截/可协商结论、缺失项与结构化参数；不生成 Task-T | 请求=Task-T+schema；响应=校验 JSON（verdict / errors / filled） | `negotiation`（SDK 默认） | 决定 Y 列；token 计入 AX/AZ，但 `byComponent` 会落到 `client:negotiation`（因为没有 stage） |
+| `LLM call · structured` | 没有 stage 的 SDK 结构化调用兜底；客户端已不再做无 stage 的内容校验调用（服务端仍在自己的 stage 内用 `validate_task_prompt_and_data_filling` 做任务前协商） | 对已生成的 Task-T 做语义校验，返回拦截/可协商结论、缺失项与结构化参数；不生成 Task-T | 请求=Task-T+schema；响应=校验 JSON（verdict / errors / filled） | `negotiation`（SDK 默认） | 决定 Y 列；token 计入 AX/AZ，但 `byComponent` 会落到 `client:negotiation`（因为没有 stage） |
 
 同链路还会出现的名字（不在上面四个里，但统计时要认得）：
 

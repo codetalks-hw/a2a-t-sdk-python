@@ -298,39 +298,27 @@ operator request → [processed] ADK intent agent (ProcessedIntent: display / ap
   processed` or `POST /api/runs {"intentMode":"processed"}` to show the structured intent fields.
   The text is still what gets sent. Gateway input is always treated as raw.
 
-### Pre-send Task-T validation
+### Pre-send Task-T check
 
-In A2A-T mode the presentation page validates the rendered Task-T with the SDK content pipeline
-before sending it. The gate runs after rendering and before approval 1, so a blocked request is
-never sent and no negotiation starts.
+The client no longer calls the SDK content validation (`validate_task_prompt_and_data_filling`).
+Before a Task-T is sent, one local check runs against the rendered prompt itself:
 
-- `A2ATClient.validate_task_prompt_and_data_filling` is the client counterpart of the server
-  method and uses the same `DefaultContentValidator` and semantic validation prompt.
-- Errors that map to a server negotiation kind (`INFORMATION` / `TARGET` / `FEASIBILITY`) are
-  negotiable and still go out, so the negotiation scenarios keep working. A missing field inside
-  one entry (`content.entry_field_missing`, for example a missing Rate) is an information
-  negotiation, not a hard block.
-- **The OSS agent intercepts its own required fields.** After the SDK extracts the caller-schema
-  parameters, a missing required value (for example the guaranteed rate) stops the request at the
-  OSS layer: nothing is sent, and the validation card asks the operator to supply it. This is the
-  business gate of `TASK_PARAM_SCHEMA.required`, separate from the network's own Task-T
-  negotiation. Fields the caller schema does not require still reach the server and are negotiated
-  there. Curated demonstration scenarios that deliberately omit a required value (the information /
-  reject / abort scenarios) skip this gate so the server-side negotiation remains demonstrable;
-  operator-entered or edited requests always enforce it.
-- Unmapped errors block the send: the run ends `finished` with `final_state=input_invalid`, records
-  a `task_validation` trace, and the page shows the issues inline.
-- A business slot-extraction failure (`slot.constraint_violated` and friends) happens before any
-  Task-T exists, so it is surfaced the same way: a blocked `task_validation` record with the
-  structured slot errors, and the same edit-and-retry card. Infrastructure failures still raise.
-- LLM/infra failures degrade to a warning and let the request through; a model outage cannot stop
-  the demo.
-- The selected-Task Modify Task-T uses the same gate; a blocked Modify sends nothing.
+- **The only local interception is a business slot-extraction failure** (`slot.constraint_violated`,
+  `slot.not_provided`, and the rest). It happens before a Task-T exists, so the run ends `finished`
+  with `final_state=input_invalid` and sends nothing; the `task_validation` trace records the
+  structured slot errors and the page reuses the edit-and-retry card. Infrastructure failures still
+  raise.
+- **A generated Task-T costs no second model call.** The client reads the business fields back from
+  the rendered prompt (operation type, area, energy-saving goal, guaranteed rate; the site list and
+  background event are recovered from their labels) for the accept refill and decision grounding.
+  The run still records a local `verdict=passed` `task_validation` trace so the evidence keeps its
+  shape.
+- The selected-Task Modify Task-T uses the same check; a blocked Modify sends nothing.
 - Edit the original request in the validation card to start a **new** run; the failed run stays in
   the history and is linked with `parentRunId`. The retry keeps the same `chainId` but gets a new
   run, conversation and trace, so the blocked text never enters the next Task-T prompt.
-- `A2AT_SAMPLE_PRE_SEND_VALIDATION=on|always|off` selects the scope; `on` is the default and
-  covers the presentation page only.
+- The old `A2AT_SAMPLE_PRE_SEND_VALIDATION` is gone; a leftover key in an existing `.env` is
+  ignored and does not fail the process.
 
 ### Langfuse observability
 

@@ -663,47 +663,35 @@ OperatorRequest → IntentProcessor → ProcessedIntent → normalized text / pl
 Third-party NMS routing is intentionally not implemented in this sample. The business intent layer
 is the seam where a real deployment dispatches the same intent to additional downstream systems.
 
-### 3.8 Client-side pre-send Task-T validation
+### 3.8 Client-side pre-send Task-T check
 
-In A2A-T mode the client can validate the rendered Task-T with the SDK content pipeline before it
-sends anything. The gate runs after rendering and before approval 1, so a blocked request never
-reaches the server and never starts a negotiation.
+The client **no longer** calls the SDK content validation
+(`validate_task_prompt_and_data_filling`). The server still uses it for pre-task negotiation (see
+4.2); the client only runs one local check against the Task-T it just rendered.
 
-- `A2ATClient.validate_task_prompt_and_data_filling(prompt, schema, template_uri)` is the client
-  counterpart of the server method; both use `DefaultContentValidator` and the same semantic
-  validation prompt. The sample calls it through `asyncio.to_thread`.
-- The result is classified with the same `negotiation_kind_for_errors` mapping the server uses:
-  - a verdict that maps to `INFORMATION` / `TARGET` / `FEASIBILITY` is **negotiable** and is still
-    sent, preserving the negotiation demo. `content.entry_field_missing` (a missing field inside
-    one entry, such as a missing Rate) maps to `INFORMATION`;
-  - an unmapped error is **blocking**: the flow returns `finished` + `final_state=input_invalid`,
-    sends no message and records a `task_validation` trace;
-  - `input.text_too_long` and `template.not_found` are deterministic and block;
-  - `llm.*` / `infra.*` failures degrade to **unavailable**: they are traced as a warning and the
-    request is sent, so a model outage cannot stop a demo.
-- A business slot-extraction failure (`slot.constraint_violated`, `slot.not_provided`, ...) happens
-  before a Task-T exists. `run_client_flow` turns `PromptGenerationError.failed_parameters` into
-  the same blocked `task_validation` record and returns `input_invalid`, so the operator can edit
-  the request and retry. Generation failures without failed slot parameters (an LLM outage, a
-  missing template) still raise and are not misreported as input problems.
-- The OSS agent enforces its own caller schema before the request leaves. On a successful content
-  validation, `_missing_required_fields` checks `TASK_PARAM_SCHEMA.required` against the extracted
-  `FilledParamData`; a missing value (for example `guaranteedThroughputTarget`) becomes a blocked
-  `content.param_missing` validation with a business `section_label` ("Rate guarantee goal") and is
-  never sent. This is a business gate, not the network's Task-T negotiation: `entry_field_missing`
-  on a field the caller schema does not require still goes out and is negotiated by the server.
-  `ClientRuntime` enables the gate for operator-entered or edited requests and disables it for the
-  curated information / reject / abort scenarios, whose deliberate gap is the server-negotiation
-  demonstration.
+- **The only local interception is a business slot-extraction failure** (`slot.constraint_violated`,
+  `slot.not_provided`, ...). It happens before a Task-T exists: `run_client_flow` turns
+  `PromptGenerationError.failed_parameters` into a blocked `task_validation` record and returns
+  `finished` + `final_state=input_invalid`, sending nothing, so the operator can edit the request
+  and retry. Generation failures without failed slot parameters (an LLM outage, a missing template)
+  still raise and are not misreported as input problems.
+- **A generated Task-T costs no second model call.** The client reads the business fields back from
+  the rendered prompt ([`protocol/task_t_readback.py`](protocol/task_t_readback.py)): operation
+  type, area, energy-saving goal, guaranteed rate; the site list and background event are
+  recovered from their labels. Those values are the accept-refill and decision-grounding baseline.
+  The real NMS accept carries no Task-T, so only the local reference server uses them.
+- The run still records a local `verdict=passed` `task_validation` trace (no LLM, `source=local`)
+  so the evidence keeps its shape; the page shows no card for it and reuses the edit-and-retry card
+  for a slot block.
 - The SDK's slot extraction prompt enforces one fragment per slot and keeps missing values null;
   duplicate `slot.constraint_violated` reports of the same `actual` value are collapsed to the most
   specific slot before the error reaches the caller.
-- The same gate runs on the two-phase Modify Task-T. A blocked Modify cancels the baseline Task
+- The same check runs on the two-phase Modify Task-T. A blocked Modify cancels the baseline Task
   before ending the run.
-- `A2AT_SAMPLE_PRE_SEND_VALIDATION` selects the scope: `on` (default) enables the gate only when the
-  run source is the presentation page, `always` enables every entry point, `off` disables it.
-- The presentation page renders the errors inline: negotiable items appear under the intent card,
-  blocking items become a validation card that pre-fills the original request and starts a **new**
+- The old `A2AT_SAMPLE_PRE_SEND_VALIDATION` key is gone; a leftover value in an existing `.env` is
+  ignored and does not fail the process.
+- The presentation page renders a slot block inline: the errors become a validation card that
+  pre-fills the original request and starts a **new**
   run after the engineer edits it. The failed run stays in the history and is linked through
   `parentRunId`. The retry reuses the blocked run's `chainId` and `traceId` but gets a **new**
   `runId` and `conversationId`: the first attempt creates one neutral workflow root, each
@@ -1159,7 +1147,6 @@ script can switch the model with a plain `export ADK_MODEL_NAME=...`.
 | `A2AT_SAMPLE_TRANSPORT` | `sse` (default), `webhook` | Client event transport. A real `--nms` run defaults to webhook (`message:send` + pushes); `--nms-sim` keeps sse. |
 | `A2AT_SAMPLE_WEBHOOK_HOST` / `A2AT_SAMPLE_WEBHOOK_PORT` | default `127.0.0.1` / `9000` | Webhook receiver address; the real NMS must be able to reach this host and port. |
 | `A2AT_SAMPLE_INTENT_MODE` | `raw` (default), `processed` | `raw` sends the operator text directly: the SDK owns the A2A-T Task-T conversion and the ADK intent layer is display-only, so it is off by default. `processed` runs the ADK business intent layer first. The pure A2A OSS Agent always runs its own intent layer. `--intent-mode` and `POST /api/runs.intentMode` override it per run. |
-| `A2AT_SAMPLE_PRE_SEND_VALIDATION` | `on` (default), `always`, `off` | Validate the rendered Task-T with the SDK content pipeline before sending. `on` covers the presentation page only; `always` covers every entry point; `off` disables the gate. |
 | `A2AT_SAMPLE_RUN_DIR` | unset; `%TEMP%/a2at-ran-energy-saving-adk` | Launcher state: `pids.json`, child logs and the per-run `.env`. Set a different value for a second instance so `--stop` only stops its own processes. |
 | `A2AT_SAMPLE_RUNS_DIR` | default `<sample>/runs` | Data directory: transcripts, client/task/gateway SQLite stores, each run's `wire.jsonl` and the Web UI history. Relative values resolve against the sample root. |
 | `A2AT_SAMPLE_ENV_FILE` | unset | Configuration file `run_demo.py` reads when `--env-file` is not passed. Each launch script can point at its own profile instead of relying on candidate guessing. |

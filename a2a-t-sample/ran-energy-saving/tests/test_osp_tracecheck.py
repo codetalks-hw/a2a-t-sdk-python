@@ -81,7 +81,6 @@ def _context(**overrides: object) -> TraceContext:
         "followup": False,
         "rounds": 0,
         "accepted": True,
-        "validation_on": True,
         "run_id": "run-1",
     }
     values.update(overrides)
@@ -135,7 +134,6 @@ def test_expected_points_count_every_negotiation_round() -> None:
 def test_match_points_uses_kind_stage_round_and_run_id() -> None:
     observations = [
         _observation(kind="task_prompt_rendered"),
-        _observation(type="GENERATION", stage="task_t_client_validation"),
         _observation(kind="task_validation"),
         _observation(kind="message_sent", run_id="run-1"),
         _observation(kind="message_sent", run_id="oss-hop"),
@@ -216,12 +214,6 @@ def _complete_observations() -> list[dict[str, object]]:
             kind="llm",
             stage="task_t_slot_extraction",
             response='{"slots": {}}',
-        ),
-        _observation(
-            type="GENERATION",
-            kind="llm",
-            stage="task_t_client_validation",
-            response='{"semantic_verdict": true}',
         ),
         _observation(kind="task_validation"),
         _observation(

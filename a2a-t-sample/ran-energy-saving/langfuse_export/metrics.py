@@ -50,6 +50,9 @@ TRACE_ATTR_SOURCES = {
 DECISION_KINDS = {"accept", "counter", "reject", "abort"}
 NEGOTIATION_KINDS = {"propose", "negotiation_started"} | DECISION_KINDS
 
+# Server generation nested under ``SendMessage``; the parent already carries its usage.
+_PUSH_NOTIFICATION = "SendMessage-pushNotification"
+
 
 def _meta(row: dict[str, Any], key: str) -> Any:
     metadata = row.get("metadata")
@@ -105,6 +108,16 @@ def _iso(value: datetime | None) -> str | None:
 
 def _start(row: dict[str, Any]) -> datetime | None:
     return parse_dt(row.get("startTime"))
+
+
+def _row_sort_key(row: dict[str, Any]) -> float:
+    """P9b: total order across rows with a missing or naive ``startTime``."""
+    parsed = _start(row)
+    if parsed is None:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _first_start(rows: list[dict[str, Any]]) -> str | None:
@@ -178,16 +191,6 @@ def _client_rows(
     return [row for row in rows if _meta(row, "kind") or _meta(row, "stage")]
 
 
-def _merged_run_meta(selected: list[dict[str, Any]], all_rows: list[dict[str, Any]]) -> dict[str, str | None]:
-    """Run-level keys from the selected attempt; chain-level keys fall back to the anchor."""
-    primary = _run_meta(selected)
-    fallback = _run_meta(all_rows)
-    for key in RUN_META_KEYS:
-        if not primary.get(key) and fallback.get(key):
-            primary[key] = fallback[key]
-    return primary
-
-
 def _run_meta(rows: list[dict[str, Any]]) -> dict[str, str | None]:
     """Merge run-level keys; the `trace opened` event usually carries them all."""
     ordered = sorted(
@@ -202,6 +205,16 @@ def _run_meta(rows: list[dict[str, Any]]) -> dict[str, str | None]:
         )
         resolved[key] = value
     return resolved
+
+
+def _merged_run_meta(selected: list[dict[str, Any]], all_rows: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Run-level keys from the selected attempt; chain-level keys fall back to the anchor."""
+    primary = _run_meta(selected)
+    fallback = _run_meta(all_rows)
+    for key in RUN_META_KEYS:
+        if not primary.get(key) and fallback.get(key):
+            primary[key] = fallback[key]
+    return primary
 
 
 def _trace_attrs(rows: list[dict[str, Any]], summary: Any = None) -> dict[str, str | None]:
@@ -237,7 +250,9 @@ def _row_side(row: dict[str, Any]) -> str:
     if side:
         return side.lower()
     scope = (
-        _as_text(_meta(row, "scope.name")) or _as_text(_meta(row, "resourceAttributes.service.name")) or ""
+        _as_text(_meta(row, "scope.name"))
+        or _as_text(_meta(row, "resourceAttributes.service.name"))
+        or ""
     ).lower()
     if "server" in scope:
         return "server"
@@ -246,65 +261,142 @@ def _row_side(row: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _client_interceptions(rows: list[dict[str, Any]], trace_id: str | None) -> dict[str, Any]:
+    """Issue #14 client-side interceptions: every ``Task-T validation blocked`` span.
+
+    One blocked validation is one interception, whether the run was abandoned or the
+    client corrected the request and retried inside the same run. ``blockedRuns`` is
+    the de-duplicated set of run ids that were blocked, ``corrected`` records whether a
+    ``correction_applied`` span exists, and ``reasons`` keeps the reported verdict
+    reasons (e.g. ``negotiation.semantic_rejected``) for quick triage.
+    """
+    blocked: list[dict[str, Any]] = []
+    corrected = False
+    for row in rows:
+        kind = _as_text(_meta(row, "kind"))
+        if kind == "correction_applied":
+            corrected = True
+            continue
+        if kind != "task_validation":
+            continue
+        name = str(row.get("name") or "").lower()
+        verdict = (_as_text(_meta(row, "detail.verdict")) or "").lower()
+        if "blocked" in name or verdict == "blocked" or _as_bool(_meta(row, "detail.blocking")):
+            blocked.append(row)
+
+    run_ids: list[str] = []
+    reasons: list[str] = []
+    for row in blocked:
+        run_id = _as_text(_meta(row, "runId")) or (trace_id or "")
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+        reason = _as_text(_meta(row, "detail.reason"))
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    return {
+        "count": len(blocked),
+        "blockedRuns": len(run_ids),
+        "runIds": run_ids,
+        "reasons": reasons,
+        "corrected": corrected,
+    }
+
+
 def _row_usage(row: dict[str, Any]) -> dict[str, int] | None:
-    """Token counts for one row: usageDetails first, then OpenTelemetry attributes."""
+    """Token counts for one row: usageDetails first, then OpenTelemetry attributes.
+
+    Gross model: ``input`` is the total prompt input and includes the cached tokens;
+    ``cachedInput`` is a subset of it (reported for analysis, never added again).
+    ``total = input + output`` for every source.
+    """
     details = row.get("usageDetails")
     if isinstance(details, dict) and details:
+        # Client model is Gross (same as server): input includes cache.
+        cached = _as_int(details.get("input_cached")) or 0
+        input_tokens = _as_int(details.get("input")) or 0
+        input_usage = _as_int(row.get("inputUsage"))
+        gross_input = input_usage if input_usage is not None else input_tokens + cached
+        output_tokens = _as_int(details.get("output")) or 0
         return {
-            "input": _as_int(details.get("input")) or 0,
-            "cachedInput": _as_int(details.get("input_cached")) or 0,
-            "output": _as_int(details.get("output")) or 0,
-            "total": _as_int(details.get("total")) or 0,
+            "input": gross_input,
+            "cachedInput": cached,
+            "output": output_tokens,
+            "total": gross_input + output_tokens,
         }
-    top = {
-        "input": _as_int(row.get("inputUsage")) or 0,
-        "cachedInput": 0,
-        "output": _as_int(row.get("outputUsage")) or 0,
-        "total": _as_int(row.get("totalUsage")) or 0,
-    }
-    if any(top.values()):
-        return top
+    top_input = _as_int(row.get("inputUsage")) or 0
+    top_output = _as_int(row.get("outputUsage")) or 0
+    if top_input or top_output:
+        return {
+            "input": top_input,
+            "cachedInput": 0,
+            "output": top_output,
+            "total": top_input + top_output,
+        }
     # Server-side agent spans (a2a-t-server) expose token usage only in OTel
     # attributes, never in usageDetails/inputUsage.
     meta = row.get("metadata")
     if isinstance(meta, dict):
         input_tokens = _as_int(meta.get("attributes.gen_ai.usage.input_tokens"))
         output_tokens = _as_int(meta.get("attributes.gen_ai.usage.output_tokens"))
-        cached = (
-            _as_int(meta.get("attributes.gen_ai.usage.input_cached_tokens")) or _as_int(meta.get("tokens.cached")) or 0
-        )
-        total = _as_int(meta.get("tokens.total"))
+        cached = _as_int(meta.get("attributes.gen_ai.usage.cache_read.input_tokens"))
+        if cached is None:
+            cached = _as_int(meta.get("attributes.gen_ai.usage.input_cached_tokens")) or _as_int(meta.get("tokens.cached")) or 0
         if input_tokens is not None or output_tokens is not None:
             input_tokens = input_tokens or 0
             output_tokens = output_tokens or 0
+            # Gross model: OTel input_tokens already includes cache_read/cache_write.
             return {
                 "input": input_tokens,
                 "cachedInput": cached,
                 "output": output_tokens,
-                "total": total if total is not None else input_tokens + output_tokens,
+                "total": input_tokens + output_tokens,
             }
     return None
+
+
+def _is_excluded_client_llm(row: dict[str, Any]) -> bool:
+    """ADK agent calls (``adk_agent`` / ``client_decision_agent``) are not client tokens."""
+    if _row_side(row) != "client":
+        return False
+    stage = _as_text(_meta(row, "stage")) or ""
+    return "agent" in stage.lower()
 
 
 def _token_sums(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
     totals = {"input": 0, "cachedInput": 0, "output": 0, "total": 0}
     by_side: dict[str, dict[str, int]] = {}
+    excluded = {"input": 0, "cachedInput": 0, "output": 0, "total": 0}
     found = False
 
     # The a2a-t-server agent span may aggregate exactly the same tokens as its
     # nested generation (e.g. SendMessage -> SendMessage-negotiation both report
     # 130812/1500). Counting both would double that LLM call; prefer the deeper
-    # observation when parent and child usage are identical.
+    # observation when parent and child usage are identical. A nested
+    # ``SendMessage-pushNotification`` is handled below by keeping the parent.
     usages: dict[str, dict[str, int]] = {}
     by_id: dict[str, dict[str, Any]] = {}
+    skipped: set[str] = set()
     for row in rows:
         row_id = _as_text(row.get("id"))
         values = _row_usage(row)
         if row_id and values is not None and any(values.values()):
             by_id[row_id] = row
             usages[row_id] = values
-    skipped: set[str] = set()
+
+    # Issue #15: a server ``SendMessage`` aggregates the usage of its nested
+    # ``SendMessage-pushNotification`` generation. Count the parent only, so the
+    # same LLM call is never summed twice (the two numbers may differ slightly).
+    for row in rows:
+        if _as_text(row.get("name")) != _PUSH_NOTIFICATION:
+            continue
+        parent_id = _as_text(row.get("parentObservationId"))
+        if parent_id and parent_id in usages:
+            skipped.add(_as_text(row.get("id")))
+
     for row_id, row in by_id.items():
+        if row_id in skipped:
+            continue
         parent_id = _as_text(row.get("parentObservationId"))
         if parent_id and parent_id in usages and usages[parent_id] == usages[row_id]:
             skipped.add(parent_id)
@@ -334,11 +426,15 @@ def _token_sums(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
             continue
         found = True
         side = _row_side(row)
+        if _is_excluded_client_llm(row):
+            for key, value in values.items():
+                excluded[key] += value
+            continue
         bucket = by_side.setdefault(side, {"input": 0, "cachedInput": 0, "output": 0, "total": 0})
         for key, value in values.items():
             totals[key] += value
             bucket[key] += value
-    return {"**totals**": totals, "bySide": by_side}, found
+    return {"**totals**": totals, "bySide": by_side, "excludedClient": excluded}, found
 
 
 def _round_of(row: dict[str, Any], fallback: int) -> int:
@@ -444,7 +540,7 @@ def _negotiation_decision(
             },
         )
 
-    decisions: list[tuple[datetime | None, int, dict[str, Any]]] = []
+    decisions: list[tuple[str | None, int, dict[str, Any]]] = []
     for row in ordered:
         kind = _as_text(_meta(row, "kind"))
         if kind in DECISION_KINDS:
@@ -455,7 +551,7 @@ def _negotiation_decision(
             if entry["decisionAt"] is None:
                 entry["decisionAt"] = _iso(_start(row))
 
-    def next_decision_round(at: datetime | None) -> int | None:
+    def next_decision_round(at: str | None) -> int | None:
         if at is None:
             return None
         for start, round_no, __ in decisions:
@@ -463,7 +559,7 @@ def _negotiation_decision(
                 return round_no
         return None
 
-    def previous_decision_round(at: datetime | None) -> int | None:
+    def previous_decision_round(at: str | None) -> int | None:
         current: int | None = None
         for start, round_no, __ in decisions:
             if start is not None and at is not None and start <= at:
@@ -643,15 +739,6 @@ def _negotiation(
             entry["notifiedAt"] = entry["proposeAt"]
             entry["notifiedAtSource"] = "propose"
 
-    # P5: a pure A2A round (propose + Decision, no client `negotiation_started`) still
-    # has a client-clock start: the propose span. Prefer it over the server fallback so
-    # the round gets a real latencyMs; a client negotiation_started already won above.
-    for entry in rounds.values():
-        if entry["negotiationStartedAt"] is None and entry["proposeAt"] is not None:
-            entry["negotiationStartedAt"] = entry["proposeAt"]
-            entry["negotiationStartedAtSource"] = "client:propose"
-            entry["clock"] = "client"
-
     server_starts, server_duration = _server_negotiation(all_rows or [])
     if server_starts:
         fallback = server_starts[min(server_starts)]
@@ -699,6 +786,317 @@ def _negotiation(
     }
 
 
+def _ms_between(start: str | None, end: str | None) -> int | None:
+    if not start or not end:
+        return None
+    start_dt = parse_dt(start)
+    end_dt = parse_dt(end)
+    if start_dt is None or end_dt is None:
+        return None
+    return int(round((end_dt - start_dt).total_seconds() * 1000))
+
+
+def _ms_between_dt(start: datetime | None, end: datetime | None) -> int | None:
+    if start is None or end is None:
+        return None
+    return int(round((end - start).total_seconds() * 1000))
+
+
+def _activity_ms(
+    rows: list[dict[str, Any]],
+    start: datetime | None,
+    end: datetime | None,
+    excluded_stages: set[str],
+) -> int | None:
+    """Union of non-excluded client activity inside ``[start, end]`` (Issue #6 B)."""
+    if start is None or end is None:
+        return None
+    intervals: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        name = str(row.get("name") or "")
+        if name.startswith("run ·") or name.startswith("workflow ·") or name == "trace opened":
+            continue
+        if _as_text(row.get("type")) == "EVENT":
+            continue
+        row_start = _start(row)
+        row_end = parse_dt(row.get("endTime"))
+        if row_start is None or row_end is None:
+            continue
+        if row_end < start or row_start > end:
+            continue
+        if _row_side(row) == "server":
+            continue
+        kind = _as_text(_meta(row, "kind"))
+        stage = _as_text(_meta(row, "stage")) or ""
+        if kind == "llm" and (stage in excluded_stages or stage.startswith("client_decision")):
+            continue
+        clip_start = max(row_start, start)
+        clip_end = min(row_end, end)
+        if clip_end > clip_start:
+            intervals.append((clip_start, clip_end))
+    if not intervals:
+        return 0
+    intervals.sort()
+    merged: list[list[datetime]] = [list(intervals[0])]
+    for interval_start, interval_end in intervals[1:]:
+        if interval_start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], interval_end)
+        else:
+            merged.append([interval_start, interval_end])
+    return int(round(sum((end_at - start_at).total_seconds() for start_at, end_at in merged) * 1000))
+
+
+def _s_timings(rows: list[dict[str, Any]], trace_id: str | None) -> dict[str, Any]:
+    """Issue #6 negotiation timings (S1/S3/S4/S7/S8 → 协商时延).
+
+    S1 anchors on the retry run root when the trace contains one (a blocked first
+    attempt is ignored), otherwise on ``trace opened``. S3/S8 are the server
+    negotiation ``SendMessage`` spans (a new negotiation generation starts the next
+    round); S4/S7 are Decision requested→Decision accept and Decision accept→Accept
+    sent. 协商时延 = S3 + S4 + S8 + S7 for completed rounds only.
+    """
+    def start(row: dict[str, Any] | None) -> datetime | None:
+        return _start(row) if row is not None else None
+
+    def sort_key(row: dict[str, Any]) -> float:
+        return _row_sort_key(row)
+
+    ordered = sorted(rows, key=sort_key)
+    run_roots = [row for row in ordered if str(row.get("name") or "").startswith("run ·")]
+    retry_roots = [
+        row
+        for row in run_roots
+        if _as_text(_meta(row, "runId")) not in (None, "", trace_id)
+    ]
+    opened = next((row for row in ordered if str(row.get("name") or "") == "trace opened"), None)
+    if retry_roots:
+        anchor_row = retry_roots[-1]
+    elif opened is not None:
+        anchor_row = opened
+    elif run_roots:
+        anchor_row = run_roots[0]
+    else:
+        anchor_row = ordered[0] if ordered else None
+    anchor = start(anchor_row) if anchor_row is not None else None
+    anchor_key = sort_key(anchor_row) if anchor_row is not None else None
+    scoped = [
+        row
+        for row in ordered
+        if anchor_key is None or start(row) is None or sort_key(row) >= anchor_key
+    ]
+
+    validations = [row for row in scoped if _as_text(_meta(row, "kind")) == "task_validation"]
+    validations.sort(key=sort_key)
+    passed = next((row for row in validations if "passed" in str(row.get("name") or "").lower()), None)
+    failed = next(
+        (
+            row
+            for row in validations
+            if "blocked" in str(row.get("name") or "").lower()
+            or "failed" in str(row.get("name") or "").lower()
+        ),
+        None,
+    )
+    if passed is not None:
+        s1_ms = _ms_between_dt(anchor, start(passed))
+    elif failed is not None:
+        return {"s1Ms": None, "latencyMs": None, "stopped": True, "rounds": []}
+    else:
+        sent = next(
+            (
+                row
+                for row in scoped
+                if _as_text(_meta(row, "kind")) == "message_sent"
+                and "task-t sent" in str(row.get("name") or "").lower()
+            ),
+            None,
+        )
+        s1_ms = _ms_between_dt(anchor, start(sent)) if sent is not None else None
+
+    def server_scope(row: dict[str, Any]) -> bool:
+        scope = (_as_text(_meta(row, "scope.name")) or "") + (
+            _as_text(_meta(row, "resourceAttributes.service.name")) or ""
+        )
+        return "a2a-t-server" in scope.lower()
+
+    server_sends = [
+        row
+        for row in ordered
+        if server_scope(row)
+        and str(row.get("name") or "") == "SendMessage"
+        and _as_text(row.get("type")) == "AGENT"
+    ]
+    negotiation_spans = [row for row in ordered if str(row.get("name") or "").startswith("SendMessage-negotiation")]
+    neg_parents = {
+        _as_text(row.get("parentObservationId"))
+        for row in negotiation_spans
+        if row.get("parentObservationId")
+    }
+    server_rounds: list[dict[str, int | None]] = []
+    for row in server_sends:
+        duration = _ms_between_dt(start(row), parse_dt(row.get("endTime")))
+        if _as_text(row.get("id")) in neg_parents:
+            server_rounds.append({"s3Ms": duration, "s8Ms": 0})
+        elif server_rounds:
+            current = server_rounds[-1]
+            current["s8Ms"] = int(current["s8Ms"] or 0) + int(duration or 0)
+
+    def kind_rows(kind: str) -> list[dict[str, Any]]:
+        return sorted(
+            (row for row in ordered if _as_text(_meta(row, "kind")) == kind),
+            key=sort_key,
+        )
+
+    proposes = kind_rows("propose")
+    requested = kind_rows("decision_requested")
+    decisions: list[dict[str, Any]] = []
+    for kind in ("accept", "counter", "reject", "abort"):
+        decisions.extend(kind_rows(kind))
+    decisions.sort(key=sort_key)
+    accept_sent = [
+        row
+        for row in kind_rows("message_sent")
+        if _as_text(_meta(row, "phase")) in {"resolution", "negotiation"}
+    ]
+    accept_sent.sort(key=sort_key)
+
+    rounds_client = max(len(proposes), len(requested), len(decisions))
+    client_rounds: list[dict[str, int | None]] = []
+    for index in range(rounds_client):
+        request = requested[index] if index < len(requested) else None
+        decision = decisions[index] if index < len(decisions) else None
+        reply = accept_sent[index] if index < len(accept_sent) else None
+        request_at = start(request)
+        decision_at = start(decision)
+        reply_at = start(reply)
+        s4_raw = _ms_between_dt(request_at, decision_at)
+        s7_raw = (
+            _ms_between_dt(decision_at, reply_at)
+            if decision_at is not None and reply_at is not None and reply_at >= decision_at
+            else None
+        )
+        s4 = _activity_ms(ordered, request_at, decision_at, {"client_decision_agent"}) if s4_raw is not None else None
+        # S7 keeps the negotiation_accept_extraction LLM inside the window (user
+        # definition); only idle gaps are dropped.
+        s7 = _activity_ms(ordered, decision_at, reply_at, set()) if s7_raw is not None else None
+        client_rounds.append(
+            {
+                "s4Ms": s4,
+                "s7Ms": s7,
+                "s4RawMs": s4_raw,
+                "s7RawMs": s7_raw,
+                "s4ExcludedMs": (s4_raw - s4) if s4_raw is not None and s4 is not None else None,
+                "s7ExcludedMs": (s7_raw - s7) if s7_raw is not None and s7 is not None else None,
+            }
+        )
+
+    total_rounds = max(len(server_rounds), len(client_rounds))
+    rounds: list[dict[str, Any]] = []
+    total_ms = 0
+    any_complete = False
+    for index in range(total_rounds):
+        server = server_rounds[index] if index < len(server_rounds) else {}
+        client = client_rounds[index] if index < len(client_rounds) else {}
+        s3 = server.get("s3Ms")
+        s8 = server.get("s8Ms")
+        s4 = client.get("s4Ms")
+        s7 = client.get("s7Ms")
+        complete = s3 is not None and s4 is not None and s7 is not None
+        latency = (s3 or 0) + (s8 or 0) + (s4 or 0) + (s7 or 0) if complete else None
+        if latency is not None:
+            total_ms += latency
+            any_complete = True
+        rounds.append(
+            {
+                "round": index + 1,
+                "s3Ms": s3,
+                "s4Ms": s4,
+                "s4RawMs": client.get("s4RawMs"),
+                "s4ExcludedMs": client.get("s4ExcludedMs"),
+                "s7Ms": s7,
+                "s7RawMs": client.get("s7RawMs"),
+                "s7ExcludedMs": client.get("s7ExcludedMs"),
+                "s8Ms": s8,
+                "negotiationLatencyMs": latency,
+            }
+        )
+    return {
+        "s1Ms": s1_ms,
+        "latencyMs": total_ms if any_complete else None,
+        "stopped": False,
+        "rounds": rounds,
+    }
+
+
+def _client_negotiation_rounds(rows: list[dict[str, Any]]) -> int:
+    """Rounds evidenced by client negotiation events (accept/decision_requested/propose)."""
+    kinds = {"propose", "decision_requested", "accept", "counter", "reject", "abort"}
+    events = [row for row in rows if _as_text(_meta(row, "kind")) in kinds]
+    if not events:
+        return 0
+    numbered = [_as_int(_meta(row, "round")) for row in events]
+    numbered = [value for value in numbered if value]
+    if numbered:
+        return max(numbered)
+    return max(
+        sum(1 for row in events if _as_text(_meta(row, "kind")) == "accept"),
+        sum(1 for row in events if _as_text(_meta(row, "kind")) == "decision_requested"),
+        sum(1 for row in events if _as_text(_meta(row, "kind")) == "propose"),
+    )
+
+
+def _server_send_blocks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Server ``SendMessage`` durations with their A2A response state."""
+    blocks: list[tuple[datetime, int, str]] = []
+    for row in rows:
+        scope = (_as_text(_meta(row, "scope.name")) or "") + (
+            _as_text(_meta(row, "resourceAttributes.service.name")) or ""
+        )
+        if "a2a-t-server" not in scope.lower():
+            continue
+        if str(row.get("name") or "") != "SendMessage":
+            continue
+        start = _start(row)
+        end = parse_dt(row.get("endTime"))
+        if start is None or end is None:
+            continue
+        response = _meta(row, "attributes.gen_ai.agent.a2a.response")
+        state = ""
+        if isinstance(response, dict):
+            status = response.get("status")
+            if isinstance(status, dict) and status.get("state"):
+                state = _as_text(status.get("state")) or ""
+            if not state:
+                update = response.get("statusUpdate")
+                if isinstance(update, dict):
+                    nested = update.get("status")
+                    if isinstance(nested, dict) and nested.get("state"):
+                        state = _as_text(nested.get("state")) or ""
+        blocks.append((start, int(round((end - start).total_seconds() * 1000)), state))
+    blocks.sort(key=lambda item: item[0])
+    return [{"durationMs": duration, "state": state} for _, duration, state in blocks]
+
+
+def _server_send_durations(rows: list[dict[str, Any]]) -> list[int]:
+    """Durations of the a2a-t-server ``SendMessage`` spans, in start order."""
+    durations: list[tuple[datetime, int]] = []
+    for row in rows:
+        scope = (_as_text(_meta(row, "scope.name")) or "") + (
+            _as_text(_meta(row, "resourceAttributes.service.name")) or ""
+        )
+        if "a2a-t-server" not in scope.lower():
+            continue
+        if str(row.get("name") or "") != "SendMessage":
+            continue
+        start = _start(row)
+        end = parse_dt(row.get("endTime"))
+        if start is None or end is None:
+            continue
+        durations.append((start, int(round((end - start).total_seconds() * 1000))))
+    durations.sort(key=lambda item: item[0])
+    return [duration for _, duration in durations]
+
+
 def build_metrics(
     rows: list[dict[str, Any]],
     trace_id: str | None = None,
@@ -710,11 +1108,11 @@ def build_metrics(
     """Build the metrics document for one exported trace.
 
     ``rows`` are the API observation rows (the same objects written to
-    ``raw/observations.jsonl``). ``round_mode`` selects the negotiation round model:
-    ``legacy`` (row order, default) or ``decision`` (PROPOSE-DECISION pairing, for
-    A2A/pure). ``run_id`` selects one attempt of a shared correction trace; without it
-    a multi-run trace uses :func:`select_run_id` (the attempt that sent Task-T).
-    ``summary`` is optional and only used as a fallback for the end-to-end latency.
+    ``raw/observations.jsonl``). ``summary`` is optional and only used as a
+    fallback for the end-to-end latency of non-A2A traces. ``round_mode`` selects
+    the negotiation round model. ``run_id`` selects one attempt of a shared
+    correction trace; without it a multi-run trace uses :func:`select_run_id`
+    (the attempt that sent Task-T).
     """
     warnings: list[str] = []
     attempt_run_ids = _distinct_run_ids(rows)
@@ -749,11 +1147,23 @@ def build_metrics(
     sdk_called_at = _first_start([row for row in run_rows if _meta(row, "kind") == "task_prompt_rendered"])
     request_sent_at = _first_start([row for row in run_rows if _meta(row, "kind") == "message_sent"])
     task_created_at = _first_start([row for row in run_rows if _meta(row, "kind") == "task_created"])
+    status_at = _first_start(
+        [
+            row
+            for row in run_rows
+            if _meta(row, "kind") == "status"
+            and (
+                "task modification succeeded" in str(row.get("name") or "").lower()
+                or "task creation succeeded" in str(row.get("name") or "").lower()
+            )
+        ]
+    )
+    end_at = task_created_at or status_at
 
     end_to_end_ms: int | None = None
-    if received_at and task_created_at:
+    if received_at and end_at:
         start_dt = parse_dt(received_at)
-        end_dt = parse_dt(task_created_at)
+        end_dt = parse_dt(end_at)
         if start_dt and end_dt:
             end_to_end_ms = int(round((end_dt - start_dt).total_seconds() * 1000))
     elif summary is not None and getattr(summary, "latency_ms", None) is not None:
@@ -765,7 +1175,9 @@ def build_metrics(
     # "No usage" is data, not absence: keep both side buckets at zero so downstream
     # tables can print 0 instead of blank cells (pure A2A runs have no LLM calls).
     for side in ("client", "server"):
-        token_data["bySide"].setdefault(side, {"input": 0, "cachedInput": 0, "output": 0, "total": 0})
+        token_data["bySide"].setdefault(
+            side, {"input": 0, "cachedInput": 0, "output": 0, "total": 0}
+        )
     tokens = {"input": 0, "cachedInput": 0, "output": 0, "total": 0}
     tokens.update(token_data["**totals**"])
     if not tokens_found:
@@ -778,10 +1190,85 @@ def build_metrics(
         _as_int(run_meta.get("rounds")),
         round_mode,
     )
+    timing = _s_timings(rows, trace_id)
+    negotiation["s1Ms"] = timing["s1Ms"]
+    if timing["stopped"]:
+        negotiation["latencyMs"] = None
+        negotiation["rounds"] = 0
+        negotiation["roundsDetail"] = []
+        warnings.append("Task-T validation failed; negotiation timings skipped")
+    else:
+        negotiation["latencyMs"] = timing["latencyMs"]
+        if (run_meta.get("protocol") or "").lower() == "pure":
+            send_durations = _server_send_durations(rows)
+            if send_durations:
+                negotiation["latencyMs"] = sum(send_durations)
+                negotiation["latencySource"] = "pure:sum(SendMessage durations)"
+                negotiation["sendMessageDurationsMs"] = send_durations
+        legacy_detail = {
+            int(entry.get("round") or 0): entry
+            for entry in (negotiation.get("roundsDetail") or [])
+            if isinstance(entry, dict)
+        }
+        merged: list[dict[str, Any]] = []
+        for round_timing in timing["rounds"]:
+            entry = dict(
+                legacy_detail.get(
+                    round_timing["round"],
+                    {
+                        "round": round_timing["round"],
+                        "proposeAt": None,
+                        "notifiedAt": None,
+                        "notifiedAtSource": None,
+                        "negotiationStartedAt": None,
+                        "negotiationStartedAtSource": None,
+                        "clock": None,
+                        "decisionAt": None,
+                        "sdkConstructedAt": None,
+                        "replySentAt": None,
+                        "negotiationType": None,
+                        "hop": None,
+                    },
+                )
+            )
+            entry.update(round_timing)
+            merged.append(entry)
+        if merged:
+            negotiation["roundsDetail"] = merged
+            negotiation["rounds"] = len(merged)
+    blocks = _server_send_blocks(rows)
+    input_required = [
+        block for block in blocks if "INPUT_REQUIRED" in str(block["state"]).upper()
+    ]
+    negotiation["inputRequiredRounds"] = len(input_required)
+    client_rounds = _client_negotiation_rounds(run_rows)
+    meta_rounds = _as_int(run_meta.get("rounds")) or 0
+    meta_negotiated = _as_bool(run_meta.get("negotiated"))
+    if not blocks and not client_rounds and not meta_rounds and not meta_negotiated:
+        # No server evidence: keep the legacy metadata-driven view.
+        pass
+    elif not (input_required or client_rounds or meta_rounds or meta_negotiated):
+        negotiation["triggered"] = False
+        negotiation["rounds"] = 0
+        negotiation["roundsDetail"] = []
+        negotiation["latencyMs"] = None
+        negotiation.pop("latencySource", None)
+        negotiation.pop("sendMessageDurationsMs", None)
+    else:
+        negotiation["triggered"] = True
+        rounds = max(int(negotiation.get("rounds") or 0), len(input_required), client_rounds, meta_rounds)
+        negotiation["rounds"] = rounds
+        if (run_meta.get("protocol") or "").lower() == "pure":
+            if blocks:
+                negotiation["latencyMs"] = sum(block["durationMs"] for block in blocks)
+                negotiation["latencySource"] = "pure:sum(SendMessage durations)"
+                negotiation["sendMessageDurationsMs"] = [block["durationMs"] for block in blocks]
     if negotiation["rounds"] and not negotiation["roundsDetail"]:
         warnings.append("negotiation rounds reported by run metadata but no round detail found")
     if any(entry.get("clock") == "server" for entry in negotiation["roundsDetail"]):
-        warnings.append("negotiationStartedAt filled from a2a-t-server spans (server clock); latencyMs left null")
+        warnings.append(
+            "negotiationStartedAt filled from a2a-t-server spans (server clock)"
+        )
     if negotiation["rounds"] and negotiation["latencyMs"] is None:
         warnings.append("negotiation rounds found but latency could not be computed")
 
@@ -791,12 +1278,18 @@ def build_metrics(
         "clientObservations": sum(1 for row in run_rows if _as_text(_meta(row, "side")) == "client"),
         "serverObservations": sum(1 for row in run_rows if _as_text(_meta(row, "side")) == "server"),
         "generations": sum(
-            1 for row in run_rows if str(row.get("type") or "").upper() == "GENERATION" or _meta(row, "kind") == "llm"
+            1
+            for row in run_rows
+            if str(row.get("type") or "").upper() == "GENERATION" or _meta(row, "kind") == "llm"
         ),
         "toolCalls": sum(
-            1 for row in run_rows if str(row.get("type") or "").upper() == "TOOL" or _meta(row, "kind") == "tool"
+            1
+            for row in run_rows
+            if str(row.get("type") or "").upper() == "TOOL" or _meta(row, "kind") == "tool"
         ),
     }
+    interceptions = _client_interceptions(rows, trace_id)
+    counts["clientInterceptions"] = interceptions["count"]
 
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -823,17 +1316,19 @@ def build_metrics(
             "openedAt": opened_at,
             "sdkCalledAt": sdk_called_at,
             "requestSentAt": request_sent_at,
-            "taskCreatedAt": task_created_at,
+            "taskCreatedAt": end_at,
         },
         "latency": {"endToEndMs": end_to_end_ms},
         "tokens": {
             "input": tokens["input"],
             "cachedInput": tokens["cachedInput"],
+            "excludedClient": token_data.get("excludedClient"),
             "output": tokens["output"],
             "total": tokens["total"],
             "bySide": token_data["bySide"],
         },
         "negotiation": negotiation,
+        "clientInterception": interceptions,
         "counts": counts,
         "sources": {
             "receivedAt": "metadata.receivedAt (trace opened) or trace_opened.startTime",
@@ -841,17 +1336,16 @@ def build_metrics(
             "requestSentAt": "first message_sent.startTime",
             "taskCreatedAt": "task_created.startTime",
             "endToEndMs": "taskCreatedAt - receivedAt",
-            "tokens": "sum(usageDetails.input/input_cached/output/total, else top-level usage, else OTel attributes.gen_ai.usage.*) per side, de-duplicated when a parent span repeats its child generation tokens; includes the a2a-t-server side",
+            "tokens": "gross input (usageDetails.input + input_cached, else inputUsage, else OTel input_tokens which already includes cache) per side; cachedInput is a subset and total = input + output",
             "chainId": "metadata.chainId, else trace.sessionId",
             "counts.clientObservations": "run rows (metadata.runId == traceId) with metadata.side == client; side=server rows still feed task_created/status timestamps but are counted separately",
             "negotiation.rounds": "max(distinct rounds from propose/negotiation_started/decision, run metadata rounds)",
             "tokens.siblingDedupe": "identical usage repeated on sibling generations under the same parent is counted once",
             "negotiation.notifiedAt": "decision_requested startTime when present (full level), else the client propose startTime (same instant the operator is notified)",
-            "negotiation.negotiationStartedAt": "client negotiation_started span, else the client propose span, else the a2a-t-server SendMessage/SendMessage-negotiation start (server clock, not used for latency)",
-            "negotiation.roundsDetail.negotiationType": "propose row metadata.detail.negotiationType; None when absent",
-            "negotiation.roundsDetail.hop": "propose row metadata.detail.hop; None when absent",
+            "negotiation.negotiationStartedAt": "client negotiation_started span, else the a2a-t-server SendMessage/SendMessage-negotiation start (server clock, not used for latency)",
             "negotiation.serverDurationMs": "metadata attributes.gen_ai.agent.a2at.negotiation.total_duration_ms from a2a-t-server spans",
             "negotiation.latencyMs": "sum(decisionAt - negotiationStartedAt) over rounds; only for client-clock rounds",
+            "clientInterception": "every task_validation row whose name/verdict marks it blocked (Issue #14); blockedRuns counts distinct runIds, corrected = a correction_applied span exists",
         },
         "warnings": warnings,
     }

@@ -24,8 +24,6 @@ from google.protobuf.message import Message
 from shared.config import (
     DISCOVERY_NMS,
     DISCOVERY_REGISTRY,
-    PRE_SEND_VALIDATION_ALWAYS,
-    PRE_SEND_VALIDATION_ON,
     SUPPORTED_INTENT_MODES,
     SampleConfig,
 )
@@ -900,7 +898,6 @@ class RunManager:
         target_server_context_id: str | None = None,
         scripted_decisions: Sequence[NegotiationDecision] | None = None,
         pure_answers: Sequence[str] | None = None,
-        validate_before_send: bool | None = None,
         language: str | None = None,
         prepared_task_t: str | None = None,
         prepared_filled: Mapping[str, object] | None = None,
@@ -943,8 +940,6 @@ class RunManager:
                 keeps the scenario's catalog script.
             pure_answers: per-run answers for the pure A2A ``INPUT_REQUIRED`` rounds, consumed in
                 order; ``None`` keeps the process-level pure policy.
-            validate_before_send: force the pre-send Task-T validation on or off; ``None`` uses the
-                process setting and the source kind.
             language: per-run scenario language; ``None``/empty keeps the process language.
             prepared_task_t: a Task-T the caller already generated and validated. The run sends it
                 as-is and skips both SDK calls (the tester's interception-miss path).
@@ -1008,11 +1003,6 @@ class RunManager:
                 raise ValueError(
                     "A Modify-only run needs both the target Task id and its context id."
                 )
-        resolved_validate_before_send = (
-            _should_validate_before_send(self._config, resolved_source)
-            if validate_before_send is None
-            else validate_before_send
-        )
         resolved_intent_mode = (intent_mode or self._config.intent_mode).strip()
         if resolved_intent_mode not in SUPPORTED_INTENT_MODES:
             raise ValueError(
@@ -1093,7 +1083,6 @@ class RunManager:
             idempotency_key=resolved_key,
             store=self._store,
             intent_mode=resolved_intent_mode,
-            validate_before_send=resolved_validate_before_send,
             raw_request=raw_request,
             source=dict(resolved_source),
             run_mode=run_mode,
@@ -1824,9 +1813,6 @@ class RunManager:
                 run_id=run.run_id,
                 user_request=run.user_request,
                 conversation_context=run.conversation_context,
-                validate_before_send=run.validate_before_send,
-                enforce_required_fields=_should_enforce_required_fields(run.source),
-                site_level_rate_optional=bool(run.source.get("negotiationExpected")),
                 run_mode=run.run_mode,
                 target_task_id=run.target_task_id,
                 target_context_id=run.target_context_id,
@@ -2344,28 +2330,6 @@ def _format_conversation_context(turns: list[Any]) -> str:
         lines.append(line)
         total += len(line) + 1
     return "\n".join(lines)
-
-
-#: Entry points whose requests must satisfy the caller schema's required fields. A gateway or API
-#: caller keeps its previous behavior this iteration; the interactive entry points do not send an
-#: incomplete Task-T to the network.
-_REQUIRED_FIELD_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"presentation", "tester", "explorer", "cli"})
-
-
-def _should_validate_before_send(
-    config: SampleConfig,
-    source: Mapping[str, object],
-) -> bool:
-    """Return whether this run enables the client-side Task-T validation gate."""
-    setting = config.pre_send_validation
-    return setting == PRE_SEND_VALIDATION_ALWAYS or (
-        setting == PRE_SEND_VALIDATION_ON and source.get("kind") == "presentation"
-    )
-
-
-def _should_enforce_required_fields(source: Mapping[str, object]) -> bool:
-    """Return whether this run must satisfy the caller schema's required fields."""
-    return str(source.get("kind") or "") in _REQUIRED_FIELD_SOURCE_KINDS
 
 
 def _resolve_negotiation_source(negotiation_source: str | None) -> str:
