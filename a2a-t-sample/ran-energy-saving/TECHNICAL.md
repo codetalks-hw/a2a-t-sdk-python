@@ -1478,7 +1478,7 @@ The sample is deliberately a prototype. Before production:
 
 | Path | Responsibility |
 | --- | --- |
-| [`run_demo.py`](run_demo.py) | Multi-process launcher: starts registry, server, the Web UI (`--ui`) and (with `--gateway`) the inbound A2A gateway as background children, runs the CLI client in the foreground otherwise, and stops the recorded PIDs afterwards. Because the UI is a child, `--stop` also reclaims it (including legacy UIs by port). |
+| [`run_demo.py`](run_demo.py) | Multi-process launcher: starts registry, server, the Web UI (`--ui`) and (with `--gateway`) the inbound A2A gateway as background children, runs the CLI client in the foreground otherwise, and stops the recorded PIDs afterwards. Because the UI is a child, `--stop` stops it as a recorded PID; a legacy UI that was never recorded is reclaimed by port only with `--reclaim-port`, and only when its command line proves this instance owns it. |
 | [`env.example`](env.example) | Unified offline-ready configuration template. |
 | [`demo/agents/server_agent/`](demo/agents/server_agent) | Server-side LangGraph execution: `planner.py` (scripted/live model + prompt), `langgraph_tools.py` (guarded tools + `PlanGuard`), `graph.py` (ReAct state graph), `tools.py` (pure NMS tools). No ADK. |
 | [`demo/agents/client_agent/`](demo/agents/client_agent) | Client ADK decision agent: `agent.py` exports `root_agent`; `tools.py` holds the SLA and impact tools; `prompts/request_instruction.md` is the instruction. |

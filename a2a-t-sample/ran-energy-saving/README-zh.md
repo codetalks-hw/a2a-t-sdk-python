@@ -470,7 +470,11 @@ A2AT_SAMPLE_WEBHOOK_PORT=9001 \
 python run_demo.py --nms --protocol a2a --ui --brand huawei --oss-port 8011
 ```
 
-`--stop` 只读本实例 `A2AT_SAMPLE_RUN_DIR/pids.json`，停 B 不影响 A。A2A + NMS 中，UI 通过
+`--stop` 只读本实例 `A2AT_SAMPLE_RUN_DIR/pids.json`，停 B 不影响 A。默认只停自己记录的
+PID，**不扫描端口**：同机两个实例的 `demo.web.serve` 命令行完全一样，"像本 sample" 不等于
+"属于本实例"。旧版启动器把 UI 起在自己进程里、没有记录时，才用 `--stop --reclaim-port`
+按端口回收；即便加了该开关，也只停能证明属于本实例的 UI（子进程的 `--env-file` 指向本实例
+的 `RUN_DIR`，旧版启动器则要求 `--ui-port` 与本端口一致），否则打印 PID 并保留。A2A + NMS 中，UI 通过
 direct A2A/SSE 访问本地 OSS Agent；OSS Agent 通过标准 A2A 访问网管（webhook，`--nms-sim` 时用
 SSE）。OSS Agent 复用与 A2A-T 客户端相同的 ADK 决策 Agent 回答网管的 `INPUT_REQUIRED`，并把
 决策渲染成自然语言文本。

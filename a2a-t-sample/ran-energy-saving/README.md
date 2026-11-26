@@ -566,7 +566,13 @@ python run_demo.py --nms --protocol a2a --pure-hop oss --ui --brand huawei --oss
 ```
 
 `--stop` reads only that instance's `A2AT_SAMPLE_RUN_DIR/pids.json`, so stopping B leaves A
-running. In A2A + NMS the UI calls the vendor NMS directly: the Task on the wire is the vendor's
+running. By default it stops only the PIDs it recorded and does **not** scan the port: two
+instances on one machine run the identical `demo.web.serve` command line, so "looks like this
+sample" does not prove "belongs to this instance". Only an older launcher, which served the UI
+inside its own process and never recorded it, needs `--stop --reclaim-port`; even then only a UI
+proven to be this instance's is stopped (the child's `--env-file` points at this instance's
+`RUN_DIR`; a legacy launcher must name the matching `--ui-port`), otherwise the PIDs are printed
+and left running. In A2A + NMS the UI calls the vendor NMS directly: the Task on the wire is the vendor's
 Task, and the same ADK decision agent answers the vendor's plain-text questions. With the explicit
 `--pure-hop oss` proxy, the UI talks to the local OSS Agent and the OSS Agent talks to the NMS; the
 outer Task and downstream binding then exist, which is why the direct hop is the default.
