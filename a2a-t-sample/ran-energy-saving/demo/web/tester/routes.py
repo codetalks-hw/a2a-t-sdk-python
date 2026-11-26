@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
 
+from demo.web.request_source import request_source
 from demo.web.tester.report import write_report
 from demo.web.tester.service import (
     ALL_STAGES,
@@ -214,6 +215,7 @@ def build_tester_routes(
                 concurrency=_concurrency(body.get("concurrency")),
                 rounds=_rounds(body.get("rounds")),
                 owner=_client_id(request),
+                owner_source=request_source(request, "tester"),
             )
         except (TypeError, ValueError) as exc:
             return JSONResponse({"error": str(exc), "code": "invalid_request"}, status_code=400)
@@ -232,6 +234,7 @@ def build_tester_routes(
                 negotiation_source=_optional_str(body.get("negotiationSource")),
                 keep_tasks=bool(body.get("keepTasks")),
                 owner=_client_id(request),
+                owner_source=request_source(request, "tester"),
             )
         except (TypeError, ValueError) as exc:
             return JSONResponse({"error": str(exc), "code": "invalid_request"}, status_code=400)
