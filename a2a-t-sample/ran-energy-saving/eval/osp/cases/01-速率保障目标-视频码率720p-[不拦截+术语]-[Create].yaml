@@ -50,7 +50,7 @@ expect:
 
         ## Task Context
         Energy saving time range: start time "00:00:00", end time "22:00:00"
-        Ensuring user experience for 720p video
+        Rate guarantee target: {00:00-22:00, Ensuring user experience for 720p video}
 
         ## Terminology Explanation
         1. LTE

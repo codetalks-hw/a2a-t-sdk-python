@@ -48,11 +48,11 @@ expect:
         A2ATestRegion
 
         ## Task Target
+        Apply high GS
 
         ## Task Context
         Energy saving time range: start time "19:00:00", end time "22:00:00"
         Rate guarantee target: 10Mbps
-        Apply high GS
 
         ## Terminology Explanation
         1. LTE

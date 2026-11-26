@@ -51,9 +51,9 @@ expect:
         A2ATestRegion3
 
         ## Task Target
+        Energy saving aggressiveness: Conservative
 
         ## Task Context
-        Energy saving aggressiveness: Conservative
         Time-segmented rate guarantee target: {00:00-07:00,2Mbps}, { 07:00-18:00,20Mbps},{18:00-24:00,2Mbps}
 
         ## Terminology Explanation

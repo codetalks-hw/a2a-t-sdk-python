@@ -51,7 +51,7 @@ expect:
 
         ## Task Context
         Energy saving time range: start time "00:00:00", end time "22:00:00"
-        Set the User Experience Target  to 10
+        Rate guarantee target: {00:00-22:00, Set the User Experience Target  to 10}
 
         ## Terminology Explanation
         1. LTE

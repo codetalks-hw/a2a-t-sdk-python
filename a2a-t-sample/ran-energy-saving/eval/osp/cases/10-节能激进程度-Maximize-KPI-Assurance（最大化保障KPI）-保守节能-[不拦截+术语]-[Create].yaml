@@ -45,10 +45,10 @@ expect:
         A2ATestRegion
 
         ## Task Target
+        maximize kpi assurance
 
         ## Task Context
         Energy saving time range: start time "19:00:00", end time "22:00:00"
-        maximize kpi assurance
 
         ## Terminology Explanation
         1. LTE

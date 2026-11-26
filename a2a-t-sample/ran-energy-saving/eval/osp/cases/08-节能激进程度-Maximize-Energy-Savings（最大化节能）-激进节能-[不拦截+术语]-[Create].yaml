@@ -45,10 +45,10 @@ expect:
         A2ATestRegion
 
         ## Task Target
+        maximize energy savings
 
         ## Task Context
         Energy saving time range: start time "19:00:00", end time "22:00:00"
-        maximize energy savings
 
         ## Terminology Explanation
         1. LTE
