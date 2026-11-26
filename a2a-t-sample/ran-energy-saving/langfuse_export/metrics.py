@@ -391,8 +391,9 @@ def _token_sums(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], bool]:
         if _as_text(row.get("name")) != _PUSH_NOTIFICATION:
             continue
         parent_id = _as_text(row.get("parentObservationId"))
-        if parent_id and parent_id in usages:
-            skipped.add(_as_text(row.get("id")))
+        row_id = _as_text(row.get("id"))
+        if row_id and parent_id and parent_id in usages:
+            skipped.add(row_id)
 
     for row_id, row in by_id.items():
         if row_id in skipped:
@@ -540,7 +541,7 @@ def _negotiation_decision(
             },
         )
 
-    decisions: list[tuple[str | None, int, dict[str, Any]]] = []
+    decisions: list[tuple[datetime | None, int, dict[str, Any]]] = []
     for row in ordered:
         kind = _as_text(_meta(row, "kind"))
         if kind in DECISION_KINDS:
@@ -551,7 +552,7 @@ def _negotiation_decision(
             if entry["decisionAt"] is None:
                 entry["decisionAt"] = _iso(_start(row))
 
-    def next_decision_round(at: str | None) -> int | None:
+    def next_decision_round(at: datetime | None) -> int | None:
         if at is None:
             return None
         for start, round_no, __ in decisions:
@@ -559,7 +560,7 @@ def _negotiation_decision(
                 return round_no
         return None
 
-    def previous_decision_round(at: str | None) -> int | None:
+    def previous_decision_round(at: datetime | None) -> int | None:
         current: int | None = None
         for start, round_no, __ in decisions:
             if start is not None and at is not None and start <= at:

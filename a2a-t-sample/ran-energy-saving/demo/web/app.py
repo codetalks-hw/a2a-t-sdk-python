@@ -564,6 +564,20 @@ def create_app(
     # The independent decision-quality judge is a separate model; an unconfigured process passes
     # None and the appendix records every semantic check as unjudged.
     tester_judge = build_judge_client(config) if config.judge_configured else None
+    # The tester report and the review console fetch Langfuse traces with the same credentials the
+    # client uses. The sample's `.env` is above the runs directory, so passing the loaded config
+    # avoids making them rediscover it (``langfuse_export`` only reads the cwd).
+    trace_config: LangfuseConfig | None = None
+    if config.langfuse_public_key and config.langfuse_secret_key:
+        try:
+            trace_config = load_langfuse_config(
+                host=config.langfuse_base_url,
+                public_key=config.langfuse_public_key,
+                secret_key=config.langfuse_secret_key,
+            )
+        except LangfuseConfigError as exc:
+            _LOGGER.warning("Langfuse trace fetch disabled: %s", exc)
+            trace_config = None
     tester_routes, tester_batches = build_tester_routes(
         runs=manager,
         protocols=advertised_protocols,
@@ -588,6 +602,7 @@ def create_app(
         judge=tester_judge,
         judge_model_label=config.judge_model if tester_judge is not None else "",
         pure_hop=config.pure_hop,
+        trace_config=trace_config,
     )
     # The status page is process-wide: it must see every browser's batches, so it reads the same
     # tester manager the owner-filtered console uses.
@@ -612,20 +627,6 @@ def create_app(
         runs_dir=resolved_runs_dir,
         client_db_path=Path(config.client_db_path) if config.client_db_path else None,
     )
-    # The review console fetches Langfuse traces with the same credentials the client uses. The
-    # sample's `.env` is above the runs directory, so passing the loaded config avoids making the
-    # console rediscover it (``langfuse_export`` only reads the cwd).
-    trace_config: LangfuseConfig | None = None
-    if config.langfuse_public_key and config.langfuse_secret_key:
-        try:
-            trace_config = load_langfuse_config(
-                host=config.langfuse_base_url,
-                public_key=config.langfuse_public_key,
-                secret_key=config.langfuse_secret_key,
-            )
-        except LangfuseConfigError as exc:
-            _LOGGER.warning("review trace fetch disabled: %s", exc)
-            trace_config = None
     review_routes = build_review_routes(
         catalog=case_catalog,
         runs_dir=resolved_runs_dir,

@@ -110,7 +110,7 @@ Sample-only additions that upstream does not have:
 
 ## Historical version strings
 
-`demo/web/observe/table.py` and `tests/test_observe_table.py` contain
-`上游 0.4.3 起，缺失侧输出 0` / `0.4.3` strings. They describe upstream's 0.4.3
-token-bucket semantics and are pinned by tests; they are historical notes, not version
-carriers. Do **not** bump them when syncing the vendored package to a newer release.
+`demo/web/observe/table.py` contains `上游 0.4.3 起，缺失侧输出 0` / `0.4.3` strings.
+They describe upstream's 0.4.3 token-bucket semantics and are historical notes, not version
+carriers. The observe console is frozen and its tests were removed on 2026-11-26, so nothing
+pins these strings; do **not** bump them when syncing the vendored package.

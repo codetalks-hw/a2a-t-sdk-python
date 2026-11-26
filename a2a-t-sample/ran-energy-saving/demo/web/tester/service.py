@@ -441,6 +441,9 @@ class CaseItem:
     langfuse_url: str = ""
     #: Why Langfuse rejected the run's export (project suspended, bad key), empty when healthy.
     langfuse_warning: str = ""
+    #: OTel/Langfuse trace id used to fetch this run's observations (``run.langfuse["traceId"]``),
+    #: distinct from the vendor-facing :attr:`trace_id` in the first report column.
+    langfuse_trace_id: str = ""
     #: OSP 11-key structured intent extracted by the tester's SDK ``intent`` stage.
     intent: dict[str, object] | None = None
     #: Structured Task payload the downstream returned with ``TASK_STATE_SUBMITTED``: the
@@ -496,6 +499,7 @@ class CaseItem:
             "traceId": self.trace_id,
             "langfuseUrl": self.langfuse_url,
             "langfuseWarning": self.langfuse_warning,
+            "langfuseTraceId": self.langfuse_trace_id,
             "intent": self.intent,
             "serverIntent": self.server_intent,
             "intentCompare": self.intent_comparison(),
@@ -1266,6 +1270,7 @@ class EvalBatchManager:
         # export the previous run's intent/trace/answer when the new attempt fails early.
         item.trace_id = ""
         item.langfuse_warning = ""
+        item.langfuse_trace_id = ""
         item.intent = None
         item.server_intent = None
         item.intent_meta = {}
@@ -2694,6 +2699,9 @@ class EvalBatchManager:
             langfuse_warning = _langfuse_warning(run)
             if langfuse_warning:
                 item.langfuse_warning = langfuse_warning
+            langfuse_trace_id = _langfuse_trace_id(run)
+            if langfuse_trace_id:
+                item.langfuse_trace_id = langfuse_trace_id
             self._collect_reference(item, case)
             correction = _correction_detail(run)
             if correction is not None:
@@ -3396,6 +3404,11 @@ class EvalBatchManager:
                     if isinstance(item.get("langfuseWarning"), str)
                     else ""
                 ),
+                langfuse_trace_id=(
+                    item.get("langfuseTraceId")
+                    if isinstance(item.get("langfuseTraceId"), str)
+                    else ""
+                ),
                 intent=_optional_mapping(item.get("intent")),
                 server_intent=_optional_mapping(item.get("serverIntent")),
                 intent_meta=_mapping_or_empty(item.get("intentMeta")),
@@ -3503,6 +3516,10 @@ class EvalBatchManager:
         if warning and warning != item.langfuse_warning:
             item.langfuse_warning = warning
             data["langfuseWarning"] = warning
+        trace_id = _langfuse_trace_id(run)
+        if trace_id and trace_id != item.langfuse_trace_id:
+            item.langfuse_trace_id = trace_id
+            data["langfuseTraceId"] = trace_id
         return data
 
     def _snapshot(self, batch: _Batch) -> dict[str, object]:
@@ -4357,6 +4374,13 @@ def _langfuse_url(run: RunState) -> str:
     snapshot = run.langfuse if isinstance(run.langfuse, Mapping) else {}
     url = snapshot.get("url")
     return url if isinstance(url, str) else ""
+
+
+def _langfuse_trace_id(run: RunState) -> str:
+    """Return the OTel/Langfuse trace id of one run, empty when observability is off."""
+    snapshot = run.langfuse if isinstance(run.langfuse, Mapping) else {}
+    trace_id = snapshot.get("traceId")
+    return trace_id if isinstance(trace_id, str) else ""
 
 
 def _baseline_run_id(item: CaseItem) -> str | None:
