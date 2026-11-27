@@ -10,7 +10,7 @@ tags:
   - negotiation-a2a
   - negotiation-a2at
 user_input: |-
-  Due to power outages at LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion area from 08:00 to 10:00 and from 15:00 to 18:00 on the second day, the guaranteed bandwidth for LNR_KPI_7745 and NES_27A_321071 during the power outage period needs to be modified to 10 Mbps.
+  Due to power outages at LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion area from 08:00 to 10:00 and from 15:00 to 18:00 on the second day, the guaranteed bandwidth for LNR_KPI_7745 and NES_27A_321071 during the power outage period needs to be modified to 15 Mbps.
 expect:
   intent:
     Operation type: Modify
@@ -55,7 +55,7 @@ expect:
         ## Task Target
 
         ## Task Context
-        Site list: ["LNR_KPI_7745", "NES_27A_321071"], Time-segmented rate guarantee target: {08:00-10:00, 10Mbps}, {15:00-18:00, 10Mbps}, Background event: power outage from 08:00 to 10:00 and 15:00 to 18:00.
+        Site list: ["LNR_KPI_7745", "NES_27A_321071"], Time-segmented rate guarantee target: {08:00-10:00, 15Mbps}, {15:00-18:00, 15Mbps}, Background event: power outage from 08:00 to 10:00 and 15:00 to 18:00.
 
         ## Terminology Explanation
         1. LTE
@@ -107,7 +107,7 @@ expect:
 
             ## Feasibility Negotiation Result in Detail
 
-            Reduce throughput target from 10Mbps to 2Mbps for the power outage period.
+            Reduce throughput target from 15Mbps to 2Mbps for the power outage period.
       final_state: task_completed
       final_state_derived: true
     a2a:
