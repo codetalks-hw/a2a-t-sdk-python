@@ -1,7 +1,10 @@
 # OSP 无线节能评测用例
 
 来源：`OSP-Unified Evaluation Set_v.01.xlsx` 的前两个 sheet（`A2A_原始数据`、`A2A-T_原始数据`）。
-一条用例一个文件，共 **51** 条；A2A 与 A2A-T 的预期放在同一个文件里。
+一条用例一个文件，共 **100** 条；A2A 与 A2A-T 的预期放在同一个文件里。
+
+`cases/*.yaml` 就是唯一来源，直接手工维护：原表导出的快照与生成器已删除，不再有"重新生成"
+这一步；改完跑 `tests/test_osp_eval_cases.py` 校验结构。
 
 本目录是**运行用例集**，不是原表导出：原表里只用于跑测后回填的观测列（实际转换、实际校验、
 时间点、token 等）不在这里，跑测结果另行记录。
@@ -11,7 +14,6 @@
 ```
 eval/osp/
 ├── README.md        # 本文件
-├── index.yaml       # 100 条用例的目录索引（选题、速查用）
 └── cases/
     ├── 01-速率保障目标-视频码率720p-[不拦截+术语]-[Create].yaml
     └── ...          # 共 100 个
@@ -23,7 +25,7 @@ eval/osp/
 <id>-<用例名>-[<预期校验>]-[<操作>].yaml
 ```
 
-- `id`：原表编号，1–51，两位补零，保证目录排序。
+- `id`：原表编号，1–100，两位补零，保证目录排序。
 - `<用例名>`：原表用例名，保留中文；`： / \ : * ? " < > |`、换行、连续空白等替换为 `-`，
   折叠重复的 `-`，最长 50 字。
 - `<预期校验>`：`拦截` / `不拦截` / `不拦截+术语` / `未填写`。
@@ -118,7 +120,7 @@ known_issue: null
 - “上一个任务”指请求中最近列出的任务：14/70–72/76–78/82。
 
 服务端可以自行提供的值（例如可行性协商中的 5/2Mbps 让步）不写入条件。条件不影响
-`script` 能源码回放；重新生成语料时必须保留这些字段。
+`script` 能源码回放；改动用例时不要删掉这些字段。
 
 ### 3.1 `expect.intent`
 
@@ -191,9 +193,8 @@ A2A 与 A2A-T 的预期结构化意图在这 100 条里完全相同，因此只�
 
 `/annotate` 只展示补充请求原文，不执行它。
 
-数据来源是重构版工作簿 K 列（`无线节能场景用例_重构版_A2ATestRegion`）。用例文件仍是生成产物，
-生成器尚未支持该列：重跑 `generate_osp_cases.py` 会丢掉字段，`--check` 会报漂移。合并脚本见
-`docs-local/merge-osp-blocked-followup.py`（内部，不入库）。
+数据来源是重构版工作簿 K 列（`无线节能场景用例_重构版_A2ATestRegion`），已直接写进各用例文件；
+语料现在是手工维护的，不存在"重跑生成器会丢字段"的问题。
 
 ### 3.5 `baseline`（Modify 的配对创建）
 
@@ -225,7 +226,6 @@ baseline:
    的第一段都不是 demo 的 `00:00-06:00` 窗口。
 
 `/tester` 优先用用例自己的 `baseline.request`；没有该字段时回退到共享 fixture（`_baseline_request`）。
-生成器尚未支持该字段，手工加入后 `--check` 会报漂移（与 `blocked_followup` 相同）。
 
 ## 4. 阶段模型与 `stop_after`
 
@@ -376,16 +376,15 @@ A2A-T 只有 10 条需要协商（26/28/29/30/31/32/50/51/88/89），其余 90 �
 `tags: [needs-confirmation]` 目前只在 34（H/J 时段不一致）和 40/46（原表预期与输入矛盾）上。业务
 确认后去掉标签；40/46 再把对应 `assert` 打开。7 与 20/21/28 只保留 `known_issue` 说明。
 
-## 7. 重新生成
+## 7. 修改用例
 
-源 JSON 在 `docs-local/osp-eval-cases/`（内部目录，不入库）。修改源数据后：
+`eval/osp/cases/*.yaml` 是唯一来源，直接编辑，没有生成器、没有 `--check`。改完必须跑：
 
 ```bash
-python docs-local/osp-eval-cases/generate_osp_cases.py
-python docs-local/osp-eval-cases/generate_osp_cases.py --check
+PYTHONPATH=. ../../.venv/Scripts/python.exe -m pytest tests/test_osp_eval_cases.py -q
 ```
 
-`--check` 会逐文件比较生成的 YAML 与已提交文件，有漂移时返回非零。
+它校验数量、文件名契约、schema 键集合与固定的 `assert` 开关；新增/改名/改 `validate` 时会立刻失败。
 
 ## 8. 离线 runner
 
@@ -615,12 +614,11 @@ python -m eval.osp.runner --all --stop-after validate --model-mode live \
 - **可选导出**：顶部「导出 overlay YAML / JSON」产出 `osp-expectations-overlay/v1`，用于跨环境、
   入库或蓝区固化；可直接放到 `eval/osp/expectations-overlay.yaml`（或 `--overlay` 指定的路径）。
   - overlay 只接受两类键：`a2a-t.slot_errors`（仅 blocked 用例）与
-    `<protocol>.negotiation.messages`；`validate` / `task_t` / 轮次数仍以生成的用例为准。
+    `<protocol>.negotiation.messages`；`validate` / `task_t` / 轮次数仍以用例文件为准。
   - YAML overlay 是严格模式（写错即失败）；标注库是宽松模式（坏条目告警后跳过）。
-  - 叠加顺序：生成用例 < YAML overlay < 标注库（最新的人工确认优先）。
+  - 叠加顺序：用例文件 < YAML overlay < 标注库（最新的人工确认优先）。
 - 右侧「生成期望片段」：单用例的片段，已按 `expect.protocols` 的层级（6 空格）缩进；没有已确认值时
   会明确说明。它和 overlay 的单个 case 条目同形。
-- `eval/osp/index.yaml` 只记录 id/文件名/标签/轮次数，不含这两类期望，无需更新它。
 
 ### 12.6 注意
 

@@ -207,7 +207,6 @@ cases:
 - `messages` 外层下标 = 轮次（1 基），内层 = 该轮可接受的渲染；`expected_rounds > 1` 时必须每轮一组。
 - overlay 只接受 `slot_errors` 与 `negotiation.messages`；`validate` / `task_t` / 轮次数仍以用例为准。
 - overlay 的 mtime/size 计入 catalog 版本；解析失败会让 reload 保留上一份快照，不会清空目录。
-- `eval/osp/index.yaml` 不含这两类期望，**不需要**改。
 - 如果确实要把值写进单个用例（例如蓝区固化），片段仍可直接粘贴；但现场请优先用 overlay。
 
 ### 5.3 落地后必须验证
