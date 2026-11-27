@@ -48,7 +48,7 @@ expect:
 
         ## Task Context
         Energy saving time range: start time "00:00:00", end time "22:00:00"
-        The historical minimum downlink throughput was 2 Mbps. Set the AVG DL THP to 10Mbps.
+        Rate guarantee target: {00:00-22:00, Set the AVG DL THP to 10Mbps}
 
         ## Terminology Explanation
         1. LTE
