@@ -1,16 +1,17 @@
 schema: osp-eval-case/v1
-id: 50
-name: UC7 停电时长>4h
-dimension: D1 意图完备且清晰
+id: 28
+name: "[negotiation]时间重叠+可行性协商"
+dimension: D3 意图模糊
 operation: Modify
 tags:
-  - power-outage
-  - uc
+  - negotiation
+  - feasibility-negotiation
+  - time-overlap
   - scenario-based
   - negotiation-a2a
   - negotiation-a2at
 user_input: |-
-  A power outage will occur from 08:00 to 18:00 tomorrow, affecting NRES_XCS_6102937 and NES_27A_321071 in A2ATestRegion region. The time-segment-based guaranteed throughput target for NRES_XCS_6102937 and NES_27A_321071 need to be modified, with a target of 5Mbps from 08:00 to 18:00.
+  Because LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion zone experienced a power outage from 08:00 to 18:00 on the second day, the guaranteed bandwidth for LNR_KPI_7745 and NES_27A_321071 needs to be modified to 10 Mbit/s from 08:00 to 12:00 and 5 Mbit/s from 11:00 to 18:00.
 expect:
   intent:
     Operation type: Modify
@@ -25,18 +26,20 @@ expect:
     Guaranteed throughput target by zone: []
     Scenario-based energy saving:
       - Site list:
-          - NRES_XCS_6102937
+          - LNR_KPI_7745
           - NES_27A_321071
         Guaranteed throughput target by site:
           - Guaranteed throughput target: 2Mbps
-            Effective time period: 08:00:00-08:59:59&09:00:00-09:59:59&10:00:00-10:59:59&11:00:00-11:59:59&12:00:00-12:59:59&13:00:00-13:59:59&14:00:00-14:59:59&15:00:00-15:59:59&16:00:00-16:59:59&17:00:00-17:59:59
+            Effective time period: 08:00:00-08:59:59&09:00:00-09:59:59&10:00:00-10:59:59&11:00:00-11:59:59
+          - Guaranteed throughput target: 2Mbps
+            Effective time period: 12:00:00-12:59:59&13:00:00-13:59:59&14:00:00-14:59:59&15:00:00-15:59:59&16:00:00-16:59:59&17:00:00-17:59:59
         Scenario: Power outage
         Scenario period: 08:00:00-17:59:59
   protocols:
     a2a-t:
-      validate: pass
-      validate_label: 不拦截
-      send: true
+      validate: blocked
+      validate_label: 拦截
+      send: false
       task_t: |-
         ## Operation Type
         Modify
@@ -53,7 +56,7 @@ expect:
         ## Task Target
 
         ## Task Context
-        Site list: ["NRES_XCS_6102937", "NES_27A_321071"],Time-segmented rate guarantee target: {08:00-18:00, 5Mbps},Background event: power outage from 08:00 to 18:00.
+        Site list: ["LNR_KPI_7745", "NES_27A_321071"], Time-segmented rate guarantee target: {08:00-12:00,  10Mbps}, {12:00-18:00, 5Mbps}, Background event: power outage from 08:00 to 18:00.
 
         ## Terminology Explanation
         1. LTE
@@ -105,16 +108,18 @@ expect:
 
             ## Feasibility Negotiation Result in Detail
 
-            Reduce throughput target from 5Mbps to 2Mbps for the power outage period.
-      final_state: task_completed
+            Reduce throughput target to 2Mbps for the power outage period.
+      final_state: input_invalid
       final_state_derived: true
     a2a:
       negotiation:
         expected: true
-        expected_rounds: 1
+        expected_rounds: 3
         kinds: null
         rounds:
-          - Agree to reduce the target from 5Mbps to 2Mbps.
+          - 'Set the guaranteed throughput targets: 08:00-12:00→10Mbps,12:00-18:00→5Mbps.'
+          - 'Set the guaranteed throughput targets: 08:00-12:00→5Mbps,12:00-18:00→5Mbps.'
+          - 'Set the guaranteed throughput targets: 08:00-12:00→2Mbps,12:00-18:00→2Mbps.'
       final_state: null
 assert:
   intent: true
@@ -127,6 +132,9 @@ assert:
   a2a:
     negotiation: true
     final_state: false
+blocked_followup:
+  input: |-
+    Because LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion zone experienced a power outage from 08:00 to 18:00 on the second day, the guaranteed bandwidth for those sites needs to be modified to 10 Mbit/s from 08:00 to 12:00 and 5 Mbit/s from 12:00 to 18:00.
 runner:
   scenario: night
   language: en-US
@@ -135,5 +143,5 @@ runner:
 source:
   file: OSP-Unified Evaluation Set_v.01_拆分_A2ATestRegion.xlsx
   sheet: A2A-T_原始数据
-  row: 50
+  row: 28
 known_issue: null

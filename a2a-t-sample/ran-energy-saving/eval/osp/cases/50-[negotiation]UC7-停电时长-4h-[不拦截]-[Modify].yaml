@@ -1,16 +1,16 @@
 schema: osp-eval-case/v1
-id: 26
-name: 停电场景10Mbps调整为2Mbps
+id: 50
+name: "[negotiation]UC7 停电时长>4h"
 dimension: D1 意图完备且清晰
 operation: Modify
 tags:
   - power-outage
-  - rate-guarantee
+  - uc
   - scenario-based
   - negotiation-a2a
   - negotiation-a2at
 user_input: |-
-  Due to a power outage from 08:00 to 18:00 on Day 2 affecting LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion region, modify their guaranteed throughput to 10 Mbps.
+  A power outage will occur from 08:00 to 18:00 tomorrow, affecting NRES_XCS_6102937 and NES_27A_321071 in A2ATestRegion region. The time-segment-based guaranteed throughput target for NRES_XCS_6102937 and NES_27A_321071 need to be modified, with a target of 5Mbps from 08:00 to 18:00.
 expect:
   intent:
     Operation type: Modify
@@ -25,7 +25,7 @@ expect:
     Guaranteed throughput target by zone: []
     Scenario-based energy saving:
       - Site list:
-          - LNR_KPI_7745
+          - NRES_XCS_6102937
           - NES_27A_321071
         Guaranteed throughput target by site:
           - Guaranteed throughput target: 2Mbps
@@ -53,7 +53,7 @@ expect:
         ## Task Target
 
         ## Task Context
-        Site list: ["LNR_KPI_7745","NES_27A_321071"], Time-segmented rate guarantee target: {08:00-18:00, 10Mbps}, Background event: power outage from 08:00 to 18:00.
+        Site list: ["NRES_XCS_6102937", "NES_27A_321071"],Time-segmented rate guarantee target: {08:00-18:00, 5Mbps},Background event: power outage from 08:00 to 18:00.
 
         ## Terminology Explanation
         1. LTE
@@ -105,17 +105,16 @@ expect:
 
             ## Feasibility Negotiation Result in Detail
 
-            Reduce throughput target from 10Mbps to 2Mbps for the power outage period.
+            Reduce throughput target from 5Mbps to 2Mbps for the power outage period.
       final_state: task_completed
       final_state_derived: true
     a2a:
       negotiation:
         expected: true
-        expected_rounds: 2
+        expected_rounds: 1
         kinds: null
         rounds:
-          - OK, lower LNR_KPI_7745 and NES_27A_321071 to 5Mbps during the outage.
-          - OK, lower LNR_KPI_7745 and NES_27A_321071 to 2Mbps during the outage.
+          - Agree to reduce the target from 5Mbps to 2Mbps.
       final_state: null
 assert:
   intent: true
@@ -136,5 +135,5 @@ runner:
 source:
   file: OSP-Unified Evaluation Set_v.01_拆分_A2ATestRegion.xlsx
   sheet: A2A-T_原始数据
-  row: 26
+  row: 50
 known_issue: null

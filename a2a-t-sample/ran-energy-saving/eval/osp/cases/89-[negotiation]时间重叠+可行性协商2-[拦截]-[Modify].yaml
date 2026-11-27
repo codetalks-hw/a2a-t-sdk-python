@@ -1,6 +1,6 @@
 schema: osp-eval-case/v1
-id: 88
-name: 时间重叠+可行性协商1
+id: 89
+name: "[negotiation]时间重叠+可行性协商2"
 dimension: D3 意图模糊
 operation: Modify
 tags:
@@ -11,7 +11,7 @@ tags:
   - negotiation-a2a
   - negotiation-a2at
 user_input: |-
-  Because LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion zone experienced a power outage from 08:00 to 18:00 on the second day, the guaranteed bandwidth for LNR_KPI_7745 and NES_27A_321071 needs to be modified to 10 Mbit/s from 08:00 to 12:00 and 5 Mbit/s from 10:00 to 18:00.
+  Because LNR_KPI_7745 and NES_27A_321071 in the A2ATestRegion zone experienced a power outage from 08:00 to 18:00 on the second day, the guaranteed bandwidth for LNR_KPI_7745 and NES_27A_321071 needs to be modified to 10 Mbit/s from 08:00 to 12:00 and 5 Mbit/s from 09:00 to 18:00.
 expect:
   intent:
     Operation type: Modify
@@ -143,5 +143,5 @@ runner:
 source:
   file: OSP-Unified Evaluation Set_v.01_拆分_A2ATestRegion.xlsx
   sheet: A2A-T_原始数据
-  row: 80
+  row: 81
 known_issue: null
