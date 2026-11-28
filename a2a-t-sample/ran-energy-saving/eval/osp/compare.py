@@ -913,7 +913,10 @@ def normalize_task_context(text: str) -> str:
     )
     value = re.sub(r"\bset the\s+", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+to\s+", " ", value, flags=re.IGNORECASE)
-    value = re.sub(r"\.(?=\s|$)", "", value)
+    # A sentence-final period is punctuation, not meaning. It also ends a value written inside
+    # braces/parens (``{00:00-22:00, ... 720p video.}``), so a following closing bracket must
+    # count as a boundary too. A decimal point (``10.5Mbps``) is followed by a digit and survives.
+    value = re.sub(r"\.(?=[\s}\)\]]|$)", "", value)
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"\s*([,:;])\s*", r"\1", value)
     return value.strip().lower()
@@ -950,7 +953,11 @@ def _task_context_tokens(text: str) -> tuple[str, ...]:
     tokens = re.findall(
         r"[a-z0-9][a-z0-9.+\-]*", normalize_task_context(text).replace(":", " ")
     )
-    return tuple(sorted(token for token in tokens if token not in _CONTEXT_STOPWORDS))
+    # A sentence-final period is never part of the business value: strip it here as well so the
+    # token bag cannot report ``video.`` against ``video`` when the normalizer missed that spot.
+    # Only trailing dots are removed, keeping decimals (``10.5mbps``) and hyphenated values.
+    stripped = (token.rstrip(".") for token in tokens)
+    return tuple(sorted(token for token in stripped if token and token not in _CONTEXT_STOPWORDS))
 
 
 _RATE_MBPS_RE: Final[re.Pattern[str]] = re.compile(r"(\d+(?:\.\d+)?)\s*mbps", re.IGNORECASE)

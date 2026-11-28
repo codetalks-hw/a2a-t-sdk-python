@@ -815,6 +815,73 @@ def test_task_context_label_separator_is_not_a_business_difference() -> None:
     )
 
 
+def test_task_context_period_inside_a_brace_is_not_a_semantic_difference() -> None:
+    """The model writes ``video.}``; the period is punctuation, not a different context.
+
+    Run ``fce9b374c53b4725865a5b68f24b33f8``: the only difference was the period before ``}``,
+    which the old ``\\.(?=\\s|$)`` rule could not see.
+    """
+    from eval.osp.compare import _contexts_match
+
+    expected = (
+        'Energy saving time range: start time "00:00:00", end time "22:00:00"\n'
+        "Rate guarantee target: {00:00-22:00, Ensuring user experience for 720p video}"
+    )
+    actual = (
+        'Energy saving time range: start time "00:00:00", end time "22:00:00"\n'
+        "Rate guarantee target: {00:00-22:00, Ensuring user experience for 720p video.}"
+    )
+
+    assert _contexts_match(expected, actual)
+
+
+def test_task_context_period_inside_parentheses_is_not_a_semantic_difference() -> None:
+    from eval.osp.compare import _contexts_match
+
+    assert _contexts_match(
+        "Rate guarantee target: (00:00-22:00, 720p video)",
+        "Rate guarantee target: (00:00-22:00, 720p video.)",
+    )
+
+
+def test_a_decimal_point_is_still_a_difference() -> None:
+    """Only sentence-final periods are stripped; ``10.5Mbps`` must not become ``105Mbps``."""
+    from eval.osp.compare import _contexts_match
+
+    assert not _contexts_match("Rate guarantee target: 10.5Mbps", "Rate guarantee target: 105Mbps")
+
+
+def test_normalize_task_context_drops_the_period_before_a_closing_brace() -> None:
+    from eval.osp.compare import normalize_task_context
+
+    assert normalize_task_context("Rate guarantee target: {00:00-22:00, 720p video.}") == (
+        normalize_task_context("Rate guarantee target: {00:00-22:00, 720p video}")
+    )
+
+
+def test_the_reported_run_task_t_context_is_semantically_same() -> None:
+    """Regression for ``fce9b374c53b4725865a5b68f24b33f8``: verdict same, no reason."""
+    expected = (
+        "## Task Context\n"
+        'Energy saving time range: start time "00:00:00", end time "22:00:00"\n'
+        "Rate guarantee target: {00:00-22:00, Ensuring user experience for 720p video}\n"
+    )
+    actual = (
+        "## Task Context\n"
+        'Energy saving time range: start time "00:00:00", end time "22:00:00"\n'
+        "Rate guarantee target: {00:00-22:00, Ensuring user experience for 720p video.}\n"
+    )
+
+    rows = {row.path: row for row in flatten_task_t(expected, actual)}
+    row = rows["task_t.Task Context"]
+    assert row.verdict == INTENT_ROW_SAME
+    # The verbatim text still differs (the period), so the row keeps the normalization note; the
+    # diff list the pass/fail decision uses must be empty.
+    assert row.reason == "semantically equal after normalization"
+    # The minimal fixture carries only this section, so only the context row is asserted here.
+    assert all(diff.path != "task_t.Task Context" for diff in compare_task_t(expected, actual))
+
+
 def test_report_summarizes_each_stage() -> None:
     """The report's per-stage counts drive the yellow-zone Task-T and interception summary."""
     outcomes = [
