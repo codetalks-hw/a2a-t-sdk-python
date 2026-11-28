@@ -950,7 +950,7 @@ def test_langfuse_defaults_are_disabled_and_capture_content(tmp_path: Path) -> N
     assert config.langfuse_ui_base_url == "https://us.cloud.langfuse.com"
     assert config.langfuse_capture_content is True
     assert config.langfuse_environment == "demo"
-    assert config.langfuse_flush_at == 8
+    assert config.langfuse_flush_at == 4
 
 
 def test_langfuse_flush_at_can_be_tuned(tmp_path: Path) -> None:

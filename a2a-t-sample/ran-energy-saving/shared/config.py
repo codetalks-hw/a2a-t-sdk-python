@@ -187,11 +187,12 @@ LANGFUSE_UI_BASE_URL_ENV_KEY = "A2AT_SAMPLE_LANGFUSE_UI_BASE_URL"
 LANGFUSE_ENABLED_ENV_KEY = "A2AT_SAMPLE_LANGFUSE_ENABLED"
 LANGFUSE_CAPTURE_CONTENT_ENV_KEY = "A2AT_SAMPLE_LANGFUSE_CAPTURE_CONTENT"
 LANGFUSE_ENVIRONMENT_ENV_KEY = "A2AT_SAMPLE_LANGFUSE_ENVIRONMENT"
-#: Spans per OTLP export request. OTel's batch processor groups spans by count, and one LLM span
-#: carries the whole slot-extraction prompt (~34 KB), so this key is the request-size lever: 32
-#: spans of concurrent runs can exceed the egress proxy's 1 MB body limit and get a 403 the batch
-#: processor cannot retry. The SDK reads the same key, but the exporter passes the value
-#: explicitly, so this is the single owner.
+#: Spans per OTLP export request. OTel's batch processor groups spans by count and this key is the
+#: request-size lever: the egress proxy rejects a body above 1 MB with a 403 the batch processor
+#: cannot retry. Concurrent tester runs merge spans from several runs, and an ADK ``llm`` span
+#: carries the system instruction, tool declarations and the whole conversation, so it is far
+#: larger than the ~34 KB slot-extraction span the old cap was sized on. The SDK reads the same
+#: key, but the exporter passes the value explicitly, so this is the single owner.
 LANGFUSE_FLUSH_AT_ENV_KEY = "LANGFUSE_FLUSH_AT"
 LANGFUSE_FLUSH_AT_LOWER_BOUND = 1
 LANGFUSE_FLUSH_AT_UPPER_BOUND = 32
@@ -386,9 +387,10 @@ DEFAULT_LANGFUSE_BASE_URL = "https://us.cloud.langfuse.com"
 DEFAULT_LANGFUSE_UI_BASE_URL = "https://us.cloud.langfuse.com"
 DEFAULT_LANGFUSE_ENVIRONMENT = "demo"
 #: The SDK default is 512 spans per request, which cannot fit the proxy's 1 MB body limit once
-#: content capture is on. 8 keeps a worst-case request near 0.3 MB while still batching a trace's
-#: usual 18-22 spans of one run into 2-3 requests.
-DEFAULT_LANGFUSE_FLUSH_AT = 8
+#: content capture is on. 8 was still observed to cross 1 MB when a tester batch runs cases
+#: concurrently (each merged ADK ``llm`` span is much larger than the slot-extraction estimate),
+#: so 4 halves the worst-case body; ``LANGFUSE_FLUSH_AT=1`` remains the escape hatch.
+DEFAULT_LANGFUSE_FLUSH_AT = 4
 
 #: Sample root (the directory that owns ``runs/``). Relative runs directories resolve here.
 SAMPLE_ROOT = Path(__file__).resolve().parents[1]
