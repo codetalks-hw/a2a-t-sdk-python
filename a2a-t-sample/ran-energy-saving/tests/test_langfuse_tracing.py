@@ -425,6 +425,19 @@ def test_gen_ai_usage_carries_the_cached_prefix(offline_config: SampleConfig) ->
     assert generation.attributes["gen_ai.usage.cache_read.input_tokens"] == 7
 
 
+def test_the_raw_token_map_is_not_copied_into_observation_metadata(
+    offline_config: SampleConfig,
+) -> None:
+    """Usage lives in usage_details and gen_ai.usage.*; the raw producer map is internal."""
+    exporter, runtime = _exporter(offline_config)
+
+    exporter(_llm_span())
+
+    generation = _by_name(runtime)["LLM call · negotiation_propose_extraction"]
+    assert "langfuse.observation.metadata.tokens" not in generation.attributes
+    assert "langfuse.observation.usage_details" in generation.attributes
+
+
 def test_non_generation_spans_do_not_claim_gen_ai_usage(offline_config: SampleConfig) -> None:
     exporter, runtime = _exporter(offline_config)
 

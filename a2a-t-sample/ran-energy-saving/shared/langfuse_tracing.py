@@ -1720,15 +1720,18 @@ def _observation_metadata(
     *,
     capture_content: bool,
 ) -> dict[str, object]:
-    """Return the metadata attributes of one observation."""
+    """Return the metadata attributes of one observation.
+
+    The producer's raw token map is deliberately not copied here: a generation already carries
+    the same counts as ``langfuse.observation.usage_details`` and as the standard
+    ``gen_ai.usage.*`` keys, and the raw map's key names (``prompt``/``completion``/...) are an
+    internal producer shape, not a contract.
+    """
     metadata: dict[str, object] = {}
     for key in _STRUCTURAL_FIELDS:
         value = span.get(key)
         if value is not None and value != "":
             metadata[key] = value
-    tokens = span.get("tokens")
-    if isinstance(tokens, Mapping):
-        metadata["tokens"] = dict(tokens)
     if capture_content and _as_str(span.get("kind")) not in _PAYLOAD_KINDS and detail:
         metadata["detail"] = dict(detail)
     return metadata
