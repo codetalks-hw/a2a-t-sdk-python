@@ -25,9 +25,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from demo.web.tester.export_view import (
+    intent_structure,
+    intent_structure_label,
     render_intent_diff,
     render_trajectory,
-    render_wire_frames,
+    render_wire_frame_json,
+    render_wire_json,
     render_wire_trajectory,
     result_label,
     score_for,
@@ -52,40 +55,39 @@ _STAGE_ORDER: Final[tuple[str, ...]] = (
 )
 
 #: Column order of the arbitration worksheet (the reference workbook's naming).
+#:
+#: The reference workbook's authoring bookmarks (QA_ID / UID / 设计人), the duplicate score
+#: columns (最终得分 is 自动评分; 仲裁得分 / 人工标记结果 stay empty without a manual arbitration)
+#: and the four Langfuse duplicates (输出token / 总token / 协商轮次 / 端到端时延) are gone: the
+#: test team does not use them, and they made the live-run columns hard to read.
 _REFERENCE_HEADERS: Final[tuple[str, ...]] = (
     "traceId",
     "协议",
     "用例编号",
     "用例名称",
     "任务类型",
-    "QA_ID",
-    "UID",
-    "设计人",
-    "问题",
+    "期望Task-T",
     "原始请求",
     "标准化请求",
+    "客户端是否拦截",
+    "拦截比对",
+    "SDK拦截报错",
     "意图理解结果(结构化JSON)",
     "SDK抽取意图",
     "意图来源",
     "期望意图",
+    "意图结构",
     "answer与reference差异点",
     "被测模型生成答案",
     "交互报文",
     "仲裁人-EVAL-额外结果-执行轨迹",
     "仲裁人-EVAL-额外结果-任务状态",
-    "仲裁人-EVAL-额外结果-端到端时延(ms)",
-    "协商轮次",
     "协商触发",
     "协商成功",
-    "仲裁人-EVAL-额外结果-输出token",
-    "仲裁人-EVAL-额外结果-总token",
     "执行状态",
     "自动评分",
-    "最终得分",
     "汇总结果",
     "判定原因",
-    "仲裁得分",
-    "人工标记结果",
     "备注",
     *TRACE_COLUMN_HEADERS,
 )
@@ -93,8 +95,8 @@ _REFERENCE_HEADERS: Final[tuple[str, ...]] = (
 #: Excel's hard limit of one cell's text length.
 _MAX_CELL_CHARS: Final[int] = 32000
 
-#: Suffix of an interaction cell that did not fit one Excel cell.
-_WIRE_TRUNCATED_NOTE: Final[str] = "…（已截断，完整逐帧报文见「交互报文」工作表）"
+#: Note of an interaction cell too large for one Excel cell; the sheet keeps every frame.
+_WIRE_OVERFLOW_NOTE: Final[str] = "完整逐帧 JSON 见「交互报文」工作表"
 #: Suffix of a trajectory cell that did not fit one Excel cell.
 _TRAJECTORY_TRUNCATED_NOTE: Final[str] = "…（轨迹已截断，完整报文见「交互报文」列）"
 #: Note of an item that never started a run (a validate-only or intercepted-miss item).
@@ -103,8 +105,6 @@ _NO_RUN_NOTE: Final[str] = "本用例未启动 run。"
 _NO_RUNS_DIR_NOTE: Final[str] = "导出时未提供 run 目录，无法读取交互报文。"
 #: Note of a run whose wire logs are absent (capture off, or the run directory was cleaned up).
 _NO_WIRE_NOTE: Final[str] = "run {run_id} 无 wire 报文（未开启报文记录或文件已清理）。"
-#: Header of the interaction cell, naming the files it merges.
-_WIRE_HEADER: Final[str] = "run {run_id} | {frames} 帧 | wire.jsonl / wire-oss.jsonl / wire-error.jsonl"
 
 #: Note written when an item never produced a run answer (validate-only batch).
 _NO_ANSWER_NOTE: Final[str] = "未执行发送阶段"
@@ -118,7 +118,7 @@ _NO_INTENT_NOTE: Final[str] = "本批次未采集意图"
 _REBUILT_TRACE_NOTE: Final[str] = "traceparent 为重建值"
 
 
-#: Per-run Langfuse cells (``runId -> (nine values, note)``). The route fills it before calling
+#: Per-run Langfuse cells (``runId -> (values, note)``). The route fills it before calling
 #: ``write_report``; keeping it outside this module keeps the report a pure function of its input.
 TraceColumns = Mapping[str, tuple[Sequence[object], str]]
 
@@ -135,7 +135,7 @@ def write_report(
         batch: The batch snapshot served to the UI.
         runs_dir: Directory holding ``<runId>/wire*.jsonl``, used for the interaction column.
             ``None`` keeps the report exportable when only the snapshot is available.
-        trace_columns: Langfuse metrics per run id. ``None`` leaves the nine columns blank, which
+        trace_columns: Langfuse metrics per run id. ``None`` leaves the Langfuse columns blank, which
             keeps the workbook structure stable when observability is off or not requested.
     """
     rounds = _rounds_of(batch)
@@ -172,6 +172,9 @@ def write_report(
         "发现",
         "拦截校验",
         "拦截后补充信息",
+        "客户端是否拦截",
+        "拦截比对",
+        "SDK拦截报错",
         *[f"{stage} 状态" for stage in _STAGE_ORDER],
         "错误信息",
     ]
@@ -189,6 +192,7 @@ def write_report(
         token_map = tokens if isinstance(tokens, Mapping) else {}
         baseline = item.get("baseline")
         baseline_map = baseline if isinstance(baseline, Mapping) else {}
+        interception = _client_interception(item)
         row: list[object] = [
             item.get("caseId", ""),
             item.get("name", ""),
@@ -208,6 +212,9 @@ def write_report(
             batch.get("discovery", ""),
             _interception_verdict(item),
             _interception_followup(item),
+            _interception_observed_cell(interception),
+            _interception_compare_cell(interception),
+            _sdk_interception_errors(item),
             *[
                 (stage_map.get(stage, {}).get("status", "") if isinstance(stage_map.get(stage), Mapping) else "")
                 for stage in _STAGE_ORDER
@@ -220,7 +227,7 @@ def write_report(
     widths = [
         12, 42, 10, 10, 40, 12, 12, 34,
         10, 34, 34, 18, 40,
-        10, 10, 10, 14, 48,
+        10, 10, 10, 14, 48, 14, 14, 60,
         12, 12, 12, 12, 14, 12, 12, 12, 40,
     ]
     if multi:
@@ -486,7 +493,7 @@ def _write_reference_sheet(
             continue
         wire_text, frames, records = _wire_text(item, runs_dir)
         oversized = len(wire_text) > _MAX_CELL_CHARS
-        shown = _truncated_wire(wire_text) if oversized else wire_text
+        shown = _oversized_wire_cell(item, len(frames)) if oversized else wire_text
         trajectory = render_wire_trajectory(records)
         if len(trajectory) > _MAX_CELL_CHARS:
             keep = _MAX_CELL_CHARS - len(_TRAJECTORY_TRUNCATED_NOTE)
@@ -499,8 +506,8 @@ def _write_reference_sheet(
         if oversized:
             overflow.append((item, frames))
     widths = [
-        34, 8, 10, 42, 10, 12, 36, 10, 60, 48, 48, 60, 60, 10, 60, 60, 60, 90, 50,
-        16, 14, 10, 10, 10, 12, 12, 10, 10, 10, 10, 10, 12, 40,
+        34, 8, 10, 42, 10, 60, 48, 48, 14, 14, 60, 60, 60, 10, 60, 20, 60, 90, 50,
+        50, 16, 14, 10, 10, 10, 12, 40, 40,
         *TRACE_COLUMN_WIDTHS,
     ]
     if multi:
@@ -513,7 +520,7 @@ def _append_trace_cells(
     item: Mapping[str, Any],
     trace_columns: TraceColumns | None,
 ) -> None:
-    """Append the nine Langfuse cells after ``备注`` and merge their note into it.
+    """Append the Langfuse cells after ``备注`` and merge their note into it.
 
     ``_reference_row`` always ends with ``备注``; the trace block stays after it so the existing
     column letters (A–AH) do not move. A per-run failure note joins the same cell.
@@ -683,48 +690,43 @@ def _reference_row(
         expected_intent = intent_stage.get("expected")
     answer = _map_of(item.get("answer"))
     exchanges = answer.get("exchanges")
-    token_map = _map_of(item.get("tokens"))
     status = str(item.get("status") or "")
     raw_request = intent_meta.get("rawRequest") or refs.get("userInput") or ""
     case_id = item.get("caseId")
+    structure = _intent_structure(item, expected_intent, server_intent)
+    interception = _client_interception(item)
     return [
         str(item.get("traceId") or ""),
         str(item.get("protocol") or ""),
         case_id if case_id != 0 else "",
         refs.get("caseName") or item.get("name", ""),
         refs.get("operation", ""),
-        refs.get("qaId", ""),
-        refs.get("uid", ""),
-        refs.get("designer", ""),
         refs.get("taskT", ""),
         raw_request,
         intent_meta.get("normalizedText") or raw_request,
+        _interception_observed_cell(interception),
+        _interception_compare_cell(interception),
+        _sdk_interception_errors(item),
         _json_cell(server_intent, indent=2),
         _json_cell(sdk_intent, indent=2),
         intent_meta.get("source", ""),
         _json_cell(expected_intent, indent=2),
+        intent_structure_label(structure),
         render_intent_diff(
             expected_intent if isinstance(expected_intent, Mapping) else None,
             server_intent,
         ),
-        _json_cell(answer, indent=2),
+        _json_cell(_slim_answer(answer), indent=2),
         wire_text,
         wire_trajectory
         or render_trajectory(exchanges if isinstance(exchanges, list) else []),
         _task_state(item, answer),
-        item.get("durationMs", ""),
-        _negotiation_rounds(answer, stages),
         _bool_cell(refs.get("negotiationExpected")),
         _negotiation_success(item, refs, answer),
-        token_map.get("output", ""),
-        token_map.get("total", ""),
         status,
-        _score_cell(status),
         _score_cell(status),
         result_label(status),
         verdict_reason(item),
-        "",
-        "",
         _reference_note(item, refs, intent_meta, answer, server_intent, sdk_intent),
     ]
 
@@ -774,7 +776,7 @@ def _reference_note(
 def _wire_text(
     item: Mapping[str, Any], runs_dir: Path | None
 ) -> tuple[str, list[str], list[dict[str, object]]]:
-    """Return the item's interaction transcript, its per-frame blocks and the raw records."""
+    """Return the interaction JSON, its per-frame JSON documents and the raw records."""
     run_id = str(item.get("runId") or "")
     if not run_id:
         return _NO_RUN_NOTE, [_NO_RUN_NOTE], []
@@ -784,15 +786,24 @@ def _wire_text(
     if not records:
         note = _NO_WIRE_NOTE.format(run_id=run_id)
         return note, [note], []
-    frames = render_wire_frames(records)
-    header = _WIRE_HEADER.format(run_id=run_id, frames=len(frames))
-    return f"{header}\n\n" + "\n\n".join(frames), frames, records
+    frames = [
+        render_wire_frame_json(record, index)
+        for index, record in enumerate(records, start=1)
+    ]
+    return render_wire_json(records, run_id=run_id), frames, records
 
 
-def _truncated_wire(text: str) -> str:
-    """Cut the interaction cell to Excel's limit and point at the fallback sheet."""
-    keep = _MAX_CELL_CHARS - len(_WIRE_TRUNCATED_NOTE)
-    return text[:keep] + _WIRE_TRUNCATED_NOTE
+def _oversized_wire_cell(item: Mapping[str, Any], frame_count: int) -> str:
+    """Return a valid-JSON pointer for a cell that cannot hold the whole transcript."""
+    return json.dumps(
+        {
+            "runId": str(item.get("runId") or ""),
+            "frameCount": frame_count,
+            "note": _WIRE_OVERFLOW_NOTE,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _write_wire_sheet(
@@ -902,6 +913,146 @@ def _cell(value: object) -> object:
     if isinstance(value, str) and len(value) > _MAX_CELL_CHARS:
         return value[:_MAX_CELL_CHARS] + "…（已截断）"
     return value
+
+
+def _intent_structure(
+    item: Mapping[str, Any],
+    expected: object,
+    actual: Mapping[str, Any] | None,
+) -> dict[str, object]:
+    """Return the item's intent-structure verdict, recomputed for older batch snapshots."""
+    document = item.get("intentStructure")
+    if isinstance(document, Mapping):
+        return dict(document)
+    return intent_structure(
+        expected if isinstance(expected, Mapping) else None,
+        actual,
+    )
+
+
+#: Labels of the observed client gate.
+_INTERCEPTION_OBSERVED_LABELS: Final[dict[str, str]] = {
+    "blocked": "是",
+    "passed": "否",
+    "pass": "否",
+    "not_executed": "未执行",
+    "not_applicable": "不适用",
+}
+#: Labels of the observed-vs-expected interception comparison.
+_INTERCEPTION_COMPARE_LABELS: Final[dict[str, str]] = {
+    "hit": "命中",
+    "miss": "漏拦",
+    "false_block": "误拦",
+    "undefined": "未定义期望",
+    "not_executed": "未执行",
+    "not_applicable": "不适用",
+}
+
+
+def _client_interception(item: Mapping[str, Any]) -> dict[str, object]:
+    """Return the item's client-interception record, derived for older snapshots."""
+    record = item.get("clientInterception")
+    if isinstance(record, Mapping):
+        return dict(record)
+    if str(item.get("protocol") or "") == "a2a":
+        return {"observed": "not_applicable", "compare": "not_applicable"}
+    observed = ""
+    interception = item.get("interception")
+    stages = interception.get("stages") if isinstance(interception, Mapping) else None
+    for candidate in (
+        stages.get("validate") if isinstance(stages, Mapping) else None,
+        _map_of(item.get("stages")).get("validate"),
+    ):
+        if not isinstance(candidate, Mapping):
+            continue
+        detail = candidate.get("detail")
+        verdict = detail.get("verdict") if isinstance(detail, Mapping) else candidate.get("actual")
+        if isinstance(verdict, str) and verdict:
+            observed = verdict
+            break
+    if not observed:
+        return {"observed": "not_executed", "compare": "not_executed"}
+    blocked = observed == "blocked"
+    expected = _map_of(item.get("refs")).get("validateExpected")
+    if expected is None:
+        compare = "undefined"
+    elif expected == "blocked":
+        compare = "hit" if blocked else "miss"
+    else:
+        compare = "false_block" if blocked else "hit"
+    return {"observed": "blocked" if blocked else "passed", "compare": compare}
+
+
+def _interception_observed_cell(record: Mapping[str, object]) -> str:
+    """Return 是/否/未执行/不适用 for the observed client gate."""
+    return _INTERCEPTION_OBSERVED_LABELS.get(str(record.get("observed") or ""), "")
+
+
+def _interception_compare_cell(record: Mapping[str, object]) -> str:
+    """Return 命中/漏拦/误拦/未定义期望 for the observed-vs-expected gate."""
+    return _INTERCEPTION_COMPARE_LABELS.get(str(record.get("compare") or ""), "")
+
+
+def _sdk_interception_errors(item: Mapping[str, Any]) -> str:
+    """Return the SDK's own validation errors, one block per gate attempt.
+
+    A blocked case has two attempts: the original request the case expects to be blocked, and
+    the replacement it dispatches. Both are printed so the error can be read against the request
+    rewrite instead of trusting the stage verdict alone. A clean pass leaves the cell empty.
+    """
+    entries: list[tuple[str, Mapping[str, object]]] = []
+    interception = item.get("interception")
+    stages = interception.get("stages") if isinstance(interception, Mapping) else None
+    original = stages.get("validate") if isinstance(stages, Mapping) else None
+    if isinstance(original, Mapping):
+        entries.append(("原请求", original))
+    validate = _map_of(item.get("stages")).get("validate")
+    if isinstance(validate, Mapping):
+        entries.append(("下发请求" if entries else "校验", validate))
+    texts = [text for label, stage in entries if (text := _gate_error_text(label, stage))]
+    return "\n".join(texts)
+
+
+def _gate_error_text(label: str, stage: Mapping[str, object]) -> str:
+    """Render one gate attempt's verdict, code and per-slot errors."""
+    detail = _map_of(stage.get("detail"))
+    verdict = str(detail.get("verdict") or stage.get("actual") or "")
+    if not verdict:
+        return ""
+    if verdict == "pass":
+        return ""
+    code = str(detail.get("code") or "")
+    lines = [f"{label}：{verdict}" + (f"（{code}）" if code else "")]
+    errors = detail.get("slotErrors")
+    for error in errors if isinstance(errors, list) else []:
+        if not isinstance(error, Mapping):
+            continue
+        slot = str(error.get("slotName") or "")
+        error_code = str(error.get("code") or "")
+        message = str(error.get("message") or "")
+        head = "、".join(part for part in (slot, error_code) if part)
+        line = f"- {head}" if head else "-"
+        if message:
+            line = f"{line}：{message}" if head else f"{line} {message}"
+        lines.append(line)
+    if len(lines) == 1 and stage.get("message"):
+        lines.append(f"- {stage['message']}")
+    return "\n".join(lines)
+
+
+#: Keys of the model answer kept in the arbitration cell. ``exchanges`` is dropped because the
+#: interaction column and the trajectory already carry every frame.
+_SLIM_ANSWER_KEYS: Final[tuple[str, ...]] = (
+    "code",
+    "message",
+    "finalResult",
+    "negotiationSummary",
+)
+
+
+def _slim_answer(answer: Mapping[str, Any]) -> dict[str, object]:
+    """Return the answer object without the exchange list the other columns already carry."""
+    return {key: answer[key] for key in _SLIM_ANSWER_KEYS if key in answer}
 
 
 def _interception_verdict(item: Mapping[str, Any]) -> str:

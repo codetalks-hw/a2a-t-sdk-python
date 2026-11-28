@@ -597,7 +597,7 @@ flowchart TB
 | D24 | 模型把字符串字段写成对象时怎么处理 | 直接失败 / 解析层窄归一 / 放宽共享模型 | 解析层窄归一：`confirmed_intent` / `feasibility_summary` 只有一个字符串值时取出该字符串；`filled_params` 同名键值不同则不归一，按错误报出 | 已对齐（2026-11-26） |
 | D25 | pure A2A 是否复用 A2A-T 的拦截后补充请求 | 复用 / 不复用 / 新增 pure 本地拦截门 | 不复用：`blocked_followup` 是 A2A-T 发送前门禁的补充请求；pure A2A 发原始请求，由网管的重叠反问和用例记录的 3 轮答复完成协商 | 已对齐（2026-11-26） |
 | D26 | NMS 500 `Agent SSE lock already held` 是否重试 | 有界重试 / 只记录 / 固定等待 | 只记录：客户端在 `INPUT_REQUIRED` 后已关闭自己的 SSE 响应，剩余串行化在网管侧；错误文案明确标注不重试 | 已对齐（2026-11-26） |
-| D27 | 导出表的交互过程报文放哪里 | 只给 wire 链接 / R 列逐帧原文 / 规范化 exchanges | R 列（原 origin_answer）整列改为逐帧原始报文，导出时读 `wire.jsonl` / `wire-oss.jsonl` / `wire-error.jsonl`（含 webhook 推送与重复丢弃帧）；answer 仍在 Q 列；超过 Excel 单元格上限时 R 截断并指向「交互报文」工作表 | 已对齐（2026-11-26） |
+| D27 | 导出表的交互过程报文放哪里 | 只给 wire 链接 / 交互列逐帧原文 / 整列一个 JSON | 交互列整列是一个 JSON 文档（`runId` / `frameCount` / `sources` / `frames[]`），每帧保留原始字段；超 Excel 单元格上限时单元格改为 JSON 指针，完整逐帧 JSON 在「交互报文」工作表一行一帧；answer 仍在「被测模型生成答案」列 | 已对齐（2026-11-28） |
 | D28 | 如何知道“谁在跑”和共享资源占用 | 各自看自己的批次 / 全局只读 status 页 / 看日志 | 全局只读 `/status`：所有浏览器的执行中批次、所有来源的 live run、进程与 SDK 池占用、Task 间接指标；触发人显示来源 IP + 匿名 cookie 短码 + UA；不提供取消操作 | 已对齐（2026-11-26） |
 | D29 | 原批次未跑完时能否重跑单条用例 | 只能等批次结束 / 允许中途重跑 / 重跑独立成批 | 允许中途重跑，但只限已经产生终态结果的行；主批次与重跑共享 `batch.concurrency` 个槽，重跑占用下一个空槽，不提高总并发；排队行可取消；批次级重试在运行期间仍禁用 | 已对齐（2026-11-26） |
 
@@ -619,6 +619,26 @@ flowchart TB
 **D29 说明（2026-11-26）**：原来点击单行「重跑」会把整个批次标成 `running`，前端据此禁用所有行，服务端也拒绝第二次调用，因此一条失败用例的重跑会挡住整批。现在批次执行拆成两条工作流：主批次遍历和重跑队列，二者共享一个大小为 `batch.concurrency` 的槽池。已经产生终态结果的行（passed / failed / error / cancelled / partial）可以在主批次仍在跑时重跑；pending / running 的行不能重跑，避免同一条用例被执行两次。默认并发 1 时，重跑在当前用例结束后、下一个 pending 用例之前取得空槽执行；总活动项不会超过配置的并发，因而不会额外放大网管配额。排队中的行在结果表标记「排队中」，可以取消排队且保留上一次结果；重跑真正开始时才清空旧证据并写入 `attempts`。批次只有在主批次结束、重跑队列为空、没有活动项时才标 `finished`。批次级「重试失败用例」在批次运行期间仍然禁用，避免在主批次尚未跑完时创建重复批次。SDK-only 用例在并发 >1 时使用客户端池，与主批次一致；并发 1 时仍受全局串行锁约束。
 
 **D28 说明（2026-11-26）**：一个 UI 进程只有一个 SDK 池（上限 32）和一份网管配额，而 tester 原有批次视图按匿名 cookie 隔离，看不到别人是否在跑。新增 `/status` 只读页（`/api/status` 每 2 秒刷新）：显示进程启动时间与 uptime、模型/NMS/数据目录、SDK 池占用与串行锁、在跑用例数；列出**所有浏览器**的执行中批次（进度、当前用例/轮次、并发、执行到哪一阶段）、**所有来源**的 live run（tester / presentation / gateway，含 detached 与远端 Task）、本进程最近结束的批次。触发人标识在建批次时记录：来源 IP（优先 `X-Forwarded-For` 首跳）、匿名 cookie 短码和 User-Agent，持久化在 batch JSON 的 `ownerSource`。网管配额本身不可读，页面只给出本地间接指标（保留 Task 的批次、仍持有 `remoteTaskId` 的 run、detached run），并明确提示重启 UI 会终止在跑批次。页面无鉴权、只读，不提供取消他人任务的操作。
+
+**D30–D34 说明（2026-11-28 测试反馈）**：五条现场反馈已落地。
+
+- **cancel 的 trace**：`RunManager._cancel_remote_task` 原来在调用方任务（batch worker / HTTP handler）
+  里直接调 transport，run 的 correlation contextvars 只绑定在 run 自己的 task 里，因此 cancel 的本地
+  a2a-sdk 跳和真机 NMS 跳都不带 `traceparent`。现在 cancel 外包一层 `_bound_run_trace(run)`；
+  `NmsClient.cancel_task` 同时把出站请求写入 `wire.jsonl`，可在导出里核对。
+- **交互报文整列一个 JSON**：`render_wire_json` 输出 `{runId, frameCount, sources, frames[]}`，每帧
+  保留记录的全部字段（含 webhook 推送、`dropped`、SDK 拒收帧），不再逐块嵌 JSON；单元格超限时改为
+  JSON 指针，逐帧 JSON 仍在「交互报文」工作表。
+- **导出 SDK 拦截报错**：仲裁格式与用例结果新增「SDK拦截报错」，输出每次 gate 的 verdict/code 与
+  逐槽位 `slotName/code/message`，包括 Task-T 生成前的 `slot.*` 失败，便于与「拦截后补充信息」
+  （`blocked_followup.input`）逐条核对。
+- **语义一致但结构不同**：`intent_structure` 递归比较键集合、层级与值类型（忽略取值、键顺序、数组
+  顺序），结果表新增「意图结构」列；语义一致但结构不同显示为「语义一致·结构不同」，仲裁格式同步
+  导出同名列。
+- **导出列裁剪与拦截统计**：删除 QA_ID/UID/设计人、重复的 4 个 Langfuse 列（输出token/总token/
+  协商轮次/端到端时延）、重复评分列（最终得分/仲裁得分/人工标记结果）；「问题」列改名为「期望Task-T」；
+  「被测模型生成答案」去掉与交互报文/轨迹重复的 `exchanges`。新增「客户端是否拦截」（是/否/未执行/
+  不适用）与「拦截比对」（命中/漏拦/误拦/未定义期望），数据来自 `task_validation`，不依赖 Langfuse。
 
 **D27 说明（2026-11-26）**：仲裁格式表的 R 列原来是 `origin_answer`，与 Q 列「被测模型生成答案」
 是同一个 answer 对象的紧凑/缩进两种形式，信息重复。现在 R 列直接放该用例主 run 的逐帧交互报文：

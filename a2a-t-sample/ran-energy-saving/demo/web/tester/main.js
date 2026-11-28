@@ -630,6 +630,66 @@ function resultText(item) {
   return item.status === "passed" ? "全部阶段通过" : "";
 }
 
+//: Labels and badge classes of the structural comparison of the final structured intent.
+const INTENT_STRUCTURE_LABELS = {
+  same: "一致",
+  semanticOnly: "语义一致·结构不同",
+  different: "不一致",
+};
+
+function intentStructureBadge(document) {
+  if (!document || document.semantic === "unavailable") return null;
+  if (document.semantic !== "same") {
+    return badge("failed", INTENT_STRUCTURE_LABELS.different);
+  }
+  if (document.structure === "same") {
+    return badge("passed", INTENT_STRUCTURE_LABELS.same);
+  }
+  return badge("waiting", INTENT_STRUCTURE_LABELS.semanticOnly);
+}
+
+function intentStructureCell(item) {
+  const node = intentStructureBadge(item.intentStructure);
+  if (!node) return el("td", "metric", "—");
+  node.title = "按字段结构对比：键集合、层级与值类型；语义一致但结构不同会单独标出";
+  return el("td", "", node);
+}
+
+function appendIntentStructureBlock(body, item) {
+  const document = item.intentStructure;
+  const node = intentStructureBadge(document);
+  if (!node) return;
+  const block = el("section", "diff-block");
+  const head = el("div", "diff-head");
+  head.append(el("strong", "", "意图结构"), node);
+  block.append(head);
+  const diffs = Array.isArray(document.diffs) ? document.diffs : [];
+  if (!diffs.length) {
+    block.append(el("p", "summary", "键集合、层级与值类型一致。"));
+    body.append(block);
+    return;
+  }
+  const table = el("table", "grid diff-table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const title of ["字段", "类型", "期望", "实际"]) headRow.append(el("th", "", title));
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  for (const diff of diffs) {
+    const row = document.createElement("tr");
+    row.append(
+      el("td", "mono", diff.path || ""),
+      el("td", "", diff.kind || ""),
+      el("td", "mono", String(diff.expected ?? "")),
+      el("td", "mono", String(diff.actual ?? "")),
+    );
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  block.append(table);
+  body.append(block);
+}
+
 function populateRoundFilter(rounds) {
   const select = $("round-filter");
   const signature = `${state.batch?.batchId || ""}:${rounds}`;
@@ -714,6 +774,7 @@ function renderResults() {
     const status = document.createElement("td");
     status.append(badge(item.status));
     if (queued) status.append(document.createTextNode(" "), badge("waiting", "排队中"));
+    const structure = intentStructureCell(item);
     const duration = el("td", "metric", durationText(item.durationMs));
     const tokens = el("td", "metric", tokenText(item.tokens));
     const runs = document.createElement("td");
@@ -784,7 +845,7 @@ function renderResults() {
     actions.append(document.createTextNode(" · "), rerun);
     row.append(
       number, id, name, protocol, ...(round ? [round] : []),
-      stages, status, duration, tokens, runs, result, actions,
+      stages, status, structure, duration, tokens, runs, result, actions,
     );
     body.append(row);
   });
@@ -1116,6 +1177,7 @@ function renderResultTab(item, body) {
   appendBaselineBlock(body, item);
   appendContextBlock(body, item);
   appendServerReplyBlock(body, item);
+  appendIntentStructureBlock(body, item);
   const stages = item.stages || {};
   if (!Object.keys(stages).length) {
     body.append(el("p", "status-line", "该运行项还没有阶段结果。"));
