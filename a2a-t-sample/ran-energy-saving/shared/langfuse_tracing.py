@@ -73,6 +73,18 @@ OBSERVATION_MODEL_ATTRIBUTE: Final[str] = "langfuse.observation.model.name"
 OBSERVATION_USAGE_ATTRIBUTE: Final[str] = "langfuse.observation.usage_details"
 ROOT_ATTRIBUTE: Final[str] = "langfuse.internal.as_root"
 
+#: OTel GenAI semantic-convention keys, written next to the ``langfuse.observation`` ones so a
+#: generation carries the standard model/token names into any OTel- or GenAI-aware consumer. The
+#: Langfuse attributes stay the ingestion contract: the Langfuse SDK itself never emits ``gen_ai.*``
+#: and its UI reads ``usage_details``. The semconv names are hard-coded (the incubating package
+#: renames them: ``prompt_tokens`` -> ``input_tokens``, and the cached key moved too).
+GEN_AI_OPERATION_NAME_ATTRIBUTE: Final[str] = "gen_ai.operation.name"
+GEN_AI_REQUEST_MODEL_ATTRIBUTE: Final[str] = "gen_ai.request.model"
+GEN_AI_RESPONSE_MODEL_ATTRIBUTE: Final[str] = "gen_ai.response.model"
+GEN_AI_USAGE_INPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.output_tokens"
+GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.cache_read.input_tokens"
+
 #: Langfuse SDK 5.1.0's internal baggage key. The SDK marks a span whose parent was not exported
 #: in this process as an application root; a retry attaches to a workflow anchor exported by an
 #: earlier attempt, so the anchor context carries this claim to suppress the second root.
@@ -1403,6 +1415,8 @@ class LangfuseSpanExporter:
                 attributes[OBSERVATION_STATUS_MESSAGE_ATTRIBUTE] = error[:2048]
         detail = span.get("detail")
         detail_map = detail if isinstance(detail, Mapping) else {}
+        request = detail_map.get("request")
+        request_map = request if isinstance(request, Mapping) else {}
         response = detail_map.get("response")
         response_map = response if isinstance(response, Mapping) else {}
         # Top-level fields are the current producer contract; older/other shapes kept the model
@@ -1415,8 +1429,15 @@ class LangfuseSpanExporter:
         if not isinstance(tokens_value, Mapping) or not tokens_value:
             tokens_value = response_map.get("usage")
         usage = _usage_details(tokens_value)
-        if observation_type == OBSERVATION_GENERATION and usage:
-            attributes[OBSERVATION_USAGE_ATTRIBUTE] = _json_value(usage)
+        if observation_type == OBSERVATION_GENERATION:
+            if usage:
+                attributes[OBSERVATION_USAGE_ATTRIBUTE] = _json_value(usage)
+            _set_gen_ai_attributes(
+                attributes,
+                response_model=model,
+                request_model=_as_str(request_map.get("model")),
+                usage=usage,
+            )
         if self._config.langfuse_capture_content:
             input_payload, output_payload = _observation_payload(kind, detail_map)
             if input_payload is not None:
@@ -1733,6 +1754,39 @@ def _usage_details(tokens: object) -> dict[str, int] | None:
         if cached is not None:
             usage["input_cached"] = cached
     return usage or None
+
+
+def _set_gen_ai_attributes(
+    attributes: dict[str, Any],
+    *,
+    response_model: str | None,
+    request_model: str | None,
+    usage: Mapping[str, int] | None,
+) -> None:
+    """Add the OTel GenAI semantic-convention keys of one generation.
+
+    The Langfuse attributes stay the ingestion contract (the UI and the tester columns read
+    ``langfuse.observation.usage_details``); these keys make the same generation readable by any
+    OTel- or GenAI-aware consumer. The producer records one model field, so the request model
+    falls back to the response model.
+    """
+    attributes[GEN_AI_OPERATION_NAME_ATTRIBUTE] = "chat"
+    model = response_model or request_model
+    if model:
+        attributes[GEN_AI_RESPONSE_MODEL_ATTRIBUTE] = model
+    named_model = request_model or model
+    if named_model:
+        attributes[GEN_AI_REQUEST_MODEL_ATTRIBUTE] = named_model
+    if not usage:
+        return
+    for key, attribute in (
+        ("input", GEN_AI_USAGE_INPUT_TOKENS_ATTRIBUTE),
+        ("output", GEN_AI_USAGE_OUTPUT_TOKENS_ATTRIBUTE),
+        ("input_cached", GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS_ATTRIBUTE),
+    ):
+        value = usage.get(key)
+        if value is not None:
+            attributes[attribute] = value
 
 
 def _nested_cached_tokens(tokens: Mapping[str, object]) -> int | None:

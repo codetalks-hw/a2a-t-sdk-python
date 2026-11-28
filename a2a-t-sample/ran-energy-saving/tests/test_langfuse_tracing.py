@@ -219,6 +219,12 @@ def test_llm_span_becomes_a_generation_with_usage(offline_config: SampleConfig) 
         "output": 20,
         "total": 50,
     }
+    # The same generation also carries the OTel GenAI semantic-convention keys.
+    assert attributes["gen_ai.operation.name"] == "chat"
+    assert attributes["gen_ai.request.model"] == "deepseek-v4.1-flash"
+    assert attributes["gen_ai.response.model"] == "deepseek-v4.1-flash"
+    assert attributes["gen_ai.usage.input_tokens"] == 30
+    assert attributes["gen_ai.usage.output_tokens"] == 20
     assert json.loads(attributes["langfuse.observation.input"]) == [{"role": "user", "content": "propose"}]
     assert attributes["langfuse.observation.output"] == '{"ok":true}'
     # The recorded timestamps are replayed exactly.
@@ -252,6 +258,10 @@ def test_a_generation_falls_back_to_detail_model_and_usage(
         "output": 4,
         "total": 7,
     }
+    assert generation.attributes["gen_ai.request.model"] == "detail-model"
+    assert generation.attributes["gen_ai.response.model"] == "detail-model"
+    assert generation.attributes["gen_ai.usage.input_tokens"] == 3
+    assert generation.attributes["gen_ai.usage.output_tokens"] == 4
 
 
 def test_round_spans_group_negotiation_observations(offline_config: SampleConfig) -> None:
@@ -402,6 +412,27 @@ def test_usage_details_tolerates_scripted_tokens(
     generation = _by_name(runtime)["LLM call · negotiation_propose_extraction"]
     attribute = generation.attributes.get("langfuse.observation.usage_details")
     assert (json.loads(attribute) if attribute is not None else None) == expected
+
+
+def test_gen_ai_usage_carries_the_cached_prefix(offline_config: SampleConfig) -> None:
+    exporter, runtime = _exporter(offline_config)
+
+    exporter(_llm_span(tokens={"prompt": 10, "cached": 7, "completion": 1, "total": 11}))
+
+    generation = _by_name(runtime)["LLM call · negotiation_propose_extraction"]
+    assert generation.attributes["gen_ai.usage.input_tokens"] == 10
+    assert generation.attributes["gen_ai.usage.output_tokens"] == 1
+    assert generation.attributes["gen_ai.usage.cache_read.input_tokens"] == 7
+
+
+def test_non_generation_spans_do_not_claim_gen_ai_usage(offline_config: SampleConfig) -> None:
+    exporter, runtime = _exporter(offline_config)
+
+    exporter(_created_span())
+
+    span = _by_name(runtime)["Task created"]
+    assert "gen_ai.usage.input_tokens" not in span.attributes
+    assert "gen_ai.request.model" not in span.attributes
 
 
 def test_missing_langfuse_package_is_a_noop(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
