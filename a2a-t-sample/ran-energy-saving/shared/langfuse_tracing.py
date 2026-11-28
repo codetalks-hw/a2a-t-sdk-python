@@ -16,7 +16,9 @@ warning that the run snapshot can display.
 
 Python SDK v5's high-level ``start_observation`` uses the current time and cannot replay a finished
 span, so the exporter talks to OpenTelemetry directly and passes the recorded ``startedAt`` /
-``endedAt`` timestamps. The ``langfuse.*`` attribute names are the SDK's public ingestion contract.
+``endedAt`` timestamps. The ``langfuse.*`` attribute names are the SDK's public ingestion contract;
+the GenAI semantic-convention keys come from the A2A-T SDK's own observability attribute set, so the
+client generations and the SDK's server-side spans cannot drift apart.
 """
 
 from __future__ import annotations
@@ -35,6 +37,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 from urllib.parse import urlsplit
+
+from a2a_t.observability.attributes import (
+    ATTR_GEN_AI_OPERATION_NAME,
+    ATTR_GEN_AI_REQUEST_MODEL,
+    ATTR_GEN_AI_RESPONSE_MODEL,
+    ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+    ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+)
 
 from shared.config import (
     TRACE_SPAN_LEVEL_FULL,
@@ -73,16 +83,11 @@ OBSERVATION_MODEL_ATTRIBUTE: Final[str] = "langfuse.observation.model.name"
 OBSERVATION_USAGE_ATTRIBUTE: Final[str] = "langfuse.observation.usage_details"
 ROOT_ATTRIBUTE: Final[str] = "langfuse.internal.as_root"
 
-#: OTel GenAI semantic-convention keys, written next to the ``langfuse.observation`` ones so a
+#: GenAI semantic-convention keys are written next to the ``langfuse.observation`` ones so a
 #: generation carries the standard model/token names into any OTel- or GenAI-aware consumer. The
-#: Langfuse attributes stay the ingestion contract: the Langfuse SDK itself never emits ``gen_ai.*``
-#: and its UI reads ``usage_details``. The semconv names are hard-coded (the incubating package
-#: renames them: ``prompt_tokens`` -> ``input_tokens``, and the cached key moved too).
-GEN_AI_OPERATION_NAME_ATTRIBUTE: Final[str] = "gen_ai.operation.name"
-GEN_AI_REQUEST_MODEL_ATTRIBUTE: Final[str] = "gen_ai.request.model"
-GEN_AI_RESPONSE_MODEL_ATTRIBUTE: Final[str] = "gen_ai.response.model"
-GEN_AI_USAGE_INPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.input_tokens"
-GEN_AI_USAGE_OUTPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.output_tokens"
+#: five base keys come from the A2A-T SDK's attribute set (:mod:`a2a_t.observability.attributes`),
+#: the same module its server-side spans use. Cache-read tokens are not in that fixed SDK set
+#: (spec §5.1), so the sample owns this one semconv key here.
 GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS_ATTRIBUTE: Final[str] = "gen_ai.usage.cache_read.input_tokens"
 
 #: Langfuse SDK 5.1.0's internal baggage key. The SDK marks a span whose parent was not exported
@@ -1770,18 +1775,18 @@ def _set_gen_ai_attributes(
     OTel- or GenAI-aware consumer. The producer records one model field, so the request model
     falls back to the response model.
     """
-    attributes[GEN_AI_OPERATION_NAME_ATTRIBUTE] = "chat"
+    attributes[ATTR_GEN_AI_OPERATION_NAME] = "chat"
     model = response_model or request_model
     if model:
-        attributes[GEN_AI_RESPONSE_MODEL_ATTRIBUTE] = model
+        attributes[ATTR_GEN_AI_RESPONSE_MODEL] = model
     named_model = request_model or model
     if named_model:
-        attributes[GEN_AI_REQUEST_MODEL_ATTRIBUTE] = named_model
+        attributes[ATTR_GEN_AI_REQUEST_MODEL] = named_model
     if not usage:
         return
     for key, attribute in (
-        ("input", GEN_AI_USAGE_INPUT_TOKENS_ATTRIBUTE),
-        ("output", GEN_AI_USAGE_OUTPUT_TOKENS_ATTRIBUTE),
+        ("input", ATTR_GEN_AI_USAGE_INPUT_TOKENS),
+        ("output", ATTR_GEN_AI_USAGE_OUTPUT_TOKENS),
         ("input_cached", GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS_ATTRIBUTE),
     ):
         value = usage.get(key)
